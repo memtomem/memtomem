@@ -279,6 +279,7 @@ def app(_isolated_config_paths: Path):
     # coroutine and read as "excluded" to every write guard (#2488).
     index_engine.is_excluded = MagicMock(return_value=False)
     index_engine.is_read_only_source = MagicMock(return_value=False)
+    index_engine.is_managed_source = MagicMock(return_value=True)
     index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     index_engine.rewrite_refusal = AsyncMock(return_value=None)
 

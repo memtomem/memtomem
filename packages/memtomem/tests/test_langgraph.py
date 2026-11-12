@@ -603,6 +603,7 @@ class TestAddPrivacyGate:
         # as "excluded"; these tests are about the privacy gate.
         comp.index_engine.is_excluded = MagicMock(return_value=False)
         comp.index_engine.is_read_only_source = MagicMock(return_value=False)
+        comp.index_engine.is_managed_source = MagicMock(return_value=True)
         comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
         comp.index_engine.rewrite_refusal = AsyncMock(return_value=None)
         # ``add`` classifies its target against this list (ADR-0011 §5, #2321).
@@ -925,6 +926,7 @@ class TestGetDelete:
         comp.storage.delete_chunks = AsyncMock(return_value=deleted_rows)
         # Sync predicate on the real engine; a bare MagicMock answers truthy.
         comp.index_engine.is_read_only_source = MagicMock(return_value=False)
+        comp.index_engine.is_managed_source = MagicMock(return_value=True)
         comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
         comp.index_engine.rewrite_refusal = AsyncMock(return_value=None)
         store = MemtomemStore()
@@ -2309,6 +2311,7 @@ class TestDeleteGateBUnderTheLock:
         # Sync predicate on the real engine: a bare MagicMock returns a truthy
         # Mock, which would make the lock helper refuse every chunk here.
         comp.index_engine.is_read_only_source = MagicMock(return_value=False)
+        comp.index_engine.is_managed_source = MagicMock(return_value=True)
         comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
         comp.index_engine.rewrite_refusal = AsyncMock(return_value=None)
         store = MemtomemStore()

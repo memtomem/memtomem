@@ -26,6 +26,8 @@ from memtomem.source_provenance import (
     ExcludedSourceError,
     SourceMissingError,
     ReadOnlySourceError,
+    UNMANAGED_SOURCE_DETAIL,
+    UnmanagedSourceError,
     StaleSourceProvenanceError,
     excluded_after_write_notice,
     relinked_after_write_notice,
@@ -192,6 +194,9 @@ async def get_chunk_source(
         raise HTTPException(status_code=409, detail="masked_projection_read_only")
     if meta.source_read_only or index_engine.is_read_only_source(meta.source_file):
         raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+    # This route serves the editor, and the edit of such a source is refused.
+    if not index_engine.is_managed_source(meta.source_file, meta):
+        raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
     if index_engine.is_excluded(meta.source_file):
         raise HTTPException(status_code=409, detail=EXCLUDED_SOURCE_DETAIL)
     # The raw-text gates ``GET /api/sources/content`` applies, on the stored
@@ -298,6 +303,10 @@ async def edit_chunk(
     # chunk, which is what covers a concurrent migrate re-scoping it.
     if index_engine.is_read_only_source(chunk.metadata.source_file):
         raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+    # Before the lock for the same reason: no sidecar beside a file memtomem
+    # was only asked to read.
+    if not index_engine.is_managed_source(chunk.metadata.source_file, chunk.metadata):
+        raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
 
     from memtomem import privacy
     from memtomem.tools.memory_mutation import locked_source_chunk, mutate_source_and_reindex
@@ -324,6 +333,9 @@ async def edit_chunk(
             # The helper refused before acquiring, so nothing was created beside
             # the source. Same 409 and same vocabulary as this route's own gates.
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+        if reason == "unmanaged":
+            # Refused before acquiring as well.
+            raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
         if reason == "locked":
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."
@@ -366,6 +378,10 @@ async def edit_chunk(
         # asked us to stop writing editable in the meantime.
         if index_engine.is_read_only_source(meta.source_file):
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+        # Asked again on the fresh chunk, as the read-only question is: the
+        # roots can be reloaded while the lock was awaited.
+        if not index_engine.is_managed_source(meta.source_file, meta):
+            raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
 
         inferred_scope = meta.scope or "user"
 
@@ -480,6 +496,7 @@ async def edit_chunk(
                     expected_identity=pre.identity,
                 ),
                 force_unsafe=guard.decision == "bypassed",
+                stored=meta,
             )
             # #2141, the web twin of ``memory_crud._mutate_file_and_reindex``:
             # the edit rewrote chunk text (or only its tags / line ranges,
@@ -501,6 +518,9 @@ async def edit_chunk(
             # web runtime hot-reloads it, ``web/hot_reload.py``). Also a pure
             # refusal — nothing read, nothing written, nothing to invalidate.
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL) from exc
+        except UnmanagedSourceError as exc:
+            # The same window, and likewise nothing read or written.
+            raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL) from exc
         except EditBaseMismatchError as exc:
             # Raised inside the rewrite before a byte was written, after every
             # gate above passed: the edit was based on text the span no longer
@@ -632,6 +652,10 @@ async def delete_chunk(
     # chunk, which is what covers a concurrent migrate re-scoping it.
     if index_engine.is_read_only_source(preflight.metadata.source_file):
         raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+    # Before the lock for the same reason: no sidecar beside a file memtomem
+    # was only asked to read.
+    if not index_engine.is_managed_source(preflight.metadata.source_file, preflight.metadata):
+        raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
 
     import asyncio
 
@@ -659,6 +683,9 @@ async def delete_chunk(
             # The helper refused before acquiring, so nothing was created beside
             # the source. Same 409 and same vocabulary as this route's own gates.
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+        if reason == "unmanaged":
+            # Refused before acquiring as well.
+            raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
         if reason == "locked":
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."
@@ -833,6 +860,10 @@ async def delete_chunk(
                 # flag unset. ``remove_lines`` below writes the file.
                 if index_engine.is_read_only_source(source):
                     raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+                # This route's copy of the helper's other refusal, for the
+                # reason it copies the two above.
+                if not index_engine.is_managed_source(source, meta):
+                    raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
                 if meta.start_line < 1 or meta.end_line < meta.start_line:
                     raise HTTPException(
                         status_code=409,
