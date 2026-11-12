@@ -307,12 +307,12 @@ async def mem_context_init(
             canonical storage (``skills``, ``agents``, ``commands``).
             ``settings`` is accepted for parity with other context tools
             but has no init-time pull action.
-        overwrite: Overwrite existing canonical entries during runtime
-            import. Does **not** govern ``.memtomem/context.md`` rewrite
+        overwrite: Overwrite existing canonical entries during the runtime
+            pull. Does **not** govern ``.memtomem/context.md`` rewrite
             — see ``overwrite_context_md``.
         overwrite_context_md: Allow rewriting an existing
             ``.memtomem/context.md`` from detected agent files. Kept
-            separate from ``overwrite`` so artifact-import refresh cannot
+            separate from ``overwrite`` so an artifact pull refresh cannot
             silently clobber hand-edited project memory. Mirrors the
             CLI's separate confirmation prompt at
             ``cli/context_cmd.py:789-798`` (which defaults to "No").
@@ -322,8 +322,8 @@ async def mem_context_init(
             is explicitly supplied; MCP cannot prompt interactively, so a
             missing confirmation returns a ``needs confirmation`` message.
         force_unsafe_import: Bypass Gate A on existing runtime files for
-            ``user`` / ``project_local`` imports. ``project_shared`` still
-            hard-refuses unsafe imports.
+            ``user`` / ``project_local`` pulls. ``project_shared`` still
+            hard-refuses unsafe pulls.
     """
     from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import (
