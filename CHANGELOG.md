@@ -52,6 +52,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Saving a watched file by renaming a new copy over it no longer hides it from search
+  (#3031).** Editors and tools that save atomically write a temporary file and rename it onto
+  the original. watchdog reports that as a delete of a path that still exists: the native
+  macOS observer ends the burst with one, and the polling observer (the `auto` backend on
+  macOS, and `watcher_backend: "polling"` anywhere) reports the inode change as a delete and a
+  create. The watcher hid every chunk of a deleted source at once, so the file dropped out of
+  Web UI search, `mm search` and `mem_search` until the debounced reindex, about 5 s per save
+  with the default `watcher_debounce_ms`, longer under repeated saves. A delete event is now
+  checked first: a path that is still a regular file, reached through no symlink, stays
+  searchable with its old content until the reindex picks up the new one, as an in-place write
+  always did. A real delete, a path that became a symlink or whose parent did, and a check that
+  fails are hidden as before. So is a path whose check does not answer within 0.5 s, and while
+  that check is still running, later deletes are hidden without one.
+
 - **A newly downloaded `bge-m3` loads (#3246).** huggingface-hub 1.33.0 stores a new download in a
   blob directory shared by the whole cache, and onnxruntime refuses a weights file that resolves
   outside the model's own directory, so loading a `bge-m3` downloaded that way failed with
