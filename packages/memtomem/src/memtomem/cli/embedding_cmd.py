@@ -10,7 +10,10 @@ import click
 from memtomem.embedding.identity import (
     embedding_identity_complete,
     embedding_identity_label,
+    embedding_reset_cost,
+    embedding_reset_counts,
     require_complete_embedding_identity,
+    store_has_nothing_to_reset,
 )
 
 if TYPE_CHECKING:
@@ -119,9 +122,20 @@ async def _run_initialized(
             click.echo(click.style("\nNo mismatch — DB and config are in sync.", fg="green"))
         else:
             click.echo(click.style("\nMismatch detected!", fg="yellow"))
-            click.echo(
-                "  mm embedding-reset --mode apply-current    # reset DB (destructive, re-index needed)"
-            )
+            chunks, vectors = await embedding_reset_counts(storage)
+            if store_has_nothing_to_reset(chunks, vectors):
+                # #2423: an empty store loses nothing to the reset.
+                click.echo(
+                    "  mm embedding-reset --mode apply-current    # reset DB to config; "
+                    "this store currently holds no chunks or vectors"
+                )
+            else:
+                click.echo(
+                    "  mm embedding-reset --mode apply-current    "
+                    "# reset DB (destructive, re-index needed)"
+                )
+                if chunks is not None:
+                    click.echo(f"      {embedding_reset_cost(chunks, vectors)}")
             if stored and not embedding_identity_complete(stored["provider"], stored["model"]):
                 click.echo("  Revert-to-stored is unavailable: the stored identity is incomplete.")
             else:
@@ -135,12 +149,18 @@ async def _run_initialized(
     internal_mode = mode.replace("-", "_")
 
     if internal_mode == "apply_current":
-        if not assume_yes and not click.confirm(
-            f"This will DELETE all vectors and reset DB to "
-            f"{cfg.embedding.provider}/{cfg.embedding.model} ({cfg.embedding.dimension}d). "
-            f"Re-indexing will be required. Continue?",
-            default=False,
-        ):
+        target = f"{cfg.embedding.provider}/{cfg.embedding.model} ({cfg.embedding.dimension}d)"
+        was_empty = store_has_nothing_to_reset(*await embedding_reset_counts(storage))
+        if was_empty:
+            prompt = (
+                f"This store currently holds no chunks or vectors. Reset DB to {target}. Continue?"
+            )
+        else:
+            prompt = (
+                f"This will DELETE all vectors and reset DB to {target}. "
+                "Re-indexing will be required. Continue?"
+            )
+        if not assume_yes and not click.confirm(prompt, default=False):
             click.echo("Cancelled.")
             return
 
@@ -158,7 +178,16 @@ async def _run_initialized(
                 fg="green",
             )
         )
-        click.echo("All vectors deleted — run 'mm index --force <path>' to re-index.")
+        if was_empty:
+            # Counted before the reset, outside its transaction: say what was
+            # seen then, not what the reset removed (another writer may have
+            # added rows in between, for example while the prompt waited).
+            click.echo(
+                "No chunks or vectors were found when checked before the reset. If anything "
+                "was indexed since, run 'mm index --force <path>'."
+            )
+        else:
+            click.echo("All vectors deleted — run 'mm index --force <path>' to re-index.")
 
     elif internal_mode == "revert_to_stored":
         click.echo(

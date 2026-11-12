@@ -70,6 +70,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm embedding-reset` no longer calls a reset of an empty store destructive (#2423).** A
+  store stamped with one embedding model that never received a chunk, opened after the config
+  names another model, still reports a mismatch and still needs
+  `mm embedding-reset --mode apply-current`. That reset deletes nothing, but its status line,
+  its confirmation prompt and its result all said vectors would be deleted and a re-index
+  was needed. When the store holds no chunks and no vector rows they now say so, on the CLI
+  and in `mem_embedding_reset`; the result reports what the check before the reset found,
+  since another process may write in between. A store with any chunk or vector row, or whose
+  counts cannot be read, keeps the old wording, and the CLI status line now adds what the
+  reset drops, as `mm status` does. The vector count is read from the database file, so a
+  long-running server also counts vectors another process wrote after it started. The store
+  is still not re-stamped automatically: a process already holding it open under the old
+  model could otherwise keep writing its vectors after the switch (#3294). The Web UI's reset
+  dialog is not changed yet (#3295).
 - **`mm shell`'s `recall`, the Web UI's procedures list and Find Similar no longer list
   archived and per-agent chunks by default (#3117).** These three surfaces read storage with
   no namespace filter. So they listed rows in `search.system_namespace_prefixes`
