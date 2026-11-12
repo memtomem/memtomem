@@ -110,6 +110,24 @@ READ_ONLY_TARGET_DETAIL = (
 )
 
 
+# ``index_file`` takes any path, and a memory directory can be unregistered
+# after its files were indexed, so a chunk can name a file memtomem was only
+# asked to read. Such a source stays searchable; edit and delete by chunk id
+# refuse it.
+UNMANAGED_SOURCE_DETAIL = (
+    "source_unmanaged: this chunk's source file is not under a directory memtomem manages, so "
+    "memtomem will not rewrite it. Nothing was written. Either it was indexed from an explicit "
+    "path or its directory is no longer registered (edit the file itself, or register its "
+    "directory as a memory directory to edit it here), or its project memory directory is a "
+    "symbolic link or junction (replace the link with a real directory)."
+)
+
+
+#: Where the web upload route saves files. Not an index root, and still a
+#: directory memtomem keeps memory files in, so their chunks stay editable by id.
+UPLOAD_DIR = Path("~/.memtomem/uploads")
+
+
 EXCLUDED_TARGET_DETAIL = (
     "source_excluded: indexing skips this file (an exclude pattern, a built-in rule, or a "
     "nested git worktree), so new content written to it would not be indexed. Nothing was "
@@ -152,6 +170,15 @@ class ReadOnlySourceError(ValueError):
     The per-chunk ``source_read_only`` gates catch the common case earlier; this
     is the backstop that also covers a file indexed *before* its root was
     declared read-only, whose stored chunks still carry the flag unset.
+    """
+
+
+class UnmanagedSourceError(ValueError):
+    """A rewrite refused before writing: the source is outside every memory directory.
+
+    Raised by the shared mutation helper for the reason
+    :class:`ReadOnlySourceError` is: a caller that reaches it without having
+    asked ``is_managed_source`` still refuses.
     """
 
 

@@ -202,7 +202,9 @@ def norm_dir_prefix(d: str | Path) -> str:
     return base
 
 
-def _identity_match(spellings: tuple[str, ...], root_norm: str) -> bool:
+def _identity_match(
+    spellings: tuple[str, ...], root_norm: str, *, known_identity: bool = False
+) -> bool:
     """Whether either spelling passes through ``root`` itself, by inode identity.
 
     This replaces asking whether the filesystem folds case. That question had no
@@ -240,6 +242,12 @@ def _identity_match(spellings: tuple[str, ...], root_norm: str) -> bool:
     try:
         root_stat = root_path.stat()
     except OSError:
+        return False
+    # ``st_ino == 0`` is a filesystem that does not answer identity (some FUSE
+    # and SMB mounts): every directory on it then has the root's key. A caller
+    # that refuses on a match can live with that. One that permits on a match
+    # passes ``known_identity`` and gets the literal prefix rule alone there.
+    if known_identity and root_stat.st_ino == 0:
         return False
     key = (root_stat.st_dev, root_stat.st_ino)
     depth = len(root_path.parts)
@@ -319,14 +327,45 @@ def is_under_any_root(target: str | Path, roots: Iterable[str | Path]) -> bool:
     # For a path with no symlink in it the two spellings are identical, which is
     # the common case; checking it twice doubles the stat calls per root.
     spellings = (resolved,) if entry == resolved else (resolved, entry)
-    for root in roots:
-        prefix = norm_dir_prefix(root)
-        bare = prefix.rstrip(os.sep)
-        if any(s == bare or s.startswith(prefix) for s in spellings):
-            return True
-        if _identity_match(spellings, bare):
-            return True
-    return False
+    return any(_spellings_under_root(spellings, root) for root in roots)
+
+
+def _spellings_under_root(
+    spellings: tuple[str, ...], root: str | Path, *, known_identity: bool = False
+) -> bool:
+    """Whether any normalized spelling is ``root`` or lies under it.
+
+    ``known_identity`` is for :func:`_identity_match`.
+    """
+    prefix = norm_dir_prefix(root)
+    bare = prefix.rstrip(os.sep)
+    if any(s == bare or s.startswith(prefix) for s in spellings):
+        return True
+    return _identity_match(spellings, bare, known_identity=known_identity)
+
+
+def resolves_under_any_root(target: str | Path, roots: Iterable[str | Path]) -> bool:
+    """Whether the file ``target`` resolves to lies under any directory in ``roots``.
+
+    The allowing twin of :func:`is_under_any_root`, for a rule that permits a
+    write where that one refuses it. A refusal can afford to match on either
+    spelling of a path through a symlink. A permission cannot: a write opened
+    through ``target`` lands where it resolves, so only the fully resolved
+    spelling counts, and a link inside a root that points out of it is not
+    under the root. Each root is matched as in :func:`is_under_any_root`,
+    except that a directory is taken for the root by identity only where the
+    filesystem reports one (see :func:`_identity_match`).
+
+    A path whose resolution raises ``OSError`` is under nothing; ``norm_path``
+    would fall back to the spelling as typed, which is a path nobody resolved.
+    A symlink loop does not raise: :func:`resolve_path` returns the path up to
+    the loop, which cannot be opened, and that path is matched like any other.
+    """
+    try:
+        resolved = fold_path_form(str(resolve_path(Path(target).expanduser())))
+    except OSError:
+        return False
+    return any(_spellings_under_root((resolved,), root, known_identity=True) for root in roots)
 
 
 def project_boundary_key(project_context_root: Path | str | None) -> str:

@@ -133,6 +133,7 @@ def _upload_app(read_only: object):
     engine.is_read_only_source = MagicMock(
         side_effect=read_only if callable(read_only) else lambda _p: read_only
     )
+    engine.is_managed_source = MagicMock(return_value=True)
     app.state.index_engine = engine
     app.state.config = Mem2MemConfig()
     app.state.storage = AsyncMock()
