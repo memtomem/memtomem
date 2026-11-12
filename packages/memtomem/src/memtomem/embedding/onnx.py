@@ -16,6 +16,7 @@ from memtomem._settlement import settle_shielded
 from memtomem.config import EmbeddingConfig
 from memtomem.embedding.aliases import resolve_embedder_id
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+from memtomem.embedding.hub_locks import prepare_hub_locks
 from memtomem.embedding.hub_telemetry import hub_telemetry_off
 from memtomem.errors import EmbeddingError, Mem2MemError, SearchDeadlineExceeded
 from memtomem.embedding.profiles import E5_MODEL, e5_contract_error, is_e5, is_minilm
@@ -472,6 +473,7 @@ class OnnxEmbedder:
                 # the intra-op pool so seeding doesn't saturate the machine.
                 threads = self._config.threads or None
                 cache_dir = resolve_fastembed_cache_dir()
+                prepare_hub_locks(cache_dir)
                 logger.info(
                     "Loading ONNX embedding model %s (threads=%s, cpu_mem_arena=%s, cache_dir=%s) …",
                     model_id,

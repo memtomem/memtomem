@@ -140,7 +140,7 @@ async def test_the_engine_holds_the_key_it_was_given(bm25_only_components, tmp_p
     comp, mem_dir = bm25_only_components
     refused, target, refused_key, target_key = await _refused_and_target(comp, mem_dir)
     preflight = comp.index_engine.preflight_mutation(
-        refused, refused.read_bytes(), source_key=refused_key
+        refused, refused.read_bytes(), source_path=refused.resolve()
     )
     assert preflight.rejection is not None
     _link_or_skip(refused, target)
