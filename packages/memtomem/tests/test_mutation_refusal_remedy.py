@@ -133,6 +133,12 @@ class TestEachSurfaceNamesItsOwnRemedy:
             assert _assert_mm_runs(argv, path) == ["--force-unsafe"]
         assert text.count("from the CLI with `mm ") == len(commands)
 
+    def test_mem_index_takes_no_force_unsafe(self):
+        """ADR-0006 Axis E.6: an MCP caller cannot set the valve on a file it indexes."""
+        params = inspect.signature(_core_tools()["mem_index"]).parameters  # type: ignore[arg-type]
+        assert "path" in params
+        assert "force_unsafe" not in params
+
     @pytest.mark.parametrize(("scope", "bypassable"), _TIERS)
     def test_web_names_its_own_controls_and_no_host_path(self, tmp_path, scope, bypassable):
         path = _tampered_path(tmp_path)
