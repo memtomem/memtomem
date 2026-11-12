@@ -53,6 +53,13 @@ const STATE = {
   maxResultScore: 0,
   resultScoreViews: {},
   sourcesBrowserStale: false,
+  // The source the chunk browser shows (or is loading) and the limit it was
+  // asked for, set by ``browseSource``; ``null`` once ``hideBrowser`` empties it.
+  browsedSource: null,
+  browsedLimit: 100,
+  // A card save's refresh of ``browsedSource``, held while another editor is
+  // open in the browser (#3077); see ``_requestBrowserRefresh``.
+  browserRefreshPending: null,
   tagsTabStale: false,
   homeStale: false,
   detailViewSource: '',
@@ -5115,7 +5122,16 @@ function _retranslateSourcesPartialNote() {
 }
 
 
+// Bumped by every ``browseSource`` and ``hideBrowser``: a listing answers only
+// the browse that is still the latest, so one landing late never replaces the
+// view that followed it.
+let _browseGen = 0;
+
 function hideBrowser() {
+  // A listing still in flight must not bring the cards back.
+  _browseGen += 1;
+  STATE.browsedSource = null;
+  STATE.browserRefreshPending = null;
   document.querySelector('.sources-layout')?.classList.remove('mobile-detail');
   hide(qs('chunks-browser-content'));
   const browser = qs('chunks-browser');
@@ -6452,10 +6468,17 @@ function _renderMemorySourceItem(s, maxChunks) {
 }
 
 async function browseSource(path, limit = 100, enterMobileDetail = false) {
+  const gen = ++_browseGen;
+  STATE.browsedSource = path;
+  STATE.browsedLimit = limit;
+  // This browse fetches the source afresh: a held refresh is satisfied by it,
+  // or belongs to a source no longer shown.
+  STATE.browserRefreshPending = null;
   const browser = qs('chunks-browser');
   panelLoading(browser);
   try {
     const data = await api('GET', `/api/chunks?source=${encodeURIComponent(path)}&limit=${limit}`);
+    if (gen !== _browseGen) return;
     browser.innerHTML = '';
     const content = document.createElement('div');
     content.id = 'chunks-browser-content';
@@ -6582,6 +6605,8 @@ async function browseSource(path, limit = 100, enterMobileDetail = false) {
           try {
             await api('DELETE', `/api/chunks/${c.id}`);
             card.remove();
+            // The card can take the last open editor with it.
+            _flushBrowserRefresh();
             showToast(t('toast.chunk_deleted'), 'success');
             // Update count badge
             const countEl = content.querySelector('.badge-blue');
@@ -6675,8 +6700,67 @@ async function browseSource(path, limit = 100, enterMobileDetail = false) {
       });
     }
   } catch (err) {
+    if (gen !== _browseGen) return;
     browser.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(err.message)}</p></div>`;
   }
+}
+
+// A card save refreshes its source's cards, which rebuilds every card in the
+// browser: an editor open on another card, and its draft, would go with it
+// (#3077). So the refresh waits until no editor is open, in either view, and
+// ``_flushBrowserRefresh`` runs wherever an editor closes. A save for a source
+// the browser no longer shows touches nothing: that browse fetched afresh.
+// Pending always names ``browsedSource``: ``browseSource`` and ``hideBrowser``
+// clear it whenever that changes.
+function _requestBrowserRefresh(path) {
+  if (path !== STATE.browsedSource) return;
+  STATE.browserRefreshPending = path;
+  _flushBrowserRefresh();
+}
+
+function _flushBrowserRefresh() {
+  const pending = STATE.browserRefreshPending;
+  if (!pending) return;
+  if (qs('chunks-browser')?.querySelector('.chunk-card-edit-area')) {
+    _showRefreshHeldNotice();
+    return;
+  }
+  STATE.browserRefreshPending = null;
+  browseSource(pending, STATE.browsedLimit);
+}
+
+// Until the held refresh runs, the saved chunk's cards keep their pre-save
+// text, under an id the re-index may have retired: disable what would act on
+// that id or copy that text, in both views. An editor already open on it is
+// left alone.
+function _markChunkSaved(chunkId) {
+  const browser = qs('chunks-browser');
+  if (!browser) return;
+  const sel = `[data-chunk-id="${CSS.escape(String(chunkId))}"]`;
+  browser.querySelectorAll(`.chunk-card${sel}, .doc-chunk-block${sel}`).forEach(el => {
+    el.classList.add('chunk-card-saved');
+    el.querySelectorAll('.card-copy-btn, .card-edit-btn, .card-delete-btn, .doc-chunk-edit-btn')
+      .forEach(btn => { btn.disabled = true; });
+  });
+}
+
+// One notice for the whole browser, above both views: the Document view's
+// Copy All joins every chunk's text, the saved one's included, so it is off
+// until the refresh replaces that text. The refresh rebuilds the browser and
+// takes the notice with it.
+function _showRefreshHeldNotice() {
+  const content = qs('chunks-browser-content');
+  if (!content) return;
+  content.querySelectorAll('.document-copy-btn').forEach(btn => { btn.disabled = true; });
+  if (content.querySelector('.chunks-refresh-held')) return;
+  const notice = document.createElement('div');
+  notice.className = 'chunks-refresh-held';
+  notice.setAttribute('role', 'status');
+  notice.setAttribute('data-i18n', 'chunks.refresh_held');
+  content.querySelector('.chunks-browser-header')?.after(notice);
+  // Filled after it is in the page: a live region that arrives with its text
+  // already set is often not announced.
+  setTimeout(() => { notice.textContent = t('chunks.refresh_held'); }, 0);
 }
 
 function _renderDocumentView(chunks, container, path) {
@@ -6701,6 +6785,7 @@ function _renderDocumentView(chunks, container, path) {
   sorted.forEach(c => {
     const block = document.createElement('div');
     block.className = 'doc-chunk-block';
+    block.dataset.chunkId = c.id;
 
     if (lang && lang !== 'markdown' && window.Prism) {
       const pre = document.createElement('pre');
@@ -6765,20 +6850,27 @@ function _startChunkEdit(card, chunk, sourcePath) {
     ta.focus();
   }).catch(err => {
     if (!editArea.isConnected) return;
-    editArea.remove();
+    closeEditor();
     showToast(t('toast.chunk_source_load_failed', { error: err.message }), 'error');
   });
 
+  // Every way this editor closes: a refresh held for it can run once it is
+  // the last one gone.
+  function closeEditor() {
+    editArea.remove();
+    _flushBrowserRefresh();
+  }
+
   cancelBtn.addEventListener('click', e => {
     e.stopPropagation();
-    editArea.remove();
+    closeEditor();
   });
 
   saveBtn.addEventListener('click', async e => {
     e.stopPropagation();
     if (!base) return;
     const newContent = ta.value;
-    if (newContent === base.text) { editArea.remove(); return; }
+    if (newContent === base.text) { closeEditor(); return; }
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
     ta.readOnly = true;  // what is typed now would not be in this save
@@ -6801,8 +6893,11 @@ function _startChunkEdit(card, chunk, sourcePath) {
       // it unless a source edit (and its draft) is open there.
       _forgetSavedChunk(chunk.id);
       if (String(STATE.selectedChunkId) === String(chunk.id) && !STATE.sourceEdit) clearDetail();
-      // Refresh the browser to show updated content
-      browseSource(sourcePath, card.closest('#chunks-browser-content')?.querySelectorAll('.chunk-card').length > 100 ? 500 : 100);
+      // This session's editor, not "the editor on this chunk": Cancel and Edit
+      // during the save can have opened another one on the same card.
+      editArea.remove();
+      _markChunkSaved(chunk.id);
+      _requestBrowserRefresh(sourcePath);
     } catch (err) {
       saveBtn.textContent = 'Save';
       ta.readOnly = false;

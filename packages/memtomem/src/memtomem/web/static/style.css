@@ -3654,6 +3654,7 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
 .chunk-card-actions { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
 .chunk-card-actions button { font-size: 0.68rem; padding: 2px 7px; }
 .chunk-card-edit-area { margin-top: 8px; }
+.chunks-refresh-held { margin: 6px 0; font-size: 0.78rem; color: var(--muted); }
 .chunk-card-edit-area textarea {
   width: 100%; min-height: 120px; font-family: var(--mono); font-size: 0.82rem;
   background: var(--bg); color: var(--text); border: 1px solid var(--accent);
