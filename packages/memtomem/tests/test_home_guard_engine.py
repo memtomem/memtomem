@@ -1106,6 +1106,18 @@ def test_opens_for_writing_and_writes_nothing():
     os.close(fd)
 """
 
+#: The same bytes written back through a name relative to the cwd.
+_RELATIVE_REWRITE_TEST = f"""
+from pathlib import Path
+
+def test_rewrites_the_same_bytes_through_a_relative_name(monkeypatch):
+    target = {_TARGET}
+    data = target.read_bytes()
+    monkeypatch.chdir(target.parent)
+    with open(target.name, "wb") as handle:
+        handle.write(data)
+"""
+
 _FAILED_REMOVE_TEST = f"""
 import os
 from pathlib import Path
@@ -1147,6 +1159,9 @@ def test_moves_the_directory_away_and_back():
         pytest.param(_ATOMIC_SAME_BYTES_TEST, _present_claude_settings, "os.rename", id="atomic"),
         pytest.param(_WRITE_THEN_RESTORE_TEST, _present_claude_settings, "open", id="restore"),
         pytest.param(_OPEN_RDWR_UNUSED_TEST, _present_claude_settings, "open", id="rdwr-unused"),
+        pytest.param(
+            _RELATIVE_REWRITE_TEST, _present_claude_settings, "open", id="relative-rewrite"
+        ),
         pytest.param(_FAILED_REMOVE_TEST, None, "os.remove", id="failed-remove"),
         pytest.param(_CREATE_THEN_DELETE_TEST, None, "open", id="create-delete"),
     ],
@@ -1228,18 +1243,25 @@ def test_writes_its_sandbox_through_a_dir_fd(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(os.open not in os.supports_dir_fd, reason="os.open takes no dir_fd here")
-def test_strict_mode_does_not_judge_a_relative_open_under_a_dir_fd(tmp_path: Path) -> None:
-    """The ``open`` audit event carries no ``dir_fd`` (#3307 review).
+def test_strict_mode_reads_a_relative_open_under_a_dir_fd_against_the_cwd(
+    tmp_path: Path,
+) -> None:
+    """The documented false positive: the ``open`` audit event carries no ``dir_fd`` (#2302).
 
-    A relative name can resolve under a descriptor rather than the cwd, so
-    reading it against the cwd would fail a test that wrote only its sandbox.
+    A relative name is read against the cwd, so a test whose cwd is the home
+    directory fails ``strict`` here although only its sandbox file changed.
+    Exempting relative opens instead would let every cwd-relative write to a
+    watched file pass ``strict`` silently; a loud failure the test can fix by
+    using an absolute path is the cheaper blind spot.
     """
     result = _run_nested_pytest(
         tmp_path, _DIR_FD_SANDBOX_WRITE_TEST, mode="strict", prepare=_present_claude_settings
     )
     combined = result.stdout + result.stderr
-    assert result.returncode == 0, combined
-    assert "1 passed" in combined
+    assert result.returncode == 1, combined
+    flat = " ".join(combined.split())
+    assert "was observed attempting write-capable access to real user settings" in flat
+    assert "settings.json — open on thread MainThread" in flat
 
 
 def test_strict_mode_passes_a_clean_test_beside_existing_settings(tmp_path: Path) -> None:
@@ -1298,20 +1320,15 @@ def test_witness_marks_a_write_to_the_file_as_direct(
     assert [item.direct for item in witness.drain()] == [True]
 
 
-def test_witness_marks_a_relative_open_as_not_direct(
+def test_witness_marks_a_relative_open_as_direct(
     witness: hg.WriteWitness, watched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A relative ``open`` still attributes, but is no strict verdict (#3307 review).
-
-    The event cannot say whether a ``dir_fd`` came with the name, so the
-    cwd-relative reading is a guess: good enough to attribute a net change,
-    not to fail a test on its own.
-    """
+    """A cwd-relative write to a watched file is a ``strict`` verdict (#2302)."""
     monkeypatch.chdir(watched.parent)
     with open(watched.name, "w", encoding="utf-8") as handle:
         handle.write("{}")
     observed = witness.drain()
     assert [(item.event, item.path, item.direct) for item in observed] == [
-        ("open", hg.normalise_target(watched), False)
+        ("open", hg.normalise_target(watched), True)
     ]
-    assert hg.access_without_change([], observed, ()) == []
+    assert hg.access_without_change([], observed, ()) == observed

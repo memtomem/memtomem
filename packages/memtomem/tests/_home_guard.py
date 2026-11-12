@@ -16,9 +16,12 @@ then fails counts too.  That check counts only operations that name the file
 itself: one
 that renames an ancestor directory is used to attribute a change, not as a
 verdict, because it cannot tell an empty directory from one holding the file.
-An ``open`` of a relative path is used the same way, because its audit event
-carries no ``dir_fd``: a test that opens a watched file through a relative
-name is caught only if the bytes change.
+An ``open`` audit event carries no ``dir_fd``, so a relative name is read
+against the cwd: a test whose cwd is the home directory and that opens
+``.claude/settings.json`` relative to a descriptor pointing elsewhere fails
+``strict`` although only its own file changed.  Exempting relative opens
+instead would let every cwd-relative write pass silently; this false positive
+is loud, and an absolute path avoids it.
 
 A byte difference alone does not say *this test wrote the file* (#2355).  On a
 developer machine these paths have another owner — the surrounding editor
@@ -366,8 +369,7 @@ class WriteObservation:
     ``os.remove`` that then raises, is recorded too.  ``direct`` is False when
     the operation named an ancestor directory (a rename of ``~/.claude``) and
     the watched path was projected from it, whether or not a file existed
-    there, and when an ``open`` named a relative path, which the audit event
-    cannot tell from one resolved under a ``dir_fd``.
+    there.
     """
 
     event: str
@@ -521,12 +523,6 @@ class WriteWitness:
             for candidate in _candidate_paths(event, args):
                 if isinstance(candidate, int):
                     continue
-                # The ``open`` event carries (path, mode, flags) and no
-                # ``dir_fd``, so a relative name may resolve under a descriptor
-                # rather than the cwd.  Read against the cwd it still attributes
-                # a net change, but it is not a strict verdict on its own.
-                name = os.fsdecode(candidate)  # type: ignore[arg-type]
-                guessed = event == "open" and not os.path.isabs(name)
                 for key, direct in self._affected(candidate):
                     stack = tuple(
                         traceback.format_list(traceback.extract_stack(limit=MAX_STACK_FRAMES))
@@ -542,7 +538,7 @@ class WriteWitness:
                                 window=self._window,
                                 thread=thread,
                                 stack=stack,
-                                direct=direct and not guessed,
+                                direct=direct,
                             )
                         )
         except Exception:  # pragma: no cover - defensive; see class docstring
@@ -641,9 +637,8 @@ def access_without_change(
     test restores before teardown, or a byte-identical rewrite, passes it.
     ``strict`` fails these too.  Only *direct* observations count: one
     projected from a rename of an ancestor directory cannot tell an empty
-    directory from one holding the file, and a relative ``open`` cannot tell
-    the cwd from a ``dir_fd``, so both stay attribution aids (see
-    :func:`classify`) and are not verdicts on their own.  Paths that already
+    directory from one holding the file, so it stays an attribution aid (see
+    :func:`classify`) and is not a verdict on its own.  Paths that already
     have a violation, and degraded targets (handled by :func:`degraded_writes`),
     are left out so nothing is reported twice.
     """
