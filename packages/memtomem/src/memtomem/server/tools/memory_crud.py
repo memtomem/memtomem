@@ -820,6 +820,7 @@ async def _mem_add_core(
     event_type: str,
     confirmation_surface: str = "mem_add",
     file_name: str | None = None,
+    on_appended: Callable[[str], None] | None = None,
 ) -> tuple[str, "IndexingStats | None"]:
     """Core logic for ``mem_add`` — also usable from internal callers that
     need the ``IndexingStats`` (e.g. ``mem_consolidate_apply`` linking new
@@ -867,6 +868,12 @@ async def _mem_add_core(
     ``consolidated_into`` edges (#2802). The file holds one namespace by
     construction, so it is never re-targeted the way a day file is (#2005).
     Ignored when ``file`` is given.
+
+    ``on_appended`` is called once with the text this call appended, under the
+    file lock, right after the append and before the re-index. ``stats``
+    describes the whole file's re-index, so a caller that needs to tell this
+    entry's chunk from others in ``new_chunk_ids`` needs the appended text
+    too (``mem_reflect_save``, #3273).
 
     Returns:
         Tuple of ``(user_facing_message, stats)``. ``stats`` is ``None``
@@ -1236,6 +1243,8 @@ async def _mem_add_core(
                         if idempotency_key is not None:
                             await _release_idempotency_claim(app, "mem_add", idempotency_key)
                         raise
+                    if on_appended is not None:
+                        on_appended(appended)
                     # Re-index the whole file via the standard pipeline so the watcher
                     # (which also calls index_file) produces identical hashes → no dups.
                     # The append is already durable, so a failure here leaves
