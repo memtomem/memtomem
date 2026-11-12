@@ -761,7 +761,7 @@ def extract_commands_to_canonical(
                         canonical_content.encode("utf-8"),
                         resolve_target=_resolve,
                         overwrite=overwrite,
-                        snapshot_note="pre-overwrite snapshot (import from gemini)",
+                        snapshot_note="pre-overwrite snapshot (pull from gemini)",
                         lock_timeout=lock_remaining(),
                     )
                 except TimeoutError:
