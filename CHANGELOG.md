@@ -163,11 +163,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the link's target and stored under its own key: a `project_shared` file declaring
   `redaction: documents-patterns`, which is refused there, was indexed as a user-scope file, and
   with `index_masking_manifest_path` set, a line the check had passed masked could be stored
-  unmasked. The key, the scope and the masking entry now come from one resolution, and the text
-  that is chunked is the one the check judged. `mm memory doctor` answers through the same code.
-  Not covered: the registered project directories are still resolved when the scope is looked
-  up, so replacing such a directory itself, and putting it back, inside that same step has the
-  effect a replaced file had.
+  unmasked. The key the pass checks, the scope and the masking entry now come from one
+  resolution, and the text that is chunked is the one the check judged. `mm memory doctor`
+  answers through the same code. Not covered: the registered project directories are still
+  resolved when the scope is looked up, so replacing such a directory itself, and putting it
+  back, inside that same step has the effect a replaced file had. Two later steps of the same
+  pass still resolve the path themselves: the store, when it writes the chunks (#3305), and the
+  chunker's read-only check (#3306).
 
 - **Registering a schedule refuses a params key the job does not take (#3247).** `mm schedule add
   --params` and `mem_schedule_register` used to accept any key and store it as given, so a

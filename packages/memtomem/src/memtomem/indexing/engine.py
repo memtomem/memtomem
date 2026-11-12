@@ -2647,12 +2647,15 @@ class IndexEngine:
             }
 
         # One resolution of the path just read, taken before any ``await``. It
-        # gives both the stored key (what ``norm_path`` returns, fallback
-        # included) and the path the gate judges under, so the two cannot name
-        # different files (#3290). Every write below either uses the key as
-        # stored or is checked against it by ``_require_same_source``: resolved
-        # again after an ``await``, a path relinked meanwhile names another
-        # source (#3173, #3180).
+        # gives both this pass's key for the source (what ``norm_path`` returns,
+        # fallback included) and the path the gate judges under, so those two
+        # cannot name different files (#3290). The reads and writes below
+        # either use the key as stored or are checked against it by
+        # ``_require_same_source``: resolved again after an ``await``, a path
+        # relinked meanwhile names another source (#3173, #3180). Not covered:
+        # ``upsert_chunks`` resolves each chunk's source path itself when it
+        # writes, so a swap undone inside that call is stored under the link
+        # target's key (#3305).
         decision_path = _decision_path(file_path)
         source_key = fold_path_form(str(decision_path))
         read_ms = (time.monotonic() - read_started) * 1000
