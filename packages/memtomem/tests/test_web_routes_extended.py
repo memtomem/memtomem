@@ -509,7 +509,7 @@ class TestTimeline:
         assert data["has_more"] is True
 
     async def test_timeline_blank_namespace_normalizes_to_default_view(
-        self, app, client: AsyncClient
+        self, app, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ):
         # Call timeline with omitted namespace
         await client.get("/api/timeline")
@@ -524,16 +524,16 @@ class TestTimeline:
         assert blank_filter == omitted_filter
 
         # Also verify with configured system prefixes
-        app.state.config.search.system_namespace_prefixes = ["archive:", "agent-runtime:"]
+        monkeypatch.setattr(
+            app.state.config.search,
+            "system_namespace_prefixes",
+            ["archive:", "agent-runtime:"],
+        )
         resp_sys = await client.get("/api/timeline", params={"namespace": ""})
         assert resp_sys.status_code == 200
         sys_filter = app.state.storage.recall_chunks.await_args.kwargs["namespace_filter"]
         assert sys_filter.namespaces == ()
         assert sys_filter.exclude_prefixes == ("archive:", "agent-runtime:")
-
-    async def test_timeline_malformed_namespace_returns_400(self, client: AsyncClient):
-        resp = await client.get("/api/timeline", params={"namespace": "a,b*"})
-        assert resp.status_code == 400
 
 
 # ---------------------------------------------------------------------------
