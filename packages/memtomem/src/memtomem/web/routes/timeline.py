@@ -26,8 +26,11 @@ async def get_timeline(
 ) -> TimelineResponse:
     """Return chunks created within the last *days* days, newest first."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
+    # A blank value names no namespace. Parsed as given it would be an exact
+    # namespace ``""`` that matches no row, so it takes the omitted path, as in
+    # ``GET /api/search`` (#3275).
     ns_filter = NamespaceFilter.parse(
-        namespace,
+        namespace or None,
         system_prefixes=tuple(config.search.system_namespace_prefixes),
     )
     # ADR-0011 PR-D round 9: thread project context so Web timeline
