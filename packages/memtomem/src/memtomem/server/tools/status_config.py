@@ -22,6 +22,11 @@ from memtomem._instance_registry import (
     enumerate_live_instances as _enumerate_live_instances,
     store_digest_for as _store_digest_for,
 )
+from memtomem.embedding.identity import (
+    embedding_reset_cost,
+    embedding_reset_counts,
+    store_has_nothing_to_reset,
+)
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.generation import ComponentGeneration
 from memtomem.runtime.components import prune_settled_generations
@@ -509,14 +514,7 @@ async def collect_status_report(app: AppContext) -> dict:
             except Exception:
                 logger.debug("vector count query failed", exc_info=True)
         chunks = stats["total_chunks"]
-        # Orphan vectors survive with zero chunks, so the two clauses are
-        # independent: what is dropped, and whether a re-index follows.
-        dropped = "all vector rows" if vectors is None else f"{vectors} vector row(s)"
-        if chunks == 0:
-            reindex = "no chunks to re-index."
-        else:
-            reindex = f"{chunks} chunk(s) stay but need `mm index --force <path>` to re-embed."
-        detail = f"Reset drops {dropped}; {reindex}"
+        detail = embedding_reset_cost(chunks, vectors)
         warnings.append(
             {
                 "kind": warning_kind,
@@ -1927,7 +1925,20 @@ async def mem_embedding_reset(
             lines.append("\nNo mismatch — DB and config are in sync.")
         else:
             lines.append("\nWarning: Mismatch detected!")
-            lines.append('  -> "apply_current": reset DB to config (destructive, re-index needed)')
+            chunks, vectors = await embedding_reset_counts(app.storage)
+            if store_has_nothing_to_reset(chunks, vectors):
+                # #2423: an empty store loses nothing to the reset; saying
+                # "destructive" there sends the caller looking for a backup.
+                lines.append(
+                    '  -> "apply_current": reset DB to config. This store currently holds '
+                    "no chunks or vectors."
+                )
+            else:
+                lines.append(
+                    '  -> "apply_current": reset DB to config (destructive, re-index needed)'
+                )
+                if chunks is not None:
+                    lines.append(f"     {embedding_reset_cost(chunks, vectors)}")
             if stored and not embedding_identity_complete(stored["provider"], stored["model"]):
                 lines.append(
                     "  Revert-to-stored is unavailable: the stored identity is incomplete."
@@ -1941,6 +1952,7 @@ async def mem_embedding_reset(
     if mode == "apply_current":
         from memtomem.config import embedding_policy_fingerprint
 
+        was_empty = store_has_nothing_to_reset(*await embedding_reset_counts(app.storage))
         await app.storage.reset_embedding_meta(
             dimension=config.embedding.dimension,
             provider=config.embedding.provider,
@@ -1958,6 +1970,15 @@ async def mem_embedding_reset(
         # call holding a client's turn open. It is no longer a safety caveat:
         # both paths preserve each file's stored namespace, including under a
         # session (ADR-0033, #2104).
+        if was_empty:
+            # Counted before the reset, outside its transaction: this says
+            # what was observed, not what the reset itself removed.
+            return (
+                f"DB reset to {config.embedding.provider}/{config.embedding.model} "
+                f"({config.embedding.dimension}d). No chunks or vectors were found when "
+                "checked before the reset. If anything was indexed since, re-embed with "
+                "`mm index --force <memory_dir>` (CLI) or mem_index(force=true)."
+            )
         return (
             f"DB reset to {config.embedding.provider}/{config.embedding.model} "
             f"({config.embedding.dimension}d). All vectors deleted — re-embed "

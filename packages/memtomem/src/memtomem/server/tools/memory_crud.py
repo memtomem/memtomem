@@ -39,6 +39,7 @@ from memtomem.source_provenance import (
     READ_ONLY_TARGET_DETAIL,
     SOURCE_READ_ONLY_DETAIL,
     STALE_SOURCE_PROVENANCE_DETAIL,
+    UNMANAGED_SOURCE_DETAIL,
     StaleSourceProvenanceError,
     excluded_after_write_notice,
     relinked_after_write_notice,
@@ -69,7 +70,7 @@ def edit_base_mismatch_message(exc: EditBaseMismatchError) -> str:
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
-    from memtomem.models import Chunk, IndexingStats
+    from memtomem.models import Chunk, ChunkMetadata, IndexingStats
     from memtomem.tools.memory_writer import PreImage, Rewrite
 
 logger = logging.getLogger(__name__)
@@ -336,6 +337,7 @@ async def _locked_chunk(
         yield None, f"Error: chunk {chunk_id} not found.", False
         return
     source_file = chunk.metadata.source_file
+    stored = chunk.metadata
     for _ in range(_CHUNK_LOCK_MOVE_RETRIES):
         # Inside the loop, immediately before the acquire, and asked about
         # ``source_file`` — the path this iteration is about to lock. Acquiring
@@ -350,6 +352,11 @@ async def _locked_chunk(
         # this one only keeps a refusal from leaving a file behind.
         if app.index_engine.is_read_only_source(source_file):
             yield None, f"Error: {SOURCE_READ_ONLY_DETAIL}", False
+            return
+        # Here for the same two reasons: no sidecar beside a file memtomem was
+        # only asked to read, and each path the loop re-keys onto is judged.
+        if not app.index_engine.is_managed_source(source_file, stored):
+            yield None, f"Error: {UNMANAGED_SOURCE_DETAIL}", False
             return
         key = AppContext.memory_file_lock_key(source_file)
         try:
@@ -382,6 +389,7 @@ async def _locked_chunk(
                     # Moved out from under us (migrate re-scoped the chunk before
                     # we took L2): re-key onto the new path and retry there.
                     source_file = fresh.metadata.source_file
+                    stored = fresh.metadata
         except TimeoutError:
             yield (
                 None,
@@ -507,6 +515,7 @@ async def _mutate_file_and_reindex(
     op: str,
     *,
     force_unsafe: bool = False,
+    stored: ChunkMetadata | None = None,
 ) -> tuple[IndexingStats | None, str | None]:
     """Backup-read → ``mutate`` → incremental re-index, rolling back on failure.
 
@@ -549,6 +558,9 @@ async def _mutate_file_and_reindex(
     reaches the re-index only when the preflight found nothing flagged or
     masked, so it covers this write and nothing else.
 
+    ``stored`` is the metadata of the chunk ``source_file`` came from, for
+    :meth:`~memtomem.indexing.engine.IndexEngine.is_managed_source`.
+
     Returns ``(stats, None)`` on success or ``(None, error_message)`` after
     a refusal or a rollback; ``op`` ("edit"/"delete") only shapes the messages.
     """
@@ -565,6 +577,10 @@ async def _mutate_file_and_reindex(
     # whose chunks still carry the flag unset.
     if app.index_engine.is_read_only_source(source_file):
         return None, f"Error: {SOURCE_READ_ONLY_DETAIL}"
+    # The writer's own copy of the check ``_locked_chunk`` makes before it
+    # locks, so a caller that reaches this function another way still refuses.
+    if not app.index_engine.is_managed_source(source_file, stored):
+        return None, f"Error: {UNMANAGED_SOURCE_DETAIL}"
     # Before the awaits below, not after: a session that ends during the
     # re-index would otherwise lose the flag, and one that starts would
     # inherit a mutation that happened in its predecessor.
@@ -1659,6 +1675,7 @@ async def mem_edit(
             ),
             force_unsafe=guard.decision == "bypassed",
             op="edit",
+            stored=meta,
         )
         if mutate_err:
             return mutate_err
@@ -1763,6 +1780,7 @@ async def mem_delete(
                     expected_identity=pre.identity,
                 ),
                 op="delete",
+                stored=meta,
             )
             if mutate_err:
                 return mutate_err

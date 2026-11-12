@@ -289,6 +289,7 @@
   "chunks.card_edit_title": "Edit chunk",
   "chunks.card_delete": "Delete",
   "chunks.card_delete_title": "Delete chunk",
+  "chunks.refresh_held": "Saved. Until the other open edits are closed, these cards still show the saved chunk's previous text.",
   "chunks.shown_of_total": "{shown} of {total} shown",
 
   "sources.help": "Indexed source files. Click a file to browse chunks. Drag the divider to resize. Sort by name, chunks, size, or recency.",

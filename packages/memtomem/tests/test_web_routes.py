@@ -309,6 +309,7 @@ def app(_isolated_config_paths: Path):
     # the read-only-root gate is the second one.
     index_engine.is_excluded = MagicMock(return_value=False)
     index_engine.is_read_only_source = MagicMock(return_value=False)
+    index_engine.is_managed_source = MagicMock(return_value=True)
     index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     index_engine.rewrite_refusal = AsyncMock(return_value=None)
     # ``mutated=True`` mirrors what an engine that indexed chunks really

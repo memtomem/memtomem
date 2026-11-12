@@ -411,6 +411,7 @@ class TestRefusalAfterTheWriteReportsTheRestore:
         engine = AsyncMock()
         engine.is_excluded = MagicMock(return_value=False)
         engine.is_read_only_source = MagicMock(return_value=False)
+        engine.is_managed_source = MagicMock(return_value=True)
         engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
         engine.rewrite_refusal = AsyncMock(return_value=None)
         engine.index_file = AsyncMock(side_effect=refusal)

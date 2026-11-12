@@ -20,7 +20,11 @@ from helpers import StubCtx
 from memtomem.indexing.engine import resolve_owning_memory_dir
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
-from memtomem.source_provenance import EXCLUDED_SOURCE_DETAIL, excluded_after_write_notice
+from memtomem.source_provenance import (
+    EXCLUDED_SOURCE_DETAIL,
+    UNMANAGED_SOURCE_DETAIL,
+    excluded_after_write_notice,
+)
 from memtomem.tools import memory_mutation, memory_writer
 from memtomem.web.app import create_app
 from memtomem.web.deps import require_configured
@@ -58,6 +62,10 @@ async def excluded_source(request, bm25_only_components, tmp_path):
     unregistered, so the parent root owns it and finds a nested worktree.
     ``unowned_worktree``: the same inside a repository outside every configured
     root, so no root owns it and its enclosing repository is the bound (#2486).
+
+    The fourth value is the refusal each surface gives. A source outside every
+    root is refused for being there before the exclusion is asked about, so
+    ``unowned_worktree`` gets that refusal; the predicate still says excluded.
     """
     comp, mem_dir = bm25_only_components
     indexing = comp.config.indexing
@@ -80,7 +88,9 @@ async def excluded_source(request, bm25_only_components, tmp_path):
     (chunk,) = await comp.storage.list_chunks_by_source(source)
     assert chunk.metadata.source_span_hash
     assert not chunk.metadata.source_read_only
-    return comp, source, chunk
+    unmanaged = request.param == "unowned_worktree"
+    assert comp.index_engine.is_managed_source(source, chunk.metadata) is not unmanaged
+    return comp, source, chunk, UNMANAGED_SOURCE_DETAIL if unmanaged else EXCLUDED_SOURCE_DETAIL
 
 
 async def _index(comp, source: Path) -> None:
@@ -105,19 +115,19 @@ async def _request(comp, surface, chunk_id):
         return await client.delete(f"/api/chunks/{chunk_id}")
 
 
-def _assert_excluded(result):
+def _assert_refused(result, detail: str):
     if isinstance(result, str):
-        assert result == f"Error: {EXCLUDED_SOURCE_DETAIL}"
+        assert result == f"Error: {detail}"
     else:
         assert result.status_code == 409, result.text
-        assert result.json()["detail"] == EXCLUDED_SOURCE_DETAIL
+        assert result.json()["detail"] == detail
 
 
 @pytest.mark.parametrize("surface", SURFACES)
 async def test_an_excluded_source_is_refused_before_any_write(
     excluded_source, monkeypatch, surface
 ):
-    comp, source, chunk = excluded_source
+    comp, source, chunk, detail = excluded_source
     source_before = source.read_bytes()
     rows_before = comp.storage._get_db().execute("SELECT * FROM chunks").fetchall()
     index = AsyncMock(wraps=comp.index_engine.index_file)
@@ -140,7 +150,7 @@ async def test_an_excluded_source_is_refused_before_any_write(
         monkeypatch.setattr(module, "restore_pre_image_quietly", restore)
         restores.append(restore)
 
-    _assert_excluded(await _request(comp, surface, chunk.id))
+    _assert_refused(await _request(comp, surface, chunk.id), detail)
 
     assert source.read_bytes() == source_before
     assert comp.storage._get_db().execute("SELECT * FROM chunks").fetchall() == rows_before
