@@ -259,12 +259,14 @@ class SourceRelinkedError(RetryableError):
 
 
 def _decision_path(file_path: Path) -> Path:
-    """One resolution of ``file_path``: the path a file is judged and keyed under.
+    """One resolution of ``file_path``: the path a pass judges a file under and takes its key from.
 
     Unfolded, so it compares with registered roots and manifest keys as they
-    are written. Its stored key is ``fold_path_form(str(path))``, which is
-    ``norm_path(file_path)``, fallback included: a resolution that raises
-    ``OSError`` gives ``file_path`` as given.
+    are written. The key a pass captures from it is
+    ``fold_path_form(str(path))``, which is ``norm_path(file_path)``, fallback
+    included: a resolution that raises ``OSError`` gives ``file_path`` as
+    given. It is the key the pass checks, not a promise about the rows: the
+    store resolves a chunk's source path itself when it writes (#3305).
     """
     try:
         return resolve_path(file_path)
@@ -2679,8 +2681,8 @@ class IndexEngine:
         # load-bearing on its own, so a user-dir symlink pointing at a
         # ``project_shared`` note must not be adjudicated as ``user``, and an
         # ``.md`` alias to a non-Markdown target must not claim a Markdown
-        # frontmatter declaration. ``decision_path`` is the resolution the
-        # stored key was taken from, above; the scope and manifest lookups
+        # frontmatter declaration. ``decision_path`` is the resolution this
+        # pass's key was taken from, above; the scope and manifest lookups
         # below take it as given and resolve nothing again.
         if self._registry.get(decision_path.suffix) is None:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
@@ -3856,8 +3858,8 @@ class IndexEngine:
     ) -> tuple[str, Path | None, str | None, IndexProjection]:
         """What the redaction gate judges ``content`` with: scope, root, exemption, projection.
 
-        ``decision_path`` is one resolution of the file's path, the one its
-        stored key comes from (:func:`_decision_path`). The scope and manifest
+        ``decision_path`` is one resolution of the file's path, the one a pass
+        takes its key from (:func:`_decision_path`). The scope and manifest
         lookups take it as given, so a leaf replaced by a symlink after that
         resolution is judged as the file that was read, not as the link's
         target (#3191, #3290). The scope lookup still resolves the registered
