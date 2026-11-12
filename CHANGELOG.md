@@ -272,6 +272,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   it would change who can read the models in it: run `chmod 700 ~/.memtomem/cache/fastembed`
   to make it private. A directory named by `MEMTOMEM_FASTEMBED_CACHE` or
   `FASTEMBED_CACHE_PATH` is created as before, and Windows is unchanged.
+- **A credential written directly against Korean, Japanese or Chinese text is no longer
+  missed (#3298).** Ten of the twenty secret patterns (npm, AWS access key id, JWT, the
+  newer OpenAI and Anthropic keys, GitHub `gho_`/`ghu_`/`ghs_`/`ghr_`, Google API, GitLab,
+  Hugging Face and PyPI tokens) were anchored, in front or on both sides, with a word
+  boundary that counts Hangul, kana and Han characters as part of a word. A token with
+  such text directly in front of it, and for five of the ten one with a particle attached
+  behind it (`키 AKIA…를 사용한다`), matched nothing and was written, in every scope
+  including `project_shared`. Their boundaries now count only ASCII letters, digits and `_`
+  as word characters, which is what the Web UI's pre-check already did with the same
+  patterns. Nothing changes for a token between ASCII neighbours. A token directly after an
+  accented Latin letter is matched too. Text stored before this change is not rescanned.
 
 ## [0.7.8] — 2026-11-10
 

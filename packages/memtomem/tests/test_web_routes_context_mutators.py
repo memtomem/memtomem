@@ -841,6 +841,24 @@ async def test_POST_rejects_secret_shaped_content(
 
 @pytest.mark.parametrize("adapter", TYPE_MATRIX)
 @pytest.mark.anyio
+async def test_POST_rejects_a_key_id_with_a_particle_attached(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    """A token written against Hangul has no ASCII neighbour on that side, and
+    is refused like one between spaces (#3298)."""
+    key_id = "AKIA" + "IOSFODNN7" + "EXAMPLE"
+    body = adapter["create_body"]("leaky")
+    body["content"] += f"\n배포 키 {key_id}를 사용한다\n"
+    r = await client.post(adapter["list_url"], json=body)
+    assert r.status_code == 422, (adapter["type"], r.text)
+    assert r.json()["reason_code"] == "privacy_blocked", r.text
+    assert not adapter["created_working"](gateway_root, "leaky").exists()
+
+
+@pytest.mark.parametrize("adapter", TYPE_MATRIX)
+@pytest.mark.anyio
 async def test_PUT_rejects_secret_shaped_content_even_with_force(
     adapter: dict,
     client: AsyncClient,
