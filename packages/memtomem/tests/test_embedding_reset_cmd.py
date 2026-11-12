@@ -291,3 +291,163 @@ def test_partial_stamp_status_and_refused_revert_close_storage(
     reset.assert_not_awaited()
     with sqlite3.connect(db_path) as db:
         assert db.execute("SELECT * FROM _memtomem_meta ORDER BY key").fetchall() == before
+
+
+# ── #2423: the reset's wording follows what the store actually holds ─────────
+
+_E5 = "intfloat/multilingual-e5-small"
+
+
+def _stamp_1024(db_path, *, content: str | None) -> None:
+    """Stamp ``db_path`` 1024/bge-m3, the issue's first step.
+
+    ``content="chunk"`` adds one chunk with its vector, ``content="orphan"``
+    one vector row with no chunk, ``None`` neither.
+    """
+    from memtomem.config import StorageConfig
+    from memtomem.storage.sqlite_backend import SqliteBackend
+
+    async def run() -> None:
+        storage = SqliteBackend(
+            StorageConfig(sqlite_path=db_path),
+            dimension=1024,
+            embedding_provider="onnx",
+            embedding_model="bge-m3",
+        )
+        await storage.initialize()
+        try:
+            if content == "chunk":
+                await storage.upsert_chunks([make_chunk("stamp probe", embedding=[0.1] * 1024)])
+        finally:
+            await storage.close()
+
+    asyncio.run(run())
+    if content == "orphan":
+        import struct
+
+        import sqlite_vec
+
+        db = sqlite3.connect(db_path)
+        db.enable_load_extension(True)
+        sqlite_vec.load(db)
+        db.execute(
+            "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
+            (987, struct.pack("1024f", *([0.2] * 1024))),
+        )
+        db.commit()
+        db.close()
+
+
+def _switch_config(home, db_path) -> None:
+    """Point the config at e5-small/384 without indexing anything."""
+    path = home / ".memtomem" / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "storage": {"sqlite_path": db_path.as_posix()},
+                "embedding": {"provider": "onnx", "model": _E5, "dimension": 384},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _counts(db_path) -> tuple[int, int]:
+    import sqlite_vec
+
+    db = sqlite3.connect(db_path)
+    db.enable_load_extension(True)
+    sqlite_vec.load(db)
+    try:
+        chunks = db.execute("SELECT count(*) FROM chunks").fetchone()[0]
+        vectors = db.execute("SELECT count(*) FROM chunks_vec").fetchone()[0]
+    finally:
+        db.close()
+    return chunks, vectors
+
+
+def test_empty_store_reset_says_nothing_is_deleted(home, runner: CliRunner) -> None:
+    db_path = home / ".memtomem" / "memtomem.db"
+    db_path.parent.mkdir(parents=True)
+    _stamp_1024(db_path, content=None)
+    _switch_config(home, db_path)
+    assert _counts(db_path) == (0, 0)
+
+    status = runner.invoke(cli, ["embedding-reset"])
+    assert status.exit_code == 0, status.output
+    assert "Mismatch detected!" in status.output
+    assert "this store currently holds no chunks or vectors" in status.output
+    assert "destructive" not in status.output
+
+    cancelled = runner.invoke(cli, ["embedding-reset", "--mode", "apply-current"], input="n\n")
+    assert cancelled.exit_code == 0, cancelled.output
+    assert (
+        "This store currently holds no chunks or vectors. Reset DB to "
+        "onnx/intfloat/multilingual-e5-small (384d). Continue?"
+    ) in " ".join(cancelled.output.split())
+    assert "DELETE all vectors" not in cancelled.output
+    assert "Cancelled." in cancelled.output
+
+    applied = runner.invoke(cli, ["embedding-reset", "--mode", "apply-current", "--yes"])
+    assert applied.exit_code == 0, applied.output
+    assert "No chunks or vectors were found when checked before the reset" in applied.output
+    assert "All vectors deleted" not in applied.output
+    assert runner.invoke(cli, ["embedding-reset"]).output.count("No mismatch") == 1
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_counts", "cost"),
+    [
+        (
+            "chunk",
+            (1, 1),
+            "Reset drops 1 vector row(s); 1 chunk(s) stay but need "
+            "`mm index --force <path>` to re-embed.",
+        ),
+        ("orphan", (0, 1), "Reset drops 1 vector row(s); no chunks to re-index."),
+    ],
+    ids=["chunk-with-vector", "orphan-vector"],
+)
+def test_store_with_rows_keeps_the_destructive_wording(
+    home, runner: CliRunner, content, expected_counts, cost
+) -> None:
+    """A chunk or an orphan vector each make the reset delete something."""
+    db_path = home / ".memtomem" / "memtomem.db"
+    db_path.parent.mkdir(parents=True)
+    _stamp_1024(db_path, content=content)
+    _switch_config(home, db_path)
+    assert _counts(db_path) == expected_counts
+
+    status = runner.invoke(cli, ["embedding-reset"])
+    assert status.exit_code == 0, status.output
+    assert "# reset DB (destructive, re-index needed)" in status.output
+    assert cost in " ".join(status.output.split())
+    assert "currently holds no chunks" not in status.output
+
+    cancelled = runner.invoke(cli, ["embedding-reset", "--mode", "apply-current"], input="n\n")
+    assert "This will DELETE all vectors" in cancelled.output
+    assert "currently holds no chunks" not in cancelled.output
+
+    applied = runner.invoke(cli, ["embedding-reset", "--mode", "apply-current", "--yes"])
+    assert applied.exit_code == 0, applied.output
+    assert "All vectors deleted" in applied.output
+
+
+def test_unreadable_counts_are_not_treated_as_empty(home, runner, monkeypatch) -> None:
+    from memtomem.storage.sqlite_backend import SqliteBackend
+
+    db_path = home / ".memtomem" / "memtomem.db"
+    db_path.parent.mkdir(parents=True)
+    _stamp_1024(db_path, content=None)
+    _switch_config(home, db_path)
+    monkeypatch.setattr(
+        SqliteBackend, "get_stats", AsyncMock(side_effect=RuntimeError("stats unavailable"))
+    )
+
+    status = runner.invoke(cli, ["embedding-reset"])
+    assert status.exit_code == 0, status.output
+    assert "# reset DB (destructive, re-index needed)" in status.output
+    assert "currently holds no chunks" not in status.output
+    cancelled = runner.invoke(cli, ["embedding-reset", "--mode", "apply-current"], input="n\n")
+    assert "This will DELETE all vectors" in cancelled.output

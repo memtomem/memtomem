@@ -7311,6 +7311,32 @@ class TestNonInteractivePresetNotice:
         assert "Accepted and ignored" in normalized
         assert "deprecated alias for --non-interactive through 0.4.x" in normalized
 
+    def test_help_documents_provider_tokenizer_and_mcp(self) -> None:
+        """#3245: --provider, --tokenizer and --mcp each carry a help text.
+
+        Asserts phrases that only the new help contains (bare choice names
+        already appear in the ``[none|onnx|...]`` part of the output, so they
+        would pass with no help text at all).
+        """
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        result = CliRunner().invoke(cli, ["init", "--help"])
+
+        assert result.exit_code == 0
+        # Normalize whitespace — click re-wraps help text, splitting words
+        # across lines.
+        normalized = " ".join(result.output.split())
+        # --provider: none means keyword search with no embeddings.
+        assert "keyword search only" in normalized
+        # --tokenizer: kiwipiepy is the Korean tokenizer (capital K — the
+        # --preset help already says "korean" in lower case).
+        assert "Korean" in normalized
+        # --mcp: claude runs `claude mcp add`; json writes ./.mcp.json.
+        assert "claude mcp add" in normalized
+        assert ".mcp.json" in normalized
+
 
 class TestStepHeaderPosition:
     """(#420) ``step_header`` reads its step number from

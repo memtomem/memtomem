@@ -864,6 +864,12 @@ class MemtomemStore:
                     from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
 
                     raise PermissionError(READ_ONLY_TARGET_DETAIL)
+                if reason == "unmanaged":
+                    # Refused before the acquire as well, and as final: the
+                    # chunk's source is outside every memory directory.
+                    from memtomem.source_provenance import UNMANAGED_SOURCE_DETAIL
+
+                    raise PermissionError(UNMANAGED_SOURCE_DETAIL)
                 if reason == "moved":
                     # The file we held was not this row's any more, so nothing
                     # it said is authoritative. Re-key onto the new one.

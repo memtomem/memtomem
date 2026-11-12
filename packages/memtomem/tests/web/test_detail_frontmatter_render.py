@@ -80,9 +80,11 @@ def frontmatter_dev_server() -> Iterator[str]:
         (notes / "topic.md").write_text(TOPIC_NOTE, encoding="utf-8")
         cli = [sys.executable, "-c", "from memtomem.cli import cli; cli()"]
         run = dict(cwd=project, env=env, check=True, capture_output=True)
+        # ``notes`` is the memory directory: the detail pane edits a chunk by
+        # id, which is refused for a file outside every memory directory.
         subprocess.run(
             [*cli, "init", "--non-interactive", "--provider", "none", "--preset", "minimal"]
-            + ["--mcp", "skip"],
+            + ["--mcp", "skip", "--memory-dir", str(notes)],
             **run,
         )
         subprocess.run([*cli, "index", str(notes)], **run)

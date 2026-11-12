@@ -279,6 +279,7 @@ def app(_isolated_config_paths: Path):
     # coroutine and read as "excluded" to every write guard (#2488).
     index_engine.is_excluded = MagicMock(return_value=False)
     index_engine.is_read_only_source = MagicMock(return_value=False)
+    index_engine.is_managed_source = MagicMock(return_value=True)
     index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     index_engine.rewrite_refusal = AsyncMock(return_value=None)
 
@@ -507,6 +508,33 @@ class TestTimeline:
         assert data["total"] == 3
         assert len(data["chunks"]) == 3
         assert data["has_more"] is True
+
+    async def test_timeline_blank_namespace_normalizes_to_default_view(
+        self, app, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Call timeline with omitted namespace
+        await client.get("/api/timeline")
+        omitted_filter = app.state.storage.recall_chunks.await_args.kwargs["namespace_filter"]
+
+        # Call timeline with blank namespace param
+        resp = await client.get("/api/timeline", params={"namespace": ""})
+        assert resp.status_code == 200
+        blank_filter = app.state.storage.recall_chunks.await_args.kwargs["namespace_filter"]
+
+        # Blank namespace must normalize to None, matching the omitted namespace behavior (#3275)
+        assert blank_filter == omitted_filter
+
+        # Also verify with configured system prefixes
+        monkeypatch.setattr(
+            app.state.config.search,
+            "system_namespace_prefixes",
+            ["archive:", "agent-runtime:"],
+        )
+        resp_sys = await client.get("/api/timeline", params={"namespace": ""})
+        assert resp_sys.status_code == 200
+        sys_filter = app.state.storage.recall_chunks.await_args.kwargs["namespace_filter"]
+        assert sys_filter.namespaces == ()
+        assert sys_filter.exclude_prefixes == ("archive:", "agent-runtime:")
 
 
 # ---------------------------------------------------------------------------
