@@ -383,28 +383,6 @@ async def test_a_preflight_whose_resolution_fails_refuses(
     assert _holds(comp) == {}
 
 
-async def test_an_indexed_file_whose_resolution_fails_is_held(
-    bm25_only_components, tmp_path, monkeypatch
-):
-    """A path that cannot be resolved cannot be vouched for either, so it is held like a relink."""
-    comp, mem_dir = bm25_only_components
-    alpha, _ = _two_clean_files(mem_dir)
-    stats = await comp.index_engine.index_file(alpha, ingress_guarded=True)
-    assert stats.indexed_chunks == 1, stats
-    pre, source_path = _read(alpha)
-    read_key = norm_path(alpha)
-
-    def fail(_p):
-        raise OSError("unresolvable")
-
-    monkeypatch.setattr("memtomem.indexing.engine.resolve_path", fail)
-    preflight = comp.index_engine.preflight_mutation(alpha, pre, source_path=source_path)
-
-    assert preflight.relinked is True
-    assert await comp.index_engine.hold_relinked_mutation(alpha, preflight) is True
-    assert _holds(comp) == {read_key: RELINKED_HOLD}
-
-
 async def test_only_the_preflight_freezes_the_scope(bm25_only_components, monkeypatch):
     """The doctor's preview keeps resolving the way the index gate does."""
     import memtomem.indexing.engine as engine_mod
@@ -571,3 +549,25 @@ async def test_rows_stored_under_a_key_from_before_folding_are_not_held(
     assert await comp.index_engine.hold_relinked_mutation(leaf, preflight) is False
     assert _holds(comp) == {}
     assert await _hits(comp, "Alphaword")
+
+
+async def test_an_indexed_file_whose_resolution_fails_is_held(
+    bm25_only_components, tmp_path, monkeypatch
+):
+    """A path that cannot be resolved cannot be vouched for either, so it is held like a relink."""
+    comp, mem_dir = bm25_only_components
+    alpha, _ = _two_clean_files(mem_dir)
+    stats = await comp.index_engine.index_file(alpha, ingress_guarded=True)
+    assert stats.indexed_chunks == 1, stats
+    pre, source_path = _read(alpha)
+    read_key = norm_path(alpha)
+
+    def fail(_p):
+        raise OSError("unresolvable")
+
+    monkeypatch.setattr("memtomem.indexing.engine.resolve_path", fail)
+    preflight = comp.index_engine.preflight_mutation(alpha, pre, source_path=source_path)
+
+    assert preflight.relinked is True
+    assert await comp.index_engine.hold_relinked_mutation(alpha, preflight) is True
+    assert _holds(comp) == {read_key: RELINKED_HOLD}
