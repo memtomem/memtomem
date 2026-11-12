@@ -3249,14 +3249,30 @@ def _model_dimension(provider: str | None, model: str, fallback: int) -> int:
         "0.4.x; use --non-interactive in scripts."
     ),
 )
-@click.option("--provider", type=click.Choice(["none", "onnx", "ollama", "openai"]), default=None)
+@click.option(
+    "--provider",
+    type=click.Choice(["none", "onnx", "ollama", "openai"]),
+    default=None,
+    help=(
+        "Embedding provider: none (keyword search only, no embeddings), "
+        "onnx (local), ollama (an Ollama server), or openai (cloud; see --api-key)."
+    ),
+)
 @click.option("--model", default=None, help="Embedding model name")
 @click.option("--memory-dir", default=None, help="Memory directory path")
 @click.option("--db-path", default=None, help="SQLite DB path")
 @click.option("--namespace", default=None, help="Default namespace")
 @click.option("--auto-ns", is_flag=True, default=False, help="Auto-assign namespace from folder")
 @click.option("--top-k", default=None, type=int, help="Results per search")
-@click.option("--tokenizer", type=click.Choice(["unicode61", "kiwipiepy"]), default=None)
+@click.option(
+    "--tokenizer",
+    type=click.Choice(["unicode61", "kiwipiepy"]),
+    default=None,
+    help=(
+        "Keyword-search tokenizer: unicode61 (English and most languages) "
+        "or kiwipiepy (Korean word splitting; needs the kiwipiepy package)."
+    ),
+)
 @click.option("--decay", is_flag=True, default=False, help="Enable time-decay")
 @click.option("--api-key", default=None, help="OpenAI API key")
 @click.option(
@@ -3264,6 +3280,11 @@ def _model_dimension(provider: str | None, model: str, fallback: int) -> int:
     "mcp_mode",
     type=click.Choice(["claude", "kimi", "json", "skip"]),
     default=None,
+    help=(
+        "Connect an editor: claude (runs `claude mcp add`, user scope), "
+        "json (writes ./.mcp.json in the current directory), "
+        "kimi (writes Kimi Code's mcp.json), or skip."
+    ),
 )
 @click.option(
     "--include-provider",
