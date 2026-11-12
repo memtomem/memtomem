@@ -16,6 +16,9 @@ then fails counts too.  That check counts only operations that name the file
 itself: one
 that renames an ancestor directory is used to attribute a change, not as a
 verdict, because it cannot tell an empty directory from one holding the file.
+So a test that moves ``~/.claude`` aside, writes or restores the settings file
+under the temporary name, and moves the directory back passes ``strict`` when
+the bytes end up unchanged; a change to them still fails it.
 An ``open`` audit event carries no ``dir_fd``, so a relative name is read
 against the cwd: a test whose cwd is the home directory and that opens
 ``.claude/settings.json`` relative to a descriptor pointing elsewhere fails
