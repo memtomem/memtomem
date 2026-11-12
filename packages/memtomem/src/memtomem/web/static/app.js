@@ -8027,7 +8027,13 @@ async function findSimilar() {
   list.innerHTML = '<div class="empty-state" style="height:60px"><p>Loading…</p></div>';
 
   try {
-    const data = await api('GET', `/api/chunks/${STATE.selectedChunkId}/similar?top_k=5`);
+    // Neighbours from the namespace the Search tab is filtered to, read at
+    // click time as ``_buildSearchParams`` reads it. With no filter the route
+    // hides the system namespaces, as a search does.
+    const params = new URLSearchParams({ top_k: 5 });
+    const nsFilter = qs('ns-filter')?.value;
+    if (nsFilter) params.set('namespace', nsFilter);
+    const data = await api('GET', `/api/chunks/${STATE.selectedChunkId}/similar?${params}`);
     if (!data.results.length) {
       list.innerHTML = '<div class="empty-state" style="height:60px"><p>No similar chunks found</p></div>';
       return;
