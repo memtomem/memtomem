@@ -134,7 +134,7 @@ class TestEachSurfaceNamesItsOwnRemedy:
         assert text.count("from the CLI with `mm ") == len(commands)
 
     def test_mem_index_takes_no_force_unsafe(self):
-        """ADR-0006 Axis E.6: an MCP caller cannot set the valve on a file it indexes."""
+        """ADR-0006 Axis E.6: ``mem_index`` offers an MCP caller no valve."""
         params = inspect.signature(_core_tools()["mem_index"]).parameters  # type: ignore[arg-type]
         assert "path" in params
         assert "force_unsafe" not in params
