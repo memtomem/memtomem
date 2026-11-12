@@ -187,7 +187,9 @@ async def test_a_clean_source_relinked_after_the_read_is_held_as_relinked(
     Each surface is a different caller of ``preflight_mutation``. The query is
     warmed first and asked again without dropping the cache: the hold moves the
     store's visibility epoch, and the pipeline drops its warmed answers when it
-    sees that. With the epoch held still, this assertion fails.
+    sees that. With the epoch held still, this assertion fails for six of the
+    seven surfaces; ``mcp_add`` passes either way, because its wrapper
+    (``memory_crud._preflight_refusal``) drops the cache on any refusal.
     """
     comp, mem_dir = bm25_only_components
     clean = mem_dir / "alpha.md"
