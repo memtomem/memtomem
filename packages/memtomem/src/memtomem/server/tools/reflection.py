@@ -164,9 +164,10 @@ async def mem_reflect_save(
     # The core, not ``mem_add``: its ``stats`` is what tells a refusal (an
     # excluded ``reflections.md`` #2488, a namespace mix, the redaction guard)
     # apart from a save. On a refusal nothing was written, so there is no
-    # insight to link — ``recent[0]`` below would be some older chunk.
+    # insight to link.
     from memtomem.indexing.engine import PrivacyRejection
 
+    appended: list[str] = []
     try:
         result, stats = await _mem_add_core(
             content=insight,
@@ -177,6 +178,7 @@ async def mem_reflect_save(
             template=None,
             ctx=ctx,
             event_type="reflect_save",
+            on_appended=appended.append,
         )
     except PrivacyRejection as exc:
         if exc.mutation_outcome != "appended":
@@ -186,24 +188,27 @@ async def mem_reflect_save(
         return result
 
     # Link related chunks to the new insight. Not when the file became excluded
-    # while the insight was appended: nothing was indexed, so ``recent[0]``
-    # below would be some older chunk (#3165). ``result`` carries the notice.
+    # while the insight was appended: nothing was indexed (#3165). ``result``
+    # carries the notice.
     if related_chunks and not stats.excluded_files:
         app = await _get_app_initialized(ctx)
         from uuid import UUID
 
-        # ADR-0011 PR-D round 9: thread project context onto the
-        # always-on scope filter. Insights default to user-tier today,
-        # but ``mem_reflect`` may land a project-tier reflection in
-        # the future; threading the context now means the
-        # ``recent[0]`` lookup returns the just-written insight chunk
-        # under whichever tier it lives in.
-        from memtomem.server.tools.search import _resolve_project_context_root
-
-        project_context_root = _resolve_project_context_root(app)
-        recent = await app.storage.recall_chunks(limit=1, project_context_root=project_context_root)
-        if recent:
-            insight_id = recent[0].id
+        # Best effort, like the links themselves: the insight is saved by now,
+        # and an error here would invite a retry that appends it again.
+        try:
+            insight_id = await _own_insight_chunk_id(app, stats, appended)
+        except Exception:
+            logger.warning("mem_reflect_save: could not attribute the insight", exc_info=True)
+            insight_id = None
+        if insight_id is None:
+            logger.warning(
+                "mem_reflect_save: could not tell which chunk holds the insight "
+                "(%d new chunk ids); related chunks not linked",
+                len(stats.new_chunk_ids),
+            )
+            result += f"\n- {_UNLINKED_NOTICE}"
+        else:
             for cid in related_chunks:
                 try:
                     # Linking is a write, and the same boundary applies:
@@ -225,3 +230,46 @@ async def mem_reflect_save(
                     logger.warning("Failed to link chunk %s to reflection", cid, exc_info=True)
 
     return f"Insight saved.\n{result}"
+
+
+_UNLINKED_NOTICE = (
+    "Warning: could not tell which chunk holds this insight; related chunks were not linked."
+)
+
+
+async def _own_insight_chunk_id(app, stats, appended: list[str]):
+    """The id of the chunk this save's insight became, or ``None`` when unsure.
+
+    ``stats.new_chunk_ids`` is every chunk the re-index of the whole file
+    upserted, not only this entry's, so it cannot be read as "the insight"
+    on its own (#3273). The newest row in the store is worse: any concurrent
+    write elsewhere can be newer. Precise attribution needs the indexer to
+    report which chunks an append produced (#3292); until then this answers
+    only the unambiguous case:
+
+    * the re-index upserted exactly one chunk, and
+    * the appended block, projected on its own the way the re-index chunks a
+      file (same chunker, merging and bounding), is one non-empty chunk whose
+      content that chunk contains: equal when the entry stands alone, a
+      superset when a short entry merged into the section before it.
+
+    Anything else (an insight split into several chunks, a pending edit to the
+    file indexed with it, a merge that adds a heading between the entry's
+    parts) is saved but not linked.
+    """
+    from memtomem.indexing.privacy_gate import _read_text_view
+
+    if len(appended) != 1 or len(stats.new_chunk_ids) != 1:
+        return None
+    chunk = await resolve_chunk(app, stats.new_chunk_ids[0])
+    if chunk is None:
+        return None
+    # The re-index reads the file with universal newlines; project what it read.
+    projected = app.index_engine._chunk_projected_content(
+        chunk.metadata.source_file, _read_text_view(appended[0])
+    )
+    if len(projected) != 1 or not projected[0].content.strip():
+        return None
+    if projected[0].content not in chunk.content:
+        return None
+    return chunk.id
