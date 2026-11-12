@@ -17,6 +17,7 @@ hermes_version = "0.1.20"
 hermes_memory_version = "0.2.0"
 antigravity_version = "0.2.12"
 cursor_version = "0.1.0"
+openclaw_version = "0.1.0"
 
 [opencode]
 package = "opencode-memtomem"

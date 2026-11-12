@@ -67,7 +67,7 @@ class TestOnnxGoldenPath:
         assert "PostgreSQL" in contents
 
     async def test_fastembed_tokenizer_safety_cap_contract(self, onnx_components):
-        """Pinned FastEmbed 0.8 keeps the tokenizer path used by #1786."""
+        """The locked FastEmbed keeps the tokenizer path used by #1786."""
         comp, _ = onnx_components
         await comp.embedder.embed_texts(["load the real tokenizer"])
         tokenizer = comp.embedder._tokenizer

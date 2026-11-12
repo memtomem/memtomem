@@ -401,7 +401,9 @@ async def test_a_thread_that_cannot_start_skips_the_check(tmp_path, monkeypatch,
         def start(self) -> None:
             raise RuntimeError("can't start new thread")
 
-    monkeypatch.setattr(watcher_mod, "threading", SimpleNamespace(Thread=Unstartable))
+    monkeypatch.setattr(
+        watcher_mod, "threading", SimpleNamespace(Thread=Unstartable, Lock=threading.Lock)
+    )
     watcher = _bare_watcher(tmp_path, {tmp_path / "a.md"})
 
     await watcher._journal_relinked_keys()

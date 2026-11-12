@@ -56,7 +56,21 @@ export MEMTOMEM_EMBEDDING__DIMENSION=384
 
 Or run `mm init` and pick the English or Korean-optimized preset, or select "Local ONNX" in the Advanced wizard.
 
-The model is downloaded automatically on first use (~490 MB for multilingual-e5-small) and cached in `~/.memtomem/cache/fastembed/` (override with `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH`; a `.env` file applies only the first, so set `FASTEMBED_CACHE_PATH` in the environment).
+The model is downloaded automatically on first use (~490 MB for multilingual-e5-small) and cached in `~/.memtomem/cache/fastembed/` (override with `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH`; a `.env` file applies only the first, so set `FASTEMBED_CACHE_PATH` in the environment). On macOS and Linux memtomem creates the default directory owner-only (mode 0700); a directory you name with either variable, and one that already exists, keep their own permissions.
+
+On a filesystem that does not implement `flock`, filelock 4.2.1 through at least 4.2.10 never
+grant the lock huggingface-hub takes when it links a download to the store it shares across the
+cache, and the download would wait for it forever. Before downloading, memtomem checks that
+`flock` works in the model cache directory, once per directory per process. Where it does not, or the check cannot
+run, memtomem turns huggingface-hub's shared blob store off for the whole process and logs a
+warning; a file another model already stored is then downloaded again instead of linked. A lock
+file left behind by an earlier run can still block a download there; if one does, set
+`MEMTOMEM_FASTEMBED_CACHE` to a directory on a local disk. The `local` (sentence-transformers)
+reranker gets the same check in every directory sentence-transformers may download into: the
+Hugging Face hub cache (`HF_HUB_CACHE`, under `HF_HOME` by default), and also
+`SENTENCE_TRANSFORMERS_HOME` when it is set, which sentence-transformers 6 reads and earlier
+releases ignore for this reranker. For a lock file left there, move that directory to a local
+disk instead.
 
 The download goes through `huggingface_hub`. memtomem runs it with Hub telemetry off: the pinned
 E5 calls, the `fastembed` constructors for other ONNX embedding models and the `fastembed`

@@ -237,11 +237,11 @@ async def promote_scratch(
             from memtomem.tools.memory_writer import read_pre_image_or_empty, read_with_source_key
 
             needs_valve = guard.decision == "bypassed"
-            pre, source_key = await _asyncio.to_thread(
+            pre, source_path = await _asyncio.to_thread(
                 read_with_source_key, read_pre_image_or_empty, target
             )
             preflight = await _asyncio.to_thread(
-                index_engine.preflight_mutation, target, pre, source_key=source_key
+                index_engine.preflight_mutation, target, pre, source_path=source_path
             )
             if preflight.rejection is not None:
                 rejection = await index_engine.refuse_mutation(target, preflight)

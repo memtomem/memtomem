@@ -112,6 +112,13 @@ def _resolve_add_target(base: Path, raw: str) -> Path:
     return resolved
 
 
+def _web_scope_hint(tier: str) -> str:
+    fields = f"scope={tier!r}"
+    if tier == "project_shared":
+        fields += " and confirm_project_shared=true"
+    return fields
+
+
 def _revalidate_add_target(base: Path, target: Path) -> None:
     """Repeat containment and component checks immediately before writing."""
     root = base.expanduser().resolve(strict=True)
@@ -888,6 +895,19 @@ async def add_memory(
             target = _resolve_add_target(base, req.file)
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=_ADD_PATH_ERROR) from exc
+        # A tier registered inside ``base`` is another tier, with its own
+        # gates; the ones above were run for ``req.scope`` (#2821).
+        from memtomem.memory_scope import explicit_target_tier_refusal
+
+        tier_err = explicit_target_tier_refusal(
+            target,
+            req.scope,
+            memory_dirs=config.indexing.memory_dirs,
+            project_memory_dirs=config.indexing.project_memory_dirs,
+            scope_hint=_web_scope_hint,
+        )
+        if tier_err is not None:
+            raise HTTPException(status_code=422, detail=tier_err)
     else:
         # Issue #2005: one day file per namespace — a shared day file loses one
         # namespace as soon as chunk merging joins two entries. The web surface
@@ -999,11 +1019,11 @@ async def add_memory(
             from memtomem.web.routes import system as _sys
 
             needs_valve = guard.decision == "bypassed"
-            pre, source_key = await _asyncio.to_thread(
+            pre, source_path = await _asyncio.to_thread(
                 read_with_source_key, read_pre_image_or_empty, target
             )
             preflight = await _asyncio.to_thread(
-                index_engine.preflight_mutation, target, pre, source_key=source_key
+                index_engine.preflight_mutation, target, pre, source_path=source_path
             )
             if preflight.rejection is not None:
                 rejection = await index_engine.refuse_mutation(target, preflight)

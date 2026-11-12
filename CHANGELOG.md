@@ -5,8 +5,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **`mm add --file` and the Web UI's `/api/add` with `file` refuse a file in another memory
+  tier (#2821).** A file named relative to the user memory directory that lands in a project
+  tier registered inside it used to be written, and indexed as that tier, under the user
+  scope's gates. It is now refused with `nothing was written`, even with
+  `--confirm-project-shared`. Write to that tier from its project with its own scope:
+  `mm add "<note>" --scope project_shared --confirm-project-shared --file <name>` (or
+  `--scope project_local`), where `--file` is relative to that tier's directory. MCP
+  `mem_add(file=...)` is unchanged: it infers the tier and asks for that tier's confirmation.
+
 ### Added
 
+- **An OpenClaw plugin bundle (experimental).** `packages/memtomem-openclaw-bundle` gives an
+  OpenClaw agent the memtomem MCP server and the six user-scope skills the Hermes plugin ships
+  (search, recall, remember, index, status, setup), byte for byte, with the same launch line:
+  Python 3.12, the pinned `memtomem[onnx]` release and `PYTHON_DOTENV_DISABLED=1`. OpenClaw
+  reads it as a Codex-format bundle, the shape ClawHub publishes; ClawHub refuses the Hermes
+  plugin's Agent Plugins manifest. It is a bundle, not a memory plugin: OpenClaw's own memory
+  keeps `plugins.slots.memory`. The README tells operators to keep the memtomem tools away from
+  messaging and group agents, where anyone who can message the agent could search the store.
+  The release check now also refuses this package when it changed since the last release
+  without a version bump, as it does for the two Hermes packages.
 - **`create_components(..., bm25_path_fallback=False)` keeps BM25 from matching chunk paths
   (#3205).** By default a BM25 search that matches no chunk's content falls back to matching
   file names, so typing a filename still finds that file (#2224). A component whose file names
@@ -21,7 +42,87 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   both lines out. langchain-memtomem's store does: its file names are encoded keys ending in
   `.md`, so `md` returned every item. The default is unchanged, so existing indexes do not re-embed.
 
+### Changed
+
+- **The `onnx` extra requires fastembed 0.9.1 or later and pillow 13 (#3246).** `memtomem[onnx]`
+  declared `fastembed>=0.8,<0.9`. It now declares `fastembed>=0.9.1,<0.10` and `pillow>=13.0.0`,
+  so upgrading memtomem upgrades both. No reindex is needed: with the same onnxruntime,
+  fastembed 0.9.1 and 0.8.1 differ by at most 1.3e-8 per vector element on
+  `multilingual-e5-small` and `all-MiniLM-L6-v2`, and not at all on `bge-m3`,
+  `bge-small-en-v1.5` or the three rerankers. Those models, already downloaded from Hugging
+  Face by the earlier version, loaded from the cache with `HF_HUB_OFFLINE` set; the potion
+  models below are the exception.
+- **`minishlab/potion-*` embedding models load from fastembed's static implementation (#3246).**
+  fastembed 0.9.1 computes `potion-base-8M`, `potion-retrieval-32M` and `potion-multilingual-128M`
+  from `model.safetensors` instead of running an ONNX export, and downloads that file on the first
+  load after the upgrade. An index built with one of them needs no reindex: across 13 inputs on
+  both sides of the 512-token limit the largest element difference was 1.2e-6.
+  `embedding.onnx_cpu_mem_arena` has no effect on these models, and the truncation warning now
+  counts their tokens without special tokens, as the model does. A static model that fastembed
+  adds later is refused by name until it has been compared the same way.
+
+### Removed
+
+- **`ContextInfo.ranked_siblings` and `ContextInfo.related_chunks` are gone (#3004).** Both
+  fields of `memtomem.models.ContextInfo` were declared for features that never shipped. Nothing
+  set them and nothing read them, so they were always empty tuples. Code that passes either name
+  to `ContextInfo(...)` now raises `TypeError`; drop the argument.
+
 ### Fixed
+
+- **Saving a watched file by renaming a new copy over it no longer hides it from search
+  (#3031).** Editors and tools that save atomically write a temporary file and rename it onto
+  the original. watchdog reports that as a delete of a path that still exists: the native
+  macOS observer ends the burst with one, and the polling observer (the `auto` backend on
+  macOS, and `watcher_backend: "polling"` anywhere) reports the inode change as a delete and a
+  create. The watcher hid every chunk of a deleted source at once, so the file dropped out of
+  Web UI search, `mm search` and `mem_search` until the debounced reindex, about 5 s per save
+  with the default `watcher_debounce_ms`, longer under repeated saves. A delete event is now
+  checked first: a path that is still a regular file, reached through no symlink, stays
+  searchable with its old content until the reindex picks up the new one, as an in-place write
+  always did. A real delete, a path that became a symlink or whose parent did, and a check that
+  fails are hidden as before. So is a path whose check does not answer within 0.5 s, and while
+  that check is still running, later deletes are hidden without one.
+- **A file named with `mm add --file` or `/api/add` no longer skips the project_shared
+  confirmation (#2821).** Both confined the file to the directory the requested scope chose,
+  then ran the gates for that scope, without asking which tier the file was in. A
+  `project_shared` tier registered inside the user memory directory therefore took a write
+  made with the default user scope, without `--confirm-project-shared`, and its rows were
+  stored as `project_shared`. Both now judge the file by the tier it resolves into, the way
+  the default day file has been judged since #2807, and refuse any tier other than the
+  requested one. A link inside the user directory that leads into such a tier is refused the
+  same way on the CLI (the Web UI already refused links). The tier is still decided by the
+  path's spelling, so a differently cased or Unicode-normalized alias of a registered tier,
+  and a `project_shared` tier nested inside a `project_local` one, are not caught yet (#3268).
+
+- **A newly downloaded `bge-m3` loads (#3246).** huggingface-hub 1.33.0 stores a new download in a
+  blob directory shared by the whole cache, and onnxruntime refuses a weights file that resolves
+  outside the model's own directory, so loading a `bge-m3` downloaded that way failed with
+  `External data path validation failed`. fastembed 0.9 hardlinks the model and its weights into
+  `onnx_snapshots/` inside the model's cache directory and loads them from there. A cache
+  downloaded by an older huggingface-hub was not affected. In a read-only cache the links cannot
+  be made and the load still fails; make the cache writable for the first load.
+
+- **A memory tool's privacy preflight judges a file under the path it read it from (#3191).**
+  Before a memory tool appends to or rewrites a file, on any surface, it checks that the file as
+  it stands may be indexed. That check resolved the path again after the read, so a path replaced
+  by a symlink in between had the read's bytes judged under the link target's scope: a
+  `project_shared` file declaring `redaction: documents-patterns`, which is refused there, passed
+  as a user-scope file, and the write went through the link to the target. The re-index after the
+  write still judged what it stored, so nothing it refuses was stored. The check now uses the path
+  resolved with the read, and when the path resolves somewhere else by the time of the check, the
+  write is refused with nothing written ("now resolves to a different location than when it was
+  read"). A path that was already a symlink when read is judged through it, as before. Not
+  covered: a path replaced after this check and before the write.
+
+- **Registering a schedule refuses a params key the job does not take (#3247).** `mm schedule add
+  --params` and `mem_schedule_register` used to accept any key and store it as given, so a
+  typo was ignored on every run: `--job dedup_scan --params '{"limt": 20}'` registered a scan
+  that ran with the default `limit=50`. Registration now fails and names the key and the keys
+  the job accepts, as in `unknown params for dedup_scan: 'limt' (allowed: limit, max_scan,
+  threshold)`. A job that takes no params (`compaction`, `dead_chunk_link_cleanup`) refuses
+  any key. Schedules already stored are not changed: an unknown key in one is still ignored
+  when it runs, and its values are still type- and range-checked as before.
 
 - **Entity extraction no longer cuts or drops an entity that has Korean, Japanese
   or Chinese text attached (#3222, #3227).** Korean and Japanese write a particle
@@ -100,6 +201,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   user. It now ends with the class name, for example
   `cannot read Hermes config: RuntimeError`. The message for an old Hermes still
   names the version it needs (0.21.5 or later).
+- **The first model download no longer hangs on a filesystem without `flock` (#3261).**
+  huggingface-hub 1.33.0 takes a lock with no timeout when it links a downloaded file to
+  the store it shares across the cache. On a filesystem that does not implement `flock`,
+  filelock 4.2.1 through 4.2.10, the latest, which a fresh install gets, never grant that
+  lock, so the ONNX embedder or the fastembed reranker never finished loading a model it
+  had not downloaded yet. Before downloading, memtomem now checks that `flock` works in the model
+  cache directory. If it does not, or the check cannot run, memtomem turns
+  huggingface-hub's shared blob store off for the whole process and logs a warning; a
+  file another model already stored is then downloaded again instead of linked. A lock
+  file left behind by an earlier run can still block a download there: point
+  `MEMTOMEM_FASTEMBED_CACHE` at a local disk if one does. The `local`
+  (sentence-transformers) reranker hung the same way on its first download, measured with
+  sentence-transformers 6.3.0 and `flock` failing with `ENOSYS`, and gets the same check
+  (#3266). It runs in the Hugging Face hub cache (`HF_HUB_CACHE`) and, when it is set, in
+  `SENTENCE_TRANSFORMERS_HOME`, since sentence-transformers 6 downloads there and earlier
+  releases do not. A model given as a local directory is not checked.
 
 ### Security
 
@@ -110,7 +227,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   4.0.0-beta.83, as its latest release (1.19.5) still does. The OpenCode plugin imports
   only types from `@opencode-ai/plugin` and nothing from `effect`, ships no
   dependencies and sets no cookies, so the advisory is recorded as an exception with
-  the same 2026-11-20 expiry as the others rather than overridden past the pin.
+  the same expiry as the others rather than overridden past the pin.
+- pillow moves from 12.3.0 to 13.0.0, the only fix for 41 advisories published between
+  2026-10-20 and 2026-10-23, and their 41 recorded exceptions are removed (#3246).
+  memtomem embeds text and opens no images; pillow is installed because fastembed
+  depends on it. The `onnx` extra now requires `pillow>=13.0.0` itself, since fastembed
+  0.9.1 still accepts pillow 12.
+- The other six recorded OSV exceptions, due to expire on 2026-11-20, were re-judged and
+  renewed to 2026-12-20; none of their blockers has cleared yet. `@opencode-ai/plugin`
+  1.19.5 still pins the `effect`, `zod` and (through `effect`) `toml` versions behind
+  them.
+- **filelock moves from 3.25.2 to 4.2.10 in the lockfile, and its nine recorded
+  exceptions are removed (#3261).** No memtomem package declares filelock, so an install
+  made without the lockfile (pip, `uvx`, the plugin launch lines) already got the latest
+  release, in which the nine advisories are fixed; the lockfile, which development and CI
+  install from, now matches it. Four of the nine were reachable through the fastembed
+  cache, as the 0.7.1 entry describes
+  ([GHSA-fq56-3cx3-fjxp](https://osv.dev/vulnerability/GHSA-fq56-3cx3-fjxp),
+  [GHSA-rfpc-qcw5-3pc4](https://osv.dev/vulnerability/GHSA-rfpc-qcw5-3pc4),
+  [GHSA-69hj-f68j-2879](https://osv.dev/vulnerability/GHSA-69hj-f68j-2879),
+  [GHSA-8mx5-7m5m-r77g](https://osv.dev/vulnerability/GHSA-8mx5-7m5m-r77g)). Upgrading
+  memtomem does not upgrade filelock in an environment that already has it: run
+  `pip install -U filelock` there. The release that fixes them used to hang the first
+  model download on a filesystem without `flock`; see Fixed.
+- **The default model cache is created owner-only on macOS and Linux (#3252).**
+  `~/.memtomem/cache/fastembed` used to be created with the umask default, usually 0755,
+  so another local account could traverse it and reach the lock files huggingface-hub
+  keeps under it. Being able to reach them is a precondition of two of the filelock
+  advisories above (GHSA-rfpc-qcw5-3pc4, GHSA-69hj-f68j-2879), which still apply where
+  filelock is older than 4.2.1. The directory is now
+  created with mode 0700. A cache that already exists is not changed, since tightening
+  it would change who can read the models in it: run `chmod 700 ~/.memtomem/cache/fastembed`
+  to make it private. A directory named by `MEMTOMEM_FASTEMBED_CACHE` or
+  `FASTEMBED_CACHE_PATH` is created as before, and Windows is unchanged.
 
 ## [0.7.8] — 2026-11-10
 

@@ -570,7 +570,7 @@ async def _mutate_file_and_reindex(
     # inherit a mutation that happened in its predecessor.
     provenance_session_id = await capture_session_for_untracked_write(app)
     try:
-        pre_image, source_key = await asyncio.to_thread(
+        pre_image, source_path = await asyncio.to_thread(
             read_with_source_key, read_pre_image, source_file
         )
     except FileNotFoundError:
@@ -578,7 +578,7 @@ async def _mutate_file_and_reindex(
         # nothing has been read or written yet.
         return None, f"Error: {SOURCE_MISSING_DETAIL}"
     preflight = await asyncio.to_thread(
-        app.index_engine.preflight_mutation, source_file, pre_image.data, source_key=source_key
+        app.index_engine.preflight_mutation, source_file, pre_image.data, source_path=source_path
     )
     if preflight.rejection is not None:
         rejection = await app.index_engine.refuse_mutation(source_file, preflight)

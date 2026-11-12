@@ -529,7 +529,9 @@ class _HermesPackage(NamedTuple):
     unreadable: str
 
 
-# Every Hermes package the catalog pins by commit SHA and manifest version.
+# Every package a catalog pins by commit SHA and manifest version: the Hermes catalog's two,
+# and the OpenClaw bundle, which ClawHub publishes from a release commit under its manifest
+# version. The tuple keeps its Hermes name; the check is the same for all three.
 _HERMES_PACKAGES = (
     _HermesPackage(
         "packages/memtomem-hermes-plugin",
@@ -544,6 +546,13 @@ _HERMES_PACKAGES = (
         "hermes_memory_version",
         _rendered_yaml_manifest_version,
         "has no single rendered version line",
+    ),
+    _HermesPackage(
+        "packages/memtomem-openclaw-bundle",
+        ".codex-plugin/plugin.json",
+        "openclaw_version",
+        _json_manifest_version,
+        "is not a JSON object",
     ),
 )
 
@@ -639,11 +648,12 @@ def validate_changelog_baseline(tag: str, repo_root: Path) -> str:
 
 
 def validate_hermes_version_bump(tag: str, repo_root: Path) -> str | None:
-    """Refuse a Hermes package that changed since the last release under the same version.
+    """Refuse a pinned package that changed since the last release under the same version.
 
     Hermes installs a package at a commit SHA and its catalog entry pins the
-    manifest version, so changed content under an unchanged version is invisible
-    to anyone reading that version. The comparison is the *delivered* manifest,
+    manifest version, and a ClawHub release of the OpenClaw bundle is a commit
+    under its manifest version, so changed content under an unchanged version is
+    invisible to anyone reading that version. The comparison is the *delivered* manifest,
     committed HEAD against the previous release commit; contract-to-manifest
     parity is the supply-chain tests' job. A version-only bump is allowed. Every
     package in ``_HERMES_PACKAGES`` is checked on its own.
@@ -669,7 +679,7 @@ def validate_hermes_version_bump(tag: str, repo_root: Path) -> str | None:
     if ancestry.returncode == 1:
         raise ReleaseCheckError(
             f"previous release {baseline} is not an ancestor of HEAD; cannot tell what the "
-            "Hermes packages changed since it"
+            "pinned plugin packages changed since it"
         )
     if ancestry.returncode != 0:
         raise ReleaseCheckError(
@@ -1258,7 +1268,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--require-hermes-version-bump",
         action="store_true",
         help=(
-            "Also refuse a Hermes plugin package that changed since the previous "
+            "Also refuse a Hermes or OpenClaw plugin package that changed since the previous "
             "release tag without a version bump. Needs full tag history."
         ),
     )

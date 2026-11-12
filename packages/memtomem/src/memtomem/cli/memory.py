@@ -183,6 +183,13 @@ def add(
         raise_cli_error(e)
 
 
+def _cli_scope_hint(tier: str) -> str:
+    flags = f"--scope {tier}"
+    if tier == "project_shared":
+        flags += " --confirm-project-shared"
+    return f"`mm add {flags}`"
+
+
 async def _add(
     content: str,
     title: str | None,
@@ -314,6 +321,19 @@ async def _add(
                 target.relative_to(base)
             except ValueError:
                 raise click.ClickException("File path escapes memory directory")
+            # A tier registered inside ``base`` is another tier, with its own
+            # gates; the ones below are run for ``--scope`` (#2821).
+            from memtomem.memory_scope import explicit_target_tier_refusal
+
+            tier_err = explicit_target_tier_refusal(
+                target,
+                scope,
+                memory_dirs=comp.config.indexing.memory_dirs,
+                project_memory_dirs=comp.config.indexing.project_memory_dirs,
+                scope_hint=_cli_scope_hint,
+            )
+            if tier_err is not None:
+                raise click.ClickException(tier_err)
         else:
             # Issue #2005: one day file per namespace. A single day file
             # shared by two namespaces loses one of them as soon as chunk

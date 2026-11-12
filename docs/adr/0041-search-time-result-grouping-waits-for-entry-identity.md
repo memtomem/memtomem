@@ -118,11 +118,12 @@ state:
 - Which occurrence key #3003 persists (heading line number or an ordinal of
   the path within the file), and how legacy rows without it are treated by a
   grouping stage: never as "same occurrence".
-- Whether `ContextInfo.ranked_siblings` is removed (#3004) or becomes the
-  typed home of entry siblings once #3003 lands. This ADR recommends a
-  separate `SearchResult.group` field, because grouping is independent of the
-  context window and `context` is `None` when the effective context window
-  is zero.
+- *(Resolved 2026-11-12, #3004.)* `ContextInfo.ranked_siblings` and
+  `ContextInfo.related_chunks` are removed. Neither had a producer or a
+  consumer, and the `RankedSibling` type the first one named was never
+  defined. This ADR's recommendation for entry siblings stands: a separate
+  `SearchResult.group` field, because grouping is independent of the context
+  window and `context` is `None` when the effective context window is zero.
 
 ## Alternatives considered
 

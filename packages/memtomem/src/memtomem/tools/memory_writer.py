@@ -17,7 +17,7 @@ from uuid import uuid4
 
 
 from memtomem.source_provenance import StaleSourceProvenanceError, source_span_hash
-from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import resolve_path
 
 
 logger = logging.getLogger(__name__)
@@ -656,20 +656,29 @@ def read_pre_image_or_empty(file_path: Path) -> bytes:
         return b""
 
 
-def read_with_source_key[T](read: Callable[[Path], T], file_path: Path) -> tuple[T, str]:
-    """``read(file_path)``, and the stored key of the source it read, resolved right after it.
+def read_with_source_key[T](read: Callable[[Path], T], file_path: Path) -> tuple[T, Path]:
+    """``read(file_path)``, and the path of the source it read, resolved right after it.
 
-    For a memory tool that hands the bytes to ``IndexEngine.preflight_mutation``:
-    a refusal holds the source under this key, so it must be the source whose
-    bytes were judged. Resolved later, after an ``await``, a path replaced by a
-    symlink meanwhile would hold the link's target and leave the refused
-    source's chunks searchable (#3183). Call it as one worker-thread call, so
-    the caller has no ``await`` between the read and the resolution. Not seen:
-    another process swapping the path between the read and the resolution
-    right after it.
+    For a memory tool that hands the bytes to ``IndexEngine.preflight_mutation``
+    as ``source_path``. The preflight judges the bytes under this path, not
+    under a later resolution of ``file_path``, and a refusal holds the source
+    under this path's stored key, so both must be the source whose bytes were
+    read. Resolved later, after an ``await``, a path replaced by a symlink
+    meanwhile would be judged under the link target's scope (#3191) and hold the
+    link's target (#3183). Call it as one worker-thread call, so the caller has
+    no ``await`` between the read and the resolution. Not seen: another process
+    swapping the path between the read and the resolution right after it.
+
+    The path is not folded: the preflight compares it with registered roots and
+    manifest keys as the index gate does. Its stored key is
+    ``fold_path_form(str(path))``, which is ``norm_path(file_path)``, fallback
+    included: a resolution that raises ``OSError`` gives ``file_path`` as given.
     """
     data = read(file_path)
-    return data, norm_path(file_path)
+    try:
+        return data, resolve_path(file_path)
+    except OSError:
+        return data, file_path
 
 
 def restore_pre_image_quietly(file_path: Path, pre_image: PreImage) -> RestoreOutcome:

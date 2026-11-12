@@ -13,7 +13,7 @@ import click
 
 from croniter import croniter  # type: ignore[import-untyped]
 
-from memtomem.scheduler.jobs import JOB_KINDS, run_outcome
+from memtomem.scheduler.jobs import JOB_KINDS, run_outcome, validate_new_params
 
 
 @click.group()
@@ -63,7 +63,7 @@ def schedule_add(cron_expr: str, job_kind: str, params_json: str | None) -> None
 
     spec = JOB_KINDS[job_kind]
     try:
-        spec.params_model.model_validate(params)
+        validate_new_params(spec, params)
     except Exception as exc:
         raise click.ClickException(f"invalid params: {exc}") from exc
 

@@ -3112,6 +3112,7 @@ def classify_scope(
     project_memory_dirs: Iterable[Path | str] | None = None,
     *,
     resolved_roots: frozenset[Path] | None = None,
+    resolved: bool = False,
 ) -> tuple[str, Path | None]:
     """Classify ``path`` into a scope tier and project root (ADR-0011).
 
@@ -3135,6 +3136,11 @@ def classify_scope(
     passes it so the roots are resolved once rather than once per path. When
     given, it wins over ``project_memory_dirs``, and an empty set still
     enforces registration: every project-shaped path comes back ``user``.
+
+    ``resolved=True`` says ``path`` is already the resolution the caller judges
+    under: the registration check compares it as given instead of resolving it
+    again, so a leaf replaced by a symlink since that resolution is not followed
+    (#3191). The registered roots are still resolved here.
     """
     s = str(path).replace("\\", "/").rstrip("/")
     for scope_name, pat in _PROJECT_SCOPE_PATTERNS:
@@ -3150,10 +3156,13 @@ def classify_scope(
         if registered_roots is None and project_memory_dirs is not None:
             registered_roots = resolve_project_memory_dirs(project_memory_dirs)
         if registered_roots is not None:
-            try:
-                resolved_path = Path(str(path)).expanduser().resolve()
-            except OSError:
+            if resolved:
                 resolved_path = Path(str(path))
+            else:
+                try:
+                    resolved_path = Path(str(path)).expanduser().resolve()
+                except OSError:
+                    resolved_path = Path(str(path))
             # The path qualifies if any registered project_memory_dir is
             # an ancestor (the registered dir is the ``memories[/.local]``
             # subdir, so ``path`` must live at or under it).
