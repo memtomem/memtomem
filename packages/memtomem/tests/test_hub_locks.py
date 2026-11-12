@@ -386,3 +386,136 @@ def test_reranker_load_is_guarded(monkeypatch, tmp_path):
         reranker._close_sync()
 
     assert events == [("prepare", tmp_path), ("construct", str(tmp_path))]
+
+
+# --- the local (sentence-transformers) reranker (#3266) -------------------------------
+
+_ST_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+
+@pytest.fixture
+def local_load(monkeypatch, tmp_path):
+    """Load ``LocalReranker`` against a stub ``CrossEncoder`` and record what ran, in order."""
+    import memtomem.search.reranker.local as local_mod
+    from memtomem.config import RerankConfig
+
+    events: list[tuple[str, object]] = []
+
+    class CrossEncoder:
+        def __init__(self, model):
+            events.append(("construct", model))
+
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", SimpleNamespace(CrossEncoder=CrossEncoder)
+    )
+    monkeypatch.delenv("SENTENCE_TRANSFORMERS_HOME", raising=False)
+    hub_cache = tmp_path / "hub"
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(hub_cache))
+
+    def load(model: str = _ST_MODEL) -> None:
+        reranker = local_mod.LocalReranker(RerankConfig(provider="local", model=model))
+        try:
+            reranker._get_model()
+        finally:
+            reranker._close_sync()
+
+    return SimpleNamespace(events=events, load=load, module=local_mod, hub_cache=hub_cache)
+
+
+@pytest.fixture
+def record_prepare(monkeypatch, local_load):
+    def record(cache_dir):
+        local_load.events.append(("prepare", cache_dir))
+
+    monkeypatch.setattr(local_load.module, "prepare_hub_locks", record)
+    return local_load
+
+
+def test_local_reranker_load_is_guarded_in_the_hub_cache(record_prepare):
+    record_prepare.load()
+
+    hub_cache = record_prepare.hub_cache
+    assert record_prepare.events == [("prepare", hub_cache.resolve()), ("construct", _ST_MODEL)]
+    # A first install has no cache yet; the probe needs the directory to exist.
+    assert hub_cache.is_dir()
+
+
+def test_both_caches_are_probed_when_sentence_transformers_home_is_set(
+    monkeypatch, tmp_path, record_prepare
+):
+    # sentence-transformers 6.3.0 downloads into SENTENCE_TRANSFORMERS_HOME; 5.2.2
+    # and earlier ignore it in CrossEncoder and use the Hub cache.
+    monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", str(tmp_path / "st"))
+
+    record_prepare.load()
+
+    assert record_prepare.events == [
+        ("prepare", (tmp_path / "st").resolve()),
+        ("prepare", record_prepare.hub_cache.resolve()),
+        ("construct", _ST_MODEL),
+    ]
+
+
+def test_an_empty_sentence_transformers_home_probes_the_working_directory(
+    monkeypatch, tmp_path, record_prepare
+):
+    # sentence-transformers 6.3.0 keeps the empty value and the Hub resolves it to
+    # the current directory, which is where the model then lands.
+    monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", "")
+    monkeypatch.chdir(tmp_path)
+
+    record_prepare.load()
+
+    assert record_prepare.events[0] == ("prepare", tmp_path.resolve())
+
+
+def test_a_relative_cache_is_probed_again_after_a_chdir(monkeypatch, tmp_path, local_load):
+    probes: list[Path] = []
+    monkeypatch.setattr(hub_locks, "_flock_works", lambda d: probes.append(d) or True)
+    monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", "models")
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        monkeypatch.chdir(tmp_path / name)
+        local_load.load()
+
+    assert probes == [
+        (tmp_path / "a/models").resolve(),
+        local_load.hub_cache.resolve(),
+        (tmp_path / "b/models").resolve(),
+    ]
+
+
+def test_a_local_model_directory_is_not_probed(tmp_path, record_prepare):
+    record_prepare.load(str(tmp_path))
+
+    assert record_prepare.events == [("construct", str(tmp_path))]
+
+
+def test_an_unresolvable_cache_still_loads(monkeypatch, record_prepare):
+    def unresolvable(self):
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "expanduser", unresolvable)
+
+    record_prepare.load()
+
+    assert record_prepare.events == [("construct", _ST_MODEL)]
+
+
+def test_an_unresolvable_candidate_does_not_skip_the_next(monkeypatch, record_prepare):
+    monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", "~unresolvable")
+    real_expanduser = Path.expanduser
+
+    def expanduser(self):
+        if str(self) == "~unresolvable":
+            raise RuntimeError("Could not determine home directory.")
+        return real_expanduser(self)
+
+    monkeypatch.setattr(Path, "expanduser", expanduser)
+
+    record_prepare.load()
+
+    assert record_prepare.events == [
+        ("prepare", record_prepare.hub_cache.resolve()),
+        ("construct", _ST_MODEL),
+    ]

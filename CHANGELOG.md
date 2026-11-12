@@ -212,8 +212,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   file another model already stored is then downloaded again instead of linked. A lock
   file left behind by an earlier run can still block a download there: point
   `MEMTOMEM_FASTEMBED_CACHE` at a local disk if one does. The `local`
-  (sentence-transformers) reranker downloads into the Hugging Face cache and is not
-  covered yet (#3266).
+  (sentence-transformers) reranker hung the same way on its first download, measured with
+  sentence-transformers 6.3.0 and `flock` failing with `ENOSYS`, and gets the same check
+  (#3266). It runs in the Hugging Face hub cache (`HF_HUB_CACHE`) and, when it is set, in
+  `SENTENCE_TRANSFORMERS_HOME`, since sentence-transformers 6 downloads there and earlier
+  releases do not. A model given as a local directory is not checked.
 
 ### Security
 
