@@ -197,7 +197,9 @@ def test_any_other_instance_is_busy_while_one_call_is_outstanding(
     first = make(mod, hermes, budget_ms=50)
     assert first.prefetch(_QUERY) == ""
     assert outcome(events) == "hook_timeout"
-    same_copy = make(mod, hermes, budget_ms=50)
+    # Its budget is not under test: the busy refusal returns before any wait, and the final
+    # prefetch must not lose a delivered result to runner jitter on a 50 ms deadline.
+    same_copy = make(mod, hermes, budget_ms=5000)
     assert same_copy.prefetch(_QUERY) == ""
     assert outcome(events) == "skipped_busy"
     other_copy = load()
@@ -206,6 +208,7 @@ def test_any_other_instance_is_busy_while_one_call_is_outstanding(
     assert patient.prefetch(_QUERY) == ""
     assert time.perf_counter() - started < _PROMPT_S
     assert outcome(events) == "skipped_busy"
+    assert hermes.call_started.wait(5)  # the worker records its call after the hook gave up
     assert len(hermes.calls) == 1
     gate.set()
     drain(mod)
@@ -220,7 +223,7 @@ def test_a_detached_instance_keeps_the_slot_until_its_call_ends(
     old = make(mod, hermes, budget_ms=50)
     old.prefetch(_QUERY)
     old.shutdown()
-    new = make(mod, hermes, budget_ms=50)
+    new = make(mod, hermes, budget_ms=5000)  # not under test: the refusal returns before any wait
     new.prefetch(_QUERY)
     assert outcome(events) == "skipped_busy"
     gate.set()
@@ -238,6 +241,7 @@ def test_a_burst_of_turns_makes_exactly_one_call(mod: Any, hermes: Any, events: 
         time.sleep(0.05)
     for thread in threads:
         thread.join(5)
+    assert hermes.call_started.wait(5)
     assert len(hermes.calls) == 1
     assert sorted(e["outcome"] for e in events()) == [
         "hook_timeout",
@@ -402,6 +406,7 @@ def test_two_module_copies_share_one_admission_per_name(
     assert outcome(events) == "skipped_busy"
     assert other._registry() is mod._registry()
     assert list(mod._registry().admissions) == ["memtomem"]
+    assert hermes.call_started.wait(5)
     assert len(hermes.calls) == 1
 
 
