@@ -315,11 +315,20 @@ async def _cmd_recall(comp, args: list[str]) -> None:
     # scope filter — interactive ``recall`` in a registered project
     # cwd should surface project_shared / project_local rows alongside
     # user-tier ones, matching the contract ``mm mem recall`` honours.
+    from memtomem.models import NamespaceFilter
     from memtomem.server.tools.search import _resolve_project_context_root
 
     project_context_root = _resolve_project_context_root(comp)
+    # The namespaces ``mm recall`` shows with no ``--namespace``: system ones
+    # (``archive:*``, ``agent-runtime:*``) stay hidden (#3117). ``mm recall
+    # --namespace`` is the way to read them.
     chunks = await comp.storage.recall_chunks(
-        since=since, limit=20, project_context_root=project_context_root
+        since=since,
+        limit=20,
+        namespace_filter=NamespaceFilter.parse(
+            None, system_prefixes=tuple(comp.config.search.system_namespace_prefixes)
+        ),
+        project_context_root=project_context_root,
     )
 
     if not chunks:
