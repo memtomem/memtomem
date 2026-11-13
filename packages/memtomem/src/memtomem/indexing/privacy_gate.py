@@ -28,8 +28,8 @@ def privacy_remedy(surface: RemedySurface, *, path: Path, bypassable: bool) -> s
     this exact file: ``mem_index`` defaults to the server's cwd and a relative
     name can resolve elsewhere, so commands carry the full path. ``bypassable``
     is false for ``project_shared``, whose ``force_unsafe`` is refused, so no
-    bypass is offered there. ``mem_index`` has no ``force_unsafe``: an MCP
-    caller's bypass is the CLI's. The web names its own control and the bare
+    bypass is offered there. ``mem_index`` has no ``force_unsafe``, so the MCP
+    remedy names the CLI's bypass. The web names its own control and the bare
     file name only (host paths stay out of web responses).
     """
     if surface in ("cli", "shell", "mcp"):
