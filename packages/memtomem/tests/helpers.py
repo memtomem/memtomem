@@ -474,3 +474,20 @@ def clean_preflight(*_args, **_kwargs):
     from memtomem.indexing.engine import MutationPreflight
 
     return MutationPreflight(None, False, True)
+
+
+def append_judged(
+    file_path: Path,
+    content: str,
+    title: str | None = None,
+    tags: list[str] | None = None,
+) -> str:
+    """``memory_writer.append_entry`` for a test that only needs an entry in a file.
+
+    The writer appends only to the file a preflight judged (#3289), so it takes
+    the read as ``judged``; this reads the file right before the append, which
+    is the judgement a test with nothing in between would get.
+    """
+    from memtomem.tools.memory_writer import append_entry, read_for_append
+
+    return append_entry(file_path, content, title, tags, judged=read_for_append(file_path))

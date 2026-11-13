@@ -597,7 +597,9 @@ class TestAddPrivacyGate:
     def _stub_components(indexed_chunks: int = 3):
         comp = MagicMock()
         comp.index_engine.index_file = AsyncMock(
-            return_value=MagicMock(indexed_chunks=indexed_chunks, excluded_files=0)
+            return_value=MagicMock(
+                indexed_chunks=indexed_chunks, excluded_files=0, relinked_files=0
+            )
         )
         # A ``MagicMock`` predicate answers truthy, which the #2488 guard reads
         # as "excluded"; these tests are about the privacy gate.
@@ -665,7 +667,10 @@ class TestAddPrivacyGate:
         (args, akw) = append_calls[0]
         assert args[0] == target.resolve()
         assert args[1] == "safe content"
+        judged = akw.pop("judged")
         assert akw == {"title": "T", "tags": ["t1"]}
+        # The append is bound to what the preflight judged (#3289).
+        assert judged.source_path == target.resolve() and judged.existed is False
         iargs, ikw = comp.index_engine.index_file.call_args
         assert iargs[0] == target.resolve()
         assert ikw["namespace"] == "agent-runtime:planner"

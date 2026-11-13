@@ -73,6 +73,28 @@ def resolve_path(p: Path) -> Path:
         return Path(os.path.realpath(p))
 
 
+def own_leaf_key(file_path: Path) -> str:
+    """The key the store wrote for ``file_path`` while it was a regular file.
+
+    Its resolved parent plus its name as given: the leaf is never followed, so
+    a leaf that is, or becomes, a symlink still names its own rows and never
+    its target's (#2835, #2878). It does not match another spelling of the
+    leaf, so on Windows a name typed in a case other than the stored one names
+    no rows.
+    """
+    return fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
+
+
+def leaf_names_own_key(own_key: str, resolved: Path) -> bool:
+    """Whether ``resolved``, a resolution of a path, is the regular file at ``own_key``.
+
+    Case is compared the way the platform compares it, because Windows'
+    ``resolve()`` takes the leaf's on-disk case: a leaf typed ``NOTE.md`` and
+    stored as ``note.md`` still names its own key there.
+    """
+    return os.path.normcase(fold_path_form(str(resolved))) == os.path.normcase(own_key)
+
+
 def norm_path(p: Path) -> str:
     """Normalize path to a canonical string.
 

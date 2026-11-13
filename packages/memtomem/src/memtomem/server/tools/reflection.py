@@ -187,10 +187,10 @@ async def mem_reflect_save(
     if stats is None:
         return result
 
-    # Link related chunks to the new insight. Not when the file became excluded
-    # while the insight was appended: nothing was indexed (#3165). ``result``
-    # carries the notice.
-    if related_chunks and not stats.excluded_files:
+    # Link related chunks to the new insight. Not when the file became excluded,
+    # or was replaced by a symlink, while the insight was appended: nothing was
+    # indexed (#3165, #3289). ``result`` carries the notice.
+    if related_chunks and not (stats.excluded_files or stats.relinked_files):
         app = await _get_app_initialized(ctx)
         from uuid import UUID
 

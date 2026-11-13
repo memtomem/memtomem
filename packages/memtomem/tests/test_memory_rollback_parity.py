@@ -140,8 +140,10 @@ _WRITER = "tools/memory_writer.py"
 #: The functions in ``memory_writer`` that are *meant* to create. Appending a
 #: note to a file that need not exist yet is what ``mem_add`` does, so the rule
 #: is an allowlist rather than a blanket ban — and an allowlist small enough to
-#: read is the point. ``append_entry`` delegates here rather than opening.
-_CREATORS = frozenset({"append_blocks"})
+#: read is the point. ``append_entry`` and ``append_blocks`` delegate here rather
+#: than opening, and these create only at the path the preflight judged (#3289):
+#: by directory descriptor, and by path where there is no ``dir_fd``.
+_CREATORS = frozenset({"_create_judged", "_create_judged_by_path"})
 
 _CREATING_MODE_CHARS = "wax"
 
@@ -254,15 +256,16 @@ def test_only_the_declared_creators_in_memory_writer_may_create():
     )
 
 
-def test_the_declared_creator_really_creates():
-    """The allowlist must name a function that creates, not a stale name.
+@pytest.mark.parametrize("name", sorted(_CREATORS))
+def test_the_declared_creator_really_creates(name):
+    """The allowlist must name functions that create, not stale names.
 
-    Without this the guard above passes just as well after ``append_blocks``
-    stops creating — at which point the allowlist silently exempts nothing and
+    Without this the guard above passes just as well after a creator stops
+    creating — at which point the allowlist silently exempts nothing and
     nobody notices the entry is dead.
     """
-    fn = _writer_functions()["append_blocks"]
+    fn = _writer_functions()[name]
     assert _creating_writes(fn), (
-        "append_blocks no longer creates; it is on the creator allowlist "
-        "precisely because mem_add's append must create its target file"
+        f"{name} no longer creates; it is on the creator allowlist precisely "
+        "because mem_add's append must create its target file"
     )

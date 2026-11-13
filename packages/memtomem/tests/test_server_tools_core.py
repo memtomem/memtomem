@@ -22,7 +22,7 @@ from memtomem.server.formatters import (
     _format_structured_results,
 )
 from memtomem.server.helpers import _check_embedding_mismatch, _parse_recall_date, _set_config_key
-from memtomem.tools.memory_writer import append_entry
+from helpers import append_judged
 
 from helpers import make_chunk
 
@@ -361,7 +361,7 @@ class TestMemoryCRUD:
 
     async def test_append_entry_creates_file(self, memory_dir):
         target = memory_dir / "test_add.md"
-        append_entry(target, "Hello, world!", title="Greeting")
+        append_judged(target, "Hello, world!", title="Greeting")
 
         assert target.exists()
         text = target.read_text(encoding="utf-8")
@@ -370,7 +370,7 @@ class TestMemoryCRUD:
 
     async def test_append_entry_with_tags(self, memory_dir):
         target = memory_dir / "tagged.md"
-        append_entry(target, "Tagged content", title="Tagged", tags=["python", "tips"])
+        append_judged(target, "Tagged content", title="Tagged", tags=["python", "tips"])
 
         text = target.read_text(encoding="utf-8")
         assert "tags:" in text
@@ -378,7 +378,7 @@ class TestMemoryCRUD:
 
     async def test_append_entry_auto_title(self, memory_dir):
         target = memory_dir / "auto.md"
-        append_entry(target, "No explicit title given")
+        append_judged(target, "No explicit title given")
 
         text = target.read_text(encoding="utf-8")
         # Auto-generated title uses "Entry <timestamp>"
@@ -386,8 +386,8 @@ class TestMemoryCRUD:
 
     async def test_append_entry_preserves_existing_content(self, memory_dir):
         target = memory_dir / "multi.md"
-        append_entry(target, "First entry", title="First")
-        append_entry(target, "Second entry", title="Second")
+        append_judged(target, "First entry", title="First")
+        append_judged(target, "Second entry", title="Second")
 
         text = target.read_text(encoding="utf-8")
         assert "## First" in text
@@ -398,7 +398,7 @@ class TestMemoryCRUD:
     async def test_append_entry_content_starts_with_heading(self, memory_dir):
         """When content already starts with ##, no extra heading is added."""
         target = memory_dir / "heading.md"
-        append_entry(target, "## Custom heading\n\nBody text")
+        append_judged(target, "## Custom heading\n\nBody text")
 
         text = target.read_text(encoding="utf-8")
         assert text.count("## Custom heading") == 1
@@ -449,7 +449,7 @@ class TestMemoryCRUD:
             ("Fact three", "Fire is hot"),
         ]
         for title, content in entries:
-            append_entry(target, content, title=title)
+            append_judged(target, content, title=title)
 
         text = target.read_text(encoding="utf-8")
         assert text.count("## Fact") == 3

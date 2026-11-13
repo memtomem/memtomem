@@ -2307,13 +2307,13 @@ class TestMemConsolidateApplyIntegration:
         from datetime import datetime, timedelta, timezone
 
         from memtomem.server.tools.consolidation import mem_consolidate_apply
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         # Build a realistic source file with 3 real entries + index it so we
         # have real chunk ids to hand to mem_consolidate_apply.
         source_file = memory_dir / "apr-standup.md"
         for i in range(3):
-            append_entry(
+            append_judged(
                 source_file,
                 f"Agenda item {i}: standup note with enough text to survive chunking.",
                 title=f"Item {i}",
@@ -2461,11 +2461,11 @@ class TestSystemNamespacePrefixFilter:
     async def test_default_search_excludes_archive_summary(self, components, memory_dir):
         """End-to-end: an archive:summary chunk is NOT returned by a
         bare search (no namespace), but IS returned when explicitly asked."""
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         # 1. Index a user-facing chunk in the default namespace.
         user_file = memory_dir / "normal.md"
-        append_entry(
+        append_judged(
             user_file,
             "A regular memory about Python async context managers and their lifecycle.",
             title="Regular Entry",

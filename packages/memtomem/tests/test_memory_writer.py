@@ -18,6 +18,7 @@ from memtomem.tools.memory_writer import (
     _validate_line_range,
     append_entry,
     format_entry_block,
+    read_for_append,
     read_pre_image,
     remove_lines,
     replace_chunk_body,
@@ -30,7 +31,7 @@ class TestAppendEntry:
     def test_creates_new_file_with_parent_dirs(self, tmp_path):
         target = tmp_path / "nested" / "dir" / "notes.md"
 
-        append_entry(target, "hello world")
+        append_entry(target, "hello world", judged=read_for_append(target))
 
         assert target.exists()
         text = target.read_text(encoding="utf-8")
@@ -41,7 +42,7 @@ class TestAppendEntry:
         target = tmp_path / "notes.md"
         target.write_text("# Existing\n\nOld content.\n", encoding="utf-8")
 
-        append_entry(target, "new entry", title="New")
+        append_entry(target, "new entry", title="New", judged=read_for_append(target))
 
         text = target.read_text(encoding="utf-8")
         assert "Old content." in text
@@ -53,7 +54,7 @@ class TestAppendEntry:
     def test_skips_heading_when_content_already_starts_with_h2(self, tmp_path):
         target = tmp_path / "notes.md"
 
-        append_entry(target, "## Inline Heading\n\nbody text")
+        append_entry(target, "## Inline Heading\n\nbody text", judged=read_for_append(target))
 
         text = target.read_text(encoding="utf-8")
         # Should not double up: no "## Entry " heading injected before the content.
@@ -64,7 +65,9 @@ class TestAppendEntry:
     def test_tags_rendered_when_provided(self, tmp_path):
         target = tmp_path / "notes.md"
 
-        append_entry(target, "content", title="T", tags=["alpha", "beta"])
+        append_entry(
+            target, "content", title="T", tags=["alpha", "beta"], judged=read_for_append(target)
+        )
 
         text = target.read_text(encoding="utf-8")
         # Canonical blockquote form: explicit ``> `` prefix + JSON array.
@@ -74,7 +77,7 @@ class TestAppendEntry:
     def test_no_tags_line_when_tags_omitted(self, tmp_path):
         target = tmp_path / "notes.md"
 
-        append_entry(target, "content", title="T")
+        append_entry(target, "content", title="T", judged=read_for_append(target))
 
         text = target.read_text(encoding="utf-8")
         assert "tags:" not in text
@@ -98,7 +101,7 @@ class TestDefaultHeadingUniqueness:
         target = tmp_path / "notes.md"
 
         for i in range(5):
-            append_entry(target, f"entry {i}")
+            append_entry(target, f"entry {i}", judged=read_for_append(target))
 
         headings = self._headings(target.read_text(encoding="utf-8"))
         assert len(headings) == 5
@@ -125,7 +128,7 @@ class TestDefaultHeadingUniqueness:
     def test_default_heading_still_carries_a_readable_timestamp(self, tmp_path):
         target = tmp_path / "notes.md"
 
-        append_entry(target, "content")
+        append_entry(target, "content", judged=read_for_append(target))
 
         text = target.read_text(encoding="utf-8")
         heading = self._headings(text)[0]
@@ -139,7 +142,7 @@ class TestDefaultHeadingUniqueness:
     def test_an_explicit_title_is_still_used_verbatim(self, tmp_path):
         target = tmp_path / "notes.md"
 
-        append_entry(target, "content", title="Cache Decision")
+        append_entry(target, "content", title="Cache Decision", judged=read_for_append(target))
 
         assert self._headings(target.read_text(encoding="utf-8")) == ["## Cache Decision"]
 
@@ -607,7 +610,7 @@ class TestAppendStillCreates:
     def test_append_entry_creates_a_missing_file(self, tmp_path):
         target = tmp_path / "nested" / "d.md"
 
-        append_entry(target, "fresh note", title="Fresh")
+        append_entry(target, "fresh note", title="Fresh", judged=read_for_append(target))
 
         assert target.exists()
         assert "fresh note" in target.read_text(encoding="utf-8")

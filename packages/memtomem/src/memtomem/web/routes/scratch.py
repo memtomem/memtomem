@@ -12,7 +12,6 @@ from memtomem.models import stored_namespace
 from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.source_provenance import (
-    EXCLUDED_AFTER_APPEND_NOTICE,
     EXCLUDED_TARGET_DETAIL,
     READ_ONLY_TARGET_DETAIL,
 )
@@ -233,15 +232,20 @@ async def promote_scratch(
             # whose content may not be indexed before anything is written. The
             # entry stays in scratch, unpromoted.
             from memtomem.indexing.engine import PrivacyRejection
-            from memtomem.tools.memory_mutation import appended_valve_text
-            from memtomem.tools.memory_writer import read_pre_image_or_empty, read_with_source_key
+            from memtomem.tools.memory_mutation import (
+                append_warning,
+                appended_valve_text,
+                refuse_changed_append,
+            )
+            from memtomem.tools.memory_writer import SourceChangedError, read_for_append
 
             needs_valve = guard.decision == "bypassed"
-            pre, source_path = await _asyncio.to_thread(
-                read_with_source_key, read_pre_image_or_empty, target
-            )
+            judged = await _asyncio.to_thread(read_for_append, target)
             preflight = await _asyncio.to_thread(
-                index_engine.preflight_mutation, target, pre, source_path=source_path
+                index_engine.preflight_mutation,
+                target,
+                judged.data,
+                source_path=judged.source_path,
             )
             if preflight.rejection is not None:
                 rejection = await index_engine.refuse_mutation(target, preflight)
@@ -252,17 +256,29 @@ async def promote_scratch(
             blocker = preflight.blocker("promote", target.name, needs_valve=needs_valve)
             if blocker is not None:
                 raise index_blocked_http(blocker)
-            appended = await _asyncio.to_thread(
-                append_entry, target, entry["value"], title=body.title, tags=body.tags
-            )
+            try:
+                appended = await _asyncio.to_thread(
+                    append_entry,
+                    target,
+                    entry["value"],
+                    title=body.title,
+                    tags=body.tags,
+                    judged=judged,
+                )
+            except SourceChangedError as exc:
+                # Nothing was written; the entry stays in scratch, unpromoted.
+                refusal = await refuse_changed_append(index_engine, target, judged, op="promote")
+                search_pipeline.invalidate_cache()
+                raise index_blocked_http(refusal) from exc
             try:
                 stats = await index_engine.index_file(
                     target,
                     namespace=write_ns,
                     ingress_guarded=True,
                     force_unsafe=needs_valve,
-                    valve_text=appended_valve_text(pre, appended) if needs_valve else None,
+                    valve_text=appended_valve_text(judged.data, appended) if needs_valve else None,
                     lock_held=True,
+                    hold_if_relinked=judged.leaf_own,
                 )
             except PrivacyRejection as exc:
                 # The entry is now in the file, unindexed. Mark it promoted so a
@@ -288,8 +304,9 @@ async def promote_scratch(
             # it again while this mark waits for the writer.
             if not await _mark_promoted(storage, key, entry["value"]):
                 detail = _NOT_MARKED_PROMOTED.format(file=target.name)
-                if stats.excluded_files:
-                    detail = f"{EXCLUDED_AFTER_APPEND_NOTICE} {detail}"
+                warning = append_warning(stats, judged)
+                if warning is not None:
+                    detail = f"{warning} {detail}"
                 raise HTTPException(status_code=503, detail=detail)
     except TimeoutError as exc:
         raise HTTPException(
@@ -301,6 +318,6 @@ async def promote_scratch(
         promoted=True,
         file=str(target),
         indexed_chunks=stats.indexed_chunks,
-        # The file became excluded while the entry was appended (#3165).
-        warning=EXCLUDED_AFTER_APPEND_NOTICE if stats.excluded_files else None,
+        # Excluded, or replaced by a link, while the entry was appended.
+        warning=append_warning(stats, judged),
     )

@@ -58,7 +58,7 @@ from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD, RELINKED_HOLD
 from memtomem.storage.sqlite_helpers import fold_path_form
 from memtomem.source_provenance import UPLOAD_DIR
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
-from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import leaf_names_own_key, norm_path, own_leaf_key
 from memtomem.storage.sqlite_helpers import resolves_under_any_root as _resolves_under_any_root
 from memtomem.storage.sqlite_helpers import resolve_path
 from memtomem.storage.orphan_detect import RetainRule
@@ -239,18 +239,6 @@ def _exclude_match_keys(
     return keys
 
 
-def _own_leaf_key(file_path: Path) -> str:
-    """The key the store wrote for ``file_path`` while it was a regular file.
-
-    Its resolved parent plus its name as given: the leaf is never followed, so
-    a leaf that is, or becomes, a symlink still names its own rows and never
-    its target's (#2835, #2878). It does not match another spelling of the
-    leaf, so on Windows a name typed in a case other than the stored one names
-    no rows.
-    """
-    return fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
-
-
 class SourceRelinkedError(RetryableError):
     """The path being indexed names another source than the one its content was read from (#3180).
 
@@ -315,7 +303,7 @@ def _leaf_relinked(own_key: str, work_path: Path) -> bool:
     """
     if Path(own_key).is_symlink():
         return True
-    return os.path.normcase(fold_path_form(str(work_path))) != os.path.normcase(own_key)
+    return not leaf_names_own_key(own_key, work_path)
 
 
 def _path_is_excluded(
@@ -1751,10 +1739,10 @@ class IndexEngine:
         # its target's rows (#2835). Resolved parent plus the name matches the
         # key the store wrote while the leaf was a regular file, when the leaf
         # is spelled as it was stored (#2878).
-        purge_key = _own_leaf_key(file_path) if purge_if_excluded else None
+        purge_key = own_leaf_key(file_path) if purge_if_excluded else None
         # The relink check runs inside the locks too, so a hold-only call must
         # not stop at the early exclusion return below (#3164).
-        relink_key = _own_leaf_key(file_path) if hold_if_relinked else None
+        relink_key = own_leaf_key(file_path) if hold_if_relinked else None
         if (
             purge_key is None
             and relink_key is None
@@ -4127,8 +4115,21 @@ class IndexEngine:
             )
         if preflight.source_key is None:
             return False
+        return await self.hold_relinked_source(file_path, preflight.source_key)
+
+    async def hold_relinked_source(self, file_path: Path, source_key: str) -> bool:
+        """Hold the rows stored under ``source_key``, the source a memory tool read (#3289).
+
+        For a tool that finds, after its preflight, that the path no longer
+        holds the file it read: :meth:`hold_relinked_mutation` when the
+        preflight saw it, and an append whose open saw it
+        (``memory_writer.SourceChangedError``). The key is the read's, as
+        stored, never resolved again. Returns whether rows were held; a hold
+        that fails is logged and reported as ``False``, because the write is
+        refused either way and the failure must not replace that refusal.
+        """
         try:
-            held = await self._hold_waiting(file_path, RELINKED_HOLD, key=preflight.source_key)
+            held = await self._hold_waiting(file_path, RELINKED_HOLD, key=source_key)
         except Exception as exc:
             logger.error("Could not hold the chunks of relinked source %s: %s", file_path.name, exc)
             return False

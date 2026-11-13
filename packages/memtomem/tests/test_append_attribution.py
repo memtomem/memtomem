@@ -24,13 +24,14 @@ from memtomem.indexing.append_attribution import (
     attribute_append,
 )
 from memtomem.models import Chunk, ChunkMetadata
-from memtomem.tools.memory_writer import append_blocks, append_entry, read_pre_image_or_empty
+from memtomem.tools.memory_writer import append_blocks, append_entry, read_for_append
 
 
 async def _append(engine, path: Path, content: str, *, between=None, **entry):
     """Append like the memory tools do, then index with the append's region."""
-    pre = read_pre_image_or_empty(path)
-    appended = append_entry(path, content, **entry)
+    judged = read_for_append(path)
+    pre = judged.data
+    appended = append_entry(path, content, **entry, judged=judged)
     if between is not None:
         between(path)
     return await engine.index_file(
@@ -125,8 +126,9 @@ class TestAttributed:
     async def test_an_explicit_namespace(self, stack):
         # The namespace and scope steps rebuild every chunk after chunking.
         comp, engine, path = stack
-        pre = read_pre_image_or_empty(path)
-        appended = append_entry(path, "zqns entry body.", title="NS")
+        judged = read_for_append(path)
+        pre = judged.data
+        appended = append_entry(path, "zqns entry body.", title="NS", judged=judged)
 
         stats = await engine.index_file(
             path,
@@ -145,8 +147,9 @@ class TestAttributed:
         # A plain pass after the append records a receipt; a region still
         # gets its answer instead of the receipt's shortcut.
         comp, engine, path = stack
-        pre = read_pre_image_or_empty(path)
-        appended = append_entry(path, "zqreceipt entry body.", title="Receipt")
+        judged = read_for_append(path)
+        pre = judged.data
+        appended = append_entry(path, "zqreceipt entry body.", title="Receipt", judged=judged)
         await engine.index_file(path)
         again = await engine.index_file(path)
         assert again.indexed_chunks == 0
@@ -165,8 +168,9 @@ class TestAttributed:
         engine._config.min_chunk_tokens = 0
         path.write_text("## A\n\nzqa body\n", encoding="utf-8")
         await engine.index_file(path, ingress_guarded=True)
-        pre = read_pre_image_or_empty(path)
-        appended = append_blocks(path, [lead + "## B\n\nzqb body\n"])
+        judged = read_for_append(path)
+        pre = judged.data
+        appended = append_blocks(path, [lead + "## B\n\nzqb body\n"], judged=judged)
 
         stats = await engine.index_file(
             path, ingress_guarded=True, append_region=append_region(pre, appended)
@@ -246,8 +250,9 @@ class TestMerged:
         comp, engine, path = stack
         path.write_bytes(b'## Existing\n> tags: ["old"]\n')
         await engine.index_file(path, ingress_guarded=True)
-        pre = read_pre_image_or_empty(path)
-        appended = append_blocks(path, ["\nzqbody text\n"])
+        judged = read_for_append(path)
+        pre = judged.data
+        appended = append_blocks(path, ["\nzqbody text\n"], judged=judged)
 
         stats = await engine.index_file(
             path, ingress_guarded=True, append_region=append_region(pre, appended)
@@ -271,9 +276,10 @@ class TestUnverified:
         # ``P + A + A``: a suffix match would name the other writer's copy.
         comp, engine, path = stack
         engine._config.min_chunk_tokens = 0
-        pre = read_pre_image_or_empty(path)
-        appended = append_entry(path, "zqtwin body.", title="Twin")
-        append_blocks(path, [appended])
+        judged = read_for_append(path)
+        pre = judged.data
+        appended = append_entry(path, "zqtwin body.", title="Twin", judged=judged)
+        append_blocks(path, [appended], judged=read_for_append(path))
 
         stats = await engine.index_file(
             path, ingress_guarded=True, append_region=append_region(pre, appended)
@@ -323,8 +329,9 @@ class TestUnverified:
         comp, engine, path = stack
         path.write_text("zqbefore text", encoding="utf-8")
         await engine.index_file(path, ingress_guarded=True)
-        pre = read_pre_image_or_empty(path)
-        appended = append_blocks(path, [" and zqafter text\n"])
+        judged = read_for_append(path)
+        pre = judged.data
+        appended = append_blocks(path, [" and zqafter text\n"], judged=judged)
 
         stats = await engine.index_file(
             path, ingress_guarded=True, append_region=append_region(pre, appended)
@@ -357,8 +364,9 @@ class TestUnverified:
         comp, engine, path = stack
         rst = path.with_suffix(".rst")
         assert type(engine._registry.get(".rst")).__name__ != "MarkdownChunker"
-        pre = read_pre_image_or_empty(rst)
-        appended = append_blocks(rst, ["Title\n=====\n\nzqrst body.\n"])
+        judged = read_for_append(rst)
+        pre = judged.data
+        appended = append_blocks(rst, ["Title\n=====\n\nzqrst body.\n"], judged=judged)
 
         stats = await engine.index_file(
             rst, ingress_guarded=True, append_region=append_region(pre, appended)
@@ -371,7 +379,7 @@ class TestUnverified:
     @pytest.mark.asyncio
     async def test_not_requested(self, stack):
         comp, engine, path = stack
-        append_entry(path, "zqplain body.", title="Plain")
+        append_entry(path, "zqplain body.", title="Plain", judged=read_for_append(path))
         stats = await engine.index_file(path, ingress_guarded=True)
 
         assert stats.new_chunk_ids

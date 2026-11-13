@@ -681,26 +681,41 @@ class MemtomemStore:
                     return {"error": "namespace_mix_refused", "detail": mix_err}
 
                 from memtomem.indexing.engine import PrivacyRejection
-                from memtomem.tools.memory_mutation import appended_valve_text, preflight_refusal
+                from memtomem.tools.memory_mutation import (
+                    appended_valve_text,
+                    preflight_refusal,
+                    refuse_changed_append,
+                )
+                from memtomem.tools.memory_writer import SourceChangedError
 
                 # The re-index after the append judges the whole file: refuse a
                 # file whose content may not be indexed before writing anything.
                 needs_valve = guard.decision == "bypassed"
-                refusal, pre = await preflight_refusal(
+                refusal, judged = await preflight_refusal(
                     comp.index_engine, target, op="add", needs_valve=needs_valve, surface="neutral"
                 )
                 if refusal is not None:
                     comp.search_pipeline.invalidate_cache()
                     return {"error": "index_blocked", "detail": refusal, "written": False}
-                appended = append_entry(target, content, title=title, tags=tags)
+                try:
+                    appended = append_entry(target, content, title=title, tags=tags, judged=judged)
+                except SourceChangedError:
+                    refusal = await refuse_changed_append(
+                        comp.index_engine, target, judged, op="add"
+                    )
+                    comp.search_pipeline.invalidate_cache()
+                    return {"error": "index_blocked", "detail": refusal, "written": False}
                 try:
                     stats = await comp.index_engine.index_file(
                         target,
                         namespace=effective_namespace,
                         ingress_guarded=True,
                         force_unsafe=needs_valve,
-                        valve_text=(appended_valve_text(pre, appended) if needs_valve else None),
+                        valve_text=(
+                            appended_valve_text(judged.data, appended) if needs_valve else None
+                        ),
                         lock_held=True,
+                        hold_if_relinked=judged.leaf_own,
                     )
                 except PrivacyRejection as exc:
                     comp.search_pipeline.invalidate_cache()
@@ -723,11 +738,12 @@ class MemtomemStore:
             "file": str(target),
             "indexed_chunks": stats.indexed_chunks,
         }
-        if stats.excluded_files:
-            # The file became excluded while the entry was appended (#3165).
-            from memtomem.source_provenance import EXCLUDED_AFTER_APPEND_NOTICE
+        from memtomem.tools.memory_mutation import append_warning
 
-            result["warning"] = EXCLUDED_AFTER_APPEND_NOTICE
+        # Excluded, or replaced by a link, while the entry was appended.
+        warning = append_warning(stats, judged)
+        if warning is not None:
+            result["warning"] = warning
         return result
 
     async def get(self, chunk_id: str) -> dict | None:
