@@ -13,6 +13,7 @@ import base64
 import copy
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -690,14 +691,27 @@ def test_signature_on_a_plain_issue_is_ignored(
     [
         (SIGNATURE, "sign"),
         (f"  {SIGNATURE}\n", "sign"),
+        (f"{SIGNATURE}\r\n", "sign"),
         ("recheck", "recheck"),
         ("  ReCheck ", "recheck"),
+        ("recheck\r\n", "recheck"),
+        ("rechecK", "ignore"),
         (SIGNATURE.lower(), "ignore"),
     ],
 )
 def test_comment_command_normalisation(body: str, command: str) -> None:
     event = {"comment": {"body": body}}
     assert cla.comment_command(event, SIGNATURE) == command
+
+
+def test_signature_followed_by_a_line_break_is_recorded(
+    github: FakeGitHub, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Pressing Enter after the sentence stores it with a trailing CRLF (#3314).
+    assert _run(monkeypatch, tmp_path, _comment_event(f"{SIGNATURE}\r\n")) == 0
+
+    assert _signed_logins(github) == {"alice"}
+    assert github.status()["state"] == "success"
 
 
 def test_recheck_re_evaluates_without_recording(
@@ -777,9 +791,68 @@ def test_workflow_job_conditions_split_the_events() -> None:
     assert jobs["CLAAssistant"]["if"] == "${{ github.event_name == 'pull_request_target' }}"
     assert " ".join(jobs["CLASign"]["if"].split()) == (
         "${{ github.event_name == 'issue_comment' && github.event.issue.pull_request && "
-        "( github.event.comment.body == 'recheck' || "
-        f"github.event.comment.body == '{SIGNATURE}' ) }}}}"
+        "( contains(github.event.comment.body, 'recheck') || "
+        f"contains(github.event.comment.body, '{SIGNATURE}') ) }}}}"
     )
     for job in jobs.values():
         (run_step,) = [step for step in job["steps"] if "run" in step]
         assert run_step["env"]["CLA_SIGNATURE_TEXT"] == SIGNATURE
+
+
+_BODY = r"github\.event\.comment\.body"
+_BODY_TERMS = {
+    "==": re.compile(rf"{_BODY}\s*==\s*'([^']*)'"),
+    "contains": re.compile(rf"contains\(\s*{_BODY}\s*,\s*'([^']*)'\s*\)"),
+    "startsWith": re.compile(rf"startsWith\(\s*{_BODY}\s*,\s*'([^']*)'\s*\)"),
+}
+
+
+def _sign_gate_admits(body: str) -> bool:
+    """The comment terms of the CLASign `if`, OR-ed, with Actions' case rules for ASCII.
+
+    GitHub's expressions reference: `==` on strings ignores case, and `contains` and
+    `startsWith` are not case sensitive. `str.lower` agrees with that for ASCII, which is
+    why the script takes `recheck` only in ASCII. The terms are read out of the workflow,
+    so this measures the `if` as written; a term of any other shape admits nothing.
+    """
+    expression = _workflow()["jobs"]["CLASign"]["if"]
+    text = body.lower()
+    checks = {
+        "==": lambda literal: text == literal,
+        "contains": lambda literal: literal in text,
+        "startsWith": lambda literal: text.startswith(literal),
+    }
+    return any(
+        checks[kind](literal.lower())
+        for kind, pattern in _BODY_TERMS.items()
+        for literal in pattern.findall(expression)
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        SIGNATURE,
+        f"{SIGNATURE}\r\n",
+        f"{SIGNATURE}\n\n",
+        f"  {SIGNATURE}",
+        "recheck",
+        "Recheck",
+        "recheck\r\n",
+        "  ReCheck ",
+    ],
+    ids=[
+        "exact",
+        "crlf",
+        "blank-lines",
+        "indented",
+        "recheck",
+        "recheck-capitalised",
+        "recheck-crlf",
+        "recheck-padded",
+    ],
+)
+def test_sign_job_runs_for_every_body_the_script_accepts(body: str) -> None:
+    # A body the `if` skips never reaches the script, so nothing records it (#3314).
+    assert cla.comment_command({"comment": {"body": body}}, SIGNATURE) != "ignore"
+    assert _sign_gate_admits(body)
