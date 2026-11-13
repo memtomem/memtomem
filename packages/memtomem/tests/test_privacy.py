@@ -51,13 +51,6 @@ def _reset_counters():
 # LTM-origin addition awaiting its reverse mirror), bump the leading side's
 # constant with a sync-tracking note, then re-align the trailing side's
 # constant when the sync lands.
-#
-# A divergence window is open (#3298): ten token rules spell their word
-# boundaries as ASCII lookarounds here, and memtomem-stm still has ``\b`` and
-# pins ``631d79e5…``. It closes when those ten strings are mirrored into STM's
-# ``CREDENTIAL_PATTERNS`` and its constant is set to the value below.
-# ``test_privacy_ascii_boundary.py`` pins that the boundary spelling is the
-# only difference between the two sets.
 _SECRET_CLASS_SET_SHA256 = "f6f3d9c324867d786fa5d58b199494872f179b68f5fe42bacc96546989ecfa76"
 
 
