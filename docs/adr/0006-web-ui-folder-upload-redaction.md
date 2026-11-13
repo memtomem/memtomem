@@ -321,44 +321,38 @@ extension of this one.
 > deciding it. [#2801](https://github.com/memtomem/memtomem/issues/2801) asked
 > for the decision.
 
-**The gap.** `mem_index` lists the files it blocked and offers no bypass. The
-MCP refusals that do carry a remedy, from the memory tools and `mem_fetch`,
-name the CLI: `privacy_remedy("mcp", …)` says `mm index --force-unsafe <path>`
-(#2799). Through `mem_index` an agent has one route of its own, the E.5
-declaration, and that waives only the two label rules. For any other reviewed
-false positive `mem_index` has nothing to offer; the CLI flag and the Web UI's
-"Index without privacy gate" checkbox do.
+**The gap.** `mem_index` lists the files it blocked and offers no bypass. A
+file with hits gets through `mem_index` only by carrying the E.5 declaration,
+which waives only the two label rules.
 
 | Option | Behavior | Verdict |
 |--------|----------|---------|
-| E.6a — add `force_unsafe` to `mem_index` | the MCP caller sets the valve itself; refused for `project_shared`, audit-logged and counted like every other bypass | ❌ |
-| E.6b — **no valve on `mem_index`** | `mem_index` keeps refusing; the MCP remedy keeps naming `mm index --force-unsafe` | ✅ |
+| E.6a — add `force_unsafe` to `mem_index` | the MCP caller sets the valve itself; refused for `project_shared`, audit-logged and counted | ❌ |
+| E.6b — **no valve on `mem_index`** | `mem_index` keeps refusing a file with hits unless it carries the E.5 declaration | ✅ |
 
 **Decision: E.6b.** `mem_index` stays without `force_unsafe`.
 
 **Why.** The valve exists to record that someone looked at the flagged content
 and accepted it. On `mem_index` the flag would accept a whole file that is
 already on disk, including content the caller did not write and may never have
-read, and the acceptance would come from the caller alone. The CLI flag and
-the Web UI checkbox leave that acceptance with the person operating them.
+read, and the acceptance would come from the caller alone. The existing
+bypasses for indexing a file, `mm index --force-unsafe` and the Web UI's
+"Index without privacy gate" checkbox, sit on human-facing surfaces.
 
 Two arguments this decision does not rest on:
 
-- **Not breadth.** `mem_fetch`, `mem_import`, `mem_import_notion` and
-  `mem_import_obsidian` already take `force_unsafe` over MCP for content the
-  caller did not write. An importer run with it over the directory that holds
-  a blocked file indexes that content as an imported copy, so this decision
-  does not put flagged content out of an MCP caller's reach. They predate this
-  review and keep their parameter. Whether they should is a separate question
-  that this amendment does not settle; it settles only that the same shape is
-  not extended to `mem_index`.
+- **Not breadth.** MCP callers already hold valves. `mem_add` takes
+  `force_unsafe`, and so do `mem_fetch`, `mem_import`, `mem_import_notion` and
+  `mem_import_obsidian`, for content the caller did not write. This decision
+  therefore does not keep flagged content away from an MCP caller, and does
+  not claim to. Those tools keep their parameter. Whether they should is a
+  separate question that this amendment does not settle; it settles only that
+  `mem_index` does not become one more.
 - **Not the description budget.** A full budget would be a reason to make
   room, not a reason to decline.
 
-**Accepted consequence.** `mem_index` keeps refusing a reviewed false positive
-outside the two label rules. An agent with only MCP access that wants that
-source file indexed asks a person to do it from the CLI or the Web UI. The
-importer route above stays as it is.
+**Accepted consequence.** `mem_index` cannot perform this bypass: it keeps
+refusing a reviewed false positive outside the two label rules.
 
 **Reopen trigger.** MCP callers gain an approval they cannot give themselves,
 for example an elicitation that the client's user answers. A valve bound to
@@ -917,12 +911,8 @@ These were considered when drafting and folded into the leaning above:
 
 - `packages/memtomem/src/memtomem/server/tools/indexing.py` — `mem_index`,
   whose signature has no `force_unsafe`.
-- `packages/memtomem/src/memtomem/indexing/privacy_gate.py` —
-  `privacy_remedy`, the sentence each surface gets after a privacy refusal.
 - `packages/memtomem/tests/test_mutation_refusal_remedy.py` —
-  `test_mem_index_takes_no_force_unsafe` pins the decision;
-  `test_mcp_calls_are_core_tools_with_real_parameters` pins that the MCP
-  remedy names the CLI bypass.
+  `test_mem_index_takes_no_force_unsafe` pins the decision.
 - Issue #2801 — the decision this review records.
 
 ### Memory bundle v4 export/restore clarification (2026-10-26)
