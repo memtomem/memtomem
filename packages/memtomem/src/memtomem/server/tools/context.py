@@ -1,4 +1,18 @@
-"""Tools: context_detect, context_init, context_generate, context_sync, context_diff, context_memory_migrate, context_artifact_migrate, context_artifact_transfer."""
+"""MCP context tools: ``mem_context_detect`` and ``mem_context_diff`` only.
+
+Both read; neither writes. Every context operation that writes (init, generate,
+sync, pull, memory and artifact migration, transfer, versions and labels) has
+no MCP tool; it runs from the CLI (``mm context ...``), and some also from the
+web UI. Those writes reach the agents' own configuration (hooks, skills,
+instruction files), and over MCP the caller is an agent: a consent flag it
+passes as a tool argument (``allow_host_writes``, ``confirm_project_shared``,
+``apply``) is not consent from the person. The CLI puts the same operation
+behind the client's own command approval.
+
+The functions below that are not decorated with ``@mcp.tool()`` /
+``@register`` are no longer part of any MCP surface and are kept only until
+their removal; do not register them again.
+"""
 
 from __future__ import annotations
 
@@ -288,9 +302,7 @@ def _settings_dup_tier_warnings(root: Path, active_scope: str) -> list[str]:
     return lines
 
 
-@mcp.tool()
 @tool_handler
-@register("context")
 async def mem_context_init(
     include: str = "",
     overwrite: bool = False,
@@ -591,9 +603,9 @@ async def mem_context_detect(
         include_runtimes: Also report read-only provider-client registration
             status (Claude / Antigravity / Codex / Kimi; ADR-0021 §B). A
             separate boolean on purpose — it is NOT part of the ``include``
-            set, so the shared sync/generate/init/diff include contract is
-            never widened (``mem_context_sync(include="runtimes")`` still
-            rejects).
+            set, so the include contract shared with ``mem_context_diff``
+            and ``mm context sync`` / ``generate`` / ``init`` is never
+            widened (``mm context sync --include=runtimes`` still rejects).
     """
     from memtomem.context.detector import (
         detect_agent_dirs,
@@ -690,9 +702,7 @@ async def mem_context_detect(
     return "\n".join(lines) if lines else "Nothing detected."
 
 
-@mcp.tool()
 @tool_handler
-@register("context")
 async def mem_context_generate(
     agent: str = "all",
     include: str = "",
@@ -936,11 +946,10 @@ async def mem_context_diff(
         scope: ADR-0011 canonical artifact tier for the skills / agents /
             commands diff (``project_shared`` default, ``user``, or
             ``project_local``). The same value is also forwarded as the
-            ADR-0010 host-write target-scope override for ``settings``,
-            mirroring ``mem_context_generate`` / ``mem_context_sync``
-            (``cli/context_cmd.py:963-987``). MCP has no cwd to infer
-            from, so callers must pass ``scope`` explicitly to target a
-            non-default tier.
+            ADR-0010 target-scope override for the ``settings`` comparison,
+            as ``mm context generate`` / ``sync`` resolve it. MCP has no cwd
+            to infer from, so callers must pass ``scope`` explicitly to
+            target a non-default tier.
     """
     from memtomem.context.agents import diff_agents
     from memtomem.context.commands import diff_commands
@@ -1054,9 +1063,7 @@ async def mem_context_diff(
     return "\n".join(lines) if lines else "Nothing to compare."
 
 
-@mcp.tool()
 @tool_handler
-@register("context")
 async def mem_context_sync(
     include: str = "",
     strict: bool = False,
@@ -1300,9 +1307,7 @@ async def mem_context_sync(
 _KNOWN_MEMORY_SCOPES: frozenset[str] = frozenset({"user", "project_shared", "project_local"})
 
 
-@mcp.tool()
 @tool_handler
-@register("context")
 async def mem_context_memory_migrate(
     source: str,
     from_scope: str,
@@ -1571,9 +1576,7 @@ def _format_artifact_scope_result(result: MigrateScopeResult, *, apply_: bool) -
     return "\n".join(lines)
 
 
-@mcp.tool()
 @tool_handler
-@register("context")
 async def mem_context_artifact_migrate(
     asset_type: str = "",
     name: str = "",
@@ -1983,9 +1986,7 @@ def _resolve_transfer_destination(to_project: str, src_root: Path) -> tuple[Path
     return scope.root, ""
 
 
-@mcp.tool()
 @tool_handler
-@register("context")
 async def mem_context_artifact_transfer(
     asset_type: str = "",
     name: str = "",
@@ -2483,9 +2484,7 @@ def _format_label_result(headline: str, manifest: VersionsManifest) -> str:
     return f"{headline}\nLabels:\n{body}"
 
 
-@mcp.tool()
 @tool_handler
-@register("context")
 async def mem_context_version(
     artifact_type: str,
     name: str,
@@ -2734,9 +2733,7 @@ async def mem_context_version(
     )
 
 
-@mcp.tool()
 @tool_handler
-@register("context")
 async def mem_context_promote(
     artifact_type: str,
     name: str,
@@ -3088,9 +3085,7 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
     )
 
 
-@mcp.tool()
 @tool_handler
-@register("context")
 async def mem_context_pull(
     kind: str = "",
     name: str = "",

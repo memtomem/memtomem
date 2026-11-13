@@ -7,8 +7,6 @@ tool against real two-project filesystem layouts (not mocked) through the
 ``.git`` + isolated-``HOME`` fixture the CLI transfer tests use
 (``test_cli_context_transfer.py``), and pin:
 
-* registry classification: registered via ``@register("context")``, routed by
-  ``mem_do``, NOT one of the frozen core-9;
 * the full validation-gate set mirrors the CLI dispatch (mcp-servers branch
   gates first, names validated before any path probe);
 * ``apply=False`` (the default) never mutates and never gates;
@@ -29,9 +27,7 @@ from pathlib import Path
 import pytest
 
 from memtomem.context.projects import KnownProjectsStore, ProjectScope, compute_scope_id
-from memtomem.server.tool_registry import ACTIONS
 from memtomem.server.tools.context import mem_context_artifact_transfer
-from memtomem.server.tools.meta import mem_do
 
 _SECRET_LITERAL = "AKIA1234567890ABCDEF"  # AWS-key shape — caught by the privacy scan
 
@@ -111,38 +107,11 @@ def _seed_mcp_server(projects: dict[str, Path], root_key: str = "a", name: str =
 # ── registry classification (#1283 acceptance) ───────────────────────────
 
 
-def test_action_registered_in_context_category() -> None:
-    """Registered via @register outside the frozen core-9; mem_do dispatches
-    by the ``mem_``-stripped name."""
-    assert "context_artifact_transfer" in ACTIONS
-    assert ACTIONS["context_artifact_transfer"].category == "context"
-    # Param surface is the documented one (registry parses the Args section).
-    assert set(ACTIONS["context_artifact_transfer"].param_docs) == {
-        "asset_type",
-        "name",
-        "mode",
-        "from_scope",
-        "to_scope",
-        "to_project_scope_id",
-        "as_name",
-        "apply",
-        "confirm_project_shared",
-        "allow_host_writes",
-    }
-
-
 def test_action_not_in_core_nine() -> None:
     from memtomem.server import _CORE_TOOLS
 
     assert "mem_context_artifact_transfer" not in _CORE_TOOLS
     assert len(_CORE_TOOLS) == 9  # the frozen default set stays frozen
-
-
-@pytest.mark.anyio
-async def test_mem_do_routes_the_action(projects) -> None:
-    out = await mem_do(action="context_artifact_transfer", params={"asset_type": "agents"})
-    # The action's own validation message proves the registry dispatch ran.
-    assert "mode must be 'copy' or 'move'" in out
 
 
 # ── validation gates (mirror the CLI dispatch) ───────────────────────────

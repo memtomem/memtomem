@@ -191,23 +191,9 @@ class TestContextSurfacePosture:
     absence, so adding a verb later must consciously flip this test rather than
     slip in unnoticed."""
 
-    # The 10 @register("context") actions. (v0.5.0/#1619 retired the
-    # @mcp.tool()-only mem_context_migrate alias, which was never in ACTIONS.)
-    _EXPECTED_CONTEXT_ACTIONS = frozenset(
-        {
-            "context_init",
-            "context_detect",
-            "context_generate",
-            "context_diff",
-            "context_sync",
-            "context_memory_migrate",
-            "context_artifact_migrate",
-            "context_artifact_transfer",
-            "context_version",
-            "context_promote",
-            "context_pull",
-        }
-    )
+    # The 2 @register("context") actions: both read. No context write is on
+    # MCP (test_context_writes_off_mcp.py pins the removed names).
+    _EXPECTED_CONTEXT_ACTIONS = frozenset({"context_detect", "context_diff"})
 
     def test_registered_context_actions_are_exactly_the_expected_set(self):
         registered = {name for name, info in ACTIONS.items() if info.category == "context"}

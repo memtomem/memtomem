@@ -18,8 +18,7 @@ sibling ``mem_context_artifact_migrate`` tests use, and pin:
 * Gate A privacy scan on ``create`` — ``project_shared`` hard-refuses and
   nothing lands, ``user`` is permissive (mirrors the CLI ``version create``);
 * promote == rollback (pointer move), delete label, reserved + version-shaped
-  label rejection, promote-missing-version, delete+version contradiction;
-* ``mem_do`` routing via the canonical action name and the alias.
+  label rejection, promote-missing-version, delete+version contradiction.
 """
 
 from __future__ import annotations
@@ -419,40 +418,6 @@ async def test_promote_explicit_project_shared_confirm_gate(layout):
         "agents", "foo", label="production", version="v1", scope="project_shared"
     )
     assert out.startswith("needs confirmation")
-
-
-# ── mem_do routing ────────────────────────────────────────────────────────
-
-
-@pytest.mark.anyio
-async def test_mem_do_routes_version_and_promote(layout):
-    from memtomem.server.tools.meta import mem_do
-
-    _seed_dir(layout, "agents", "foo")
-    # Canonical action name ``context_version`` (there is no "version" alias —
-    # that name belongs to mem_version, the protocol-negotiation action).
-    created = await mem_do(
-        "context_version", {"artifact_type": "agents", "name": "foo", "action": "create"}
-    )
-    assert created.startswith("Created")
-    # Surviving discoverability alias ``promote`` → ``context_promote``.
-    promoted = await mem_do(
-        "promote",
-        {"artifact_type": "agents", "name": "foo", "label": "production", "version": "v1"},
-    )
-    assert "production → v1" in promoted
-
-
-@pytest.mark.anyio
-async def test_mem_do_routes_enable(layout):
-    from memtomem.server.tools.meta import mem_do
-
-    _seed_flat(layout, "agents", "flatone")
-    out = await mem_do(
-        "context_version",
-        {"artifact_type": "agents", "name": "flatone", "action": "enable"},
-    )
-    assert out.startswith("Adopted")
 
 
 # ── label-aware deploy (mem_context_sync / mem_context_generate --label) ────
