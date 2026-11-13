@@ -91,11 +91,14 @@ def attribute_append(
     * ``merged``: chunks touch the appended text, but at least one also holds
       lines from before it (a short entry merged into the previous section, an
       entry header that lands in the previous section's chunk, overlap
-      borrowed from the chunk before).
+      borrowed in either direction across the boundary).
+
+    A chunk touches the appended text by its span or by a line it borrowed.
     * ``unverified``, with no ids: the file is not the expected text (another
       writer's bytes are in it), the appended text is blank or starts
-      mid-line, no chunk touches it, a chunk's line range is unknown, or a
-      touching chunk was not committed.
+      mid-line, no chunk touches it, a chunk's line range is unknown, a chunk
+      carries overlap with no record of its source lines, or a touching chunk
+      was not committed.
     """
     if content != region.expected_text:
         return (), "unverified"
@@ -117,11 +120,15 @@ def attribute_append(
     # cannot be told apart by line, so the boundary cannot be placed.
     if first > 0 and content[first - 1] != "\n":
         return (), "unverified"
-    touching = [
-        chunk
+    # Overlap copies text between neighbours, and ``line_map`` records where
+    # each borrowed line came from. A chunk that carries overlap without one (a
+    # fragment the token budget cut) could hold the append's text unseen.
+    if any(
+        chunk.line_map is None and (chunk.metadata.overlap_before or chunk.metadata.overlap_after)
         for chunk in chunks
-        if chunk.metadata.start_line <= last_line and chunk.metadata.end_line >= first_line
-    ]
+    ):
+        return (), "unverified"
+    touching = [chunk for chunk in chunks if _touches(chunk, first_line, last_line)]
     if not touching:
         return (), "unverified"
     if any(chunk.id not in committed_ids for chunk in touching):
@@ -131,6 +138,17 @@ def attribute_append(
     return ids, "exact" if all(_within(c, first_line, last_line) for c in touching) else "merged"
 
 
+def _touches(chunk: Chunk, first_line: int, last_line: int) -> bool:
+    """Whether ``chunk`` holds any line of ``[first_line, last_line]``.
+
+    By its span, or by a line it borrowed as overlap: the chunk before the
+    append can carry the append's first lines without its span reaching them.
+    """
+    if chunk.metadata.start_line <= last_line and chunk.metadata.end_line >= first_line:
+        return True
+    return any(first_line <= abs(n) <= last_line for n in chunk.source_line_map() if n)
+
+
 def _within(chunk: Chunk, first_line: int, last_line: int) -> bool:
     """Whether every source line ``chunk`` holds lies in ``[first_line, last_line]``.
 
@@ -138,8 +156,5 @@ def _within(chunk: Chunk, first_line: int, last_line: int) -> bool:
     into this one, and ``line_map`` records them as negative source lines.
     """
     if not (chunk.metadata.start_line >= first_line and chunk.metadata.end_line <= last_line):
-        return False
-    if chunk.line_map is None and chunk.metadata.overlap_before:
-        # Borrowed text with no record of where it came from.
         return False
     return all(first_line <= abs(n) <= last_line for n in chunk.source_line_map() if n)

@@ -195,10 +195,17 @@ class TestMerged:
         path.write_text("## Old\n\nzqold body", encoding="utf-8")
         await engine.index_file(path, ingress_guarded=True)
 
-        stats = await _append(engine, path, "zqnew body.", title="New")
+        stats = await _append(engine, path, "zqnew body.", title="New", tags=["t"])
 
-        new = [c for c in await _rows(comp, path) if "zqnew" in c.content]
-        assert any("zqold" in c.content for c in new)
+        rows = await _rows(comp, path)
+        holding_new = sorted(
+            (c for c in rows if "zqnew" in c.content), key=lambda c: c.metadata.start_line
+        )
+        # Both directions: the entry's chunk borrows the old line, and the old
+        # chunk borrows the entry's first line, so both hold the append.
+        assert len(holding_new) == 2
+        assert any("zqold" in c.content for c in holding_new)
+        assert stats.appended_chunk_ids == tuple(c.id for c in holding_new)
         assert stats.appended_attribution == "merged"
 
 
@@ -330,10 +337,23 @@ class TestAttributeAppend:
         b.line_map = (-3, 0, 5, 6, 7)
         assert attribute_append(self.TEXT, self._region(), [b], {b.id}) == ((b.id,), "merged")
 
-    def test_borrowed_text_without_a_line_map_is_merged(self):
-        b = _chunk(5, 7)
-        b.metadata = dataclasses.replace(b.metadata, overlap_before=4)
-        assert attribute_append(self.TEXT, self._region(), [b], {b.id}) == ((b.id,), "merged")
+    def test_a_chunk_before_that_borrowed_the_appended_line(self):
+        a, b = _chunk(1, 3), _chunk(5, 7)
+        a.line_map = (1, 2, 3, 0, -5)
+        assert attribute_append(self.TEXT, self._region(), [a, b], {a.id, b.id}) == (
+            (a.id, b.id),
+            "merged",
+        )
+
+    @pytest.mark.parametrize("field", ["overlap_before", "overlap_after"])
+    def test_overlap_with_no_record_of_its_lines(self, field):
+        # Anywhere in the file: a chunk before the append may hold its text.
+        a, b = _chunk(1, 3), _chunk(5, 7)
+        a.metadata = dataclasses.replace(a.metadata, **{field: 4})
+        assert attribute_append(self.TEXT, self._region(), [a, b], {a.id, b.id}) == (
+            (),
+            "unverified",
+        )
 
     def test_a_mid_line_start(self):
         text = "before after\n"
