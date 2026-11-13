@@ -369,6 +369,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **The LangGraph stores' write guard now reads the strings inside a value as they are
+  stored (#3300).** `MemtomemBaseStore` (0.3.9 through 0.7.8) and `MemtomemHybridStore`
+  (0.6.0 through 0.7.8) scanned a value only in its JSON-serialized form, where `"` reads
+  `\"` and a newline reads `\n`. A rule that needs a literal quote or whitespace, such as the
+  quoted-label rule (`{"password": "…"}` inside a string) or a PEM header split across lines,
+  then did not match, and the store kept and returned the string verbatim: in every scope,
+  `project_shared` included, and without `force_unsafe`. Provider-prefixed tokens were still
+  caught. Both guards now also scan every key and string of the value raw
+  (`privacy.value_scan_parts`), so such a write is refused, or with `force_unsafe` outside
+  `project_shared` written as before. `MemtomemBaseStore` now separates the parts it scans
+  the way the hybrid store does, so a label in one identifier no longer pairs with the next
+  identifier. Records written before this release are not re-scanned.
 - **`mem_import_notion` no longer writes a ZIP member outside the output directory on
   Windows (#3299).** From 0.3.6 through 0.7.8 the member-name check asked only whether the
   name was absolute on the host or had a `..` part. On Windows a name with a root but no
