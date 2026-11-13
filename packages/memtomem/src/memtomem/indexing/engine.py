@@ -48,6 +48,7 @@ from memtomem.errors import (
 )
 from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
+from memtomem.indexing.append_attribution import AppendRegion, Attribution, attribute_append
 from memtomem.indexing.redaction_exemption import declared_exemption, indexer_text
 from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint, digest
 from memtomem.memory_scope import project_tier_dir, project_tier_is_relinked
@@ -367,6 +368,10 @@ class _IndexFileBase(TypedDict):
 
 class IndexFileResult(_IndexFileBase, total=False):
     new_chunk_ids: list[UUID]
+    # The chunks an ``append_region`` caller's append became, and how cleanly
+    # (#3292). Present only on the success return of such a call.
+    appended_chunk_ids: list[UUID]
+    appended_attribution: Attribution
     # Ordered same-string subset of ``errors`` whose underlying exception is
     # typed retryable. Optional so every historical zero/permanent return shape
     # remains valid.
@@ -1198,6 +1203,7 @@ class IndexEngine:
         index_roots: IndexRoots | None = None,
         purge_key: str | None = None,
         relink_key: str | None = None,
+        append_region: AppendRegion | None = None,
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
@@ -1272,6 +1278,7 @@ class IndexEngine:
                     index_roots=index_roots,
                     purge_key=purge_key,
                     relink_key=relink_key,
+                    append_region=append_region,
                 )
             except PrivacyRejection as exc:
                 await self._hold_blocked_source(path, exc)
@@ -1596,6 +1603,7 @@ class IndexEngine:
         new_source_namespace: str | None = None,
         purge_if_excluded: bool = False,
         hold_if_relinked: bool = False,
+        append_region: AppendRegion | None = None,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
 
@@ -1697,6 +1705,17 @@ class IndexEngine:
         same (#2907). Every other caller keeps the default and indexes through
         the link (#3164).
 
+        ``append_region`` is for a caller that has just appended to the file
+        under its sidecar lock and needs to know which chunks its append
+        became (#3292); build it with
+        :func:`~memtomem.indexing.append_attribution.append_region` from the
+        pre-image it read under that lock. ``new_chunk_ids`` cannot answer
+        that: it covers the whole file's re-index and misses a chunk that kept
+        an existing id. The answer is judged from the text this call read and
+        chunked, and only when that text is the expected one, so another
+        writer's bytes anywhere in the file make it ``unverified``. See
+        ``IndexingStats.appended_chunk_ids``.
+
         If ``file_path`` is missing or inaccessible, its existing chunks are
         held outside search until recovery or explicit cleanup (#2498). A
         present nonregular replacement is positively known to be no longer an
@@ -1772,6 +1791,7 @@ class IndexEngine:
                 new_source_namespace=new_source_namespace,
                 purge_key=purge_key,
                 relink_key=relink_key,
+                append_region=append_region,
             )
         tally = _NamespaceTally()
         decision = result.get("namespace_decision")
@@ -1810,6 +1830,8 @@ class IndexEngine:
             excluded_files=1 if result.get("excluded") else 0,
             relinked_files=1 if result.get("relinked") else 0,
             current_files=1 if result.get("current") else 0,
+            appended_chunk_ids=tuple(result.get("appended_chunk_ids", ())),
+            appended_attribution=result.get("appended_attribution", "unverified"),
         )
 
     async def _hold_relinked_key(self, own_key: str) -> bool:
@@ -2498,6 +2520,7 @@ class IndexEngine:
         index_roots: IndexRoots | None = None,
         purge_key: str | None = None,
         relink_key: str | None = None,
+        append_region: AppendRegion | None = None,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]), and resolved_namespace (str | None) when
@@ -2857,6 +2880,9 @@ class IndexEngine:
             and not self._config.enrich_chunk_context
             and not self._config.auto_summarize
             and not held_scope_lost
+            # A receipt hit skips chunking, so it could not say which chunks
+            # an append became.
+            and append_region is None
         ):
             receipt_policy = digest(
                 {
@@ -3420,6 +3446,29 @@ class IndexEngine:
         }
         if unchanged_ids:
             result["unchanged_chunk_ids"] = unchanged_ids
+        if append_region is not None:
+            # Judged against the text that was chunked. ``chunk_content`` stamps
+            # every chunk of a masked projection with its redaction count, and
+            # masked chunks hold other text than ``content``, so the append
+            # stays unverified. Read from the chunks rather than ``projection``:
+            # they are what was chunked, whichever projection produced them.
+            # Only Markdown spans are judged: other chunkers decode virtual
+            # lines or keep a scalar's span for every fragment of it.
+            from memtomem.chunking.markdown import MarkdownChunker
+
+            appended_ids: tuple[UUID, ...] = ()
+            attribution: Attribution = "unverified"
+            if isinstance(self._registry.get(file_path.suffix), MarkdownChunker) and not any(
+                chunk.metadata.redaction_count for chunk in new_chunks
+            ):
+                committed = persisted_upsert_ids | {
+                    chunk.id for chunk in diff_result.unchanged + diff_result.metadata_only
+                }
+                appended_ids, attribution = attribute_append(
+                    content, append_region, new_chunks, committed
+                )
+            result["appended_chunk_ids"] = list(appended_ids)
+            result["appended_attribution"] = attribution
         if persisted_upserts:
             result["resolved_namespace"] = resolved_ns
         if exempted:

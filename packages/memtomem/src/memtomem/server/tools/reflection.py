@@ -204,8 +204,9 @@ async def mem_reflect_save(
         if insight_id is None:
             logger.warning(
                 "mem_reflect_save: could not tell which chunk holds the insight "
-                "(%d new chunk ids); related chunks not linked",
-                len(stats.new_chunk_ids),
+                "(%d appended chunk ids, %s); related chunks not linked",
+                len(stats.appended_chunk_ids),
+                stats.appended_attribution,
             )
             result += f"\n- {_UNLINKED_NOTICE}"
         else:
@@ -240,33 +241,25 @@ _UNLINKED_NOTICE = (
 async def _own_insight_chunk_id(app, stats, appended: list[str]):
     """The id of the chunk this save's insight became, or ``None`` when unsure.
 
-    ``stats.new_chunk_ids`` is every chunk the re-index of the whole file
-    upserted, not only this entry's, so it cannot be read as "the insight"
-    on its own (#3273). The newest row in the store is worse: any concurrent
-    write elsewhere can be newer. Precise attribution needs the indexer to
-    report which chunks an append produced (#3292); until then this answers
-    only the unambiguous case:
+    ``stats.appended_chunk_ids`` names the chunks the append became, judged by
+    the indexer from the text it chunked (#3292), so a pending edit elsewhere
+    in the file, indexed in the same pass, is not among them, and a chunk that
+    kept an existing id because its content matched is. This links only when:
 
-    * the re-index upserted exactly one chunk, and
+    * the append became exactly one chunk, and
     * the appended block, projected on its own the way the re-index chunks a
       file (same chunker, merging and bounding), is one non-empty chunk whose
       content that chunk contains: equal when the entry stands alone, a
       superset when a short entry merged into the section before it.
 
-    Anything else (an insight split into several chunks, a pending edit to the
-    file indexed with it that adds another new chunk, a merge that adds a
-    heading between the entry's parts) is saved but not linked.
-
-    Known gap: when a pending edit leaves another chunk holding the whole
-    insight text and the insight matches an existing chunk, the insight keeps
-    that chunk's id and the other chunk is the only new one, so it is linked.
-    Telling them apart needs the attribution #3292 asks for.
+    Anything else (an insight split into several chunks, a file another writer
+    changed between the append and the re-index) is saved but not linked.
     """
     from memtomem.indexing.privacy_gate import _read_text_view
 
-    if len(appended) != 1 or len(stats.new_chunk_ids) != 1:
+    if len(appended) != 1 or len(stats.appended_chunk_ids) != 1:
         return None
-    chunk = await resolve_chunk(app, stats.new_chunk_ids[0])
+    chunk = await resolve_chunk(app, stats.appended_chunk_ids[0])
     if chunk is None:
         return None
     # The re-index reads the file with universal newlines; project what it read.
