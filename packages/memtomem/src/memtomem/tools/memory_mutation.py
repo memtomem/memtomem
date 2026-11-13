@@ -40,6 +40,7 @@ from memtomem.source_provenance import (
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceChangedError,
+    WrittenSource,
     read_pre_image,
     read_with_source_key,
     restore_pre_image_quietly,
@@ -272,9 +273,10 @@ async def mutate_source_and_reindex(
         valve_text = rewrite_valve_text(pre_image.data, written) if force_unsafe else None
         # An exclusion installed since the check above would make the engine
         # skip the file and leave the pre-edit chunks beside the new bytes; the
-        # purge judges it again under the locks (#3163). A file replaced by a
-        # symlink since the write, after the relinked-key refusal above, is held
-        # rather than indexed through the link (#3172).
+        # purge judges it again under the locks (#3163). A path that stopped
+        # holding the rewritten file since the write, after the relinked-key
+        # refusal above, is held rather than indexed as this edit (#3172): the
+        # engine reads the file the rewrite went through, by identity (#3320).
         return await index_engine.index_file(
             source_file,
             ingress_guarded=True,
@@ -282,7 +284,7 @@ async def mutate_source_and_reindex(
             valve_text=valve_text,
             lock_held=True,
             purge_if_excluded=True,
-            hold_if_relinked=True,
+            written_source=WrittenSource(source_path, pre_image.identity),
         )
     except Exception as exc:
         if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:

@@ -1062,9 +1062,11 @@ async def add_memory(
                     namespace=write_ns,
                     ingress_guarded=True,
                     force_unsafe=needs_valve,
-                    valve_text=appended_valve_text(judged.data, appended) if needs_valve else None,
+                    valve_text=(
+                        appended_valve_text(judged.data, appended.text) if needs_valve else None
+                    ),
                     lock_held=True,
-                    hold_if_relinked=judged.leaf_own,
+                    written_source=appended.source,
                 )
             except PrivacyRejection as exc:
                 # The entry is on disk; its result may not be indexed (a title

@@ -275,7 +275,7 @@ async def _cmd_add(comp, args: list[str]) -> None:
                 click.secho(refusal.removeprefix("Error: "), fg="red")
                 return
             try:
-                append_entry(target, content, judged=judged)
+                appended = append_entry(target, content, judged=judged)
             except SourceChangedError:
                 refusal = await refuse_changed_append(comp.index_engine, target, judged, op="add")
                 comp.search_pipeline.invalidate_cache()
@@ -283,7 +283,7 @@ async def _cmd_add(comp, args: list[str]) -> None:
                 return
             try:
                 stats = await comp.index_engine.index_file(
-                    target, ingress_guarded=True, lock_held=True, hold_if_relinked=judged.leaf_own
+                    target, ingress_guarded=True, lock_held=True, written_source=appended.source
                 )
             except PrivacyRejection as exc:
                 comp.search_pipeline.invalidate_cache()

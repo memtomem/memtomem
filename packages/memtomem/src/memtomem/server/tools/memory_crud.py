@@ -49,6 +49,7 @@ from memtomem.tools.memory_writer import (
     EditBaseMismatchError,
     RestoreOutcome,
     SourceChangedError,
+    WrittenSource,
     read_pre_image,
     read_with_source_key,
     restore_pre_image_quietly,
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from memtomem.models import Chunk, ChunkMetadata, IndexingStats
-    from memtomem.tools.memory_writer import JudgedSource, PreImage, Rewrite
+    from memtomem.tools.memory_writer import Appended, JudgedSource, PreImage, Rewrite
 
 logger = logging.getLogger(__name__)
 
@@ -635,9 +636,10 @@ async def _mutate_file_and_reindex(
         # ``exclude_patterns`` is runtime-mutable: one installed since would
         # make the engine skip the file and leave the pre-edit chunks beside
         # the new bytes. The purge judges it again under the locks (#3163).
-        # A file replaced by a symlink since the write, which the caller's
-        # relinked-key refusal (#2923) could not see, is held rather than
-        # indexed through the link (#3172).
+        # A path that stopped holding the rewritten file since the write,
+        # which the caller's relinked-key refusal (#2923) could not see, is
+        # held rather than indexed as this edit (#3172). The engine reads the
+        # file the rewrite went through, by identity, or nothing (#3320).
         stats = await app.index_engine.index_file(
             source_file,
             ingress_guarded=True,
@@ -645,7 +647,7 @@ async def _mutate_file_and_reindex(
             valve_text=valve_text,
             lock_held=True,
             purge_if_excluded=True,
-            hold_if_relinked=True,
+            written_source=WrittenSource(source_path, pre_image.identity),
         )
         app.search_pipeline.invalidate_cache()
         await flag_untracked_write(app, provenance_session_id)
@@ -1274,7 +1276,7 @@ async def _mem_add_core(
                             await _release_idempotency_claim(app, "mem_add", idempotency_key)
                         raise
                     if on_appended is not None:
-                        on_appended(appended)
+                        on_appended(appended.text)
                     # Re-index the whole file via the standard pipeline so the watcher
                     # (which also calls index_file) produces identical hashes → no dups.
                     # The append is already durable, so a failure here leaves
@@ -1292,16 +1294,18 @@ async def _mem_add_core(
                             # Bound to the judged file plus this append: the
                             # valve covers nothing another writer added since.
                             valve_text=(
-                                appended_valve_text(judged.data, appended) if needs_valve else None
+                                appended_valve_text(judged.data, appended.text)
+                                if needs_valve
+                                else None
                             ),
                             lock_held=True,
-                            # A file that was a link when read is indexed through it,
-                            # as before; one that was not is held, not followed, if it
-                            # became one after the append.
-                            hold_if_relinked=judged.leaf_own,
+                            # The engine reads the file the append went through,
+                            # by identity, or nothing: a path that stopped holding
+                            # it since is held, not followed (#3320).
+                            written_source=appended.source,
                             # ``judged.data`` was read under this lock right before
                             # the append, so the engine can say which chunks it became.
-                            append_region=append_region(judged.data, appended),
+                            append_region=append_region(judged.data, appended.text),
                         )
                     except PrivacyRejection as exc:
                         # The entry is on disk and the result may not be indexed
@@ -2301,9 +2305,9 @@ async def mem_batch_add(
 
     assert target is not None
 
-    def _append_entries(path: Path, judged: JudgedSource) -> tuple[int, str]:
+    def _append_entries(path: Path, judged: JudgedSource) -> tuple[int, Appended]:
         """Append all non-empty entries in ONE write; returns the skipped
-        count and the text appended. Composing every block up front and doing a single append
+        count and what was appended. Composing every block up front and doing a single append
         makes the batch all-or-nothing (issue #1573) — a mid-batch failure
         can no longer leave entries ``0..k-1`` stranded on disk. Runs in one
         worker thread so formatting up to 500 blocks doesn't block the loop.
@@ -2444,10 +2448,12 @@ async def mem_batch_add(
                             # Bound to the judged file plus this append: the
                             # valve covers nothing another writer added since.
                             valve_text=(
-                                appended_valve_text(judged.data, appended) if needs_valve else None
+                                appended_valve_text(judged.data, appended.text)
+                                if needs_valve
+                                else None
                             ),
                             lock_held=True,
-                            hold_if_relinked=judged.leaf_own,
+                            written_source=appended.source,
                         )
                     except PrivacyRejection as exc:
                         # The entry is on disk and the result may not be indexed
@@ -2462,7 +2468,7 @@ async def mem_batch_add(
                         await mark_provenance_incomplete(app, provenance_session_id)
                         raise
                     await _flag_imprecise_write(
-                        app, provenance_session_id, stats, appended=bool(appended)
+                        app, provenance_session_id, stats, appended=bool(appended.text)
                     )
                     display_ns = await _written_namespace_label(app, target, effective_ns, stats)
                     result = (
@@ -2474,9 +2480,9 @@ async def mem_batch_add(
                         result += f"\n- Skipped: {skipped} entries (empty content)"
                     # Part of the stored base result, as in ``_mem_add_core`` (#3165).
                     # Not for a batch of only empty entries: it appended nothing.
-                    if stats.excluded_files and appended:
+                    if stats.excluded_files and appended.text:
                         result += f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}"
-                    if stats.relinked_files and appended:
+                    if stats.relinked_files and appended.text:
                         result += "\n- " + relinked_after_write_notice(
                             "batch", fold_path_form(str(judged.source_path))
                         )

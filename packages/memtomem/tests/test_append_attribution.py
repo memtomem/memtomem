@@ -31,7 +31,7 @@ async def _append(engine, path: Path, content: str, *, between=None, **entry):
     """Append like the memory tools do, then index with the append's region."""
     judged = read_for_append(path)
     pre = judged.data
-    appended = append_entry(path, content, **entry, judged=judged)
+    appended = append_entry(path, content, **entry, judged=judged).text
     if between is not None:
         between(path)
     return await engine.index_file(
@@ -128,7 +128,7 @@ class TestAttributed:
         comp, engine, path = stack
         judged = read_for_append(path)
         pre = judged.data
-        appended = append_entry(path, "zqns entry body.", title="NS", judged=judged)
+        appended = append_entry(path, "zqns entry body.", title="NS", judged=judged).text
 
         stats = await engine.index_file(
             path,
@@ -149,7 +149,7 @@ class TestAttributed:
         comp, engine, path = stack
         judged = read_for_append(path)
         pre = judged.data
-        appended = append_entry(path, "zqreceipt entry body.", title="Receipt", judged=judged)
+        appended = append_entry(path, "zqreceipt entry body.", title="Receipt", judged=judged).text
         await engine.index_file(path)
         again = await engine.index_file(path)
         assert again.indexed_chunks == 0
@@ -170,7 +170,7 @@ class TestAttributed:
         await engine.index_file(path, ingress_guarded=True)
         judged = read_for_append(path)
         pre = judged.data
-        appended = append_blocks(path, [lead + "## B\n\nzqb body\n"], judged=judged)
+        appended = append_blocks(path, [lead + "## B\n\nzqb body\n"], judged=judged).text
 
         stats = await engine.index_file(
             path, ingress_guarded=True, append_region=append_region(pre, appended)
@@ -252,7 +252,7 @@ class TestMerged:
         await engine.index_file(path, ingress_guarded=True)
         judged = read_for_append(path)
         pre = judged.data
-        appended = append_blocks(path, ["\nzqbody text\n"], judged=judged)
+        appended = append_blocks(path, ["\nzqbody text\n"], judged=judged).text
 
         stats = await engine.index_file(
             path, ingress_guarded=True, append_region=append_region(pre, appended)
@@ -278,7 +278,7 @@ class TestUnverified:
         engine._config.min_chunk_tokens = 0
         judged = read_for_append(path)
         pre = judged.data
-        appended = append_entry(path, "zqtwin body.", title="Twin", judged=judged)
+        appended = append_entry(path, "zqtwin body.", title="Twin", judged=judged).text
         append_blocks(path, [appended], judged=read_for_append(path))
 
         stats = await engine.index_file(
@@ -331,7 +331,7 @@ class TestUnverified:
         await engine.index_file(path, ingress_guarded=True)
         judged = read_for_append(path)
         pre = judged.data
-        appended = append_blocks(path, [" and zqafter text\n"], judged=judged)
+        appended = append_blocks(path, [" and zqafter text\n"], judged=judged).text
 
         stats = await engine.index_file(
             path, ingress_guarded=True, append_region=append_region(pre, appended)
@@ -366,7 +366,7 @@ class TestUnverified:
         assert type(engine._registry.get(".rst")).__name__ != "MarkdownChunker"
         judged = read_for_append(rst)
         pre = judged.data
-        appended = append_blocks(rst, ["Title\n=====\n\nzqrst body.\n"], judged=judged)
+        appended = append_blocks(rst, ["Title\n=====\n\nzqrst body.\n"], judged=judged).text
 
         stats = await engine.index_file(
             rst, ingress_guarded=True, append_region=append_region(pre, appended)

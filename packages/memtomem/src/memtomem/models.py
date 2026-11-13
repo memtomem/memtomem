@@ -629,10 +629,12 @@ class IndexingStats:
     # ``deleted_chunks`` says how many (#3158). Appended last for positional
     # construction compatibility.
     excluded_files: int = 0
-    # 1 when ``index_file(hold_if_relinked=True)`` found the file it was handed
-    # replaced by a symlink: the chunks stored under the path's own key were
-    # held, and nothing was indexed through the link (#3164). Only that call
-    # sets it. Appended last for positional construction compatibility.
+    # 1 when ``index_file`` found the path no longer holding the file its
+    # caller wrote: the chunks stored under that file's key were held, and
+    # nothing was indexed in its place. Set by a call that names the written
+    # file (``written_source``, #3320: a link, or another file, at the path)
+    # and by ``hold_if_relinked=True`` (#3164: the leaf replaced by a
+    # symlink). Appended last for positional construction compatibility.
     relinked_files: int = 0
     # 1 when ``index_file`` left the file's stored chunks describing the content
     # it read: its chunk write committed (even if the AI summary refresh after
