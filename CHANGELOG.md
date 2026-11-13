@@ -144,6 +144,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   downloaded by an older huggingface-hub was not affected. In a read-only cache the links cannot
   be made and the load still fails; make the cache writable for the first load.
 
+- **A memory tool's append writes only to the file its privacy check judged (#3289).** Every
+  surface that appends an entry (`mem_add`, `mem_batch_add` and the tools built on them, `mm add`,
+  `mm agent share`, `mm review approve`, the shell's `add`, the Web UI's add and scratch promote,
+  and the LangGraph store) checks the file as it stands, then appends. A path replaced by a
+  symlink after that check was followed: the entry landed in the link's target, a file nobody
+  judged, and a forced entry aimed at a user file could land in a `project_shared` file with
+  neither `confirm_project_shared` nor the refusal of `force_unsafe` there applying. The append now
+  decides at the open. A file that existed is opened without creating it and must be the file
+  that was read, by identity on the open descriptor; a file that did not exist is created at the
+  path that was judged, walking its directories from the root by descriptor without following a
+  link. Otherwise nothing is written, the file that was read is held out of search as
+  `source_relinked`, and the tool says the path "was replaced after it was read". A file replaced
+  by a symlink after the append and before its re-index is held instead of having the link's
+  target indexed in its place, and the result says so. A memory file that is a symlink all
+  along, and a dangling symlink, keep working as before. Also refused now, with nothing written:
+  a new file's name taken by another process between the check and the write, and a FIFO put in
+  an existing file's place, which used to block the write while it held the file's lock. Not
+  covered: a replacement by another link to the same file; another process changing the file's
+  content in place in between; on filesystems that report no file identity, a file replaced and
+  put back around the open; on Windows, a directory on a new file's path replaced (a junction,
+  say), whether or not it is put back, and a refused create there can leave an empty file behind;
+  a link put, after the append, at a path that was already a link when read, which the re-index
+  still follows.
+
 - **A memory tool that finds its file's path replaced takes that file out of search (#3291).**
   When the path a memory tool read no longer leads to the same file by the time of its privacy
   check, the tool writes nothing ("now resolves to a different location than when it was read").
@@ -166,8 +190,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   write still judged what it stored, so nothing it refuses was stored. The check now uses the path
   resolved with the read, and when the path resolves somewhere else by the time of the check, the
   write is refused with nothing written ("now resolves to a different location than when it was
-  read"). A path that was already a symlink when read is judged through it, as before. Not
-  covered: a path replaced after this check and before the write.
+  read"). A path that was already a symlink when read is judged through it, as before. A path
+  replaced after this check and before the write is #3289's, above.
 
 - **Indexing judges a file under one resolution of its path (#3290).** The redaction check that
   every index pass runs took the file's stored key, then resolved the path again to choose the

@@ -381,11 +381,11 @@ async def test_search_applies_tag_filter_before_the_candidate_cap() -> None:
 def test_handoff_id_tag_round_trips_through_the_writer(tmp_path) -> None:
     """UUID-bearing tags must survive the ``> tags:`` blockquote writer."""
     from memtomem.chunking.markdown import MarkdownChunker
-    from memtomem.tools.memory_writer import append_entry
+    from helpers import append_judged
 
     target = tmp_path / "handoff.md"
     tag = f"handoff-id-{_TARGET_ID}"
-    append_entry(target, "objective: x\n", title="Handoff", tags=["handoff", tag])
+    append_judged(target, "objective: x\n", title="Handoff", tags=["handoff", tag])
 
     chunks = MarkdownChunker().chunk_file(target, target.read_text(encoding="utf-8"))
 
@@ -421,10 +421,10 @@ def _max_size_record(*, fenced: bool) -> str:
 def _chunk_at_min_size(tmp_path, record: str):
     from memtomem.chunking.markdown import MarkdownChunker
     from memtomem.config import IndexingConfig
-    from memtomem.tools.memory_writer import append_entry
+    from helpers import append_judged
 
     target = tmp_path / "handoff.md"
-    append_entry(
+    append_judged(
         target,
         record,
         title=f"Handoff {_TARGET_ID}",
@@ -692,10 +692,10 @@ def _e5_rows(tmp_path, record: str, config):
     """
     from memtomem.chunking.bounded import bound_chunks
     from memtomem.chunking.markdown import MarkdownChunker
-    from memtomem.tools.memory_writer import append_entry
+    from helpers import append_judged
 
     target = tmp_path / "handoff.md"
-    append_entry(
+    append_judged(
         target,
         record,
         title=f"Handoff {_TARGET_ID}",

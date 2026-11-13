@@ -33,7 +33,7 @@ from memtomem.storage import sqlite_helpers
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD, RELINKED_HOLD
 from memtomem.storage.sqlite_helpers import fold_path_form, norm_path
 from memtomem.tools import memory_writer
-from memtomem.tools.memory_writer import read_pre_image_or_empty, read_with_source_key
+from memtomem.tools.memory_writer import read_for_append
 from memtomem.web.app import create_app
 from memtomem.web.deps import require_configured
 
@@ -76,7 +76,8 @@ def _holds(comp) -> dict[str, str]:
 
 
 def _read(path: Path) -> tuple[bytes, Path]:
-    return read_with_source_key(read_pre_image_or_empty, path)
+    judged = read_for_append(path)
+    return judged.data, judged.source_path
 
 
 async def _indexed_doc_then_label(comp, pdir: Path) -> Path:
@@ -357,7 +358,7 @@ def test_a_read_whose_resolution_fails_keeps_the_given_path(tmp_path, monkeypatc
     monkeypatch.setattr(memory_writer, "resolve_path", fail)
     monkeypatch.setattr(sqlite_helpers, "resolve_path", fail)
 
-    data, source_path = read_with_source_key(read_pre_image_or_empty, path)
+    data, source_path = _read(path)
 
     assert data == _CLEAN_A.encode()
     assert source_path == path

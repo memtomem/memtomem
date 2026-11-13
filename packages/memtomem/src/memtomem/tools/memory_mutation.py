@@ -28,12 +28,15 @@ from memtomem.context._atomic import async_memory_file_lock
 from memtomem.errors import StorageError
 from memtomem.search.visibility import chunk_in_scope_boundary
 from memtomem.storage.sqlite_errors import is_writer_busy
+from memtomem.storage.sqlite_helpers import fold_path_form
 from memtomem.source_provenance import (
+    EXCLUDED_AFTER_APPEND_NOTICE,
     ExcludedSourceError,
     ReadOnlySourceError,
     SourceMissingError,
     StaleSourceProvenanceError,
     UnmanagedSourceError,
+    relinked_after_write_notice,
 )
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
@@ -51,7 +54,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from memtomem.models import Chunk, ChunkMetadata, IndexingStats
-    from memtomem.tools.memory_writer import PreImage
+    from memtomem.tools.memory_writer import JudgedSource, PreImage
 
 logger = logging.getLogger(__name__)
 
@@ -330,7 +333,7 @@ async def mutate_source_and_reindex(
 
 async def preflight_refusal(
     index_engine, path: Path, *, op: str, needs_valve: bool, surface: RemedySurface
-) -> tuple[str | None, bytes]:
+) -> tuple[str | None, JudgedSource]:
     """Ask the engine whether ``path`` may take a write; the refusal text if not.
 
     For memory tools that append to or edit a file and then re-index it. The
@@ -340,22 +343,56 @@ async def preflight_refusal(
     reviewed masking manifest, and a forced write (``needs_valve``) into a file
     that already holds something flagged or masked. ``None`` means write.
 
-    Also returns the bytes the preflight judged: a caller forwarding its valve
-    binds it to them (:func:`appended_valve_text`), not to a later re-read.
-    ``surface`` is the caller's, for the remedy the refusal names.
+    Also returns what the preflight judged (``memory_writer.read_for_append``).
+    The append takes it (``append_blocks(..., judged=)``) and writes only to
+    that file (#3289); a caller forwarding its valve binds it to its bytes
+    (:func:`appended_valve_text`), not to a later re-read. ``surface`` is the
+    caller's, for the remedy the refusal names.
     """
-    from memtomem.tools.memory_writer import read_pre_image_or_empty
+    from memtomem.tools.memory_writer import read_for_append
 
-    pre, source_path = await asyncio.to_thread(read_with_source_key, read_pre_image_or_empty, path)
+    judged = await asyncio.to_thread(read_for_append, path)
     preflight = await asyncio.to_thread(
-        index_engine.preflight_mutation, path, pre, source_path=source_path
+        index_engine.preflight_mutation, path, judged.data, source_path=judged.source_path
     )
     if preflight.rejection is not None:
         rejection = await index_engine.refuse_mutation(path, preflight)
-        return rejection.mutation_detail(op, outcome="not_written", surface=surface), pre
+        return rejection.mutation_detail(op, outcome="not_written", surface=surface), judged
     if preflight.relinked:
         await index_engine.hold_relinked_mutation(path, preflight)
-    return preflight.blocker(op, path.name, needs_valve=needs_valve), pre
+    return preflight.blocker(op, path.name, needs_valve=needs_valve), judged
+
+
+async def refuse_changed_append(index_engine, path: Path, judged: JudgedSource, *, op: str) -> str:
+    """Settle an append refused at its open (``memory_writer.SourceChangedError``, #3289).
+
+    The path stopped holding the file the preflight judged between the
+    preflight and the open, so nothing was written. That is the observation
+    :meth:`IndexEngine.hold_relinked_mutation` acts on, made later: the source
+    that was read is held under the read's key, whatever is at the path now.
+    Returns the refusal text, in the wording of the preflight's own
+    ``relinked`` refusal.
+    """
+    await index_engine.hold_relinked_source(path, fold_path_form(str(judged.source_path)))
+    return (
+        f"Error: {op} refused: {path.name} was replaced after it was read; nothing was "
+        "written. Try again."
+    )
+
+
+def append_warning(stats: IndexingStats, judged: JudgedSource) -> str | None:
+    """What an append that landed tells its caller when the re-index did not index it.
+
+    An exclusion installed between the append and its re-index (#3165), or
+    the file replaced by a symlink in that window, which the re-index holds
+    rather than following (#3289). The entry is on disk either way, so it is a
+    warning, not a failure: a failure would invite the caller to append it again.
+    """
+    if stats.excluded_files:
+        return EXCLUDED_AFTER_APPEND_NOTICE
+    if stats.relinked_files:
+        return relinked_after_write_notice("entry", fold_path_form(str(judged.source_path)))
+    return None
 
 
 def outcome_after_restore(restore: RestoreOutcome) -> MutationOutcome:
