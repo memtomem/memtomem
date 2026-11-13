@@ -438,8 +438,8 @@ async def mem_agent_share(
     app = await _get_app_initialized(ctx)
 
     # Idempotency claim first (issue #1573): the share's claim covers the copy
-    # as one unit and must precede ``_mem_add_core`` (on replay
-    # ``stats.new_chunk_ids`` is unavailable anyway). Unlike mem_add, a share
+    # as one unit and must precede ``_mem_add_core`` (on replay there are no
+    # ``stats`` to attribute the copy from anyway). Unlike mem_add, a share
     # has no target-file lock, so this global (tool, key) claim is its *only*
     # concurrency guard — a second same-key caller gets "pending" and does not
     # copy. Helpers are imported lazily — ``memory_crud`` imports from this
@@ -508,6 +508,7 @@ async def mem_agent_share(
     # means nothing landed and is released below.
     from memtomem.indexing.engine import PrivacyRejection
 
+    appended: list[str] = []
     try:
         result, stats = await _mem_add_core(
             content=chunk.content,
@@ -518,6 +519,7 @@ async def mem_agent_share(
             template=None,
             ctx=ctx,
             event_type="agent_share",
+            on_appended=appended.append,
         )
     except PrivacyRejection as exc:
         if exc.mutation_outcome != "appended":
@@ -532,45 +534,49 @@ async def mem_agent_share(
     # but structured queries (fanout / provenance walk / per-NS audit)
     # use ``chunk_links`` because that's what has a covering index.
     #
-    # ``stats.new_chunk_ids`` holds the UUIDs of chunks freshly upserted
-    # by this call. ``append_entry`` writes a single section so we
-    # normally see exactly one new chunk and ``[0]`` is the section head
-    # — the right representative for the share copy.
-    #
-    # Edge case the chunker can produce: ``_merge_short_chunks`` may
-    # fold a freshly-appended short entry *into* the previous trailing
-    # chunk of the daily file, in which case ``new_chunk_ids[0]`` is
-    # the re-merged chunk (old+new content) rather than a pure share
-    # copy. Same indexer behavior exposed by re-sharing into multiple
-    # namespaces on the same day; the link writer inherits it.
-    # Mitigating factors: the markdown ``shared-from=`` tag is still on
-    # the content so humans / tag-filter search still find it, and a
-    # future bump of ``_CHUNK_LINKS_BACKFILL_KEY`` (not done in this PR)
-    # would let a migration widen / re-derive links if we ever need to.
+    # The link targets the chunk the copy became, as the indexer attributes
+    # it to this append (#3315), not ``new_chunk_ids``: that covers the whole
+    # file's re-index, so it can hold a pending edit's chunk and misses a copy
+    # whose chunk kept an existing id. Only an ``exact`` attribution links. A
+    # short copy merged into the section before it is not a copy of the
+    # source, and a link on that chunk would make the neighbouring entry's
+    # next edit fail the engine's linked-identity guard (#3324).
     #
     # ``stats`` is ``None`` on the early-error paths of ``_mem_add_core``
     # (empty content, oversized, template failure) — those paths also
     # return an error message so the copy did not happen and there is
     # nothing to link.
-    if stats is not None and stats.new_chunk_ids:
+    if stats is not None:
+        from memtomem.server.tools._append_target import own_appended_chunk_id
+
+        # Best effort, like the link itself: the copy is durable by now, and
+        # an error here must not invite a retry that appends it again.
         try:
-            await app.storage.add_chunk_link(
-                source_id=uid,
-                target_id=stats.new_chunk_ids[0],
-                link_type="shared",
-                namespace_target=target,
-            )
+            copy_id = await own_appended_chunk_id(app, stats, appended, allow_merged=False)
         except Exception:
-            # Link recording is best-effort — the copy itself is durable
-            # via the markdown file and ``shared-from=`` tag, so a writer
-            # failure here must not surface to the user or roll the copy
-            # back. Log for diagnostic use.
-            logger.warning("chunk_links writer failed for share copy", exc_info=True)
-    elif stats is not None:
-        logger.warning(
-            "mem_agent_share: no new chunk UUID from mem_add — "
-            "skipping chunk_links writer (content_hash collision?)"
-        )
+            logger.warning("mem_agent_share: could not attribute the share copy", exc_info=True)
+            copy_id = None
+        if copy_id is None:
+            logger.warning(
+                "mem_agent_share: could not tell which chunk holds the share copy "
+                "(%d appended chunk ids, %s); chunk_links not recorded",
+                len(stats.appended_chunk_ids),
+                stats.appended_attribution,
+            )
+        else:
+            try:
+                await app.storage.add_chunk_link(
+                    source_id=uid,
+                    target_id=copy_id,
+                    link_type="shared",
+                    namespace_target=target,
+                )
+            except Exception:
+                # Link recording is best-effort — the copy itself is durable
+                # via the markdown file and ``shared-from=`` tag, so a writer
+                # failure here must not surface to the user or roll the copy
+                # back. Log for diagnostic use.
+                logger.warning("chunk_links writer failed for share copy", exc_info=True)
 
     if stats is None:
         # ``result`` is the core's refusal (an excluded target #2488, a

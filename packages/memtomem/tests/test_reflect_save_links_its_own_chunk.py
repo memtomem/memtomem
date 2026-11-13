@@ -22,7 +22,7 @@ import pytest
 from helpers import StubCtx
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
-from memtomem.server.tools import memory_crud, reflection
+from memtomem.server.tools import _append_target, memory_crud, reflection
 
 UNLINKED = reflection._UNLINKED_NOTICE
 
@@ -257,7 +257,7 @@ class TestUnsureLinksNothing:
         # invite a retry that appends it a second time.
         comp, mem_dir, ctx, related = stack
 
-        real = reflection.resolve_chunk
+        real = _append_target.resolve_chunk
 
         async def boom(app, chunk_id):
             # Only the attribution's read of the new chunk fails; the related
@@ -266,7 +266,7 @@ class TestUnsureLinksNothing:
                 raise RuntimeError("store read failed")
             return await real(app, chunk_id)
 
-        monkeypatch.setattr(reflection, "resolve_chunk", boom)
+        monkeypatch.setattr(_append_target, "resolve_chunk", boom)
         result = await _save(ctx, "zqboom insight body.", related)
 
         assert result.endswith(f"\n- {UNLINKED}")
