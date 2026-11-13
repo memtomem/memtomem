@@ -26,6 +26,15 @@ def _hold_sidecar_in_child(lock_path: str, ready, release) -> None:
         release.recv()
 
 
+def _managed(_source: Path) -> bool:
+    """Every source in this file sits where memtomem keeps memory files.
+
+    The other answer, and the locks it leads to, is
+    ``test_unmanaged_source_lock_location.py``.
+    """
+    return True
+
+
 def _candidate(source: Path, namespace: str = "old") -> NamespaceChunkCandidate:
     return NamespaceChunkCandidate(
         chunk_id=uuid4(),
@@ -69,7 +78,9 @@ class TestNamespaceCoordinator:
 
         monkeypatch.setattr(namespace_management, "async_file_lock", fake_lock)
 
-        result = await namespace_management.rename_namespace(storage, "old", "new")
+        result = await namespace_management.rename_namespace(
+            storage, "old", "new", is_managed_source=_managed
+        )
 
         assert result is expected
         lock_a = _lock_path_for(source_a.resolve())
@@ -109,7 +120,9 @@ class TestNamespaceCoordinator:
         monkeypatch.setattr(namespace_management, "async_file_lock", fake_lock)
 
         with pytest.raises(NamespaceMutationBusyError, match="3 attempt"):
-            await namespace_management.rename_namespace(storage, "old", "new")
+            await namespace_management.rename_namespace(
+                storage, "old", "new", is_managed_source=_managed
+            )
 
         storage.rename_namespace.assert_not_awaited()
         assert storage.list_namespace_chunk_candidates.await_count == 4
@@ -127,7 +140,9 @@ class TestNamespaceCoordinator:
         lock = AsyncMock()
         monkeypatch.setattr(namespace_management, "async_file_lock", lock)
 
-        result = await namespace_management.rename_namespace(storage, "old", "new")
+        result = await namespace_management.rename_namespace(
+            storage, "old", "new", is_managed_source=_managed
+        )
 
         assert result is expected
         assert not source.parent.exists()
@@ -165,7 +180,9 @@ class TestNamespaceCoordinator:
             )
 
             with pytest.raises(NamespaceMutationBusyError, match="nothing.*changed"):
-                await namespace_management.rename_namespace(storage, "old", "new")
+                await namespace_management.rename_namespace(
+                    storage, "old", "new", is_managed_source=_managed
+                )
 
             remaining = await storage.get_chunk(chunk.id)
             assert remaining is not None

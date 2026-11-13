@@ -128,6 +128,7 @@ async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
                     comp.storage,
                     old,
                     new,
+                    is_managed_source=comp.index_engine.is_managed_source,
                     merge=new in existing,
                 )
             except NamespaceMutationBusyError as exc:

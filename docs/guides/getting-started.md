@@ -238,9 +238,11 @@ mm search "a phrase from those notes"
 See [Core memory tools](reference/core-memory-tools.md) for incremental
 indexing, filters, namespaces, redaction, and force-reindex behavior.
 
-Indexing leaves an empty `.<name>.lock` file next to each indexed file. Those
+Indexing a directory you registered as a memory directory leaves an empty
+`.<name>.lock` file next to each indexed file. Those
 are cross-process lock sidecars, they are meant to stay, and they belong in
-your `.gitignore` — see
+your `.gitignore`. A one-off `mm index` of a path outside your memory
+directories, like the one above, leaves none — see
 [Configuration → Lock sidecars](configuration.md#lock-sidecars-namelock).
 
 ### 5. Organise memories with namespaces
