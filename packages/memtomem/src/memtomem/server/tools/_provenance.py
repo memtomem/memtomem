@@ -8,8 +8,10 @@ the recall missed them and the session ended with no summary.
 
 The fix is to stop inferring and start recording. Every chunk-creating
 MCP write surface appends one ``session_events`` row naming the chunk
-ids it just created; the auto-summary reads those ids back instead of
-guessing a namespace.
+ids it wrote; the auto-summary reads those ids back instead of guessing
+a namespace. For an append the indexer can name, those are the chunks
+the append became, not every chunk the file's re-index upserted
+(:func:`written_chunk_ids`).
 
 Three properties this module exists to hold:
 
@@ -178,6 +180,29 @@ async def mark_provenance_incomplete(app: AppContext, session_id: str | None) ->
         logger.error("provenance_flag_write_failed session_id=%s", session_id, exc_info=True)
 
 
+def written_chunk_ids(stats: IndexingStats) -> tuple[Any, ...]:
+    """The chunk ids a write's provenance event names.
+
+    ``new_chunk_ids`` covers the whole file's re-index. For an append it
+    holds a pending edit's chunks, and it misses the append's own chunk
+    when that chunk kept an existing id by content hash, which leaves the
+    write with no event at all. When the indexer attributed the append
+    (``exact`` or ``merged``, #3292) its ``appended_chunk_ids`` are the
+    chunks the append became, so those are recorded instead (#3315).
+    ``merged`` chunks also hold earlier text; :func:`_flag_imprecise_write`
+    in ``memory_crud`` marks the session for that, so the ids only have
+    to be the right chunks, not chunks of this write's text alone.
+
+    Everything else keeps ``new_chunk_ids``: ``unverified`` (the default
+    for every caller that does not pass ``append_region``, and for an
+    append the indexer could not attribute), and any stats object without
+    the field.
+    """
+    if getattr(stats, "appended_attribution", "unverified") != "unverified":
+        return tuple(getattr(stats, "appended_chunk_ids", ()) or ())
+    return tuple(getattr(stats, "new_chunk_ids", ()) or ())
+
+
 async def record_write_provenance(
     app: AppContext,
     *,
@@ -185,7 +210,8 @@ async def record_write_provenance(
     event_type: str,
     stats: IndexingStats | None,
 ) -> None:
-    """Append one provenance event naming the chunks this write created.
+    """Append one provenance event naming the chunks this write produced,
+    as :func:`written_chunk_ids` selects them.
 
     ``session_id`` is passed in, never read from ``app`` here: the caller
     captured it at write time via :func:`capture_session_and_namespace`,
@@ -199,17 +225,16 @@ async def record_write_provenance(
         return
     if stats is None:
         return
-    new_ids: tuple[Any, ...] = tuple(getattr(stats, "new_chunk_ids", ()) or ())
-    if not new_ids:
+    ids = written_chunk_ids(stats)
+    if not ids:
         return
 
-    chunk_count = len(new_ids)
+    chunk_count = len(ids)
     truncated = chunk_count > MAX_IDS_PER_EVENT
-    # ``IndexingStats.new_chunk_ids`` holds UUIDs; ``add_session_event``
-    # hands the list straight to ``json.dumps``, which cannot serialize
-    # them. ``chunk_count`` stays the *true* count so a consumer knows
-    # how much a truncated event lost.
-    recorded = [str(cid) for cid in (new_ids[:MAX_IDS_PER_EVENT] if truncated else new_ids)]
+    # The stats hold UUIDs; ``add_session_event`` hands the list straight
+    # to ``json.dumps``, which cannot serialize them. ``chunk_count`` stays
+    # the *true* count so a consumer knows how much a truncated event lost.
+    recorded = [str(cid) for cid in (ids[:MAX_IDS_PER_EVENT] if truncated else ids)]
     metadata: dict[str, Any] = {"provenance": PROVENANCE_KIND, "chunk_count": chunk_count}
     if truncated:
         metadata["truncated"] = True

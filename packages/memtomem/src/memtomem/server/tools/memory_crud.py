@@ -448,18 +448,33 @@ async def _scope_loss_refusal(app: AppContext, chunk: Chunk, chunk_id: str) -> s
 async def _flag_imprecise_write(
     app: AppContext, session_id: str | None, stats: IndexingStats, *, appended: bool = True
 ) -> None:
-    """Mark the session when an append's own record may overstate it.
+    """Mark the session when an append's own record may not be exact.
 
-    Three cases, each of which leaves ``new_chunk_ids`` describing something
-    other than "exactly what this call contributed":
+    The record names :func:`~memtomem.server.tools._provenance.written_chunk_ids`:
+    the chunks the indexer attributed to the append when it could
+    (``appended_attribution`` ``exact`` or ``merged``, #3292/#3315), the
+    whole file's ``new_chunk_ids`` otherwise. The cases below each leave
+    that record describing something other than "exactly what this call
+    contributed", or leave earlier records of the session in doubt.
+
+    ``appended_attribution`` is ``merged``. A chunk the append touches
+    starts before it: a short entry merged into the section before it, or
+    an entry that continues a section in the same chunk. That chunk holds
+    text from outside this call's append, whether the earlier text was
+    indexed (its old chunk is deleted) or still pending (nothing is
+    deleted, so the rule below does not see it).
 
     ``deleted_chunks`` is non-zero. An append re-indexes the whole file,
     and the chunker merges adjacent small sections — so appending under a
     heading another session already wrote to produces one chunk holding
-    both texts, with a new id, and the old chunk deleted. That id is in
-    ``new_chunk_ids``, so this session's record names content it did not
-    author. A pure append to fresh material deletes nothing, which is
-    what makes this a precise signal rather than a blanket one.
+    both texts, with a new id, and the old chunk deleted. That case is
+    also ``merged``, but this rule stays for every attribution: a deletion
+    says the re-index rewrote text outside this call's append, and an id
+    an earlier event recorded can survive such a rewrite holding other
+    text (content-hash reuse keeps the id across a heading rename, #3333),
+    which an ``exact`` attribution of this append says nothing about. A
+    pure append to fresh material deletes nothing, which is what makes
+    this a precise signal rather than a blanket one.
 
     ``errors`` is non-empty. Indexing reports some failures by returning
     them rather than raising — an embedding failure typically comes back
@@ -475,14 +490,10 @@ async def _flag_imprecise_write(
     it instead of indexing the link's target (#3289). ``appended`` is false
     for a batch whose entries were all empty: it wrote nothing, so there is
     nothing missing from the record.
-
-    The indexer can now name an append's own chunks
-    (``stats.appended_chunk_ids``, #3292), so the record could carry those
-    instead of being flagged; it does not yet, and until it does, saying
-    "this record is not exact" is the honest answer.
     """
     if (
-        stats.deleted_chunks
+        stats.appended_attribution == "merged"
+        or stats.deleted_chunks
         or stats.errors
         or ((stats.excluded_files or stats.relinked_files) and appended)
     ):

@@ -177,6 +177,62 @@ class TestLinksItsOwnChunk:
         assert await _edges(comp, related) == [(merged.id, "informs_reflection")]
 
     @pytest.mark.asyncio
+    async def test_a_merge_into_a_pending_section_links_it_and_flags_the_session(self, stack):
+        # Reflect accepts a merged chunk as its link target; the session's
+        # provenance records the same chunk and says it is not exact (#3315),
+        # though nothing was deleted: the earlier section was never indexed.
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, mem_dir, ctx, related = stack
+        app = ctx.request_context.lifespan_context
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await _seed(comp, mem_dir, "## Reflection\n\nzqpending short.\n", index=False)
+
+        await _save(ctx, "zqmine short insight.", related)
+
+        merged = await _chunk_holding(comp, mem_dir, "zqmine")
+        assert "zqpending" in merged.content
+        assert await _edges(comp, related) == [(merged.id, "informs_reflection")]
+        (event,) = [
+            e
+            for e in await comp.storage.get_session_events(session_id)
+            if e["event_type"] == "reflect_save"
+        ]
+        assert event["chunk_ids"] == [str(merged.id)]
+        row = await comp.storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_the_session_event_names_the_insight_not_a_pending_section(self, stack):
+        # A non-``add`` label through ``_mem_add_core``: the pending section is
+        # in ``new_chunk_ids`` and the insight alone is attributed (#3315).
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, mem_dir, ctx, related = stack
+        app = ctx.request_context.lifespan_context
+        comp.index_engine._config.min_chunk_tokens = 0
+        await _seed(comp, mem_dir, "## Earlier\n\nzqearlier indexed body.\n")
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await _seed(comp, mem_dir, "\n## Pending\n\nzqpending unindexed body.\n", index=False)
+
+        await _save(ctx, "zqmine standalone insight.", related)
+
+        mine = await _chunk_holding(comp, mem_dir, "zqmine")
+        assert "zqpending" not in mine.content
+        (event,) = [
+            e
+            for e in await comp.storage.get_session_events(session_id)
+            if e["event_type"] == "reflect_save"
+        ]
+        assert event["chunk_ids"] == [str(mine.id)]
+        row = await comp.storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("insight", "token"),
         [
