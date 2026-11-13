@@ -126,7 +126,7 @@ class TestEachSurfaceNamesItsOwnRemedy:
             values = {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
             # ``path`` defaults to the server's cwd, which need not hold the file.
             assert values.get("path") == str(path), text
-        # ``mem_index`` has no ``force_unsafe``; the only bypass is the CLI's.
+        # ``mem_index`` has no ``force_unsafe``, so the MCP remedy names the CLI's bypass.
         commands = _mm_commands(text)
         assert len(commands) == (1 if bypassable else 0), text
         for argv in commands:
