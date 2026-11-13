@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import sys
 from pathlib import Path
 from unittest import mock
 from unittest.mock import AsyncMock
@@ -37,6 +38,7 @@ from memtomem.tools.memory_writer import (
     append_blocks,
     open_written,
     read_for_append,
+    read_pre_image,
 )
 
 _MINE = "# Mine\n\n## Plans\n\nalpha falcon body\n"
@@ -44,6 +46,12 @@ _MINE_EDITED = "# Mine\n\n## Plans\n\nalpha falcon edited\n"
 _OTHER = "# Other\n\n## Plans\n\nbeta heron body\n"
 
 symlinks = pytest.mark.requires_symlinks
+# These put something else at the path while the engine holds the written file
+# open. Windows refuses to rename or delete a file that is open, so the window
+# they place a swap in does not exist there.
+swaps_an_open_file = pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows does not rename a file that is open"
+)
 
 
 def _vectors(texts, **_):
@@ -81,9 +89,12 @@ def _reason(storage, key: str) -> str | None:
 
 
 def _written(path: Path) -> WrittenSource:
-    """What a tool that just wrote ``path`` hands the engine: taken before any swap."""
-    info = os.stat(path)
-    return WrittenSource(resolve_path(path), (info.st_dev, info.st_ino))
+    """What a tool that just wrote ``path`` hands the engine: taken before any swap.
+
+    The identity comes off a descriptor, as the tools take it, so it is the
+    one the engine's own descriptor will answer with.
+    """
+    return WrittenSource(resolve_path(path), read_pre_image(path).identity)
 
 
 async def _indexed(engine, path: Path, text: str, namespace: str) -> str:
@@ -172,6 +183,7 @@ async def test_a_leaf_swapped_before_the_reindex_is_held(components, engine, mem
 
 
 @symlinks
+@swaps_an_open_file
 async def test_a_leaf_swapped_after_the_open_is_held(components, engine, memory_dir):
     """Case 2: the read comes off the descriptor, and the path check after it sees the link."""
     mine, other = memory_dir / "mine.md", memory_dir / "other.md"
@@ -257,14 +269,18 @@ async def test_a_path_through_a_linked_directory_is_indexed(
 
 
 async def test_a_file_reached_through_a_second_hard_link_is_indexed(components, engine, memory_dir):
-    mine = memory_dir / "mine.md"
+    """The name was removed and made again as another link to the same file: still that file."""
+    mine, twin = memory_dir / "mine.md", memory_dir / "twin.md"
     mine.write_text(_MINE_EDITED, encoding="utf-8")
+    written = _written(mine)
     try:
-        os.link(mine, memory_dir / "twin.md")
+        os.link(mine, twin)
     except OSError:
         pytest.skip("hard links are not available here")
+    mine.unlink()
+    os.link(twin, mine)
 
-    stats = await _reindex(engine, mine, _written(mine))
+    stats = await _reindex(engine, mine, written)
 
     assert stats.relinked_files == 0
     assert _rows(components.storage, norm_path(mine)) == [("alpha falcon edited", "mine-ns")]
@@ -331,6 +347,7 @@ async def test_a_removed_file_under_a_retain_dir_stays_shown(components, engine,
 
 
 @symlinks
+@swaps_an_open_file
 @pytest.mark.parametrize("purge", [False, True], ids=["append", "by-id"])
 async def test_a_link_to_an_excluded_file_put_in_after_the_open_is_held(
     components, engine, memory_dir, purge
@@ -432,6 +449,7 @@ async def test_a_link_to_a_hard_link_of_the_written_file_is_held(components, eng
 
 
 @symlinks
+@swaps_an_open_file
 async def test_a_stat_error_holds_the_written_key_not_what_the_path_names(
     components, engine, memory_dir
 ):
@@ -637,10 +655,9 @@ def test_an_append_names_the_file_it_created(tmp_path):
 
     appended = append_blocks(target, ["\n## One\n\nbody\n"], judged=judged)
 
-    info = os.stat(target)
-    assert appended == Appended(
-        "\n## One\n\nbody\n", WrittenSource(resolve_path(target), (info.st_dev, info.st_ino))
-    )
+    created = read_pre_image(target).identity
+    assert created is not None
+    assert appended == Appended("\n## One\n\nbody\n", WrittenSource(resolve_path(target), created))
 
 
 def test_an_append_names_the_file_it_read(tmp_path):
@@ -756,6 +773,7 @@ async def test_a_removed_file_is_judged_for_retention_by_the_written_key(
     assert _rows(components.storage, mine_key) == [("alpha falcon body", "mine-ns")]
 
 
+@swaps_an_open_file
 async def test_invalid_bytes_are_replaced_from_the_descriptor_not_reread_by_path(
     components, engine, memory_dir
 ):
