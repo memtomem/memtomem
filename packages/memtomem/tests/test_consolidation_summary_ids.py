@@ -2,8 +2,9 @@
 
 The other append callers moved to ``appended_chunk_ids`` (#3292), because a
 re-index of a shared file also upserts a pending edit's chunk and misses a chunk
-that keeps a stored id. Neither can happen here: the summary is written to a
-file created for it (#2802), so the re-index's new ids are exactly its chunks.
+that keeps a stored id. Neither happens here: the summary is written to a file
+named for that apply alone (run id plus a random token, #2802), so the
+re-index's new ids are its chunks.
 These tests pin that, and pin the case where the append attribution would have
 cost the link: chunk overlap with a summary of several chunks leaves it
 ``unverified``.
