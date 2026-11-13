@@ -152,9 +152,8 @@ def _touches(chunk: Chunk, first_line: int, last_line: int) -> bool:
 def _within(chunk: Chunk, first_line: int, last_line: int) -> bool:
     """Whether every source line ``chunk`` holds lies in ``[first_line, last_line]``.
 
-    The span alone is not enough: overlap copies lines from the chunk before
-    into this one, and ``line_map`` records them as negative source lines.
+    Read from ``source_line_map()``, not the span: overlap copies lines from
+    a neighbour into this chunk, and ``line_map`` records them as negative
+    source lines. Without a line map it is the span read line for line.
     """
-    if not (chunk.metadata.start_line >= first_line and chunk.metadata.end_line <= last_line):
-        return False
     return all(first_line <= abs(n) <= last_line for n in chunk.source_line_map() if n)
