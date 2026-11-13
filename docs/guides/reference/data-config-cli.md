@@ -736,30 +736,13 @@ A paused destination refuses (`mm context projects resume <scope_id>`
 re-enables it), and a cross-project destination must already be a
 memtomem project (`mm context init` there first).
 
-### Headless agents (MCP)
+### No MCP tool
 
-`mem_context_artifact_transfer` is the same engine via `mem_do` —
-core mode needs no extra tools:
-
-```python
-mem_do(action="context_artifact_transfer", params={
-    "asset_type": "agents", "name": "reviewer", "mode": "copy",
-    "to_project_scope_id": "p-1a2b3c4d5e6f",   # from `mm context projects list`
-})  # dry-run preview; the footer names the flags apply will need
-
-mem_do(action="context_artifact_transfer", params={
-    "asset_type": "agents", "name": "reviewer", "mode": "copy",
-    "to_project_scope_id": "p-1a2b3c4d5e6f",
-    "apply": True, "confirm_project_shared": True,
-})
-```
-
-The MCP surface is deliberately stricter than the CLI (ADR-0023 §13):
-destinations are registered `scope_id`s only (no path valve), paused
-**and** never-enrolled destinations refuse with the remediation
-command, and a `user`-tier landing — a host write outside any project
-root — needs `allow_host_writes=True` in addition to `apply=True`.
-Refusals come back prefixed (`error:` / `refused:` /
-`needs confirmation:` / `privacy block:`) so agents can branch.
+`move` and `copy` run from the CLI or the web transfer route, and `migrate`
+from the CLI; none has an MCP tool. A transfer can land in the user tier, from
+which a user-scope `mm context sync` copies it into the agents' own
+configuration, and a consent flag an agent passes as a tool argument is not the
+person's consent. An agent with a shell runs the `mm context` command instead,
+which goes through the client's own command approval.
 
 ---
