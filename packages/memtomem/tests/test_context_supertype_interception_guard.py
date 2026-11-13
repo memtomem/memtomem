@@ -994,6 +994,19 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "arms with a different parent policy — the arm is unchanged, only its "
         "enclosing function is.",
     ),
+    ("context/_atomic.py", "_open_existing_sidecar", ("OSError",), 0): (
+        _I,
+        "",
+        "The existing-only open of a memory-file sidecar: a link at that name "
+        "(``ELOOP``/``EMLINK`` from ``O_NOFOLLOW``) is the answer 'no sidecar', "
+        "and every other ``OSError`` is re-raised. It runs before any body, so "
+        "no recovery exception can exist to demote.",
+    ),
+    ("context/_atomic.py", "_open_existing_sidecar", ("BaseException",), 0): (
+        _I,
+        "",
+        "Close-and-reraise around the descriptor's identity check; nothing is swallowed.",
+    ),
     ("context/_atomic.py", "_file_lock", ("<dynamic>",), 0): (
         _I,
         "",

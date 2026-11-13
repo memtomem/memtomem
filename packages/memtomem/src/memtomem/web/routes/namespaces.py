@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from memtomem.constants import InvalidNameError, validate_namespace
 from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError
 from memtomem.services import namespace_management
-from memtomem.web.deps import get_storage
+from memtomem.web.deps import get_index_engine, get_storage
 from memtomem.web.routes._writer_wait import (
     WRITER_BUSY_READ_DETAIL,
     writer_busy_as_503,
@@ -117,6 +117,7 @@ async def rename_namespace(
     namespace: str,
     body: RenameRequest,
     storage=Depends(get_storage),
+    index_engine=Depends(get_index_engine),
 ) -> NamespaceRenameResponse:
     """Rename a namespace.
 
@@ -152,6 +153,7 @@ async def rename_namespace(
             storage,
             namespace,
             body.new_name,
+            is_managed_source=index_engine.is_managed_source,
             merge=body.merge,
         )
     except NamespaceMutationBusyError as exc:
