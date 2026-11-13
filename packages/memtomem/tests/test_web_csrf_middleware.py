@@ -21,13 +21,14 @@ import logging
 import re
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from memtomem.web.app import create_app, resolve_csrf_enforce_from_env
+from memtomem.web.app import resolve_csrf_enforce_from_env
 from memtomem.web.middleware.csrf import (
     CSRFGuardMiddleware,
-    _origin_host,
+    _origin_of,
+    _own_origin,
     _strip_port,
 )
 
@@ -130,28 +131,18 @@ def test_get_api_with_loopback_host_passes(caplog_csrf) -> None:
     assert ev["would_block"] == "False"
 
 
-def test_options_preflight_is_not_gated(caplog_csrf) -> None:
-    """``OPTIONS`` preflights are owned by the CORS middleware and skip the
-    gate entirely — no observe line, no 403 from the CSRF guard."""
+def test_options_is_gated_like_any_other_method(caplog_csrf) -> None:
+    """Nothing answers preflights, so ``OPTIONS`` has no reason to skip the
+    gate: a hostile ``Host`` is refused and the decision is logged. No token
+    is asked of it; ``OPTIONS`` is not an unsafe method."""
     client = TestClient(_build_app())
     res = client.options("/api/ping", headers={"Host": "evil.example.com"})
-    assert res.status_code != 403
-    assert _parse_observe(caplog_csrf.records) == []
-
-
-def test_production_cors_preflight_allows_the_required_csrf_header() -> None:
-    client = TestClient(create_app(lifespan=None))
-    res = client.options(
-        "/api/add",
-        headers={
-            "Origin": "http://localhost:3000",
-            "Access-Control-Request-Method": "POST",
-            "Access-Control-Request-Headers": "content-type,x-memtomem-csrf",
-        },
-    )
-    assert res.status_code == 200
-    allowed = res.headers["access-control-allow-headers"].lower()
-    assert "x-memtomem-csrf" in allowed
+    assert res.status_code == 403
+    events = _parse_observe(caplog_csrf.records)
+    assert len(events) == 1
+    assert events[0]["method"] == "OPTIONS"
+    assert events[0]["token_ok"] == "True"
+    assert events[0]["host_ok"] == "False"
 
 
 def test_post_without_token_returns_403(caplog_csrf) -> None:
@@ -343,24 +334,38 @@ def test_observe_mode_passes_through_with_log_line(caplog_csrf) -> None:
     assert ev["would_block"] == "True"
 
 
-def test_trusted_host_allow_list_unblocks_host_check(caplog_csrf) -> None:
-    """Operator-supplied ``--trusted-host`` entries pass the Host check."""
+@pytest.mark.parametrize(
+    ("origin", "trusted_origins", "origin_ok"),
+    [
+        # A loopback origin is not the origin of a request addressed to
+        # ``share.example.com``; the Host check passing does not make it one.
+        ("http://127.0.0.1:8080", frozenset(), False),
+        ("http://share.example.com", frozenset({"share.example.com"}), True),
+    ],
+)
+def test_trusted_host_allow_list_unblocks_host_check(
+    caplog_csrf, origin: str, trusted_origins: frozenset[str], origin_ok: bool
+) -> None:
+    """Operator-supplied ``--trusted-host`` entries pass the Host check. The
+    Origin check is a separate decision."""
     app = _build_app()
     app.state.csrf_trusted_hosts = frozenset({"share.example.com"})
+    app.state.csrf_trusted_origins = trusted_origins
     client = TestClient(app)
     res = client.post(
         "/api/echo",
         headers={
             "X-Memtomem-CSRF": "test-token-abc",
             "Host": "share.example.com",
-            "Origin": "http://127.0.0.1:8080",
+            "Origin": origin,
         },
     )
-    assert res.status_code == 200
+    assert res.status_code == (200 if origin_ok else 403)
     events = _parse_observe(caplog_csrf.records)
     assert len(events) == 1
     assert events[0]["host_ok"] == "True"
-    assert events[0]["would_block"] == "False"
+    assert events[0]["origin_ok"] == str(origin_ok)
+    assert events[0]["would_block"] == str(not origin_ok)
 
 
 def test_non_api_paths_pass_through_without_observe(caplog_csrf) -> None:
@@ -529,14 +534,47 @@ class TestStripPort:
         assert _strip_port(value) == expected
 
 
-class TestOriginHost:
+class TestOriginOf:
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
-            ("http://[::1]:8080", "::1"),
+            ("http://[::1]:8080", ("http", "::1", 8080)),
+            ("HTTP://LocalHost", ("http", "localhost", 80)),
+            ("https://localhost", ("https", "localhost", 443)),
+            ("https://localhost:8443/page?q=1", ("https", "localhost", 8443)),
+            ("tauri://localhost", ("tauri", "localhost", None)),
             ("null", None),
+            ("", None),
+            (None, None),
             ("http://[bad", None),
+            ("http://localhost:abc", None),
+            ("http://localhost:99999", None),
         ],
     )
-    def test_origin_values(self, value: str, expected: str | None) -> None:
-        assert _origin_host(value) == expected
+    def test_origin_values(self, value: str | None, expected: tuple | None) -> None:
+        assert _origin_of(value) == expected
+
+
+class TestOwnOrigin:
+    @pytest.mark.parametrize(
+        ("scheme", "headers", "expected"),
+        [
+            ("http", [(b"host", b"127.0.0.1:8080")], ("http", "127.0.0.1", 8080)),
+            ("https", [(b"host", b"localhost")], ("https", "localhost", 443)),
+            # No ``Host``: no origin, so no loopback ``Origin`` equals it.
+            ("http", [], None),
+            ("http", [(b"host", b"")], None),
+            ("http", [(b"host", b"localhost:abc")], None),
+        ],
+    )
+    def test_request_values(
+        self, scheme: str, headers: list[tuple[bytes, bytes]], expected: tuple | None
+    ) -> None:
+        scope = {
+            "type": "http",
+            "scheme": scheme,
+            "path": "/api/session",
+            "server": ("127.0.0.1", 8080),
+            "headers": headers,
+        }
+        assert _own_origin(Request(scope)) == expected

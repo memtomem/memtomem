@@ -825,9 +825,11 @@ def _stop_remove_stale_pid_file(pid_file: Path) -> None:
     "trusted_origins",
     multiple=True,
     metavar="HOST",
-    help="Add a hostname to the CSRF Origin/Referer allow-list. Loopback "
-    "(127.0.0.1, ::1, localhost) is always trusted; anything else has to be "
-    "named explicitly. Repeat the flag for multiple hosts.",
+    help="Add a hostname to the CSRF Origin/Referer allow-list; an entry covers "
+    "every port of that hostname. A loopback origin passes without an entry "
+    "only when it is the UI's own (the scheme, host and port the request was "
+    "addressed to); every other origin has to be named here. Repeat the flag "
+    "for multiple hosts.",
 )
 @click.option(
     "--trusted-host",
