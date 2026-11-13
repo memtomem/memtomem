@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -373,10 +372,9 @@ def appended_valve_text(pre_image: bytes, appended: str) -> str:
     another writer added in between makes the file differ, and the engine then
     judges it without the valve.
     """
-    from memtomem.indexing.redaction_exemption import indexer_text
+    from memtomem.indexing.append_attribution import text_after_append
 
-    written = appended.replace("\n", os.linesep).encode("utf-8")
-    return indexer_text(pre_image + written, errors="replace")
+    return text_after_append(pre_image, appended)
 
 
 def rewrite_valve_text(pre_image: bytes, rewrite: Rewrite | None) -> str | None:

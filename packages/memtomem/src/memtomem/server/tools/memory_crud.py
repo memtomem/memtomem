@@ -472,9 +472,9 @@ async def _flag_imprecise_write(
     were all empty: it wrote nothing, so there is nothing missing from the
     record.
 
-    Attributing precisely instead of flagging would mean tracking the
-    appended span through chunking and diffing, which is a change to the
-    indexing contract rather than to this call site. Until then, saying
+    The indexer can now name an append's own chunks
+    (``stats.appended_chunk_ids``, #3292), so the record could carry those
+    instead of being flagged; it does not yet, and until it does, saying
     "this record is not exact" is the honest answer.
     """
     if stats.deleted_chunks or stats.errors or (stats.excluded_files and appended):
@@ -870,10 +870,9 @@ async def _mem_add_core(
     Ignored when ``file`` is given.
 
     ``on_appended`` is called once with the text this call appended, under the
-    file lock, right after the append and before the re-index. ``stats``
-    describes the whole file's re-index, so a caller that needs to tell this
-    entry's chunk from others in ``new_chunk_ids`` needs the appended text
-    too (``mem_reflect_save``, #3273).
+    file lock, right after the append and before the re-index.
+    ``stats.appended_chunk_ids`` names the chunks this entry became (#3292),
+    while ``stats.new_chunk_ids`` describes the whole file's re-index.
 
     Returns:
         Tuple of ``(user_facing_message, stats)``. ``stats`` is ``None``
@@ -1141,6 +1140,7 @@ async def _mem_add_core(
         # from (issue #2005). Nothing durable happens before the append and the
         # idempotency claim is taken *after* the re-target check, so an aborted
         # attempt leaves no trace — not on disk, and not in the ledger.
+        from memtomem.indexing.append_attribution import append_region
         from memtomem.indexing.engine import PrivacyRejection
         from memtomem.tools.memory_mutation import appended_valve_text
 
@@ -1265,6 +1265,9 @@ async def _mem_add_core(
                                 appended_valve_text(pre, appended) if needs_valve else None
                             ),
                             lock_held=True,
+                            # ``pre`` was read under this lock right before the
+                            # append, so the engine can say which chunks it became.
+                            append_region=append_region(pre, appended),
                         )
                     except PrivacyRejection as exc:
                         # The entry is on disk and the result may not be indexed

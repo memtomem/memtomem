@@ -644,3 +644,15 @@ class IndexingStats:
     # (#3168). Only that call sets it. Appended last for positional
     # construction compatibility.
     current_files: int = 0
+    # The chunks an append became, set only by an ``index_file`` call that
+    # passed ``append_region`` (#3292). Unlike ``new_chunk_ids`` they are this
+    # append's alone, judged from the text the call chunked, and they include a
+    # chunk that kept an existing id because its content matched. In file
+    # order. ``appended_attribution`` says how cleanly: ``"exact"`` when every
+    # one lies within the appended text, ``"merged"`` when one also holds text
+    # from before it (a short entry merged into the previous section), and
+    # ``"unverified"`` with no ids when the file was not the text the caller
+    # expected, nothing was committed, or the call did not ask. Appended last
+    # for positional construction compatibility.
+    appended_chunk_ids: tuple[UUID, ...] = ()
+    appended_attribution: Literal["exact", "merged", "unverified"] = "unverified"

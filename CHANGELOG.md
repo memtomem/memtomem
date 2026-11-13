@@ -41,6 +41,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   BM25-indexed with the body. A component whose file names are its own bookkeeping can now leave
   both lines out. langchain-memtomem's store does: its file names are encoded keys ending in
   `.md`, so `md` returned every item. The default is unchanged, so existing indexes do not re-embed.
+- **`IndexEngine.index_file(..., append_region=...)` names the chunks an append became
+  (#3292).** `IndexingStats.new_chunk_ids` lists every chunk a whole-file re-index upserted, so
+  it holds a pending edit's chunk too, and it misses the append's own chunk when that chunk
+  matches an existing one and keeps its id. A caller that appended to the file under its lock
+  builds the region with `memtomem.indexing.append_attribution.append_region(pre_image,
+  appended)` and gets `IndexingStats.appended_chunk_ids`, in file order, with
+  `appended_attribution`: `"exact"` when every chunk lies within the appended text, `"merged"`
+  when one also holds text from before it, and `"unverified"` with no ids when the file is not
+  the text the caller expected (another writer's bytes anywhere in it), no committed chunk
+  holds the append, or the call did not ask. Every single-entry append through `mem_add`'s
+  write path reports it; `mem_batch_add` does not yet. Only `mem_reflect_save` reads it so far:
+  `mem_agent_share` and `mem_consolidate_apply` still pick their chunk from `new_chunk_ids`.
 
 ### Changed
 
@@ -76,15 +88,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   no fraction of a second, while a chunk indexed earlier in that same second keeps its
   fraction and so sorts as newer. In tests that was the related chunk itself, so it was
   linked to itself. A write elsewhere between the save and the link also took the edges. The
-  save now links only when the re-index of `reflections.md` produced exactly one new chunk,
-  and that chunk holds the entry as the indexer chunks it. Otherwise the insight is saved,
-  nothing is linked, and the result says so. That happens when the insight spans several
-  chunks, when an unindexed edit to the file is indexed with it and adds another new chunk,
-  when merging it with the section before it adds a heading inside it, or when the insight is
-  only a heading. One case still links the wrong chunk: an unindexed edit leaves another chunk
-  holding the whole insight text, and the insight itself matches a chunk that already existed,
-  so it keeps that chunk's id and the other chunk is the only new one. Precise attribution is
-  #3292.
+  save now links only when the indexer attributes the append to exactly one chunk (#3292), and
+  that chunk holds the entry as the indexer chunks it. An unindexed edit to the file that is
+  indexed with the insight no longer gets in the way, and neither does an insight that matches
+  an existing chunk and keeps its id. Otherwise the insight is saved, nothing is linked, and
+  the result says so. That happens when the insight spans several chunks, when another writer
+  changed the file between the append and its re-index, when merging it with the section
+  before it adds a heading inside it, or when the insight is only a heading.
 - **`mm embedding-reset` no longer calls a reset of an empty store destructive (#2423).** A
   store stamped with one embedding model that never received a chunk, opened after the config
   names another model, still reports a mismatch and still needs
