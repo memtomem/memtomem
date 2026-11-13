@@ -369,6 +369,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **`mem_import_notion` no longer writes a ZIP member outside the output directory on
+  Windows (#3299).** From 0.3.6 through 0.7.8 the member-name check asked only whether the
+  name was absolute on the host or had a `..` part. On Windows a name with a root but no
+  drive (`\notes\page.md`) or a drive but no root (`D:page.md`) is not absolute there, so
+  whoever wrote the ZIP could have its pages created or overwritten as `.md` files elsewhere
+  on that drive, or under another drive's current directory; the redaction guard still
+  scanned their content. POSIX was not affected. Names are now judged the same way on every
+  host, and an archive is refused before anything is written when a member name has a root
+  or drive in either path flavour, a colon in any part, or a part made only of dots and
+  spaces. An archive refused for this reason on macOS or Linux (a backslash `..`, a colon,
+  a folder named `...`) used to import there under literal names; Notion's own exports are
+  not expected to contain such names. The unused `safe_extract_zip` helper is removed, and
+  the archive limits are now tested through `import_notion` itself.
 - An advisory against `effect` 4.0.0-beta.83 (npm), published on 2026-11-10, lets a
   caller who builds a cookie from an untrusted name, domain or path add attributes to
   the `Set-Cookie` header; the fix is 4.0.0-beta.103. It is a dev-only dependency of

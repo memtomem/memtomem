@@ -13,7 +13,7 @@ import unicodedata
 import zipfile
 from collections import Counter, defaultdict
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, TypeVar
 
 import yaml
@@ -29,14 +29,13 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
-# ── Safe ZIP extraction ──────────────────────────────────────────────────
+# ── ZIP limits ───────────────────────────────────────────────────────────
 #
-# ``zipfile.ZipFile.extractall`` normalizes ``..`` / absolute member names on
-# supported runtimes, but enforces no aggregate-size, member-count, or
-# compression-ratio bound — so a few-KB crafted archive can expand to
-# gigabytes and fill the disk (a decompression bomb). The import path is
-# MCP-reachable via ``mem_import_notion``. These caps are generous enough for
-# real Notion / Obsidian exports and only trip on pathological archives.
+# A Notion ZIP is read in memory, member by member. ``zipfile`` bounds neither a
+# crafted archive's aggregate size, member count nor compression ratio, so a
+# few-KB file could expand to gigabytes (a decompression bomb). The import path
+# is MCP-reachable via ``mem_import_notion``. These caps are generous enough for
+# real Notion exports and only trip on pathological archives.
 _ZIP_MAX_TOTAL_BYTES = 2 * 1024**3  # 2 GiB aggregate uncompressed
 _ZIP_MAX_MEMBER_BYTES = 512 * 1024**2  # 512 MiB single member
 _ZIP_MAX_ENTRIES = 100_000  # member count
@@ -45,84 +44,31 @@ _ZIP_RATIO_FLOOR_BYTES = 10 * 1024**2  # only ratio-check archives above this
 
 
 class UnsafeArchiveError(ValueError):
-    """An archive exceeds the safe-extraction resource caps, or a member name
-    would escape the extraction root."""
+    """An archive exceeds a resource cap, or a member's name is not safe to
+    write under the output directory."""
 
 
-def safe_extract_zip(
-    zip_path: Path,
-    dest_dir: Path,
-    *,
-    member_filter: Callable[[str], bool] | None = None,
-) -> None:
-    """Extract ``zip_path`` into ``dest_dir`` with traversal + resource caps.
+def _unsafe_member_name(name: str) -> bool:
+    """Whether a ZIP member name could place its file outside the output directory.
 
-    Unlike a bare ``ZipFile.extractall``, this validates archive metadata up
-    front and rejects any member whose name resolves outside ``dest_dir`` —
-    failing closed on suspicious archives rather than silently normalizing
-    them.
+    Judged the same way on every host, so an archive is accepted or refused
+    alike on POSIX and Windows. A name is unsafe when, under either path
+    flavour, it has an anchor (a root, a drive, a UNC or ``\\\\?\\`` prefix),
+    or when any of its raw parts, split on both separators, holds a colon (a
+    drive-relative prefix or an NTFS stream such as ``..::$INDEX_ALLOCATION``) or
+    is made only of dots and spaces. Windows trims trailing dots and spaces from
+    the last segment of a path it is given, and parent directories are created
+    one prefix at a time, so a part like ``.. `` may act as ``..`` there.
 
-    When ``member_filter`` is given, only members whose name satisfies it are
-    extracted and counted toward the size / ratio caps; the rest are skipped
-    and never written to disk. This lets a caller that only consumes (say)
-    markdown ignore arbitrarily large attachments without either extracting
-    them (the decompression-bomb vector) or rejecting the whole archive over
-    them. Every member is still path-containment checked and counted toward
-    the entry cap regardless of the filter.
-
-    Raises:
-        UnsafeArchiveError: a member escapes ``dest_dir`` or the extracted set
-            exceeds a configured resource cap.
+    The raw split matters: ``PurePath`` drops ``.`` parts and reads ``""`` and
+    ``"."`` as no parts at all.
     """
-    dest_root = dest_dir.resolve()
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        infos = zf.infolist()
-        if len(infos) > _ZIP_MAX_ENTRIES:
-            raise UnsafeArchiveError(f"archive has {len(infos)} entries (cap {_ZIP_MAX_ENTRIES})")
-
-        to_extract: list[zipfile.ZipInfo] = []
-        total_uncompressed = 0
-        total_compressed = 0
-        for info in infos:
-            # Containment: every member must land strictly under the root.
-            # Absolute names and ``..`` chains resolve outside it; an empty or
-            # ``.`` member name resolves to the root itself.
-            target = (dest_root / info.filename).resolve()
-            if target == dest_root:
-                if info.is_dir():
-                    continue
-                raise UnsafeArchiveError(f"member {info.filename!r} has no valid path")
-            if dest_root not in target.parents:
-                raise UnsafeArchiveError(f"member {info.filename!r} escapes the extraction root")
-            if info.is_dir():
-                continue
-            if member_filter is not None and not member_filter(info.filename):
-                continue
-            if info.file_size > _ZIP_MAX_MEMBER_BYTES:
-                raise UnsafeArchiveError(
-                    f"member {info.filename!r} is {info.file_size} bytes "
-                    f"(cap {_ZIP_MAX_MEMBER_BYTES})"
-                )
-            total_uncompressed += info.file_size
-            total_compressed += info.compress_size
-            to_extract.append(info)
-
-        if total_uncompressed > _ZIP_MAX_TOTAL_BYTES:
-            raise UnsafeArchiveError(
-                f"archive expands to {total_uncompressed} bytes (cap {_ZIP_MAX_TOTAL_BYTES})"
-            )
-        if (
-            total_compressed > 0
-            and total_uncompressed > _ZIP_RATIO_FLOOR_BYTES
-            and total_uncompressed / total_compressed > _ZIP_MAX_RATIO
-        ):
-            ratio = total_uncompressed / total_compressed
-            raise UnsafeArchiveError(
-                f"archive compression ratio {ratio:.0f}:1 exceeds cap {_ZIP_MAX_RATIO}:1"
-            )
-
-        for info in to_extract:
-            zf.extract(info, dest_root)
+    if PurePosixPath(name).anchor or PureWindowsPath(name).anchor:
+        return True
+    for part in re.split(r"[\\/]", name):
+        if ":" in part or (part and not part.rstrip(" .")):
+            return True
+    return False
 
 
 def _refused_target(
@@ -348,9 +294,8 @@ def _import_notion_sync(
                     f"archive has {len(all_infos)} entries (cap {_ZIP_MAX_ENTRIES})"
                 )
             for info in all_infos:
-                member = Path(info.filename)
-                if member.is_absolute() or ".." in member.parts:
-                    raise UnsafeArchiveError(f"member {info.filename!r} escapes the archive root")
+                if _unsafe_member_name(info.filename):
+                    raise UnsafeArchiveError(f"member {info.filename!r} has an unsafe name")
             infos = sorted(
                 (i for i in all_infos if not i.is_dir() and i.filename.lower().endswith(".md")),
                 key=lambda i: i.filename,
