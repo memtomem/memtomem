@@ -1,5 +1,6 @@
 """Tests for Notion and Obsidian importers."""
 
+import sys
 import unicodedata
 import zipfile
 from pathlib import Path
@@ -15,7 +16,6 @@ from memtomem.indexing.importers import (
     _convert_obsidian_syntax,
     import_notion,
     import_obsidian,
-    safe_extract_zip,
 )
 
 
@@ -585,100 +585,144 @@ class TestImportObsidian:
         assert imported[0].name == "real-note.md"
 
 
-class TestSafeExtractZip:
-    """Resource + traversal caps on ZIP extraction (decompression-bomb defense)."""
+# Every name here must refuse the whole archive on every host. A name rooted
+# without a drive or drive-relative used to pass on Windows and join outside the
+# output directory (#3299). Names with a colon or a part made only of dots and
+# spaces are refused because Windows may reinterpret them, not because an escape
+# through each was shown; ``sub/./x.md`` stays inside and is refused with them.
+_HOSTILE_MEMBER_NAMES = [
+    "../escape.md",
+    "/abs_escape.md",
+    "\\abs\\evil.md",
+    "D:evil/page.md",
+    "C:evil/page.md",
+    "C:/abs/evil.md",
+    "//srv/share/x.md",
+    "\\\\?\\C:\\x.md",
+    "sub/..\\up.md",
+    "sub/.. /x.md",
+    "sub/.../x.md",
+    "sub/. /x.md",
+    "sub/./x.md",
+    ".",
+    "x/a:b.md",
+    "..::$INDEX_ALLOCATION/x.md",
+]
 
-    @staticmethod
-    def _make_zip(path, entries):
-        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for name, data in entries:
-                zf.writestr(name, data)
-        return path
 
-    def test_extracts_normal_zip(self, tmp_path):
-        z = self._make_zip(tmp_path / "ok.zip", [("a.md", "hi"), ("sub/b.md", "yo")])
-        dest = tmp_path / "out"
-        dest.mkdir()
-        safe_extract_zip(z, dest)
-        assert (dest / "a.md").read_text() == "hi"
-        assert (dest / "sub" / "b.md").read_text() == "yo"
+def _make_zip(path, entries):
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries:
+            zf.writestr(name, data)
+    return path
 
-    def test_rejects_parent_traversal_member(self, tmp_path):
-        z = self._make_zip(tmp_path / "trav.zip", [("../escape.md", "x")])
-        dest = tmp_path / "out"
-        dest.mkdir()
+
+@pytest.fixture
+def no_hostile_write(monkeypatch):
+    """Replace the importer's writer so a refused archive cannot reach the disk.
+
+    Even against a regressed check, a hostile member name is recorded here
+    instead of being written (an absolute or drive-relative target would
+    otherwise land outside ``tmp_path``).
+    """
+    written: list[Path] = []
+    monkeypatch.setattr(
+        importers, "atomic_write_text", lambda target, *a, **k: written.append(Path(target))
+    )
+    return written
+
+
+class TestImportNotionArchiveLimits:
+    """The ZIP checks ``import_notion`` runs, driven through ``import_notion``."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", _HOSTILE_MEMBER_NAMES)
+    async def test_refuses_member_name(self, tmp_path, no_hostile_write, name):
+        z = _make_zip(tmp_path / "bad.zip", [("ok.md", "fine"), (name, "x")])
+        with pytest.raises(UnsafeArchiveError, match="has an unsafe name"):
+            await import_notion(z, tmp_path / "out")
+        assert no_hostile_write == []
+
+    @pytest.mark.asyncio
+    async def test_non_markdown_member_with_bad_name_refuses_archive(
+        self, tmp_path, no_hostile_write
+    ):
+        z = _make_zip(tmp_path / "bad.zip", [("ok.md", "fine"), ("D:evil/image.png", "x")])
         with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
-        assert not (tmp_path / "escape.md").exists()
+            await import_notion(z, tmp_path / "out")
+        assert no_hostile_write == []
 
-    def test_rejects_absolute_member(self, tmp_path):
-        z = self._make_zip(tmp_path / "abs.zip", [("/abs_escape.md", "x")])
-        dest = tmp_path / "out"
-        dest.mkdir()
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("constant", "value", "entries"),
+        [
+            ("_ZIP_MAX_ENTRIES", 1, [("a.md", "x"), ("b.md", "y")]),
+            ("_ZIP_MAX_TOTAL_BYTES", 10, [("a.md", "x" * 100)]),
+            ("_ZIP_MAX_MEMBER_BYTES", 10, [("a.md", "x" * 100)]),
+        ],
+    )
+    async def test_refuses_archive_over_cap(
+        self, tmp_path, monkeypatch, no_hostile_write, constant, value, entries
+    ):
+        monkeypatch.setattr(importers, constant, value)
+        z = _make_zip(tmp_path / "big.zip", entries)
         with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
+            await import_notion(z, tmp_path / "out")
+        assert no_hostile_write == []
 
-    def test_rejects_too_many_entries(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(importers, "_ZIP_MAX_ENTRIES", 1)
-        z = self._make_zip(tmp_path / "many.zip", [("a.md", "x"), ("b.md", "y")])
-        dest = tmp_path / "out"
-        dest.mkdir()
-        with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
-
-    def test_rejects_oversize_aggregate(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(importers, "_ZIP_MAX_TOTAL_BYTES", 10)
-        z = self._make_zip(tmp_path / "big.zip", [("a.md", "x" * 100)])
-        dest = tmp_path / "out"
-        dest.mkdir()
-        with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
-
-    def test_rejects_oversize_member(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(importers, "_ZIP_MAX_MEMBER_BYTES", 10)
-        z = self._make_zip(tmp_path / "bigm.zip", [("a.md", "x" * 100)])
-        dest = tmp_path / "out"
-        dest.mkdir()
-        with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
-
-    def test_rejects_compression_bomb_ratio(self, tmp_path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_refuses_compression_bomb_ratio(self, tmp_path, monkeypatch, no_hostile_write):
         # Floor to 0 so the small fixture is ratio-checked; cap at 5:1. A
         # highly repetitive payload deflates far past that.
         monkeypatch.setattr(importers, "_ZIP_RATIO_FLOOR_BYTES", 0)
         monkeypatch.setattr(importers, "_ZIP_MAX_RATIO", 5)
-        z = self._make_zip(tmp_path / "bomb.zip", [("a.md", "A" * 100_000)])
-        dest = tmp_path / "out"
-        dest.mkdir()
+        z = _make_zip(tmp_path / "bomb.zip", [("a.md", "A" * 100_000)])
         with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
+            await import_notion(z, tmp_path / "out")
+        assert no_hostile_write == []
 
-    def test_member_filter_skips_unmatched_members(self, tmp_path, monkeypatch):
-        # A would-be-oversized attachment is neither size-checked nor written
-        # when the filter excludes it; the matched markdown still extracts.
-        # (This is how import_notion ignores large Notion attachments instead
-        # of extracting them or rejecting the whole export.)
+    @pytest.mark.asyncio
+    async def test_large_attachment_is_ignored(self, tmp_path, monkeypatch):
+        # The size caps count markdown members only: an oversized attachment is
+        # neither size-checked nor written, and the page beside it imports.
         monkeypatch.setattr(importers, "_ZIP_MAX_MEMBER_BYTES", 50)
-        z = self._make_zip(
-            tmp_path / "mixed.zip",
-            [("note.md", "hello"), ("big.bin", "x" * 1000)],
-        )
-        dest = tmp_path / "out"
-        dest.mkdir()
-        safe_extract_zip(z, dest, member_filter=lambda n: n.lower().endswith(".md"))
-        assert (dest / "note.md").read_text() == "hello"
-        assert not (dest / "big.bin").exists()  # attachment skipped, not extracted
+        z = _make_zip(tmp_path / "mixed.zip", [("note.md", "hello"), ("big.bin", "x" * 1000)])
+        out = tmp_path / "out"
+        imported = await import_notion(z, out)
+        assert [p.name for p in imported] == ["note.md"]
+        assert (out / "note.md").read_text(encoding="utf-8").rsplit("\n\n", 1)[1] == "hello"
+        assert not (out / "big.bin").exists()
 
-    def test_rejects_root_entry_member(self, tmp_path):
-        # A file member naming the extraction root itself (e.g. ".") is rejected
-        # as UnsafeArchiveError, not a late zipfile error.
-        zpath = tmp_path / "root.zip"
-        with zipfile.ZipFile(zpath, "w") as zf:
-            zf.writestr(zipfile.ZipInfo("."), "x")
-        dest = tmp_path / "out"
-        dest.mkdir()
-        with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(zpath, dest)
+    @pytest.mark.asyncio
+    async def test_ordinary_names_import(self, tmp_path):
+        entries = [
+            ("a.md", "body-a"),
+            ("sub/b.md", "body-b"),
+            ("c//d.md", "body-d"),
+            ("sub/Notes... e.md", "body-e"),
+        ]
+        z = _make_zip(tmp_path / "ok.zip", entries)
+        out = tmp_path / "out"
+        imported = await import_notion(z, out)
+        written = {p.relative_to(out).as_posix(): p.read_text(encoding="utf-8") for p in imported}
+        # Each page keeps its own body after the import header.
+        assert {rel: text.rsplit("\n\n", 1)[1] for rel, text in written.items()} == {
+            "a.md": "body-a",
+            "sub/b.md": "body-b",
+            "c/d.md": "body-d",
+            "sub/Notes... e.md": "body-e",
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.platform != "win32", reason="judges the host's own WindowsPath")
+    async def test_refuses_windows_names_with_the_host_path(self, tmp_path, no_hostile_write):
+        # The parametrized test above already judges these names on every host;
+        # this one runs them where ``Path`` is ``WindowsPath``, as a user's would.
+        for name in ("\\abs\\evil.md", "D:evil/page.md", "sub/.. /x.md"):
+            z = _make_zip(tmp_path / "bad.zip", [(name, "x")])
+            with pytest.raises(UnsafeArchiveError):
+                await import_notion(z, tmp_path / "out")
+        assert no_hostile_write == []
 
 
 def _chunk(path):
