@@ -1,12 +1,10 @@
 """Content redaction guard at the LTM trust boundary.
 
 The pattern set has two provenance tiers, both secret-class only. This
-module's 20 secret-class patterns mirror memtomem-stm
-``proxy/privacy.py:CREDENTIAL_PATTERNS``, and were byte-identical to it as of
-memtomem-stm's GHSA-mf67-ghgq-cv54 fix (the PKCS#8 private-key rule). Ten
-token rules are ahead of STM here: their word boundaries are written as ASCII
-lookarounds (#3298; see the note above ``DEFAULT_PATTERNS``), and STM still
-has the word-boundary escape there until the reverse sync lands.
+module's 20 secret-class patterns are byte-identical to memtomem-stm
+``proxy/privacy.py:CREDENTIAL_PATTERNS`` as of memtomem-stm#1378, which
+mirrored the ASCII word boundaries of #3298 (see the note above
+``DEFAULT_PATTERNS``).
 
 1. **STM-synced subset** (13 patterns) — originally mirrored from
    memtomem-stm; the AWS secret-material label rule (memtomem-stm#553),
@@ -16,7 +14,7 @@ has the word-boundary escape there until the reverse sync lands.
    The reference above tracks the STM change this module is
    audited-consistent with (history: ``a98636e`` -> ``3e585b5`` ->
    ``8c884cb`` -> ``5ab5467`` -> ``67689db`` -> GHSA-3v6c-9qpg-gf63 ->
-   GHSA-mf67-ghgq-cv54).
+   GHSA-mf67-ghgq-cv54 -> memtomem-stm#1378).
    STM's full set also carries PII patterns
    (email, etc.); those are excluded here by design because PII false
    positives on prose ingress would be unworkable — they live in STM's
@@ -93,8 +91,7 @@ _JWT_RULE_OLD = (
 # ``eyJ`` in the same run, with the same end; ``scan()`` moves it back. The
 # segment is consumed a word-character run at a time and possessively, so no
 # backtracking state builds up. Only a ``.`` may follow it, and giving
-# characters back never exposes one. memtomem-stm's rule differs only in
-# spelling the two boundaries ``\b`` (see the note above ``DEFAULT_PATTERNS``).
+# characters back never exposes one. Byte-identical to memtomem-stm's rule.
 _JWT_RULE = (
     r"(?<![A-Za-z0-9_])eyJ(?=[A-Za-z0-9_-]{8})[A-Za-z0-9_]*+"
     r"(?:-(?!eyJ[A-Za-z0-9_-]{8})[A-Za-z0-9_]*+)*+"
