@@ -281,9 +281,9 @@ def _open_existing(
     mode passes no ``O_CREAT`` (``"r+"``, or ``"a"`` through an ``opener``
     that drops it), so absence answers at the open rather than being raced by a
     probe: ``ENOENT`` / ``ENOTDIR`` raise :class:`SourceRemovedError`. A
-    directory standing at the path, and a FIFO with no reader (``ENXIO``,
-    under ``O_NONBLOCK``), raise :class:`SourceReplacedError`. ``what`` names
-    the write in the message.
+    directory standing at the path, a FIFO with no reader (``ENXIO``, under
+    ``O_NONBLOCK``), and a symlink loop put at the path (``ELOOP``) raise
+    :class:`SourceReplacedError`. ``what`` names the write in the message.
     """
     try:
         return open(file_path, mode, encoding="utf-8", opener=opener)
@@ -308,7 +308,7 @@ def _open_existing(
             ) from exc
         raise
     except OSError as exc:
-        if exc.errno == errno.ENXIO:
+        if exc.errno in (errno.ENXIO, errno.ELOOP):
             raise SourceReplacedError(
                 f"{file_path} is no longer a regular file; nothing was written"
             ) from exc

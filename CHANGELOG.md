@@ -159,8 +159,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   by a symlink after the append and before its re-index is held instead of having the link's
   target indexed in its place, and the result says so. A memory file that is a symlink all
   along, and a dangling symlink, keep working as before. Also refused now, with nothing written:
-  a new file's name taken by another process between the check and the write, and a FIFO put in
-  an existing file's place, which used to block the write while it held the file's lock. Not
+  a new file's name taken by another process between the check and the write, a symlink loop put
+  in an existing file's place, and a FIFO put there, which used to block the write while it held
+  the file's lock. Not
   covered: a replacement by another link to the same file; another process changing the file's
   content in place in between; on filesystems that report no file identity, a file replaced and
   put back around the open; on Windows, a directory on a new file's path replaced (a junction,

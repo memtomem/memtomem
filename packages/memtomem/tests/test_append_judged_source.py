@@ -127,6 +127,20 @@ def test_a_file_that_was_a_link_all_along_takes_the_append(tmp_path):
     assert judged.leaf_own is False
 
 
+def test_an_existing_file_replaced_by_a_symlink_loop_is_refused(tmp_path):
+    """The open answers ``ELOOP``; it is a replacement, not an internal error."""
+    alpha = tmp_path / "alpha.md"
+    alpha.write_text(_CLEAN_A, encoding="utf-8")
+    judged = read_for_append(alpha)
+    alpha.rename(tmp_path / "moved-alpha.md")
+    _link_or_skip(alpha, alpha)
+
+    with pytest.raises(SourceReplacedError):
+        append_entry(alpha, "gamma", judged=judged)
+
+    assert alpha.is_symlink()
+
+
 def test_an_existing_file_removed_since_the_read_is_not_recreated(tmp_path):
     alpha = tmp_path / "alpha.md"
     alpha.write_text(_CLEAN_A, encoding="utf-8")
@@ -516,6 +530,27 @@ async def test_mem_add_does_not_follow_a_link_put_in_place_after_the_preflight(
     assert _REPLACED in result, result
     assert bravo.read_text(encoding="utf-8") == _CLEAN_B
     assert (tmp_path / "moved-alpha.md").read_text(encoding="utf-8") == _CLEAN_A
+    assert _holds(comp) == {read_key: RELINKED_HOLD}
+
+
+async def test_mem_add_refuses_and_holds_when_a_symlink_loop_replaces_the_file(
+    bm25_only_components, tmp_path, monkeypatch
+):
+    comp, mem_dir = bm25_only_components
+    alpha, _ = _alpha_and_bravo(mem_dir)
+    assert (await comp.index_engine.index_file(alpha, ingress_guarded=True)).indexed_chunks == 1
+    read_key = norm_path(alpha)
+
+    def loop() -> None:
+        alpha.rename(tmp_path / "moved-alpha.md")
+        _link_or_skip(alpha, alpha)
+
+    calls = _swap_before_the_append(monkeypatch, loop)
+
+    result = await memory_crud.mem_add(content="gamma entry", file=str(alpha), ctx=_ctx(comp))  # type: ignore[arg-type]
+
+    assert calls, "the append never ran, so nothing was swapped"
+    assert _REPLACED in result, result
     assert _holds(comp) == {read_key: RELINKED_HOLD}
 
 
