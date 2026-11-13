@@ -486,8 +486,9 @@ def append_judged(
 
     The writer appends only to the file a preflight judged (#3289), so it takes
     the read as ``judged``; this reads the file right before the append, which
-    is the judgement a test with nothing in between would get.
+    is the judgement a test with nothing in between would get. Returns the
+    text appended.
     """
     from memtomem.tools.memory_writer import append_entry, read_for_append
 
-    return append_entry(file_path, content, title, tags, judged=read_for_append(file_path))
+    return append_entry(file_path, content, title, tags, judged=read_for_append(file_path)).text

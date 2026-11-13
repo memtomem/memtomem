@@ -712,10 +712,10 @@ class MemtomemStore:
                         ingress_guarded=True,
                         force_unsafe=needs_valve,
                         valve_text=(
-                            appended_valve_text(judged.data, appended) if needs_valve else None
+                            appended_valve_text(judged.data, appended.text) if needs_valve else None
                         ),
                         lock_held=True,
-                        hold_if_relinked=judged.leaf_own,
+                        written_source=appended.source,
                     )
                 except PrivacyRejection as exc:
                     comp.search_pipeline.invalidate_cache()

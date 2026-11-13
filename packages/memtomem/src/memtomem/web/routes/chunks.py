@@ -39,6 +39,7 @@ from memtomem.tools.memory_writer import (
     SourceChangedError,
     SourceRemovedError,
     SourceReplacedError,
+    WrittenSource,
     read_pre_image,
     read_with_source_key,
     remove_lines,
@@ -1056,16 +1057,17 @@ async def delete_chunk(
                         # the correct value and a fresher one than anything read here.
                         # The purge covers an exclusion installed since the guard
                         # above: the sibling chunks would otherwise keep their
-                        # pre-delete line ranges (#3163). A file replaced by a
-                        # symlink since the write is held, not indexed through
-                        # the link (#3172).
+                        # pre-delete line ranges (#3163). A path that stopped
+                        # holding the rewritten file since the write is held,
+                        # not indexed as this delete (#3172): the engine reads
+                        # the file the rewrite went through (#3320).
                         stats = await index_engine.index_file(
                             source,
                             force=True,
                             ingress_guarded=True,
                             lock_held=True,
                             purge_if_excluded=True,
-                            hold_if_relinked=True,
+                            written_source=WrittenSource(source_path, pre_image.identity),
                         )
                     except PrivacyRejection as exc:
                         # Removing the line made the rest of the file refusable

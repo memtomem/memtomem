@@ -121,10 +121,11 @@ def test_a_file_that_was_a_link_all_along_takes_the_append(tmp_path):
     _link_or_skip(alpha, bravo)
     judged = read_for_append(alpha)
 
-    append_entry(alpha, "gamma", judged=judged)
+    appended = append_entry(alpha, "gamma", judged=judged)
 
     assert "gamma" in bravo.read_text(encoding="utf-8")
-    assert judged.leaf_own is False
+    # The re-index is told the file the append landed in, not the link.
+    assert appended.source.source_path == bravo.resolve()
 
 
 def test_an_existing_file_replaced_by_a_symlink_loop_is_refused(tmp_path):
@@ -312,7 +313,7 @@ def test_a_new_file_is_created_with_its_missing_directories(tmp_path):
     target = tmp_path / "sub" / "deeper" / "new.md"
     judged = read_for_append(target)
 
-    assert judged.existed is False and judged.leaf_own is True
+    assert judged.existed is False
     append_entry(target, "gamma", judged=judged)
 
     assert "gamma" in target.read_text(encoding="utf-8")
@@ -322,7 +323,7 @@ def test_an_empty_batch_touches_nothing(tmp_path):
     target = tmp_path / "sub" / "new.md"
     judged = read_for_append(target)
 
-    assert append_blocks(target, [], judged=judged) == ""
+    assert append_blocks(target, [], judged=judged).text == ""
     assert not (tmp_path / "sub").exists()
 
 
@@ -672,7 +673,10 @@ async def test_a_link_put_in_place_after_the_append_is_held_not_indexed(
 
     result = await memory_crud.mem_add(content="gamma entry", file=str(alpha), ctx=_ctx(comp))  # type: ignore[arg-type]
 
-    assert "replaced by a symbolic link before it was re-indexed" in result, result
+    assert (
+        "replaced at its path (by a symbolic link or another file) before it was re-indexed"
+        in result
+    ), result
     assert "gamma entry" in (tmp_path / "moved-alpha.md").read_text(encoding="utf-8")
     assert _holds(comp) == {read_key: RELINKED_HOLD}
     # Followed, the re-index would have indexed the link's target as this write.
@@ -685,7 +689,9 @@ async def test_a_link_put_in_place_after_the_append_is_held_not_indexed(
 # ``memory_writer.append_blocks`` (the web add through ``system.append_entry``, which
 # calls it), so swapping inside it is a swap after each surface's preflight.
 
-_RELINKED_AFTER = "replaced by a symbolic link before it was re-indexed"
+_RELINKED_AFTER = (
+    "replaced at its path (by a symbolic link or another file) before it was re-indexed"
+)
 
 
 @pytest.fixture

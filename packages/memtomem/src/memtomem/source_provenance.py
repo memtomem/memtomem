@@ -64,11 +64,13 @@ def excluded_after_write_notice(op: str) -> str:
 
 
 def relinked_after_write_notice(op: str, stored_key: str) -> str:
-    """What a by-id rewrite tells its caller when its file became a symlink while it ran.
+    """What a write tells its caller when its path stopped holding the file while it ran.
 
-    The rewrite refused a relinked key before writing (#2923), so the file was
-    replaced between the write and the re-index. The re-index held the rows
-    under the path's own key instead of indexing the link's target (#3172).
+    The write refused a path that no longer held the file it read (#2923,
+    #3289), so the file was replaced between the write and the re-index: by a
+    symlink at the leaf, a parent directory turned into a link, or another
+    file saved over it. The re-index held the rows under the written file's
+    key instead of indexing what the path holds now (#3172, #3320).
 
     ``stored_key`` is the chunk's source key. The hold is placed under the
     folded spelling, so rows stored under a key from before Unicode folding
@@ -77,8 +79,9 @@ def relinked_after_write_notice(op: str, stored_key: str) -> str:
     does not find them either (#2926).
     """
     lead = (
-        f"The {op} was written, but the file was replaced by a symbolic link before it was "
-        "re-indexed, so the link's target was not indexed in its place"
+        f"The {op} was written, but the file was replaced at its path (by a symbolic link or "
+        "another file) before it was re-indexed, so what the path holds now was not indexed "
+        "in its place"
     )
     if stored_key != fold_path_form(stored_key):
         return (

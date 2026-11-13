@@ -20,7 +20,7 @@ from uuid import uuid4
 
 
 from memtomem.source_provenance import StaleSourceProvenanceError, source_span_hash
-from memtomem.storage.sqlite_helpers import leaf_names_own_key, own_leaf_key, resolve_path
+from memtomem.storage.sqlite_helpers import fold_path_form, resolve_path
 
 
 logger = logging.getLogger(__name__)
@@ -108,16 +108,78 @@ class JudgedSource:
     the filesystem cannot answer or there was no file. ``existed`` is whether
     the read found a file. ``source_path`` is the path's resolution right after
     the read: the preflight judges the bytes under it, and a new file is
-    created exactly there. ``leaf_own`` is whether the leaf was not a link at
-    the read, by the comparison the engine's relink check makes; it decides
-    whether the re-index after the append may hold the file as relinked.
+    created exactly there.
     """
 
     data: bytes
     identity: tuple[int, int] | None
     existed: bool
     source_path: Path
-    leaf_own: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WrittenSource:
+    """The file a memory tool wrote, for the re-index that follows its write (#3320).
+
+    ``IndexEngine.index_file`` takes it as ``written_source`` and reads only
+    that file (:func:`open_written`), so the re-index cannot follow a path
+    that was replaced after the write into a file the tool never wrote, and
+    index that one under the tool's namespace and tags.
+
+    ``source_path`` is the resolution taken with the read the preflight judged
+    (``JudgedSource.source_path``, or :func:`read_with_source_key`'s). It is
+    never resolved again: the re-index opens it as given, judges the content
+    under it and keys its rows by it. ``identity`` is the ``(st_dev, st_ino)``
+    of the descriptor the write went through, ``None`` where the filesystem
+    cannot answer.
+    """
+
+    source_path: Path
+    identity: tuple[int, int] | None
+
+    @property
+    def key(self) -> str:
+        """The key the store holds this source's rows under."""
+        return fold_path_form(str(self.source_path))
+
+
+@dataclass(frozen=True, slots=True)
+class Appended:
+    """What :func:`append_blocks` wrote, and the file it wrote it to.
+
+    ``text`` is the text appended (``""`` for none), before the platform
+    newline translation text mode applies, so a caller can name exactly what
+    the file should hold after the write. ``source`` is that file, for the
+    re-index: its identity comes off the descriptor the text was written
+    through, which for a file the append created is the only place to get it.
+    """
+
+    text: str
+    source: WrittenSource
+
+
+@dataclass(frozen=True, slots=True)
+class _Refusal:
+    """How a refused open is worded: what was about to happen, and what did not."""
+
+    before: str
+    file: str
+    removed: str
+    replaced: str
+
+
+_ENTRY = _Refusal(
+    "the entry was written",
+    "the file that was read",
+    "nothing was recreated",
+    "nothing was written",
+)
+_EDIT = _Refusal(
+    "the edit was written", "the file that was read", "nothing was recreated", "nothing was written"
+)
+_REINDEX = _Refusal(
+    "it was re-indexed", "the file that was written", "it was not indexed", "it was not indexed"
+)
 
 
 def _default_heading(now: str) -> str:
@@ -192,7 +254,7 @@ def format_entry_block(
     return f"\n{heading}\n\n> created: {now}{tag_line}\n\n{stripped}\n"
 
 
-def append_blocks(file_path: Path, blocks: Sequence[str], *, judged: JudgedSource) -> str:
+def append_blocks(file_path: Path, blocks: Sequence[str], *, judged: JudgedSource) -> Appended:
     """Append pre-formatted entry blocks to the file a preflight judged, in ONE write.
 
     All-or-nothing (issue #1573): a batch of entries is composed into a
@@ -211,20 +273,23 @@ def append_blocks(file_path: Path, blocks: Sequence[str], *, judged: JudgedSourc
     judged path by descriptor (:func:`_create_judged`). Either raises
     :class:`SourceChangedError` before writing anything.
 
-    Returns the text appended (``""`` for none), before the platform newline
-    translation text mode applies, so a caller can name exactly what the file
-    should hold after the write.
+    Returns the text appended and the file it went to (:class:`Appended`).
+    The identity is taken from the open descriptor before anything is written
+    through it, so a file this call created is named by what was created, not
+    by a later look at the path.
     """
     if not blocks:
-        return ""
+        return Appended("", WrittenSource(judged.source_path, judged.identity))
     text = "".join(blocks)
     if judged.existed:
         handle = _open_judged_existing(file_path, judged)
     else:
         handle = _create_judged(judged.source_path)
     with handle:
+        info = os.fstat(handle.fileno())
         handle.write(text)
-    return text
+    identity = None if info.st_ino == 0 else (info.st_dev, info.st_ino)
+    return Appended(text, WrittenSource(judged.source_path, identity))
 
 
 def append_entry(
@@ -234,10 +299,10 @@ def append_entry(
     tags: list[str] | None = None,
     *,
     judged: JudgedSource,
-) -> str:
+) -> Appended:
     """Append a single new entry to the file a preflight judged, creating it if it was absent.
 
-    Returns the text appended (see :func:`append_blocks`).
+    Returns what was appended and where (see :func:`append_blocks`).
     """
     return append_blocks(
         file_path, [format_entry_block(content, title=title, tags=tags)], judged=judged
@@ -272,30 +337,33 @@ def _open_existing(
     file_path: Path,
     mode: str,
     *,
-    what: str,
+    refusal: _Refusal,
     opener: Callable[[str, int], int] | None = None,
-) -> IO[str]:
+) -> IO:
     """``open(file_path, mode)`` for a file that must already be there, refusals typed.
 
-    Shared by :func:`_rewrite_in_place` and :func:`_open_judged_existing`. The
-    mode passes no ``O_CREAT`` (``"r+"``, or ``"a"`` through an ``opener``
-    that drops it), so absence answers at the open rather than being raced by a
-    probe: ``ENOENT`` / ``ENOTDIR`` raise :class:`SourceRemovedError`. A
-    directory standing at the path, a FIFO with no reader (``ENXIO``, under
-    ``O_NONBLOCK``), and a symlink loop put at the path raise
-    :class:`SourceReplacedError`. POSIX answers the loop ``ELOOP``; Windows
-    answers ``EINVAL``, which it also gives for other things, so there the
-    path must be a symlink as well. ``what`` names the write in the message.
+    Shared by :func:`_rewrite_in_place` and :func:`_open_same_file`. The
+    mode passes no ``O_CREAT`` (``"r+"``, or ``"a"`` / ``"rb"`` through an
+    ``opener`` that drops it), so absence answers at the open rather than
+    being raced by a probe: ``ENOENT`` / ``ENOTDIR`` raise
+    :class:`SourceRemovedError`. A directory standing at the path, a FIFO with
+    no reader opened for writing (``ENXIO``, under ``O_NONBLOCK``), and a
+    symlink loop put at the path raise :class:`SourceReplacedError`. POSIX
+    answers the loop ``ELOOP``; Windows answers ``EINVAL``, which it also
+    gives for other things, so there the path must be a symlink as well.
+
+    A text mode decodes UTF-8; a binary mode (``"b"``) gives the bytes.
+    ``refusal`` words the messages for the caller's operation.
     """
     try:
-        return open(file_path, mode, encoding="utf-8", opener=opener)
+        return open(file_path, mode, encoding=None if "b" in mode else "utf-8", opener=opener)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise SourceRemovedError(
-            f"{file_path} was removed before the {what} was written; nothing was recreated"
+            f"{file_path} was removed before {refusal.before}; {refusal.removed}"
         ) from exc
     except IsADirectoryError as exc:
         raise SourceReplacedError(
-            f"{file_path} is a directory, not the file that was read; nothing was written"
+            f"{file_path} is a directory, not {refusal.file}; {refusal.replaced}"
         ) from exc
     except PermissionError as exc:
         # Windows answers a directory at the path with EACCES where POSIX
@@ -306,7 +374,7 @@ def _open_existing(
         # rather than a file. A genuine permission error still propagates.
         if os.path.isdir(file_path):
             raise SourceReplacedError(
-                f"{file_path} is a directory, not the file that was read; nothing was written"
+                f"{file_path} is a directory, not {refusal.file}; {refusal.replaced}"
             ) from exc
         raise
     except OSError as exc:
@@ -314,27 +382,63 @@ def _open_existing(
             exc.errno == errno.EINVAL and os.path.islink(file_path)
         ):
             raise SourceReplacedError(
-                f"{file_path} is no longer a regular file; nothing was written"
+                f"{file_path} is no longer a regular file; {refusal.replaced}"
             ) from exc
         raise
+
+
+def _open_same_file(
+    file_path: Path,
+    identity: tuple[int, int] | None,
+    source_path: Path,
+    *,
+    mode: str,
+    opener: Callable[[str, int], int],
+    refusal: _Refusal,
+) -> IO:
+    """Open ``file_path`` only if it is still the file with ``identity``, or raise.
+
+    The open is the decision, for the append after a preflight
+    (:func:`_open_judged_existing`) and for the re-index after a write
+    (:func:`open_written`). The ``opener`` passes no ``O_CREAT``, so a file
+    removed since is not recreated. The descriptor must be a regular file with
+    ``identity``: a symlink put at the path since leads to another inode and
+    is refused, while a path that led through a link all along opens the same
+    inode and keeps working. Same inode through another link passes, as it
+    does for :func:`_rewrite_in_place`.
+
+    Where the filesystem gives no identity (``st_ino == 0``), the path is
+    required to resolve to ``source_path`` before the open and after it: the
+    first sees a link put in place before the open and taken away right after
+    it, the second one put in place before the open and left there. That
+    narrows the window without closing it: a link put in place after the
+    first resolution and taken away before the second is not seen.
+
+    Raises :class:`SourceRemovedError` or :class:`SourceReplacedError`.
+    """
+    if identity is None:
+        _require_resolves_to(file_path, source_path, refusal)
+    handle = _open_existing(file_path, mode, refusal=refusal, opener=opener)
+    try:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or (
+            identity is not None and (info.st_dev, info.st_ino) != identity
+        ):
+            raise SourceReplacedError(
+                f"{file_path} is no longer {refusal.file}; {refusal.replaced}"
+            )
+        if identity is None:
+            _require_resolves_to(file_path, source_path, refusal)
+    except BaseException:
+        handle.close()
+        raise
+    return handle
 
 
 def _open_judged_existing(file_path: Path, judged: JudgedSource) -> IO[str]:
     """Open the file ``judged`` read for appending, or raise :class:`SourceChangedError`.
 
-    No ``O_CREAT``, so a file removed since the read is not recreated. The
-    descriptor must be a regular file with the identity the read took: a
-    symlink put at the path since leads to another inode and is refused, while
-    a memory file that was a symlink all along opens the same target inode and
-    keeps working. Same inode through another link passes, as it does for
-    :func:`_rewrite_in_place`.
-
-    Where the filesystem gives no identity (``st_ino == 0``), the path is
-    required to resolve to the judged source before the open and after it:
-    the first sees a link put in place before the open and taken away right
-    after it, the second one put in place before the open and left there.
-    That narrows the window without closing it: a link put in place after the
-    first resolution and taken away before the second is not seen.
+    See :func:`_open_same_file` for what is compared.
     """
 
     def no_create(path: str, _flags: int) -> int:
@@ -342,33 +446,44 @@ def _open_judged_existing(file_path: Path, judged: JudgedSource) -> IO[str]:
         # masked, so nothing here names a creating flag at all.
         return os.open(path, os.O_WRONLY | os.O_APPEND | _O_NONBLOCK | _O_BINARY)
 
-    if judged.identity is None:
-        _require_resolves_to(file_path, judged.source_path)
-    handle = _open_existing(file_path, "a", what="entry", opener=no_create)
-    try:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode) or (
-            judged.identity is not None and (info.st_dev, info.st_ino) != judged.identity
-        ):
-            raise SourceReplacedError(
-                f"{file_path} is no longer the file that was read; nothing was written"
-            )
-        if judged.identity is None:
-            _require_resolves_to(file_path, judged.source_path)
-    except BaseException:
-        handle.close()
-        raise
-    return handle
+    return _open_same_file(
+        file_path, judged.identity, judged.source_path, mode="a", opener=no_create, refusal=_ENTRY
+    )
 
 
-def _require_resolves_to(file_path: Path, source_path: Path) -> None:
+def open_written(source: WrittenSource) -> IO[bytes]:
+    """Open the file a memory tool wrote, for its re-index to read (#3320).
+
+    ``source.source_path`` is opened as given, read-only, and the descriptor
+    must be the regular file the write went through (:func:`_open_same_file`).
+    Raises :class:`SourceReplacedError` when something else answers to the
+    path now — a link, another file, a directory, a FIFO (opened
+    ``O_NONBLOCK`` so one with no writer does not block) — and
+    :class:`SourceRemovedError` when nothing does. The caller reads the bytes
+    off the handle and closes it.
+    """
+
+    def read_only(path: str, _flags: int) -> int:
+        return os.open(path, os.O_RDONLY | _O_NONBLOCK | _O_BINARY)
+
+    return _open_same_file(
+        source.source_path,
+        source.identity,
+        source.source_path,
+        mode="rb",
+        opener=read_only,
+        refusal=_REINDEX,
+    )
+
+
+def _require_resolves_to(file_path: Path, source_path: Path, refusal: _Refusal) -> None:
     try:
         resolved = resolve_path(file_path)
     except OSError:
         resolved = None
     if resolved != source_path:
         raise SourceReplacedError(
-            f"{file_path} no longer resolves to the file that was read; nothing was written"
+            f"{file_path} no longer resolves to {refusal.file}; {refusal.replaced}"
         )
 
 
@@ -655,7 +770,7 @@ def _rewrite_in_place(
     with universal newlines and written with the platform's, and this is a
     refusal fix, not a newline change.
     """
-    handle = _open_existing(file_path, "r+", what="edit")
+    handle = _open_existing(file_path, "r+", refusal=_EDIT)
 
     with handle:
         info = os.fstat(handle.fileno())
@@ -993,16 +1108,11 @@ def read_for_append(file_path: Path) -> JudgedSource:
         source_path = resolve_path(file_path)
     except OSError:
         source_path = file_path
-    try:
-        leaf_own = leaf_names_own_key(own_leaf_key(file_path), source_path)
-    except OSError:
-        leaf_own = False
     return JudgedSource(
         data=b"" if pre is None else pre.data,
         identity=None if pre is None else pre.identity,
         existed=pre is not None,
         source_path=source_path,
-        leaf_own=leaf_own,
     )
 
 

@@ -533,7 +533,7 @@ class TestAForcedWriteCoversOnlyItsOwnBytes:
         judged = read_for_append(target)
         appended = append_entry(target, "second entry", title="T", judged=judged)
 
-        assert appended_valve_text(judged.data, appended) == target.read_text(encoding="utf-8")
+        assert appended_valve_text(judged.data, appended.text) == target.read_text(encoding="utf-8")
 
     def test_a_rewrite_that_read_something_else_cannot_be_bound(self):
         from memtomem.tools.memory_mutation import rewrite_valve_text
