@@ -286,8 +286,12 @@ async def test_a_preflight_whose_resolution_fails_refuses(
     assert _holds(comp) == {}
 
 
-async def test_only_the_preflight_freezes_the_scope(bm25_only_components, monkeypatch):
-    """The doctor's preview keeps resolving the way the index gate does."""
+async def test_the_gate_and_both_twins_freeze_the_scope(bm25_only_components, monkeypatch):
+    """The index gate, the doctor's preview and the preflight all judge a path as given (#3290).
+
+    Each makes one scope lookup: the index pass hands its projection to the
+    chunker, which then looks nothing up.
+    """
     import memtomem.indexing.engine as engine_mod
 
     comp, mem_dir = bm25_only_components
@@ -301,11 +305,14 @@ async def test_only_the_preflight_freezes_the_scope(bm25_only_components, monkey
         return real(path, dirs, **kwargs)
 
     monkeypatch.setattr(engine_mod, "classify_scope", spy)
+    stats = await comp.index_engine.index_file(alpha)
+    assert stats.indexed_chunks == 1, stats
+    assert seen == [True]
     comp.index_engine.preview_redaction_decision(alpha, _CLEAN_A)
     pre, source_path = _read(alpha)
     comp.index_engine.preflight_mutation(alpha, pre, source_path=source_path)
 
-    assert seen == [False, True]
+    assert seen == [True, True, True]
 
 
 def _relink_before_the_preflight(monkeypatch, engine, leaf: Path, target: Path, tmp_path: Path):
