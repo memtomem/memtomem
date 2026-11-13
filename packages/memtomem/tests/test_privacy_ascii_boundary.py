@@ -6,8 +6,8 @@ Japanese prose, had no boundary on that side and ten of the token rules missed
 it. The rules now spell their boundaries as ASCII lookarounds.
 
 What that must and must not change is checked against two references built
-from the patterns themselves: the set as memtomem-stm still spells it (the same
-strings with ``\\b``), and that spelling with the boundary made ASCII by a
+from the patterns themselves: the set as both repos spelled it before (the
+same strings with ``\\b``), and that spelling with the boundary made ASCII by a
 scoped inline flag, which is the behaviour the lookarounds are meant to have.
 """
 
@@ -30,9 +30,9 @@ _LEADING = "(?<![A-Za-z0-9_])"
 _TRAILING = "(?![A-Za-z0-9_])"
 _TRAILING_AFTER_HYPHEN_CLASS = "(?<=[A-Za-z0-9_])(?![A-Za-z0-9_])"
 
-# What memtomem-stm's suite pins for the set it still carries, and what this
-# repo pinned before #3298.
-_STM_SET_SHA256 = "631d79e538a2000424dd3493737bb60580f7516a20bdacddd12df9432caa99d8"
+# What this repo pinned before #3298, and memtomem-stm until its mirror
+# (memtomem-stm#1378).
+_SET_BEFORE_3298_SHA256 = "631d79e538a2000424dd3493737bb60580f7516a20bdacddd12df9432caa99d8"
 # The browser's JWT rule as it was sent before #3298. It is not in
 # ``DEFAULT_PATTERNS``, so the hash above does not vouch for it.
 _BROWSER_JWT_RULE_WITH_WORD_BOUNDARIES = (
@@ -122,9 +122,10 @@ def _boundary_assertions(pattern: str) -> int:
     return found
 
 
-def test_the_set_differs_from_stms_only_in_how_boundaries_are_spelled():
-    as_stm = [_with_word_boundaries(p) for p in privacy.DEFAULT_PATTERNS]
-    assert hashlib.sha256("\n".join(as_stm).encode()).hexdigest() == _STM_SET_SHA256
+def test_the_set_differs_from_the_one_before_3298_only_in_how_boundaries_are_spelled():
+    as_before = [_with_word_boundaries(p) for p in privacy.DEFAULT_PATTERNS]
+    joined = "\n".join(as_before).encode()
+    assert hashlib.sha256(joined).hexdigest() == _SET_BEFORE_3298_SHA256
     assert len(_REWRITTEN) == 10
 
 
