@@ -322,13 +322,13 @@ extension of this one.
 > for the decision.
 
 **The gap.** `mem_index` lists the files it blocked and offers no bypass. A
-file with hits gets through `mem_index` only by carrying the E.5 declaration,
-which waives only the two label rules.
+file with hits gets through `mem_index` verbatim only by carrying the E.5
+declaration, which waives only the two label rules.
 
 | Option | Behavior | Verdict |
 |--------|----------|---------|
 | E.6a — add `force_unsafe` to `mem_index` | the MCP caller sets the valve itself; refused for `project_shared`, audit-logged and counted | ❌ |
-| E.6b — **no valve on `mem_index`** | `mem_index` keeps refusing a file with hits unless it carries the E.5 declaration | ✅ |
+| E.6b — **no valve on `mem_index`** | `mem_index` keeps refusing to store a file with hits verbatim unless it carries the E.5 declaration | ✅ |
 
 **Decision: E.6b.** `mem_index` stays without `force_unsafe`.
 
@@ -352,7 +352,8 @@ Two arguments this decision does not rest on:
   room, not a reason to decline.
 
 **Accepted consequence.** `mem_index` cannot perform this bypass: it keeps
-refusing a reviewed false positive outside the two label rules.
+refusing to store a reviewed false positive outside the two label rules
+verbatim.
 
 **Reopen trigger.** MCP callers gain an approval they cannot give themselves,
 for example an elicitation that the client's user answers. A valve bound to
