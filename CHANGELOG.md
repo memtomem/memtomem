@@ -92,6 +92,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   install made without the lockfile keeps an older filelock until you run
   `pip install -U filelock`, and an existing model cache keeps its mode until you run
   `chmod 700 ~/.memtomem/cache/fastembed`; see Security.
+- **An existing environment keeps opentelemetry-api 1.45.1 until its dependencies are resolved
+  again.** A request with a crafted `traceparent` can stall a server on 1.45.1. Upgrading
+  memtomem alone may not move it; Security gives the step for each kind of install and the
+  version check.
 - **langchain-memtomem 0.2.1 follows this release** and requires `memtomem>=0.7.9,<0.8`.
   Items its store wrote before that upgrade keep the `File:` / `Fragment` lines until each is
   written again; see its CHANGELOG.
