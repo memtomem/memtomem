@@ -22,7 +22,8 @@ memtomem is beta (`0.x`); only the latest published minor receives security fixe
   styles are same-origin with inline styles allowed for the current UI. Frames,
   plugins, external base URLs, and cross-origin form submissions are blocked.
 - **Frame protection**: `X-Frame-Options: DENY` prevents clickjacking
-- **CORS**: Restricted to localhost origins only
+- **CORS**: None. The UI and its API are one origin, so no cross-origin request
+  gets a readable response or an answered preflight.
 - **Path traversal protection**: General file access endpoints validate against
   indexed sources and reject symlink escapes. The explicit one-shot indexing
   exception is documented below.
@@ -35,9 +36,8 @@ browser readability boundary, not a write boundary — a malicious tab can
 issue CORS-simple `POST` requests against `http://127.0.0.1:<port>` and the
 handler still runs even if the response is unreadable. DNS rebinding makes
 an attacker page same-origin, so it can also *read* GET responses. To close
-both gaps, a single middleware gates **every** request to `/api/**` — reads
-included; only `OPTIONS` preflights (owned by the CORS middleware) are
-skipped:
+both gaps, a single middleware gates **every** request to `/api/**`, reads
+and `OPTIONS` included:
 
 1. **Host header** — must be a loopback hostname or an operator-supplied
    `--trusted-host` entry. Checked on **every** `/api/**` request,
@@ -45,10 +45,13 @@ skipped:
    `127.0.0.1` but the browser's URL bar (and the `Host:` header) is
    attacker-controlled — without this a rebound page could read
    `GET /api/export`.
-2. **Origin / Referer** — when present, must resolve to a loopback host
-   or an operator-supplied `--trusted-origin` entry. Checked on every
-   `/api/**` request. Defends drive-by tabs whose Origin reveals the
-   attacker domain.
+2. **Origin / Referer** — when present, must be the UI's own origin or
+   name an operator-supplied `--trusted-origin` hostname. A loopback origin
+   is the UI's own only when its scheme, host and port are the ones the
+   request was addressed to (the connection's scheme and the `Host`
+   header), so a page served from another local port is refused like any
+   other site. Checked on every `/api/**` request. Defends drive-by tabs
+   and other web apps running on the same machine.
 3. **CSRF token** — `X-Memtomem-CSRF` must match the per-process token in
    `app.state.csrf_token`. Required for **unsafe** methods (POST / PUT /
    PATCH / DELETE) only. The SPA fetches it via `GET /api/session` lazily
@@ -72,7 +75,10 @@ this recovery and retain their own privacy, consent, or permission handling.
   refuses without it; the unauthenticated SPA must not be exposed to
   the network by accident.
 - `--trusted-origin <host>` (repeatable) — extends the Origin/Referer
-  allow-list. Pair with `--allow-remote-ui`.
+  allow-list by hostname, every port of it. Pair with `--allow-remote-ui`.
+  Naming a loopback hostname (`localhost`) accepts every origin on that
+  name again; it is for a local proxy that rewrites `Host`, or terminates
+  TLS without forwarding the scheme.
 - `--trusted-host <host>` (repeatable) — extends the Host-header
   allow-list. Pair with `--allow-remote-ui`.
 - `MEMTOMEM_WEB__CSRF_ENFORCE` — emergency rollback to observe-only.

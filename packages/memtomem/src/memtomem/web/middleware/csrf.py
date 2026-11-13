@@ -7,9 +7,12 @@ seam:
 1. ``X-Memtomem-CSRF`` header must match the per-process token in
    ``app.state.csrf_token``. The SPA fetches the token from
    ``GET /api/session`` and threads it through the ``api(...)`` helper.
-2. When ``Origin`` (or ``Referer`` if ``Origin`` is absent) is present,
-   it must be in the loopback allow-list — defends CORS-simple POSTs that
-   reach the handler regardless of CORS readability.
+2. When ``Origin`` (or ``Referer`` if ``Origin`` is absent) is present, it
+   must be this server's own origin — the scheme, host and port the request
+   itself was addressed to — or name an operator-trusted hostname. A page
+   served from another loopback port is another origin; without this rule
+   it could send requests that reach the handler. The app answers no CORS
+   request, so such a page cannot read a response either.
 3. ``Host`` header must be in the loopback or operator-trusted allow-list
    — defends DNS rebinding, where the socket peer is ``127.0.0.1`` but
    the browser's URL bar (and the ``Host:`` header) is attacker-controlled.
@@ -30,8 +33,7 @@ Invariants:
   depend on the HTTP method. A rebound origin must not be able to read
   ``GET /api/export`` or harvest the token from ``GET /api/session``. The
   middleware short-circuits only on non-``/api/*`` paths (SPA bootstrap,
-  static assets) and on ``OPTIONS`` preflights, which the CORS middleware
-  owns.
+  static assets). ``OPTIONS`` is checked like any other method.
 * The ``X-Memtomem-CSRF`` token is required for every unsafe method
   (``POST``/``PUT``/``PATCH``/``DELETE``) on ``/api/*``, including the
   bootstrap path itself. Safe methods never carry a token; ``GET
@@ -44,7 +46,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -55,10 +57,13 @@ logger = logging.getLogger(__name__)
 
 _LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 
-# Methods that mutate state and therefore require the CSRF token. Safe
-# methods (``GET``/``HEAD``) still pass through the Host/Origin gate — they
-# only skip the token check. Only ``OPTIONS`` preflights and non-``/api/*``
-# paths bypass the middleware entirely.
+# The port a URL means when it names none. A scheme outside this table has
+# no default, so its origin never equals an ``http`` or ``https`` one.
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+# Methods that mutate state and therefore require the CSRF token. Every
+# other method still passes through the Host/Origin gate — it only skips
+# the token check. Only non-``/api/*`` paths bypass the middleware entirely.
 _UNSAFE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # The SPA fetches its token here via GET. The route is reachable without a
@@ -93,14 +98,36 @@ def _strip_port(host_header: str | None) -> str | None:
     return h
 
 
-def _origin_host(origin_or_referer: str | None) -> str | None:
-    """Extract the hostname from an ``Origin`` or ``Referer`` header."""
-    if not origin_or_referer:
+def _origin_of(url: str | None) -> tuple[str, str, int | None] | None:
+    """Return ``(scheme, hostname, port)`` of an ``Origin`` or ``Referer`` value.
+
+    The port is the explicit one, or the scheme's default when the URL names
+    none. ``None`` when the value has no hostname (``null``) or does not
+    parse, which includes a port that is not a number.
+    """
+    if not url:
         return None
     try:
-        return urlparse(origin_or_referer).hostname
+        parts = urlsplit(url)
+        host, port = parts.hostname, parts.port
     except ValueError:
         return None
+    if not host:
+        return None
+    scheme = parts.scheme.lower()
+    return scheme, host, port if port is not None else _DEFAULT_PORTS.get(scheme)
+
+
+def _own_origin(request: Request) -> tuple[str, str, int | None] | None:
+    """Return the origin this request was addressed to, or ``None``.
+
+    The scheme is the connection's (``https`` when a proxy uvicorn trusts
+    forwarded it), and the host and port are the ``Host`` header's. Nothing
+    here depends on the bind address, so a forwarded port is still the
+    server's own origin as the browser sees it. A request with no ``Host``
+    has none.
+    """
+    return _origin_of(f"{request.url.scheme}://{request.headers.get('host', '')}")
 
 
 class CSRFGuardMiddleware(BaseHTTPMiddleware):
@@ -111,8 +138,9 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
     * ``app.state.csrf_token`` — the per-process token (``str``).
     * ``app.state.csrf_trusted_hosts`` — set of extra hostnames the
       operator opted in via ``--trusted-host``. May be empty.
-    * ``app.state.csrf_trusted_origins`` — set of extra hostnames the
-      operator opted in via ``--trusted-origin``. May be empty.
+    * ``app.state.csrf_trusted_origins`` — set of hostnames the operator
+      opted in via ``--trusted-origin``; an origin on one of them passes
+      whatever its port. May be empty.
     * ``app.state.csrf_enforce`` — bool. Defaults to ``True`` in production;
       set ``MEMTOMEM_WEB__CSRF_ENFORCE=0`` for emergency rollback to
       observe-only.
@@ -123,9 +151,8 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
         method = request.method.upper()
 
         # Only ``/api/*`` is gated. Non-API paths (SPA bootstrap, static
-        # assets) and ``OPTIONS`` preflights (owned by the CORS middleware)
-        # fall through untouched.
-        if not path.startswith("/api/") or method == "OPTIONS":
+        # assets) fall through untouched.
+        if not path.startswith("/api/"):
             return await call_next(request)
 
         # Host / Origin are the DNS-rebinding boundary: validate them on
@@ -199,13 +226,19 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
             # browser-origin failure when the request isn't from a
             # browser at all.
             return True
-        host = _origin_host(origin_hdr)
-        if host is None:
+        origin = _origin_of(origin_hdr)
+        if origin is None:
             return False
-        if host in _LOOPBACK_HOSTS:
-            return True
+        host = origin[1]
         trusted: frozenset[str] = getattr(request.app.state, "csrf_trusted_origins", frozenset())
-        return host in trusted
+        if host in trusted:
+            # The operator named this hostname; any port and scheme of it.
+            return True
+        if host not in _LOOPBACK_HOSTS:
+            return False
+        # A loopback name is not an identity: every local server has one.
+        # Only the origin this request was addressed to is the UI's own.
+        return origin == _own_origin(request)
 
     @staticmethod
     def _check_host(request: Request) -> bool:
