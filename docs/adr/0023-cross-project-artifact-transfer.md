@@ -1,6 +1,6 @@
 # ADR-0023: Cross-project artifact transfer engine (move|copy)
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-11-13: the MCP transfer and artifact-migration tools (§13) are retired; the CLI keeps both and the web keeps transfer, ADR-0044)
 **Date:** 2026-06-12
 **Context:** Context Gateway completion campaign, mechanism track #1270
 item A-2 (#1273). ADR-0011 PR-E4 shipped a single-project scope move

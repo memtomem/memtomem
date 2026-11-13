@@ -1,6 +1,6 @@
 # ADR-0021: Context Portal — multi-project state board over the gateway dashboard
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-11-13: the MCP `sync` tool it refers to is retired; detect and diff remain, ADR-0044)
 **Date:** 2026-06-02
 **Context:** Two independent design reviews (`agy`/Antigravity UX notes and a
 `codex`/Claude technical synthesis) converged on the same ask: grow the

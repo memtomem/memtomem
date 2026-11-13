@@ -34,8 +34,8 @@ correctly-snapshotted overwrite — never a wrong-content write or lost update.
 Later runtime divergence is ordinary post-pull drift (the §1 probe's job).
 
 Surfaces: the CLI ``mm context pull`` (PR-C) is the first consumer; the Web
-Pull flow (PR-D) and MCP ``mem_context_pull`` (PR-H) reuse the same
-result-coded contract.
+Pull flow (PR-D) reuses the same result-coded contract. (An MCP tool did too
+until ADR-0044 took the context writes off MCP.)
 """
 
 from __future__ import annotations
@@ -368,7 +368,7 @@ def prepare_pull(
 
     ``name`` is validated HERE rather than being assumed validated by the
     caller. Every shipping surface does validate (``context_gateway`` routes,
-    ``mem_context_pull``, the CLI), but this engine builds destination paths as
+    the CLI), but this engine builds destination paths as
     ``canonical_root / name`` — and a separator-carrying name like
     ``../other/x`` yields a perfectly ordinary *basename* while pointing the
     parent somewhere else entirely, so a downstream basename check cannot catch
