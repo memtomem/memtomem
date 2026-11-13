@@ -23,7 +23,7 @@ from helpers import StubCtx
 from memtomem import privacy
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
-from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
+from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD, RELINKED_HOLD
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.web.app import create_app
 from memtomem.web.deps import require_configured
@@ -109,28 +109,32 @@ def _web_client(comp):
     )
 
 
-async def _request(comp, surface: str, refused: Path, chunk_id: str):
-    """Drive ``surface`` at ``refused``; return whether it answered with the refusal."""
+async def _send(comp, surface: str, refused: Path, chunk_id: str):
+    """Drive ``surface`` at ``refused``; the tool's text for MCP, the response for web."""
     if surface.startswith("mcp"):
         ctx = StubCtx(AppContext.from_components(comp))
         if surface == "mcp_add":
-            result = await memory_crud.mem_add(content="gamma entry", file=str(refused), ctx=ctx)  # type: ignore[arg-type]
-        elif surface == "mcp_edit":
-            result = await memory_crud.mem_edit(chunk_id, "revised", ctx=ctx)  # type: ignore[arg-type]
-        else:
-            result = await memory_crud.mem_delete(chunk_id=chunk_id, ctx=ctx)  # type: ignore[arg-type]
-        assert "refused" in result, result
-        return
+            return await memory_crud.mem_add(content="gamma entry", file=str(refused), ctx=ctx)  # type: ignore[arg-type]
+        if surface == "mcp_edit":
+            return await memory_crud.mem_edit(chunk_id, "revised", ctx=ctx)  # type: ignore[arg-type]
+        return await memory_crud.mem_delete(chunk_id=chunk_id, ctx=ctx)  # type: ignore[arg-type]
     async with _web_client(comp) as client:
         if surface == "web_add":
-            resp = await client.post("/api/add", json={"content": "gamma", "file": refused.name})
-        elif surface == "web_edit":
-            resp = await client.patch(f"/api/chunks/{chunk_id}", json={"new_content": "revised"})
-        elif surface == "web_delete":
-            resp = await client.delete(f"/api/chunks/{chunk_id}")
-        else:
-            await comp.storage.scratch_set("note", "gamma")
-            resp = await client.post("/api/scratch/note/promote", json={"file": str(refused)})
+            return await client.post("/api/add", json={"content": "gamma", "file": refused.name})
+        if surface == "web_edit":
+            return await client.patch(f"/api/chunks/{chunk_id}", json={"new_content": "revised"})
+        if surface == "web_delete":
+            return await client.delete(f"/api/chunks/{chunk_id}")
+        await comp.storage.scratch_set("note", "gamma")
+        return await client.post("/api/scratch/note/promote", json={"file": str(refused)})
+
+
+async def _request(comp, surface: str, refused: Path, chunk_id: str):
+    """Drive ``surface`` at ``refused`` and require the refusal with nothing written."""
+    resp = await _send(comp, surface, refused, chunk_id)
+    if isinstance(resp, str):
+        assert "refused" in resp, resp
+        return
     assert resp.status_code == 409, resp.text
     assert resp.json()["detail"]["detail"] == "index_blocked", resp.text
     assert resp.json()["detail"]["written"] is False, resp.text
@@ -172,3 +176,66 @@ async def test_a_path_relinked_after_the_read_holds_the_refused_source(
     assert _reason(comp, target_key) is None
     assert await _hits(comp, "Alphaword") == []
     assert await _hits(comp, "Bravoword")
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+async def test_a_clean_source_relinked_after_the_read_is_held_as_relinked(
+    bm25_only_components, monkeypatch, surface
+):
+    """No refusal from the judge, and the source that was read is held all the same (#3291).
+
+    Each surface is a different caller of ``preflight_mutation``. The query is
+    warmed first and asked again without dropping the cache: the hold moves the
+    store's visibility epoch, and the pipeline drops its warmed answers when it
+    sees that. With the epoch held still, this assertion fails for six of the
+    seven surfaces; ``mcp_add`` passes either way, because its wrapper
+    (``memory_crud._preflight_refusal``) drops the cache on any refusal.
+    """
+    comp, mem_dir = bm25_only_components
+    clean = mem_dir / "alpha.md"
+    clean.write_text(_REFUSED, encoding="utf-8")
+    target = mem_dir / "bravo.md"
+    target.write_text(_TARGET, encoding="utf-8")
+    for path in (clean, target):
+        stats = await comp.index_engine.index_file(path, ingress_guarded=True)
+        assert stats.indexed_chunks == 1, stats
+    clean_key, target_key = norm_path(clean), norm_path(target)
+    (chunk,) = await comp.storage.list_chunks_by_source(clean)
+    warmed, _ = await comp.search_pipeline.search("Alphaword", top_k=10)
+    assert warmed and await _hits(comp, "Bravoword")
+    warmed, _ = await comp.search_pipeline.search("Alphaword", top_k=10)
+    calls = _relink_before_the_preflight(monkeypatch, comp.index_engine, clean, target)
+
+    await _request(comp, surface, clean, str(chunk.id))
+
+    assert calls, "the preflight never ran, so nothing was relinked"
+    assert clean.is_symlink()
+    assert target.read_text(encoding="utf-8") == _TARGET
+    assert _reason(comp, clean_key) == RELINKED_HOLD
+    assert _reason(comp, target_key) is None
+    still_warm, _ = await comp.search_pipeline.search("Alphaword", top_k=10)
+    assert still_warm == [], "the source is held but a warmed answer still serves it"
+    assert await _hits(comp, "Bravoword")
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+async def test_a_path_that_still_resolves_is_written_and_nothing_is_held(
+    bm25_only_components, surface
+):
+    """The relinked hold is asked for only by a preflight that found a relink."""
+    comp, mem_dir = bm25_only_components
+    clean = mem_dir / "alpha.md"
+    clean.write_text(_REFUSED, encoding="utf-8")
+    stats = await comp.index_engine.index_file(clean, ingress_guarded=True)
+    assert stats.indexed_chunks == 1, stats
+    (chunk,) = await comp.storage.list_chunks_by_source(clean)
+
+    resp = await _send(comp, surface, clean, str(chunk.id))
+
+    if isinstance(resp, str):
+        assert "refused" not in resp and not resp.startswith("Error"), resp
+    else:
+        assert resp.status_code == 200, resp.text
+    assert _reason(comp, norm_path(clean)) is None
+    assert not clean.is_symlink()
+    assert clean.read_text(encoding="utf-8") != _REFUSED
