@@ -42,7 +42,10 @@ def _mock_components(legacy_namespaces, existing_new_namespaces=(), chunk_counts
             return_value=NamespaceRenameResult(chunks_moved=2, metadata_renamed=True, merged=False)
         ),
     )
-    return SimpleNamespace(storage=storage)
+    # The rename service asks the engine where each source's lock lives; the
+    # candidate list here is empty, so the answer is never used.
+    index_engine = SimpleNamespace(is_managed_source=lambda _path: True)
+    return SimpleNamespace(storage=storage, index_engine=index_engine)
 
 
 def _patched_cli_components(comp):

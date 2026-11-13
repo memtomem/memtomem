@@ -1366,6 +1366,7 @@ class IndexEngine:
                 lock_held=False,
                 engine_serialized=engine_serialized,
                 run=_run,
+                index_roots=index_roots,
             )
 
     async def _locked_index(
@@ -1375,6 +1376,7 @@ class IndexEngine:
         lock_held: bool,
         engine_serialized: bool,
         run: Callable[[], Awaitable[tuple[IndexFileResult, float]]],
+        index_roots: IndexRoots | None = None,
     ) -> tuple[IndexFileResult, float]:
         """L2 → L3 half of :meth:`_index_file_locked`, slot already held.
 
@@ -1390,6 +1392,8 @@ class IndexEngine:
         # a module-top ``from`` import would freeze the value.
         from memtomem.context._atomic import (
             _MEMORY_SIDECAR_LOCK_BUDGET_S,
+            async_detached_source_lock,
+            async_existing_memory_file_lock,
             async_file_lock,
             memory_lock_path,
         )
@@ -1410,14 +1414,28 @@ class IndexEngine:
         # which would otherwise hold no lock at all; a migrate sidecar for a
         # missing-parent path lives in that same missing parent, so no live
         # pair-op can be mid-flight.
-        if lock_path is None or not lock_path.parent.is_dir():
+        if path is None or lock_path is None or not lock_path.parent.is_dir():
             async with self._index_lock:
                 return await run()
         lock_started = time.monotonic()
-        async with async_file_lock(
-            lock_path,
-            timeout=_MEMORY_SIDECAR_LOCK_BUDGET_S,
-        ):
+        async with contextlib.AsyncExitStack() as held:
+            if self._source_dir_is_managed(lock_path.parent, index_roots):
+                await held.enter_async_context(
+                    async_file_lock(lock_path, timeout=_MEMORY_SIDECAR_LOCK_BUDGET_S)
+                )
+            else:
+                # Any path can be indexed. Outside the directories memtomem
+                # keeps memory files in, the sidecar is not created: the
+                # detached lock is taken, then the sidecar only if some writer
+                # already left one (the lock-order block in
+                # ``context/_atomic.py`` has the rule and what it leaves open).
+                await held.enter_async_context(
+                    async_detached_source_lock(path, timeout=_MEMORY_SIDECAR_LOCK_BUDGET_S)
+                )
+                remaining = _MEMORY_SIDECAR_LOCK_BUDGET_S - (time.monotonic() - lock_started)
+                await held.enter_async_context(
+                    async_existing_memory_file_lock(path, timeout=max(remaining, 0.0))
+                )
             logger.debug(
                 "source_index lock_acquired pid=%d lock_ms=%.1f",
                 os.getpid(),
@@ -1427,6 +1445,30 @@ class IndexEngine:
                 return await run()
             async with self._index_lock:
                 return await run()
+
+    def _source_dir_is_managed(self, directory: Path, index_roots: IndexRoots | None) -> bool:
+        """Whether files that resolve into ``directory`` are locked beside themselves.
+
+        :meth:`is_managed_source` asked of the source's resolved directory
+        rather than of the source. For a file the two agree: a path is under a
+        root exactly when the directory holding it is the root or under it.
+        Asking about the directory is what lets a walk ask once per directory,
+        not once per file; the predicate resolves every configured root each
+        time it is called (#2966).
+
+        A walk's memo is used only while the configured roots are the ones it
+        was built from, the rule the exclusion guard in :meth:`_index_file`
+        follows. That comparison is of the configured paths. It does not see a
+        root that is a link and was pointed elsewhere during the walk, nor one
+        path moved between ``memory_dirs`` and ``project_memory_dirs``: for the
+        rest of that walk a directory the memo already called managed keeps
+        its sidecars, as :class:`IndexRoots` keeps each root as first asked.
+        Seeing either would mean resolving the roots again for every file. A
+        call with no walk memo (one file, the watcher) always asks afresh.
+        """
+        if index_roots is not None and tuple(self._config.all_index_roots()) == index_roots.dirs:
+            return index_roots.managed_dir(directory, self.is_managed_source)
+        return self.is_managed_source(directory)
 
     def _get_user_exclude_spec(self) -> pathspec.GitIgnoreSpec:
         """The compiled ``exclude_patterns`` spec, rebuilt only when the patterns change.

@@ -246,12 +246,13 @@ class IndexRoots:
     one asyncio run can share it.
     """
 
-    __slots__ = ("dirs", "_prefixes", "_resolved")
+    __slots__ = ("dirs", "_prefixes", "_resolved", "_managed_dirs")
 
     def __init__(self, dirs: Iterable[str | Path]) -> None:
         self.dirs: tuple[str | Path, ...] = tuple(dirs)
         self._prefixes: dict[str | Path, str] = {}
         self._resolved: dict[str | Path, Path] = {}
+        self._managed_dirs: dict[Path, bool] = {}
 
     def prefixes(self) -> list[str]:
         """``norm_dir_prefix`` of each root, in order."""
@@ -270,6 +271,21 @@ class IndexRoots:
         if known is None:
             known = Path(d).expanduser().resolve()
             self._resolved[d] = known
+        return known
+
+    def managed_dir(self, directory: Path, judge: Callable[[Path], bool]) -> bool:
+        """``judge(directory)``, asked once per directory in this walk.
+
+        ``directory`` is a source's resolved parent and ``judge`` is
+        ``IndexEngine.is_managed_source``: the indexer asks it to choose where
+        a file's lock lives, and a walk asks about the same few directories
+        for every file in them. Kept under the same rules as the two per-root
+        answers: a ``judge`` that raises stores nothing.
+        """
+        known = self._managed_dirs.get(directory)
+        if known is None:
+            known = judge(directory)
+            self._managed_dirs[directory] = known
         return known
 
 
