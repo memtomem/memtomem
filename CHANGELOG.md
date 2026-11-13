@@ -49,8 +49,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   appended)` and gets `IndexingStats.appended_chunk_ids`, in file order, with
   `appended_attribution`: `"exact"` when every chunk lies within the appended text, `"merged"`
   when one also holds text from before it, and `"unverified"` with no ids when the file is not
-  the text the caller expected (another writer's bytes anywhere in it), no committed chunk
-  holds the append, or the call did not ask. Every single-entry append through `mem_add`'s
+  the text the caller expected (another writer's bytes anywhere in it), the append starts
+  mid-line, no committed chunk holds the append, or the call did not ask. Every single-entry append through `mem_add`'s
   write path reports it; `mem_batch_add` does not yet. Only `mem_reflect_save` reads it so far:
   `mem_agent_share` and `mem_consolidate_apply` still pick their chunk from `new_chunk_ids`.
 

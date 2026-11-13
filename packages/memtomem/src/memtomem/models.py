@@ -652,7 +652,8 @@ class IndexingStats:
     # one lies within the appended text, ``"merged"`` when one also holds text
     # from before it (a short entry merged into the previous section), and
     # ``"unverified"`` with no ids when the file was not the text the caller
-    # expected, nothing was committed, or the call did not ask. Appended last
-    # for positional construction compatibility.
+    # expected, the append started mid-line, nothing was committed, or the
+    # call did not ask. Appended last for positional construction
+    # compatibility.
     appended_chunk_ids: tuple[UUID, ...] = ()
     appended_attribution: Literal["exact", "merged", "unverified"] = "unverified"

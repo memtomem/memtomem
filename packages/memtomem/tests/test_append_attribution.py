@@ -11,6 +11,7 @@ it wrote.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from uuid import uuid4
 
@@ -185,19 +186,20 @@ class TestMerged:
         assert await _id_holding(comp, path, "zqmine") in stats.appended_chunk_ids
 
     @pytest.mark.asyncio
-    async def test_an_append_that_starts_mid_line(self, stack):
+    async def test_overlap_borrowed_from_the_chunk_before(self, stack):
+        # The entry's chunk is wholly after the boundary by its span, but
+        # overlap copies the previous chunk's last line into it.
         comp, engine, path = stack
-        path.write_text("zqbefore text", encoding="utf-8")
+        engine._config.min_chunk_tokens = 0
+        engine._config.chunk_overlap_tokens = 4
+        path.write_text("## Old\n\nzqold body", encoding="utf-8")
         await engine.index_file(path, ingress_guarded=True)
-        pre = read_pre_image_or_empty(path)
-        appended = append_blocks(path, [" and zqafter text\n"])
 
-        stats = await engine.index_file(
-            path, ingress_guarded=True, append_region=append_region(pre, appended)
-        )
+        stats = await _append(engine, path, "zqnew body.", title="New")
 
+        new = [c for c in await _rows(comp, path) if "zqnew" in c.content]
+        assert any("zqold" in c.content for c in new)
         assert stats.appended_attribution == "merged"
-        assert stats.appended_chunk_ids == (await _id_holding(comp, path, "zqafter"),)
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +266,21 @@ class TestUnverified:
         assert stats.appended_attribution == "unverified"
 
     @pytest.mark.asyncio
+    async def test_an_append_that_starts_mid_line(self, stack):
+        comp, engine, path = stack
+        path.write_text("zqbefore text", encoding="utf-8")
+        await engine.index_file(path, ingress_guarded=True)
+        pre = read_pre_image_or_empty(path)
+        appended = append_blocks(path, [" and zqafter text\n"])
+
+        stats = await engine.index_file(
+            path, ingress_guarded=True, append_region=append_region(pre, appended)
+        )
+
+        assert stats.appended_chunk_ids == ()
+        assert stats.appended_attribution == "unverified"
+
+    @pytest.mark.asyncio
     async def test_not_requested(self, stack):
         comp, engine, path = stack
         append_entry(path, "zqplain body.", title="Plain")
@@ -307,6 +324,22 @@ class TestAttributeAppend:
             (a.id, b.id),
             "merged",
         )
+
+    def test_a_borrowed_line_from_before_is_merged(self):
+        b = _chunk(5, 7)
+        b.line_map = (-3, 0, 5, 6, 7)
+        assert attribute_append(self.TEXT, self._region(), [b], {b.id}) == ((b.id,), "merged")
+
+    def test_borrowed_text_without_a_line_map_is_merged(self):
+        b = _chunk(5, 7)
+        b.metadata = dataclasses.replace(b.metadata, overlap_before=4)
+        assert attribute_append(self.TEXT, self._region(), [b], {b.id}) == ((b.id,), "merged")
+
+    def test_a_mid_line_start(self):
+        text = "before after\n"
+        b = _chunk(1, 1)
+        region = AppendRegion(expected_text=text, start=len("before "))
+        assert attribute_append(text, region, [b], {b.id}) == ((), "unverified")
 
     def test_other_text_than_expected(self):
         b = _chunk(5, 7)

@@ -86,16 +86,16 @@ def attribute_append(
     chunks it produced from it, in file order, with the ids the diff assigned.
     ``committed_ids`` are the ids whose rows this run left in the store.
 
-    * ``exact``: the appended text starts on a fresh line, and every chunk
-      touching it lies within it.
+    * ``exact``: every chunk touching the appended text holds only lines of
+      it, borrowed overlap lines included.
     * ``merged``: chunks touch the appended text, but at least one also holds
-      text from before it (a short entry merged into the previous section, an
-      entry header that lands in the previous section's chunk, an append that
-      starts mid-line).
+      lines from before it (a short entry merged into the previous section, an
+      entry header that lands in the previous section's chunk, overlap
+      borrowed from the chunk before).
     * ``unverified``, with no ids: the file is not the expected text (another
-      writer's bytes are in it), the appended text is blank, no chunk touches
-      it, a chunk's line range is unknown, or a touching chunk was not
-      committed.
+      writer's bytes are in it), the appended text is blank or starts
+      mid-line, no chunk touches it, a chunk's line range is unknown, or a
+      touching chunk was not committed.
     """
     if content != region.expected_text:
         return (), "unverified"
@@ -112,6 +112,11 @@ def attribute_append(
     # touch any line, so nothing about the file is attributable.
     if any(chunk.metadata.start_line < 1 for chunk in chunks):
         return (), "unverified"
+    # Chunk positions are whole lines. An append that starts mid-line shares
+    # that line with the text before it, and several fragments of one long line
+    # cannot be told apart by line, so the boundary cannot be placed.
+    if first > 0 and content[first - 1] != "\n":
+        return (), "unverified"
     touching = [
         chunk
         for chunk in chunks
@@ -122,10 +127,19 @@ def attribute_append(
     if any(chunk.id not in committed_ids for chunk in touching):
         return (), "unverified"
 
-    fresh_line = first == 0 or content[first - 1] == "\n"
-    within = all(
-        chunk.metadata.start_line >= first_line and chunk.metadata.end_line <= last_line
-        for chunk in touching
-    )
     ids = tuple(chunk.id for chunk in touching)
-    return ids, "exact" if fresh_line and within else "merged"
+    return ids, "exact" if all(_within(c, first_line, last_line) for c in touching) else "merged"
+
+
+def _within(chunk: Chunk, first_line: int, last_line: int) -> bool:
+    """Whether every source line ``chunk`` holds lies in ``[first_line, last_line]``.
+
+    The span alone is not enough: overlap copies lines from the chunk before
+    into this one, and ``line_map`` records them as negative source lines.
+    """
+    if not (chunk.metadata.start_line >= first_line and chunk.metadata.end_line <= last_line):
+        return False
+    if chunk.line_map is None and chunk.metadata.overlap_before:
+        # Borrowed text with no record of where it came from.
+        return False
+    return all(first_line <= abs(n) <= last_line for n in chunk.source_line_map() if n)
