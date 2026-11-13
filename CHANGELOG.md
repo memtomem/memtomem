@@ -54,7 +54,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   file a chunker other than Markdown reads, masked chunks, chunk overlap anywhere in the file,
   and an append that starts mid-line, because there a span does not say what a chunk holds.
   Every single-entry append through `mem_add`'s write path reports it; `mem_batch_add` does
-  not yet. Only `mem_reflect_save` and `mem_agent_share` read it so far:
+  not yet. `mem_reflect_save`, `mem_agent_share` and a session's write provenance read it:
   `mem_consolidate_apply` still picks its chunk from `new_chunk_ids` (#3315).
 
 ### Changed
@@ -109,6 +109,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   attribute (another writer changed the file between the append and its re-index, or the file
   was excluded meanwhile). In both cases the copy is still shared and keeps its `shared-from=`
   tag, the result is unchanged, and a warning is logged.
+- **A session's write provenance names the chunks its append became (#3315).** Each memory
+  write records a session event listing its chunk ids, and the end-of-session summary reads
+  those ids to decide what the session wrote (#1876). For an append that list was
+  `IndexingStats.new_chunk_ids`, the whole re-index of the file. A new section another writer
+  added to that file and nobody had indexed yet was recorded as this session's, and an entry
+  whose chunk matched a stored one and kept its id recorded no event at all. Neither deleted a
+  chunk, so neither marked the session `provenance_incomplete`. The event now lists the chunks
+  the indexer attributes to the append (#3292) when it can, and `new_chunk_ids` as before when
+  it cannot. An entry merged into a section that was never indexed now marks the session too,
+  though nothing was deleted. The rules that marked a session after an append (a deleted
+  chunk, an indexing error, an exclusion or relink) are unchanged. `mem_batch_add`,
+  `mem_index` and `mem_fetch` record what they recorded before.
 - **`mm embedding-reset` no longer calls a reset of an empty store destructive (#2423).** A
   store stamped with one embedding model that never received a chunk, opened after the config
   names another model, still reports a mismatch and still needs
