@@ -432,8 +432,8 @@ event, rule index, and matcher type. A matcher may be omitted for match-all;
 `null`, numbers, arrays, and objects are malformed.
 
 Malformed rules ride the same non-blocking warning surface as duplicates:
-`mm context sync|diff --include=settings`, the equivalent `mem_context_*` MCP
-tools, and the Web UI hooks panel all report them. In the panel's payload,
+`mm context sync|diff --include=settings`, the `mem_context_diff` MCP tool, and
+the Web UI hooks panel all report them. In the panel's payload,
 malformed rules in the **target tier** appear under `target_hooks.malformed`
 (with an `owned` flag), while malformed rules in the **canonical** file are
 dropped before indexing and reported as `matcher_warnings`.
@@ -444,7 +444,7 @@ that touches that file refused to run.
 
 Unportable hook commands and unscanned settings files ride the same
 non-blocking warning surface on CLI (`mm context sync|diff --include=settings`)
-and MCP (`mem_context_*` tools).
+and MCP (`mem_context_diff`).
 
 <details>
 <summary>Fixing duplicates — migrate and copy hooks across tiers and projects</summary>

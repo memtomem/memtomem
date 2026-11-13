@@ -46,6 +46,8 @@ import pathlib
 import re
 from dataclasses import dataclass
 
+import pytest
+
 _SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "memtomem"
 
 #: The four approved C0 wrappers (``context/_canonical_txn.py``). A reference to
@@ -74,7 +76,24 @@ _PRIMITIVES = frozenset({"_file_lock", "async_file_lock"})
 #: Form 3 below records the enclosing ``ast.Call`` when there is one and still
 #: records a bare reference, which the rule then reports rather than assumes
 #: compliant.
-_DATA_PATH_WRAPPERS = frozenset({"async_memory_file_lock"})
+#:
+#: ``async_detached_source_lock`` and ``async_existing_memory_file_lock`` are
+#: the pair taken for a source outside every managed directory (the lock-order
+#: block in ``context/_atomic.py``). Both name their lock from the data path.
+_DATA_PATH_WRAPPERS = frozenset(
+    {
+        "async_memory_file_lock",
+        "async_detached_source_lock",
+        "async_existing_memory_file_lock",
+    }
+)
+
+#: The only modules that may name the unmanaged-source pair, besides the one
+#: that defines it.
+_UNMANAGED_PAIR = frozenset({"async_detached_source_lock", "async_existing_memory_file_lock"})
+_UNMANAGED_PAIR_USERS = frozenset(
+    {"context/_atomic.py", "indexing/engine.py", "services/namespace_management.py"}
+)
 
 #: Container methods that carry a lock path into the container they mutate.
 _CONTAINER_MUTATORS = frozenset({"add", "append", "extend", "update"})
@@ -154,9 +173,9 @@ class _Site:
 
     ``key`` is ``(module, qualname, occurrence, callee)`` — deliberately not a
     line number (churns on every unrelated edit) and deliberately not the callee
-    alone (``server/tools/context.py`` takes ``versioning_op_locked`` twice in
-    one function, and a callee-only key would collapse the two into one
-    registry row).
+    alone (``context/migrate.py::_acquire_pair_lock`` takes ``_file_lock`` more
+    than once, and a callee-only key would collapse those into one registry
+    row).
     """
 
     module: str
@@ -618,21 +637,6 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "",
         "Same; skills refused before the lock.",
     ),
-    ("server/tools/context.py", "mem_context_version", 0, "versioning_op_locked"): (
-        EXEMPT,
-        "",
-        "MCP twin of the version write surface; skills refused before the lock.",
-    ),
-    ("server/tools/context.py", "mem_context_promote", 0, "versioning_op_locked"): (
-        EXEMPT,
-        "",
-        "MCP promote; skills refused before the lock.",
-    ),
-    ("server/tools/context.py", "mem_context_promote", 1, "versioning_op_locked"): (
-        EXEMPT,
-        "",
-        "MCP delete-label, which shares the promote handler; same gate.",
-    ),
     # ── NON_C0 — a sidecar lock, but not a canonical NAME lock ───────────
     ("context/versioning.py", "create_version", 0, "_file_lock"): (
         NON_C0,
@@ -734,7 +738,20 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "",
         "Per-memory-file indexing lock. Extracted from ``_index_file_locked`` "
         "in #2105 so the engine-wide file-concurrency slot is taken above it; "
-        "still the only L2 acquire in the engine.",
+        "still the only place the engine acquires L2.",
+    ),
+    ("indexing/engine.py", "IndexEngine._locked_index", 0, "async_detached_source_lock"): (
+        MEMORY_L2,
+        "",
+        "Detached lock (L2d) for a source outside every managed directory: "
+        "``index_file`` accepts any path, and no sidecar is created beside "
+        "one memtomem was only asked to read.",
+    ),
+    ("indexing/engine.py", "IndexEngine._locked_index", 0, "async_existing_memory_file_lock"): (
+        MEMORY_L2,
+        "",
+        "The same source's adjacent sidecar, taken only if a writer already "
+        "left one. Entered after the detached lock.",
     ),
     ("server/tools/memory_crud.py", "_locked_chunk", 0, "async_memory_file_lock"): (
         MEMORY_L2,
@@ -804,6 +821,28 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "guard while its keys were built in the ``_lockable_sources`` helper; "
         "#2130 moved the ``memory_lock_path`` calls into this function so the "
         "builder and the acquire share a scope.",
+    ),
+    (
+        "services/namespace_management.py",
+        "_coordinated_mutation",
+        0,
+        "async_detached_source_lock",
+    ): (
+        MEMORY_L2,
+        "",
+        "Detached lock (L2d) of every source outside the managed directories, "
+        "each key once, before any adjacent sidecar.",
+    ),
+    (
+        "services/namespace_management.py",
+        "_coordinated_mutation",
+        0,
+        "async_existing_memory_file_lock",
+    ): (
+        MEMORY_L2,
+        "",
+        "Adjacent sidecar of such a source, taken only if it is already "
+        "there, in the same sorted pass as the managed sources' sidecars.",
     ),
     # ── INFRASTRUCTURE — the lock-composition helpers themselves ─────────
     ("context/_canonical_txn.py", "canonical_sidecar_lock", 0, "_file_lock"): (
@@ -1399,6 +1438,50 @@ def test_sidecar_lock_is_private_to_the_atomic_module() -> None:
     )
 
 
+def test_unmanaged_source_pair_is_named_only_by_its_two_callers() -> None:
+    """The detached lock and the existing-only sidecar are one rule, used twice.
+
+    They are correct only as a pair, in order, for a source the engine calls
+    unmanaged. A third caller taking either one would be a writer that leaves
+    no sidecar for the others to find, or an acquirer of the detached lock
+    that already holds an adjacent sidecar, which is the order the rule
+    forbids.
+    """
+    offenders = [
+        f"{path.relative_to(_SRC).as_posix()}:{i}"
+        for path in _scan_files()
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if any(re.search(rf"\b{name}\b", line) for name in _UNMANAGED_PAIR)
+        and path.relative_to(_SRC).as_posix() not in _UNMANAGED_PAIR_USERS
+    ]
+    assert not offenders, (
+        "async_detached_source_lock / async_existing_memory_file_lock belong to "
+        "IndexEngine._locked_index and _coordinated_mutation:\n  " + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("wrapper", sorted(_UNMANAGED_PAIR))
+def test_unmanaged_source_pair_is_discovered_and_takes_a_data_path(wrapper: str) -> None:
+    """Both halves are seen as acquires, and neither accepts a built key."""
+    compliant = (
+        f"from memtomem.context._atomic import {wrapper}\n"
+        "async def span(note):\n"
+        f"    async with {wrapper}(note, timeout=1):\n"
+        "        pass\n"
+    )
+    sites, _tree = sites_in_source(compliant, "synthetic.py")
+    assert [(s.qualname, s.callee) for s in sites] == [("span", wrapper)]
+    assert _offense_for(compliant) is None
+
+    keyed = (
+        f"from memtomem.context._atomic import {wrapper}, memory_lock_path\n"
+        "async def span(note):\n"
+        f"    async with {wrapper}(memory_lock_path(note), timeout=1):\n"
+        "        pass\n"
+    )
+    assert _offense_for(keyed) is not None
+
+
 def test_memory_l2_guard_rejects_the_other_builders() -> None:
     """The MEMORY_L2 rule must reject every non-``memory_lock_path`` key, not
     just ``_lock_path_for``.
@@ -1544,8 +1627,8 @@ def test_classifications_are_from_the_closed_set_and_explained() -> None:
 def test_registry_keys_are_unique() -> None:
     """A dict cannot hold duplicates — this pins that the KEY can distinguish.
 
-    ``server/tools/context.py::mem_context_promote`` takes ``versioning_op_locked``
-    twice; a callee-only or qualname-only key would silently merge them and
+    ``context/migrate.py::_acquire_pair_lock`` takes ``_file_lock`` more than
+    once; a callee-only or qualname-only key would silently merge them and
     classify one site with the other's reasoning.
     """
     sites = discover_sites()

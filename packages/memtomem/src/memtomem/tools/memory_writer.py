@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import io
 import json
 import logging
 import os
@@ -13,11 +15,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
+from typing import IO
 from uuid import uuid4
 
 
 from memtomem.source_provenance import StaleSourceProvenanceError, source_span_hash
-from memtomem.storage.sqlite_helpers import resolve_path
+from memtomem.storage.sqlite_helpers import leaf_names_own_key, own_leaf_key, resolve_path
 
 
 logger = logging.getLogger(__name__)
@@ -89,6 +92,32 @@ class SourceReplacedError(SourceChangedError):
     """A different file — or a directory — now answers to the source's path."""
 
     outcome = RestoreOutcome.source_replaced
+
+
+@dataclass(frozen=True, slots=True)
+class JudgedSource:
+    """What a memory tool read before an append, and the preflight judged (#3289).
+
+    :func:`append_blocks` takes it as a required keyword and writes only to the
+    file it describes, so an append cannot follow a path that was replaced by a
+    symlink after the preflight. Made by :func:`read_for_append`, in one worker
+    call.
+
+    ``data`` is the bytes read, ``b""`` for a file that did not exist.
+    ``identity`` is the read descriptor's ``(st_dev, st_ino)``, ``None`` when
+    the filesystem cannot answer or there was no file. ``existed`` is whether
+    the read found a file. ``source_path`` is the path's resolution right after
+    the read: the preflight judges the bytes under it, and a new file is
+    created exactly there. ``leaf_own`` is whether the leaf was not a link at
+    the read, by the comparison the engine's relink check makes; it decides
+    whether the re-index after the append may hold the file as relinked.
+    """
+
+    data: bytes
+    identity: tuple[int, int] | None
+    existed: bool
+    source_path: Path
+    leaf_own: bool
 
 
 def _default_heading(now: str) -> str:
@@ -163,12 +192,24 @@ def format_entry_block(
     return f"\n{heading}\n\n> created: {now}{tag_line}\n\n{stripped}\n"
 
 
-def append_blocks(file_path: Path, blocks: Sequence[str]) -> str:
-    """Append pre-formatted entry blocks to a markdown file in ONE write.
+def append_blocks(file_path: Path, blocks: Sequence[str], *, judged: JudgedSource) -> str:
+    """Append pre-formatted entry blocks to the file a preflight judged, in ONE write.
 
     All-or-nothing (issue #1573): a batch of entries is composed into a
     single ``write`` so a mid-batch failure can't leave a partial run of
     entries on disk. A no-op when ``blocks`` is empty (no file touched).
+
+    ``judged`` is what the caller read before its preflight
+    (:func:`read_for_append`). **The open is the decision** (#3289): the caller
+    holds a sidecar that binds cooperating writers only, so another process
+    can replace the path between the preflight and this write, and a plain
+    ``open(path, "a")`` would follow a symlink put there into a file nobody
+    judged — in another scope, past ``confirm_project_shared`` and the refusal
+    of ``force_unsafe`` there. A file that existed is opened without
+    ``O_CREAT`` and compared by identity on the descriptor
+    (:func:`_open_judged_existing`); a file that did not is created at the
+    judged path by descriptor (:func:`_create_judged`). Either raises
+    :class:`SourceChangedError` before writing anything.
 
     Returns the text appended (``""`` for none), before the platform newline
     translation text mode applies, so a caller can name exactly what the file
@@ -176,10 +217,13 @@ def append_blocks(file_path: Path, blocks: Sequence[str]) -> str:
     """
     if not blocks:
         return ""
-    file_path.parent.mkdir(parents=True, exist_ok=True)
     text = "".join(blocks)
-    with open(file_path, "a", encoding="utf-8") as f:
-        f.write(text)
+    if judged.existed:
+        handle = _open_judged_existing(file_path, judged)
+    else:
+        handle = _create_judged(judged.source_path)
+    with handle:
+        handle.write(text)
     return text
 
 
@@ -188,12 +232,320 @@ def append_entry(
     content: str,
     title: str | None = None,
     tags: list[str] | None = None,
+    *,
+    judged: JudgedSource,
 ) -> str:
-    """Append a single new entry to a markdown file, creating it if needed.
+    """Append a single new entry to the file a preflight judged, creating it if it was absent.
 
     Returns the text appended (see :func:`append_blocks`).
     """
-    return append_blocks(file_path, [format_entry_block(content, title=title, tags=tags)])
+    return append_blocks(
+        file_path, [format_entry_block(content, title=title, tags=tags)], judged=judged
+    )
+
+
+# ``O_NONBLOCK`` on an open for writing: a FIFO put in a file's place answers
+# ``ENXIO`` at once when nothing reads it, where a blocking open would wait for
+# a reader while the caller holds its sidecar and its idempotency claim. It
+# does nothing to a regular file. POSIX only.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
+# A directory opened to walk through needs search permission only: ``O_RDONLY``
+# would also need read permission on every ancestor, which creating a file by
+# path never did (an ancestor mode ``0o111`` refuses it). Linux spells it
+# ``O_PATH``, macOS ``O_SEARCH``.
+_O_WALK = getattr(os, "O_PATH", 0) or getattr(os, "O_SEARCH", 0) or os.O_RDONLY
+# Creating a file under a directory descriptor is what keeps a new file in the
+# judged directory. Windows has no ``dir_fd``; there the file is created by path
+# and checked afterwards (:func:`_create_judged_by_path`).
+_HAS_DIR_FD = (
+    os.open in os.supports_dir_fd
+    and os.mkdir in os.supports_dir_fd
+    and os.stat in os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+)
+
+
+def _open_existing(
+    file_path: Path,
+    mode: str,
+    *,
+    what: str,
+    opener: Callable[[str, int], int] | None = None,
+) -> IO[str]:
+    """``open(file_path, mode)`` for a file that must already be there, refusals typed.
+
+    Shared by :func:`_rewrite_in_place` and :func:`_open_judged_existing`. The
+    mode passes no ``O_CREAT`` (``"r+"``, or ``"a"`` through an ``opener``
+    that drops it), so absence answers at the open rather than being raced by a
+    probe: ``ENOENT`` / ``ENOTDIR`` raise :class:`SourceRemovedError`. A
+    directory standing at the path, a FIFO with no reader (``ENXIO``, under
+    ``O_NONBLOCK``), and a symlink loop put at the path raise
+    :class:`SourceReplacedError`. POSIX answers the loop ``ELOOP``; Windows
+    answers ``EINVAL``, which it also gives for other things, so there the
+    path must be a symlink as well. ``what`` names the write in the message.
+    """
+    try:
+        return open(file_path, mode, encoding="utf-8", opener=opener)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise SourceRemovedError(
+            f"{file_path} was removed before the {what} was written; nothing was recreated"
+        ) from exc
+    except IsADirectoryError as exc:
+        raise SourceReplacedError(
+            f"{file_path} is a directory, not the file that was read; nothing was written"
+        ) from exc
+    except PermissionError as exc:
+        # Windows answers a directory at the path with EACCES where POSIX
+        # answers EISDIR, and a directory standing where the source was is a
+        # replacement, not a permission failure. Asking what is actually there
+        # is safe in a way a pre-open probe would not be: the open has already
+        # failed and neither branch writes, so a stale answer costs a message
+        # rather than a file. A genuine permission error still propagates.
+        if os.path.isdir(file_path):
+            raise SourceReplacedError(
+                f"{file_path} is a directory, not the file that was read; nothing was written"
+            ) from exc
+        raise
+    except OSError as exc:
+        if exc.errno in (errno.ENXIO, errno.ELOOP) or (
+            exc.errno == errno.EINVAL and os.path.islink(file_path)
+        ):
+            raise SourceReplacedError(
+                f"{file_path} is no longer a regular file; nothing was written"
+            ) from exc
+        raise
+
+
+def _open_judged_existing(file_path: Path, judged: JudgedSource) -> IO[str]:
+    """Open the file ``judged`` read for appending, or raise :class:`SourceChangedError`.
+
+    No ``O_CREAT``, so a file removed since the read is not recreated. The
+    descriptor must be a regular file with the identity the read took: a
+    symlink put at the path since leads to another inode and is refused, while
+    a memory file that was a symlink all along opens the same target inode and
+    keeps working. Same inode through another link passes, as it does for
+    :func:`_rewrite_in_place`.
+
+    Where the filesystem gives no identity (``st_ino == 0``), the path is
+    required to resolve to the judged source before the open and after it:
+    the first sees a link put in place before the open and taken away right
+    after it, the second one put in place before the open and left there.
+    That narrows the window without closing it: a link put in place after the
+    first resolution and taken away before the second is not seen.
+    """
+
+    def no_create(path: str, _flags: int) -> int:
+        # The flags ``"a"`` would pass, less the create: spelled out rather than
+        # masked, so nothing here names a creating flag at all.
+        return os.open(path, os.O_WRONLY | os.O_APPEND | _O_NONBLOCK | _O_BINARY)
+
+    if judged.identity is None:
+        _require_resolves_to(file_path, judged.source_path)
+    handle = _open_existing(file_path, "a", what="entry", opener=no_create)
+    try:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or (
+            judged.identity is not None and (info.st_dev, info.st_ino) != judged.identity
+        ):
+            raise SourceReplacedError(
+                f"{file_path} is no longer the file that was read; nothing was written"
+            )
+        if judged.identity is None:
+            _require_resolves_to(file_path, judged.source_path)
+    except BaseException:
+        handle.close()
+        raise
+    return handle
+
+
+def _require_resolves_to(file_path: Path, source_path: Path) -> None:
+    try:
+        resolved = resolve_path(file_path)
+    except OSError:
+        resolved = None
+    if resolved != source_path:
+        raise SourceReplacedError(
+            f"{file_path} no longer resolves to the file that was read; nothing was written"
+        )
+
+
+def _occupied(name: str | Path, *, dir_fd: int | None = None) -> bool:
+    """Whether a failed create lost the name to something already there.
+
+    Asked only after the create failed, and of the name itself, never the
+    errno: Windows answers a directory holding the name with ``EACCES``, the
+    same errno as a genuine permission failure (``context.migrate``
+    ``_claim_hit_an_occupied_name``). A dangling symlink occupies the name too.
+    """
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return True
+
+
+def _create_judged(source_path: Path) -> IO[str]:
+    """Create ``source_path`` for appending, in the directory that was judged.
+
+    A new file has no identity to compare, so the path is the judgement: the
+    preflight judged the bytes (none) under ``source_path``, the read's
+    resolution, which names no symlink. The directories are walked from the
+    root one component at a time by descriptor, each opened ``O_NOFOLLOW``, and
+    any that is missing is made under its parent's descriptor; the file is then
+    created ``O_EXCL`` under the last one. The kernel resolves each name and
+    refuses a link in the same operation, so an ancestor replaced by a symlink
+    since the read — and put back, or not — cannot redirect the file into
+    another directory: the walk is refused instead. Nothing is written, and
+    nothing needs removing.
+
+    A name already taken (by a file another process created since the read, a
+    directory, a link) is refused, not followed: retrying reads it as an
+    existing file. A ``source_path`` that is not absolute (its resolution
+    failed) is refused. Where there is no ``dir_fd`` (Windows), see
+    :func:`_create_judged_by_path`.
+    """
+    if not _HAS_DIR_FD:
+        return _create_judged_by_path(source_path)
+    if not source_path.is_absolute():
+        raise SourceReplacedError(
+            f"{source_path} could not be resolved when it was read; nothing was written"
+        )
+    dir_fd = os.open(source_path.anchor, _O_WALK | _O_DIRECTORY)
+    try:
+        for name in source_path.parent.parts[1:]:
+            child = _enter_directory(dir_fd, name, source_path)
+            os.close(dir_fd)
+            dir_fd = child
+        # ``O_NOFOLLOW`` is redundant beside ``O_CREAT | O_EXCL``, which already
+        # refuses a symlink in the final component on POSIX; it is kept anyway.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND | _O_NOFOLLOW
+        try:
+            fd = os.open(source_path.name, flags, 0o666, dir_fd=dir_fd)
+        except OSError as exc:
+            if _occupied(source_path.name, dir_fd=dir_fd):
+                raise SourceReplacedError(
+                    f"{source_path} was created by another process after it was read; "
+                    "nothing was written"
+                ) from exc
+            raise
+    finally:
+        os.close(dir_fd)
+    return _text_appender(fd)
+
+
+def _enter_directory(parent_fd: int, name: str, source_path: Path) -> int:
+    """Open directory ``name`` under ``parent_fd``, making it if missing.
+
+    ``parent_fd`` stays the caller's to close, whatever happens here.
+
+    ``O_NOFOLLOW`` refuses a symlink at the open (Linux ``ELOOP``, macOS
+    ``ENOTDIR``), and the descriptor is checked to be a directory as well,
+    since ``O_PATH`` opens a symlink itself rather than refusing it on some
+    kernels. Anything else at the name is a replacement.
+    """
+    flags = _O_WALK | _O_DIRECTORY | _O_NOFOLLOW | _O_NONBLOCK
+    try:
+        try:
+            child = os.open(name, flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            try:
+                os.mkdir(name, 0o777, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            child = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as exc:
+        if _occupied(name, dir_fd=parent_fd):
+            raise SourceReplacedError(
+                f"{source_path}: a directory on its path was replaced after it was read; "
+                "nothing was written"
+            ) from exc
+        raise
+    try:
+        if not stat.S_ISDIR(os.fstat(child).st_mode):
+            raise SourceReplacedError(
+                f"{source_path}: a directory on its path was replaced after it was read; "
+                "nothing was written"
+            )
+    except BaseException:
+        os.close(child)
+        raise
+    return child
+
+
+def _create_judged_by_path(source_path: Path) -> IO[str]:
+    """:func:`_create_judged` without ``dir_fd`` (Windows): narrower, by path.
+
+    The file is created ``O_EXCL`` at ``source_path`` and kept only if what
+    was claimed is a regular file with the descriptor's identity. Windows'
+    ``O_EXCL`` follows a reparse point in the final component, so a dangling
+    symlink put at the name lets the create succeed at the link's target
+    (``context.migrate._create_exclusive_file``): that is refused and nothing
+    is written, and the empty file it made is left where it is, because no
+    pathname delete can be sure it removes that file and not a replacement.
+    An ancestor directory replaced since the read (a junction, say) is not
+    seen here, whether it stays replaced or is put back: the file lands where
+    the path leads at the create. A file that changes between the create and
+    the look at it is refused too, and left where it is.
+    """
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND | _O_BINARY
+    try:
+        fd = os.open(source_path, flags, 0o666)
+    except OSError as exc:
+        if _occupied(source_path):
+            raise SourceReplacedError(
+                f"{source_path} was created by another process after it was read; "
+                "nothing was written"
+            ) from exc
+        raise
+    try:
+        try:
+            claimed = os.lstat(source_path)
+        except OSError as exc:
+            # Gone, or unreachable, between the create and this look: what was
+            # claimed cannot be confirmed, so nothing is written.
+            raise SourceReplacedError(
+                f"{source_path} changed while it was created; nothing was written"
+            ) from exc
+        info = os.fstat(fd)
+        same = (
+            claimed.st_ino == 0
+            or info.st_ino == 0
+            or ((claimed.st_dev, claimed.st_ino) == (info.st_dev, info.st_ino))
+        )
+        if not stat.S_ISREG(claimed.st_mode) or not same:
+            raise SourceReplacedError(
+                f"{source_path} is held by a link the create followed; nothing was written"
+            )
+    except BaseException:
+        os.close(fd)
+        raise
+    return _text_appender(fd)
+
+
+def _text_appender(fd: int) -> IO[str]:
+    """``fd`` as ``open(path, "a", encoding="utf-8")`` would give it; owns ``fd`` either way.
+
+    Not ``open(fd, ...)``: when that fails after making its raw file it closes
+    ``fd`` itself, so closing it again on the way out could close an unrelated
+    descriptor that has reused the number. ``io.FileIO`` leaves ``fd`` open
+    when it fails, so each layer has one owner: the caller's ``fd`` until the
+    raw file exists, the raw file after. ``"a"`` on a descriptor seeks to its
+    end and creates nothing.
+    """
+    try:
+        raw = io.FileIO(fd, "a", closefd=True)
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        return io.TextIOWrapper(io.BufferedWriter(raw), encoding="utf-8")
+    except BaseException:
+        raw.close()
+        raise
 
 
 def _find_body_start_index(chunk_lines: list[str]) -> int:
@@ -303,28 +655,7 @@ def _rewrite_in_place(
     with universal newlines and written with the platform's, and this is a
     refusal fix, not a newline change.
     """
-    try:
-        handle = open(file_path, "r+", encoding="utf-8")
-    except (FileNotFoundError, NotADirectoryError) as exc:
-        raise SourceRemovedError(
-            f"{file_path} was removed before the edit was written; nothing was recreated"
-        ) from exc
-    except IsADirectoryError as exc:
-        raise SourceReplacedError(
-            f"{file_path} is a directory, not the file that was read; nothing was written"
-        ) from exc
-    except PermissionError as exc:
-        # Windows answers a directory at the path with EACCES where POSIX
-        # answers EISDIR, and a directory standing where the source was is a
-        # replacement, not a permission failure. Asking what is actually there
-        # is safe in a way a pre-open probe would not be: the open has already
-        # failed and neither branch writes, so a stale answer costs a message
-        # rather than a file. A genuine permission error still propagates.
-        if os.path.isdir(file_path):
-            raise SourceReplacedError(
-                f"{file_path} is a directory, not the file that was read; nothing was written"
-            ) from exc
-        raise
+    handle = _open_existing(file_path, "r+", what="edit")
 
     with handle:
         info = os.fstat(handle.fileno())
@@ -644,16 +975,35 @@ def read_pre_image(file_path: Path) -> PreImage:
     return PreImage(data=data, identity=identity)
 
 
-def read_pre_image_or_empty(file_path: Path) -> bytes:
-    """``file_path``'s bytes, or ``b""`` when there is no file yet.
+def read_for_append(file_path: Path) -> JudgedSource:
+    """Read ``file_path`` for an append that may create it: what the preflight judges.
 
-    For an append that may create its target: the preflight judges what is
-    there before the write, and a file that does not exist holds nothing.
+    The bytes and identity come off one descriptor, as :func:`read_pre_image`
+    takes them, or ``b""`` and no identity when there is no file yet: a file
+    that does not exist holds nothing. The resolution follows at once, as
+    :func:`read_with_source_key` takes it, and is the path the preflight judges
+    the bytes under (``source_path``). Call it as one worker-thread call, so
+    the caller has no ``await`` between the read and the resolution.
     """
     try:
-        return read_pre_image(file_path).data
+        pre: PreImage | None = read_pre_image(file_path)
     except FileNotFoundError:
-        return b""
+        pre = None
+    try:
+        source_path = resolve_path(file_path)
+    except OSError:
+        source_path = file_path
+    try:
+        leaf_own = leaf_names_own_key(own_leaf_key(file_path), source_path)
+    except OSError:
+        leaf_own = False
+    return JudgedSource(
+        data=b"" if pre is None else pre.data,
+        identity=None if pre is None else pre.identity,
+        existed=pre is not None,
+        source_path=source_path,
+        leaf_own=leaf_own,
+    )
 
 
 def read_with_source_key[T](read: Callable[[Path], T], file_path: Path) -> tuple[T, Path]:

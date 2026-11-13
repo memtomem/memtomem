@@ -526,14 +526,14 @@ class TestAForcedWriteCoversOnlyItsOwnBytes:
 
     def test_appended_text_matches_the_engines_read(self, tmp_path):
         from memtomem.tools.memory_mutation import appended_valve_text
-        from memtomem.tools.memory_writer import append_entry
+        from memtomem.tools.memory_writer import append_entry, read_for_append
 
         target = tmp_path / "n.md"
         target.write_bytes(b"# Notes\r\n\r\nfirst line\r\n")
-        pre = target.read_bytes()
-        appended = append_entry(target, "second entry", title="T")
+        judged = read_for_append(target)
+        appended = append_entry(target, "second entry", title="T", judged=judged)
 
-        assert appended_valve_text(pre, appended) == target.read_text(encoding="utf-8")
+        assert appended_valve_text(judged.data, appended) == target.read_text(encoding="utf-8")
 
     def test_a_rewrite_that_read_something_else_cannot_be_bound(self):
         from memtomem.tools.memory_mutation import rewrite_valve_text

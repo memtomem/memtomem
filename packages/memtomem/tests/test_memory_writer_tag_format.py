@@ -10,14 +10,14 @@ either drift fail loudly.
 import json
 from pathlib import Path
 
-from memtomem.tools.memory_writer import append_entry
+from helpers import append_judged
 
 
 class TestAppendEntryTagFormat:
     def test_tag_line_uses_explicit_blockquote_prefix(self, tmp_path: Path):
         """``> tags:`` line carries an explicit ``> `` prefix."""
         f = tmp_path / "out.md"
-        append_entry(f, "Body text.", title="Heading", tags=["a", "b"])
+        append_judged(f, "Body text.", title="Heading", tags=["a", "b"])
         text = f.read_text(encoding="utf-8")
         # Must contain the canonical line verbatim.
         assert '> tags: ["a", "b"]' in text
@@ -28,7 +28,7 @@ class TestAppendEntryTagFormat:
     def test_tags_serialized_as_json(self, tmp_path: Path):
         """JSON (double-quoted) form, not Python ``repr()`` (single-quoted)."""
         f = tmp_path / "out.md"
-        append_entry(f, "Body.", title="H", tags=["cache", "shared-from=abc"])
+        append_judged(f, "Body.", title="H", tags=["cache", "shared-from=abc"])
         text = f.read_text(encoding="utf-8")
         assert '> tags: ["cache", "shared-from=abc"]' in text
         # Python repr would produce single quotes; reject.
@@ -38,7 +38,7 @@ class TestAppendEntryTagFormat:
         """The emitted tag list parses cleanly as JSON."""
         f = tmp_path / "out.md"
         tags_in = ["alpha", "beta", "shared-from=xyz", "with space"]
-        append_entry(f, "Body.", title="H", tags=tags_in)
+        append_judged(f, "Body.", title="H", tags=tags_in)
         text = f.read_text(encoding="utf-8")
         # Locate the tag line and parse the bracketed value.
         line = next(line for line in text.splitlines() if line.startswith("> tags: "))
@@ -48,17 +48,17 @@ class TestAppendEntryTagFormat:
     def test_no_tag_line_when_tags_empty(self, tmp_path: Path):
         """Empty / None tags omit the tag line entirely (today's behavior)."""
         f = tmp_path / "out.md"
-        append_entry(f, "Body.", title="H", tags=None)
+        append_judged(f, "Body.", title="H", tags=None)
         assert "tags:" not in f.read_text(encoding="utf-8")
 
         f2 = tmp_path / "out2.md"
-        append_entry(f2, "Body.", title="H", tags=[])
+        append_judged(f2, "Body.", title="H", tags=[])
         assert "tags:" not in f2.read_text(encoding="utf-8")
 
     def test_created_line_carries_blockquote_prefix(self, tmp_path: Path):
         """``> created:`` keeps its prefix unchanged (no regression there)."""
         f = tmp_path / "out.md"
-        append_entry(f, "Body.", title="H", tags=["x"])
+        append_judged(f, "Body.", title="H", tags=["x"])
         text = f.read_text(encoding="utf-8")
         assert "\n> created: " in text
 
@@ -71,7 +71,7 @@ class TestAppendEntryTagFormat:
         """
         f = tmp_path / "out.md"
         tags_in = ["커리큘럼설계", "재사용자산"]
-        append_entry(f, "Body.", title="제목", tags=tags_in)
+        append_judged(f, "Body.", title="제목", tags=tags_in)
         text = f.read_text(encoding="utf-8")
         assert '> tags: ["커리큘럼설계", "재사용자산"]' in text
         # No literal backslash-u escape sequence may survive.

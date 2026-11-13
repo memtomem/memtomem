@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from helpers import StubCtx, clean_preflight, set_home
+from helpers import StubCtx, append_judged, clean_preflight, set_home
 from memtomem.memory_scope import day_file_name, namespace_mix_error, namespace_mix_refusal
 
 
@@ -125,14 +125,14 @@ class TestEarlierEntryKeepsItsNamespace:
         every changed chunk to the default namespace — undoing the fix one
         file modification later.
         """
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         comp, mem_dir = bm25_only_components
         target = mem_dir / "notes.md"
-        append_entry(target, _ALPHA, title=None, tags=[])
+        append_judged(target, _ALPHA, title=None, tags=[])
         await comp.index_engine.index_file(target, namespace="aaa", ingress_guarded=True)
 
-        append_entry(target, "a second observation about the same deploy", title=None, tags=[])
+        append_judged(target, "a second observation about the same deploy", title=None, tags=[])
         await comp.index_engine.index_file(target, ingress_guarded=True)
 
         stored = await comp.storage.namespaces_for_source(target)
@@ -148,12 +148,12 @@ class TestEarlierEntryKeepsItsNamespace:
         that day; it passes the file's namespace explicitly instead. Since
         #2061 the engine preserves under force too, so this now pins both
         defences at once — the explicit pin and the preservation behind it."""
-        from memtomem.tools.memory_writer import append_entry, remove_lines
+        from memtomem.tools.memory_writer import remove_lines
 
         comp, mem_dir = bm25_only_components
         target = mem_dir / "multi.md"
         for i in range(3):
-            append_entry(
+            append_judged(
                 target,
                 f"Entry {i}: a long enough sentence about deploys {i}",
                 title=f"H{i}",
@@ -187,13 +187,13 @@ class TestEarlierEntryKeepsItsNamespace:
         then store the literal "default" — so reading the stored spelling
         back would make the preview and the ``/api/index`` echo disagree
         about a file that never moved."""
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         comp, mem_dir = bm25_only_components
         target = mem_dir / "plain.md"
         before = await comp.index_engine.effective_namespace_for(target)
 
-        append_entry(target, _ALPHA, title=None, tags=[])
+        append_judged(target, _ALPHA, title=None, tags=[])
         await comp.index_engine.index_file(target, ingress_guarded=True)
 
         assert await comp.storage.namespaces_for_source(target) == ["default"]
@@ -222,11 +222,11 @@ class TestEarlierEntryKeepsItsNamespace:
     async def test_force_reindex_still_applies_the_resolved_namespace(self, bm25_only_components):
         """An explicit namespace is caller intent and always wins — including
         over preservation, and including under ``force``."""
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         comp, mem_dir = bm25_only_components
         target = mem_dir / "rules.md"
-        append_entry(target, _ALPHA, title=None, tags=[])
+        append_judged(target, _ALPHA, title=None, tags=[])
         await comp.index_engine.index_file(target, namespace="aaa", ingress_guarded=True)
 
         await comp.index_engine.index_file(
@@ -242,12 +242,12 @@ class TestEarlierEntryKeepsItsNamespace:
         caller intent — the documented embedding-reset recovery — must leave
         them alone."""
         from memtomem.memory_scope import day_file_name
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         comp, mem_dir = bm25_only_components
         agent_ns = "agent-runtime:planner"
         target = mem_dir / day_file_name(agent_ns, "default", date_str=_DATE)
-        append_entry(target, _ALPHA, title=None, tags=[])
+        append_judged(target, _ALPHA, title=None, tags=[])
         await comp.index_engine.index_file(target, namespace=agent_ns, ingress_guarded=True)
 
         await comp.index_engine.index_file(target, force=True, ingress_guarded=True)
@@ -468,10 +468,10 @@ class TestMcpSurface:
 
     @staticmethod
     async def _seed(comp, name: str = "shared.md") -> Path:
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         target = comp.config.indexing.memory_dirs[0] / name
-        append_entry(target, _ALPHA, title=None, tags=[])
+        append_judged(target, _ALPHA, title=None, tags=[])
         await comp.index_engine.index_file(target, namespace="aaa", ingress_guarded=True)
         return target
 
@@ -604,7 +604,9 @@ class TestCliSurface:
             ),
             index_engine=SimpleNamespace(
                 index_file=AsyncMock(
-                    return_value=SimpleNamespace(indexed_chunks=1, excluded_files=0)
+                    return_value=SimpleNamespace(
+                        indexed_chunks=1, excluded_files=0, relinked_files=0
+                    )
                 ),
                 effective_namespace_for=AsyncMock(side_effect=lambda p, ns=None, **k: ns),
                 is_excluded=lambda path: False,
@@ -898,7 +900,7 @@ class TestLangGraphSurface:
         self, bm25_only_components, monkeypatch
     ):
         from memtomem.integrations.langgraph import MemtomemStore
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         comp, mem_dir = bm25_only_components
         store = MemtomemStore()
@@ -910,7 +912,7 @@ class TestLangGraphSurface:
         )
 
         held = mem_dir / "held.md"
-        append_entry(held, _ALPHA, title=None, tags=[])
+        append_judged(held, _ALPHA, title=None, tags=[])
         await comp.index_engine.index_file(held, namespace="aaa", ingress_guarded=True)
         refused = await store.add(_BETA, namespace="bbb", file=str(held))
         assert refused.get("error") == "namespace_mix_refused"
@@ -920,11 +922,11 @@ class TestWebSurface:
     @pytest.mark.asyncio
     async def test_add_route_refuses_with_409_and_honours_the_override(self, bm25_only_components):
         from memtomem.memory_scope import namespace_mix_refusal as _refusal
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         comp, mem_dir = bm25_only_components
         target = mem_dir / "shared.md"
-        append_entry(target, _ALPHA, title=None, tags=[])
+        append_judged(target, _ALPHA, title=None, tags=[])
         await comp.index_engine.index_file(target, namespace="aaa", ingress_guarded=True)
 
         # The route's own call shape — the guard is shared, so this pins the
@@ -947,11 +949,11 @@ class TestWebSurface:
 class TestNamespacesForSource:
     @pytest.mark.asyncio
     async def test_returns_the_distinct_set(self, bm25_only_components):
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         comp, mem_dir = bm25_only_components
         a = mem_dir / "a.md"
-        append_entry(a, _ALPHA, title=None, tags=[])
+        append_judged(a, _ALPHA, title=None, tags=[])
         await comp.index_engine.index_file(a, namespace="aaa", ingress_guarded=True)
 
         assert await comp.storage.namespaces_for_source(a) == ["aaa"]

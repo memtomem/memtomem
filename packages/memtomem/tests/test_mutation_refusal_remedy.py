@@ -126,12 +126,18 @@ class TestEachSurfaceNamesItsOwnRemedy:
             values = {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
             # ``path`` defaults to the server's cwd, which need not hold the file.
             assert values.get("path") == str(path), text
-        # ``mem_index`` has no ``force_unsafe``; the only bypass is the CLI's.
+        # ``mem_index`` has no ``force_unsafe``, so the MCP remedy names the CLI's bypass.
         commands = _mm_commands(text)
         assert len(commands) == (1 if bypassable else 0), text
         for argv in commands:
             assert _assert_mm_runs(argv, path) == ["--force-unsafe"]
         assert text.count("from the CLI with `mm ") == len(commands)
+
+    def test_mem_index_takes_no_force_unsafe(self):
+        """ADR-0006 Axis E.6: ``mem_index`` offers an MCP caller no valve."""
+        params = inspect.signature(_core_tools()["mem_index"]).parameters  # type: ignore[arg-type]
+        assert "path" in params
+        assert "force_unsafe" not in params
 
     @pytest.mark.parametrize(("scope", "bypassable"), _TIERS)
     def test_web_names_its_own_controls_and_no_host_path(self, tmp_path, scope, bypassable):

@@ -1718,7 +1718,7 @@ class TestRegistryAndInstallDocs:
             f"MCP table drifted; missing={sorted(current - documented)}, "
             f"extra={sorted(documented - current)}"
         )
-        assert len(current) == 102
+        assert len(current) == 93
         assert len(_CORE_TOOLS) == 9
         standard = set(_CORE_TOOLS) | {
             f"mem_{name}" for name, info in ACTIONS.items() if info.category in _STANDARD_PACKS

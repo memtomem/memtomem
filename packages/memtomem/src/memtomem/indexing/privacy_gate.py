@@ -28,8 +28,8 @@ def privacy_remedy(surface: RemedySurface, *, path: Path, bypassable: bool) -> s
     this exact file: ``mem_index`` defaults to the server's cwd and a relative
     name can resolve elsewhere, so commands carry the full path. ``bypassable``
     is false for ``project_shared``, whose ``force_unsafe`` is refused, so no
-    bypass is offered there. ``mem_index`` has no ``force_unsafe``: an MCP
-    caller's bypass is the CLI's. The web names its own control and the bare
+    bypass is offered there. ``mem_index`` has no ``force_unsafe``, so the MCP
+    remedy names the CLI's bypass. The web names its own control and the bare
     file name only (host paths stay out of web responses).
     """
     if surface in ("cli", "shell", "mcp"):
@@ -203,7 +203,11 @@ class MutationPreflight:
     caller's ``force_unsafe`` may cover it.
     ``relinked`` — the path no longer resolves to the source that was read, so
     the write would reach a file nobody judged. Checked before the other two:
-    they describe the file that was read (#3191).
+    they describe the file that was read (#3191). The tool calls
+    :meth:`IndexEngine.hold_relinked_mutation`, which holds the source that was
+    read whatever the judge said about its bytes (#3291).
+    ``source_key`` — the stored key of the source that was read, the one a
+    hold is placed under.
     """
 
     rejection: PrivacyRejection | None
@@ -211,6 +215,7 @@ class MutationPreflight:
     valve_ok: bool
     replay: Callable[[], object] | None = field(default=None, repr=False, compare=False)
     relinked: bool = False
+    source_key: str | None = None
 
     def blocker(self, op: str, name: str, *, needs_valve: bool) -> str | None:
         """The refusal text for a write the preflight forbids, other than ``rejection``."""

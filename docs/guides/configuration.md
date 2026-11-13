@@ -846,8 +846,9 @@ inode mid-operation, and every lock held on the old inode goes stale. The
 sidecar is never replaced, so its inode is stable.
 
 The sidecar sits beside the **resolved** file, so a symlinked source is locked
-next to its target — which may be outside the tree you indexed. That is also
-what makes a symlink and its target share one lock instead of two.
+next to its target. That is also what makes a symlink and its target share one
+lock instead of two. A target outside the directories listed below gets no
+sidecar; see "Outside those directories" further down.
 
 These files are created with mode `0600`, stay empty, and are **left in place
 on purpose**. memtomem never deletes them: removing a sidecar while any
@@ -863,9 +864,12 @@ path and both believe they hold it.
 > creating the sidecar fails first. A *refused* write leaves nothing behind;
 > this is about indexing, which is supposed to happen.
 
-You will see them in any tree you index — a registered `memory_dirs` folder,
-a `mm index <path>` run, or a Reindex from the Web UI — including your own
-source repositories. A directory scan leaves one next to each file it selects
+You will see them in the directories memtomem keeps memory files in: a
+registered `memory_dirs` folder, a project's memory tier, a
+`read_only_memory_dirs` root and the upload directory, however the file was
+indexed (the watcher, `mm index <path>`, a Reindex from the Web UI). That
+includes a source repository you registered as one of them. A directory scan
+there leaves one next to each file it selects
 for indexing, which is the overlap between `indexing.supported_extensions` and
 the extensions a chunker is registered for. With the default settings that
 overlap is the whole default list, `.md`, `.json`, `.yaml`, `.yml`, `.toml`,
@@ -880,6 +884,27 @@ a directory. The defaults above remain unchanged.
 
 Sidecars are never indexed themselves:
 `.lock` is not a supported extension.
+
+**Outside those directories, indexing creates no sidecar.** `mm index <path>`
+and the MCP `mem_index` tool accept any path, and renaming or assigning a
+namespace locks whichever files its chunks came from. For a file outside every
+configured root and the upload directory, those operations write nothing next
+to it. The lock they take for such a file is an empty file under the per-user
+runtime directory, named by a digest of the file's resolved path:
+`/tmp/memtomem-<euid>/source-locks/` on POSIX, `source-locks\` under
+`<LocalAppData>\Temp\memtomem-0\` on Windows (the directory
+[Uninstall](uninstall.md) describes).
+
+If a sidecar is already beside such a file, it is still locked as well, never
+recreated, and a symlink at that name is not followed. One can be there from
+an earlier memtomem version, or from something that writes the file under
+memtomem's lock, which still creates one: the LangGraph store's
+`add(file=...)` is an example.
+
+Two limits of the runtime-directory lock: every memtomem process must see the
+same `/tmp` (a service with a private `/tmp` does not share it), and a cleanup
+job that deletes files there while a memtomem process holds one breaks that
+one lock.
 
 **Keep them out of version control.** Add the pattern to the repository's
 `.gitignore`, or to your global excludes file
@@ -1644,10 +1669,10 @@ The keys may come either from the config surface above or from the Langfuse SDK'
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (39 incl. `mem_do`), `full` (102 tools) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (39 incl. `mem_do`), `full` (93 tools) |
 | `MEMTOMEM_EXTRA_TOOLS` | *(unset)* | Comma-separated registered tool names exposed individually on top of the mode (no effect in `full`). A deployment that launches the server lists the tool its skill needs, so the skill's own allowlist can name it instead of being granted `mem_do`; the plugins' bundled server configurations set `mem_update_coverage`, which their `update` workflow needs outside `topic` mode, and so does every registration `mm init --mcp` writes (the `mm init` of memtomem 0.7.2 and earlier did not); a hand-written entry, or one an older `mm init` wrote, has to add it. If you also set it in the environment your MCP client inherits, use the same combined list (your names plus `mem_update_coverage`) in both places, or unset the inherited one and keep the combined list in the entry. Deployment configuration, not an authorization boundary: an unknown name is logged and ignored, and the surface only ever gains registered names. |
 
-In `core` mode, use `mem_do(action="...", params={...})` to access any of the 95 non-core actions. Fewer tools means less context usage for AI agents.
+In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action; `mem_do(action="help")` lists them. Fewer tools means less context usage for AI agents.
 
 ## Web UI Mode
 

@@ -391,9 +391,9 @@ class TestMemBatchAddIdempotency:
         calls: list[int] = []
         real = mw.append_blocks
 
-        def counting(file_path, blocks):
+        def counting(file_path, blocks, *, judged):
             calls.append(len(blocks))
-            return real(file_path, blocks)
+            return real(file_path, blocks, judged=judged)
 
         monkeypatch.setattr(mw, "append_blocks", counting)
 
@@ -432,11 +432,13 @@ class TestBatchAppendByteIdentity:
 
         seq_path = tmp_path / "seq.md"
         for content, title, tags in entries:
-            mw.append_entry(seq_path, content, title=title, tags=tags)
+            mw.append_entry(
+                seq_path, content, title=title, tags=tags, judged=mw.read_for_append(seq_path)
+            )
 
         atomic_path = tmp_path / "atomic.md"
         blocks = [mw.format_entry_block(c, title=t, tags=g) for c, t, g in entries]
-        mw.append_blocks(atomic_path, blocks)
+        mw.append_blocks(atomic_path, blocks, judged=mw.read_for_append(atomic_path))
 
         assert atomic_path.read_bytes() == seq_path.read_bytes()
 
@@ -444,7 +446,7 @@ class TestBatchAppendByteIdentity:
         import memtomem.tools.memory_writer as mw
 
         path = tmp_path / "none.md"
-        mw.append_blocks(path, [])
+        mw.append_blocks(path, [], judged=mw.read_for_append(path))
         assert not path.exists()
 
 

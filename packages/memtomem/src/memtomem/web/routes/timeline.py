@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from memtomem.models import NamespaceFilter
+from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.web.deps import get_config, get_storage
 from memtomem.web.schemas.core import chunk_to_out
@@ -28,11 +28,15 @@ async def get_timeline(
     since = datetime.now(timezone.utc) - timedelta(days=days)
     # A blank value names no namespace. Parsed as given it would be an exact
     # namespace ``""`` that matches no row, so it takes the omitted path, as in
-    # ``GET /api/search`` (#3275).
-    ns_filter = NamespaceFilter.parse(
-        namespace or None,
-        system_prefixes=tuple(config.search.system_namespace_prefixes),
-    )
+    # ``GET /api/search`` (#3275). Unparseable filter syntax is a request
+    # problem: answer 422 like the other routes that parse ``namespace`` (#3288).
+    try:
+        ns_filter = NamespaceFilter.parse(
+            namespace or None,
+            system_prefixes=tuple(config.search.system_namespace_prefixes),
+        )
+    except InvalidFilterSyntaxError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     # ADR-0011 PR-D round 9: thread project context so Web timeline
     # surfaces project_shared / project_local rows when the server
     # runs inside a registered project. Without this, the always-on

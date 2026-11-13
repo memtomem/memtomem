@@ -41,6 +41,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   BM25-indexed with the body. A component whose file names are its own bookkeeping can now leave
   both lines out. langchain-memtomem's store does: its file names are encoded keys ending in
   `.md`, so `md` returned every item. The default is unchanged, so existing indexes do not re-embed.
+- **`IndexEngine.index_file(..., append_region=...)` names the chunks an append became
+  (#3292).** `IndexingStats.new_chunk_ids` lists every chunk a whole-file re-index upserted, so
+  it holds a pending edit's chunk too, and it misses the append's own chunk when that chunk
+  matches an existing one and keeps its id. A caller that appended to the file under its lock
+  builds the region with `memtomem.indexing.append_attribution.append_region(pre_image,
+  appended)` and gets `IndexingStats.appended_chunk_ids`, the committed chunks whose line spans
+  touch the appended lines, in file order, with `appended_attribution`: `"exact"` when every
+  one starts within the appended lines, `"merged"` when one starts before them (a short entry
+  merged into the previous section), and `"unverified"` with no ids otherwise. That covers a
+  file that is not the text the caller expected (another writer's bytes anywhere in it), a
+  file a chunker other than Markdown reads, masked chunks, chunk overlap anywhere in the file,
+  and an append that starts mid-line, because there a span does not say what a chunk holds.
+  Every single-entry append through `mem_add`'s write path reports it; `mem_batch_add` does
+  not yet. Only `mem_reflect_save` reads it so far: `mem_agent_share` and
+  `mem_consolidate_apply` still pick their chunk from `new_chunk_ids` (#3315).
 
 ### Changed
 
@@ -76,15 +91,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   no fraction of a second, while a chunk indexed earlier in that same second keeps its
   fraction and so sorts as newer. In tests that was the related chunk itself, so it was
   linked to itself. A write elsewhere between the save and the link also took the edges. The
-  save now links only when the re-index of `reflections.md` produced exactly one new chunk,
-  and that chunk holds the entry as the indexer chunks it. Otherwise the insight is saved,
-  nothing is linked, and the result says so. That happens when the insight spans several
-  chunks, when an unindexed edit to the file is indexed with it and adds another new chunk,
-  when merging it with the section before it adds a heading inside it, or when the insight is
-  only a heading. One case still links the wrong chunk: an unindexed edit leaves another chunk
-  holding the whole insight text, and the insight itself matches a chunk that already existed,
-  so it keeps that chunk's id and the other chunk is the only new one. Precise attribution is
-  #3292.
+  save now links only when the indexer attributes the append to exactly one chunk (#3292), and
+  that chunk holds the entry as the indexer chunks it. An unindexed edit to the file that is
+  indexed with the insight no longer gets in the way, and neither does an insight that matches
+  an existing chunk and keeps its id. Otherwise the insight is saved, nothing is linked, and
+  the result says so. That happens when the insight spans several chunks, when another writer
+  changed the file between the append and its re-index, when merging it with the section
+  before it adds a heading inside it, or when the insight is only a heading.
 - **`mm embedding-reset` no longer calls a reset of an empty store destructive (#2423).** A
   store stamped with one embedding model that never received a chunk, opened after the config
   names another model, still reports a mismatch and still needs
@@ -144,6 +157,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   downloaded by an older huggingface-hub was not affected. In a read-only cache the links cannot
   be made and the load still fails; make the cache writable for the first load.
 
+- **A memory tool's append writes only to the file its privacy check judged (#3289).** Every
+  surface that appends an entry (`mem_add`, `mem_batch_add` and the tools built on them, `mm add`,
+  `mm agent share`, `mm review approve`, the shell's `add`, the Web UI's add and scratch promote,
+  and the LangGraph store) checks the file as it stands, then appends. A path replaced by a
+  symlink after that check was followed: the entry landed in the link's target, a file nobody
+  judged, and a forced entry aimed at a user file could land in a `project_shared` file with
+  neither `confirm_project_shared` nor the refusal of `force_unsafe` there applying. The append now
+  decides at the open. A file that existed is opened without creating it and must be the file
+  that was read, by identity on the open descriptor; a file that did not exist is created at the
+  path that was judged, walking its directories from the root by descriptor without following a
+  link. Otherwise nothing is written, the file that was read is held out of search as
+  `source_relinked`, and the tool says the path "was replaced after it was read". A file replaced
+  by a symlink after the append and before its re-index is held instead of having the link's
+  target indexed in its place, and the result says so. A memory file that is a symlink all
+  along, and a dangling symlink, keep working as before. Also refused now, with nothing written:
+  a new file's name taken by another process between the check and the write, a symlink loop put
+  in an existing file's place, and a FIFO put there, which used to block the write while it held
+  the file's lock. Not
+  covered: a replacement by another link to the same file; another process changing the file's
+  content in place in between; on filesystems that report no file identity, a file replaced and
+  put back around the open; on Windows, a directory on a new file's path replaced (a junction,
+  say), whether or not it is put back, and a refused create there can leave an empty file behind;
+  a link put, after the append, at a path that was already a link when read, which the re-index
+  still follows.
+
+- **A memory tool that finds its file's path replaced takes that file out of search (#3291).**
+  When the path a memory tool read no longer leads to the same file by the time of its privacy
+  check, the tool writes nothing ("now resolves to a different location than when it was read").
+  It now also holds the chunks of the file it read, as `source_relinked`, until that file is
+  indexed again: a write that is retried once the path is back does that, and so does the
+  watcher. Before, the hold depended on the check refusing the file's content, and that answer
+  could be wrong for exactly this case: with the registered `.memtomem/memories` directory itself
+  replaced by a symlink, a `project_shared` file was judged as a user-scope one, nothing was
+  refused, and chunks indexed from an earlier version of the file stayed searchable. This also
+  hides a file whose content is fine, for as long as its path stays replaced, and one whose path
+  could not be resolved at the check. Reading a held chunk by id still works. Not covered:
+  chunks stored under a path spelling from before Unicode folding on macOS are not held (#2907).
+
 - **A memory tool's privacy preflight judges a file under the path it read it from (#3191).**
   Before a memory tool appends to or rewrites a file, on any surface, it checks that the file as
   it stands may be indexed. That check resolved the path again after the read, so a path replaced
@@ -153,8 +204,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   write still judged what it stored, so nothing it refuses was stored. The check now uses the path
   resolved with the read, and when the path resolves somewhere else by the time of the check, the
   write is refused with nothing written ("now resolves to a different location than when it was
-  read"). A path that was already a symlink when read is judged through it, as before. Not
-  covered: a path replaced after this check and before the write.
+  read"). A path that was already a symlink when read is judged through it, as before. A path
+  replaced after this check and before the write is #3289's, above.
+
+- **Indexing judges a file under one resolution of its path (#3290).** The redaction check that
+  every index pass runs took the file's stored key, then resolved the path again to choose the
+  scope and the reviewed masking entry, and the chunker looked both up once more. A file replaced
+  by a symlink for the length of one of those lookups and then put back was judged, or masked, as
+  the link's target and stored under its own key: a `project_shared` file declaring
+  `redaction: documents-patterns`, which is refused there, was indexed as a user-scope file, and
+  with `index_masking_manifest_path` set, a line the check had passed masked could be stored
+  unmasked. The key the pass checks, the scope and the masking entry now come from one
+  resolution, and the text that is chunked is the one the check judged. `mm memory doctor`
+  answers through the same code. Not covered: the registered project directories are still
+  resolved when the scope is looked up, so replacing such a directory itself, and putting it
+  back, inside that same step has the effect a replaced file had. Two later steps of the same
+  pass still resolve the path themselves: the store, when it writes the chunks (#3305), and the
+  chunker's read-only check (#3306).
 
 - **Registering a schedule refuses a params key the job does not take (#3247).** `mm schedule add
   --params` and `mem_schedule_register` used to accept any key and store it as given, so a

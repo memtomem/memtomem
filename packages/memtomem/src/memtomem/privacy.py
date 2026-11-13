@@ -918,9 +918,9 @@ def emit_project_shared_confirmation(
     says a human (or an agent acting for one) authorised a git-tracked write
     at ``surface``, which is the thing that has no other record. A dry run
     writes nothing and so emits nothing — which is a statement about what
-    is *recorded*, not about what is *asked*: ``mem_context_memory_migrate``
-    still requires the confirmation argument on a preview call, its own
-    pre-existing contract and not something this line reports on.
+    is *recorded*, not about what is *asked*: a surface may still require the
+    confirmation on a preview call, its own contract and not something this
+    line reports on.
 
     **Log line only, no counter.** :data:`_VALID_OUTCOMES` labels the outcome
     of a *content scan*; a consent is not a scan, and folding it into those

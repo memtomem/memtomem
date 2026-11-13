@@ -150,9 +150,9 @@ _RECOVERY_MODULES = frozenset(
 #: receive a raised recovery exception. The seeds plus the two public wrappers
 #: that re-raise rather than convert (``copy_skill`` re-raises the prelude's
 #: SwapRecoveryError; ``migrate_scope`` calls transfer_artifact). Deliberately
-#: NOT the batch/tool functions (generate_all_skills, extract_skills_to_canonical,
-#: the mem_context_* tools), which result-code recovery into a typed skip / string
-#: and never raise it to a caller — importing those is safe.
+#: NOT the batch functions (generate_all_skills, extract_skills_to_canonical),
+#: which result-code recovery into a typed skip and never raise it to a
+#: caller — importing those is safe.
 _SCOPE_ROT_SYMBOLS = _RECOVERY_SEEDS | {"copy_skill", "migrate_scope"}
 
 # ── Scope (Option B, user-confirmed) ─────────────────────────────────────
@@ -993,6 +993,19 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "``_sidecar_lock`` so the memory-file entry point could take the same "
         "arms with a different parent policy — the arm is unchanged, only its "
         "enclosing function is.",
+    ),
+    ("context/_atomic.py", "_open_existing_sidecar", ("OSError",), 0): (
+        _I,
+        "",
+        "The existing-only open of a memory-file sidecar: a link at that name "
+        "(``ELOOP``/``EMLINK`` from ``O_NOFOLLOW``) is the answer 'no sidecar', "
+        "and every other ``OSError`` is re-raised. It runs before any body, so "
+        "no recovery exception can exist to demote.",
+    ),
+    ("context/_atomic.py", "_open_existing_sidecar", ("BaseException",), 0): (
+        _I,
+        "",
+        "Close-and-reraise around the descriptor's identity check; nothing is swallowed.",
     ),
     ("context/_atomic.py", "_file_lock", ("<dynamic>",), 0): (
         _I,
@@ -2007,87 +2020,6 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "no_recovery_callee",
         "spelling os.replace → VersionError (version store, not swap); " + _NONSKILL,
     ),
-    # ── server/tools/context.py ─────────────────────────────────────────
-    ("server/tools/context.py", "mem_context_init", ("ClickException",), 0): (
-        _U,
-        "handled_upstream",
-        "init skills block: extract_skills_to_canonical converts recovery to "
-        "typed skips; the ClickException arm catches only the privacy block. " + _UPSTREAM,
-    ),
-    ("server/tools/context.py", "mem_context_init", ("ClickException",), 1): (
-        _U,
-        "no_recovery_callee",
-        "init agents block: extract_agents_to_canonical is not a swap path; " + _NONSKILL,
-    ),
-    ("server/tools/context.py", "mem_context_init", ("ClickException",), 2): (
-        _U,
-        "no_recovery_callee",
-        "init commands block: extract_commands_to_canonical is not a swap path; " + _NONSKILL,
-    ),
-    ("server/tools/context.py", "mem_context_memory_migrate", ("ClickException",), 0): (
-        _U,
-        "no_recovery_callee",
-        "memory migrate source resolve; " + _NONSKILL,
-    ),
-    ("server/tools/context.py", "mem_context_memory_migrate", ("ClickException",), 1): (
-        _U,
-        "no_recovery_callee",
-        "memory migrate run (shutil.move + DB); " + _NONSKILL,
-    ),
-    ("server/tools/context.py", "mem_context_artifact_migrate", ("TransferRecoveryError",), 0): (
-        _T,
-        "",
-        "MCP migrate: migrate_scope → transfer engine → refused: "
-        "swap_recovery_pending (redacted). Precedes the ClickException arm.",
-    ),
-    ("server/tools/context.py", "mem_context_artifact_migrate", ("ClickException",), 0): (
-        _P,
-        "transfer",
-        "Broad ClickException after the TransferRecoveryError arm.",
-    ),
-    ("server/tools/context.py", "mem_context_artifact_transfer", ("ClickException",), 0): (
-        _U,
-        "handled_upstream",
-        "Early tier-detect try: the conservative graph reaches a transfer symbol "
-        "here, but _detect_source_scope is a read-only probe that raises no "
-        "TransferRecoveryError; the real transfer runs in the later try whose "
-        "TransferRecoveryError arm is classified TRANSLATES.",
-    ),
-    ("server/tools/context.py", "mem_context_artifact_transfer", ("TransferRecoveryError",), 0): (
-        _T,
-        "",
-        "MCP transfer: transfer_artifact → refused: swap_recovery_pending "
-        "(redacted). Precedes the collision/ClickException arms.",
-    ),
-    ("server/tools/context.py", "mem_context_artifact_transfer", ("TransferCollisionError",), 0): (
-        _P,
-        "transfer",
-        "Collision arm after the TransferRecoveryError arm.",
-    ),
-    ("server/tools/context.py", "mem_context_artifact_transfer", ("ClickException",), 1): (
-        _P,
-        "transfer",
-        "Broad ClickException catch-all after the TransferRecoveryError arm.",
-    ),
-    ("server/tools/context.py", "mem_context_version", ("OSError",), 0): (
-        _U,
-        "no_recovery_callee",
-        "adopt_flat_to_dir (os.replace, flat) — never skills swap; " + _NONSKILL,
-    ),
-    ("server/tools/context.py", "mem_context_version", ("OSError",), 1): (
-        _U,
-        "handled_upstream",
-        "versioning_op_locked create → create_version has no swap path; the "
-        "conservative graph reaches the lock wrapper (shared with skills-capable "
-        "callers), but version create over agents/commands raises no "
-        "SwapRecoveryError. " + _NONSKILL,
-    ),
-    ("server/tools/context.py", "mem_context_pull", ("OSError",), 0): (
-        _U,
-        "no_recovery_callee",
-        "Gate-message path formatting (resolve/relative_to); prepare_pull/"
-        "commit_pull run outside this try and are result-coded; " + _RO,
-    ),
     # ── web/routes/_atomic_kind.py (agents/commands router) ─────────────
     ("web/routes/_atomic_kind.py", "user_sync_host_targets", ("OSError", "<dynamic>"), 0): (
         _U,
@@ -2411,8 +2343,6 @@ KNOWN_RECOVERY_BOUNDARIES: frozenset[tuple[str, str, tuple[str, ...], int]] = fr
         ("cli/context_install_cmd.py", "_run_update_all", ("SwapRecoveryError",), 0),
         ("cli/context_install_cmd.py", "_run_install_all", ("SwapRecoveryError",), 0),
         ("cli/context_cmd.py", "seed_validation_cmd", ("SwapRecoveryError",), 0),
-        ("server/tools/context.py", "mem_context_artifact_migrate", ("TransferRecoveryError",), 0),
-        ("server/tools/context.py", "mem_context_artifact_transfer", ("TransferRecoveryError",), 0),
         ("web/routes/context_mutations.py", "install_asset", ("SwapRecoveryError",), 0),
         ("web/routes/context_mutations.py", "update_asset", ("SwapRecoveryError",), 0),
         ("web/routes/context_skills.py", "create_skill", ("SwapRecoveryError",), 0),

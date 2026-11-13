@@ -1,7 +1,7 @@
 # ADR-0006: Web UI folder/upload privacy redaction trust-boundary
 
-**Status:** Accepted (trigger fired 2026-06-11; amended to add Axis F — bundle import; amended 2026-06-30 to add Axis G — export/import path policy)
-**Date:** 2026-04-30 (amended 2026-06-11, 2026-06-30)
+**Status:** Accepted (trigger fired 2026-06-11; amended to add Axis F — bundle import; amended 2026-06-30 to add Axis G — export/import path policy; a `force_unsafe` valve on MCP `mem_index` reviewed and declined, #2801)
+**Date:** 2026-04-30 (amended 2026-06-11, 2026-06-30; reviewed 2026-11-13)
 **Context:** Issue #585 — PR #575 follow-up review surfaced that
 `packages/memtomem/src/memtomem/privacy.py: DEFAULT_PATTERNS` is enforced
 only on the MCP `mem_add` / `mem_batch_add` paths. The Web UI's
@@ -238,7 +238,8 @@ system had a hard refusal and a global valve, and nothing in between.
 
 `--force-unsafe` does not close it. It is **invocation-scoped**, and three of
 the surfaces that index these files cannot pass it at all: MCP `mem_index` has
-no such parameter (the core tool description budget is full), the watcher
+no such parameter (the core tool description budget is full; Axis E.6 later
+decided it stays that way), the watcher
 calls `index_file` without one, and the debounce queue carries only
 `(path, namespace, force)` — `mm index --debounce-window --force-unsafe` is
 rejected as a usage error. So on those paths the file is *permanently*
@@ -312,6 +313,51 @@ exemption's counter measures only what it actually waived.
 outside pattern-documenting notes, or if a hit class beyond the two label
 rules is ever proposed for the allowlist, that is a new decision — not an
 extension of this one.
+
+### Axis E.6 — `mem_index` gets no valve over MCP (reviewed 2026-11-13)
+
+> Axis E.5 noted that MCP `mem_index` cannot pass `force_unsafe` and gave the
+> core tool description budget as the reason. That described the state without
+> deciding it. [#2801](https://github.com/memtomem/memtomem/issues/2801) asked
+> for the decision.
+
+**The gap.** `mem_index` lists the files it blocked and offers no bypass. A
+file with hits gets through `mem_index` verbatim only by carrying the E.5
+declaration, which waives only the two label rules.
+
+| Option | Behavior | Verdict |
+|--------|----------|---------|
+| E.6a — add `force_unsafe` to `mem_index` | the MCP caller sets the valve itself; refused for `project_shared`, audit-logged and counted | ❌ |
+| E.6b — **no valve on `mem_index`** | `mem_index` keeps refusing to store a file with hits verbatim unless it carries the E.5 declaration | ✅ |
+
+**Decision: E.6b.** `mem_index` stays without `force_unsafe`.
+
+**Why.** The valve exists to record that someone looked at the flagged content
+and accepted it. On `mem_index` the flag would accept a whole file that is
+already on disk, including content the caller did not write and may never have
+read, and the acceptance would come from the caller alone. The existing
+bypasses for indexing a file, `mm index --force-unsafe` and the Web UI's
+"Index without privacy gate" checkbox, sit on human-facing surfaces.
+
+Two arguments this decision does not rest on:
+
+- **Not breadth.** MCP callers already hold valves. `mem_add` takes
+  `force_unsafe`, and so do `mem_fetch`, `mem_import`, `mem_import_notion` and
+  `mem_import_obsidian`, for content the caller did not write. This decision
+  therefore does not keep flagged content away from an MCP caller, and does
+  not claim to. Those tools keep their parameter. Whether they should is a
+  separate question that this amendment does not settle; it settles only that
+  `mem_index` does not become one more.
+- **Not the description budget.** A full budget would be a reason to make
+  room, not a reason to decline.
+
+**Accepted consequence.** `mem_index` cannot perform this bypass: it keeps
+refusing to store a reviewed false positive outside the two label rules
+verbatim.
+
+**Reopen trigger.** MCP callers gain an approval they cannot give themselves,
+for example an elicitation that the client's user answers. A valve bound to
+that approval would be a new decision, not an extension of this one.
 
 ### Axis F — Bundle import (added 2026-06-11 amendment)
 
@@ -862,6 +908,13 @@ These were considered when drafting and folded into the leaning above:
   reachability and is named in the reopen trigger.
 - Issue #1486 — the security-audit decision this amendment records.
 
+### Added by the 2026-11-13 review (Axis E.6)
+
+- `packages/memtomem/src/memtomem/server/tools/indexing.py` — `mem_index`,
+  whose signature has no `force_unsafe`.
+- `packages/memtomem/tests/test_mutation_refusal_remedy.py` —
+  `test_mem_index_takes_no_force_unsafe` pins the decision.
+- Issue #2801 — the decision this review records.
 
 ### Memory bundle v4 export/restore clarification (2026-10-26)
 

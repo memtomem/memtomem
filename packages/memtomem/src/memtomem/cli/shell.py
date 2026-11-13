@@ -255,24 +255,35 @@ async def _cmd_add(comp, args: list[str]) -> None:
         memory_lock_path,
     )
     from memtomem.indexing.engine import PrivacyRejection
-    from memtomem.tools.memory_mutation import preflight_refusal
+    from memtomem.tools.memory_mutation import (
+        append_warning,
+        preflight_refusal,
+        refuse_changed_append,
+    )
+    from memtomem.tools.memory_writer import SourceChangedError
 
     # Held across the preflight, the append and the re-index, like every other
     # memory write: the preflight's answer is about the file as it stands, and
     # only the lock keeps it standing until the re-index reads it.
     try:
         async with async_file_lock(memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
-            refusal, _ = await preflight_refusal(
+            refusal, judged = await preflight_refusal(
                 comp.index_engine, target, op="add", needs_valve=False, surface="shell"
             )
             if refusal is not None:
                 comp.search_pipeline.invalidate_cache()
                 click.secho(refusal.removeprefix("Error: "), fg="red")
                 return
-            append_entry(target, content)
+            try:
+                append_entry(target, content, judged=judged)
+            except SourceChangedError:
+                refusal = await refuse_changed_append(comp.index_engine, target, judged, op="add")
+                comp.search_pipeline.invalidate_cache()
+                click.secho(refusal.removeprefix("Error: "), fg="red")
+                return
             try:
                 stats = await comp.index_engine.index_file(
-                    target, ingress_guarded=True, lock_held=True
+                    target, ingress_guarded=True, lock_held=True, hold_if_relinked=judged.leaf_own
                 )
             except PrivacyRejection as exc:
                 comp.search_pipeline.invalidate_cache()
@@ -292,11 +303,10 @@ async def _cmd_add(comp, args: list[str]) -> None:
         comp.search_pipeline.invalidate_cache()
 
     click.secho(f"Added to {target.name} ({stats.indexed_chunks} chunks indexed)", fg="green")
-    if stats.excluded_files:
-        # The file became excluded while the entry was appended (#3165).
-        from memtomem.source_provenance import EXCLUDED_AFTER_APPEND_NOTICE
-
-        click.secho(EXCLUDED_AFTER_APPEND_NOTICE, fg="yellow")
+    # Excluded, or replaced by a link, while the entry was appended.
+    warning = append_warning(stats, judged)
+    if warning is not None:
+        click.secho(warning, fg="yellow")
 
 
 async def _cmd_recall(comp, args: list[str]) -> None:
