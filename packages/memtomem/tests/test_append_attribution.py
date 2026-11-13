@@ -247,28 +247,23 @@ class TestUnverified:
         assert stats.appended_attribution == "unverified"
 
     @pytest.mark.asyncio
-    async def test_masked_after_the_guard_judged_the_file(self, stack, monkeypatch):
-        # ``chunk_content`` computes its own projection after awaits the guard's
-        # did not see (a manifest updated in between), so the chunked text is
-        # not the text the guard projected. Only the first call is unmasked.
+    async def test_masked_chunks(self, stack, monkeypatch):
+        # A masking projection chunks other text than the file holds, so line
+        # positions in the file say nothing about what the chunks contain.
         from memtomem.indexing.privacy_projection import IndexProjection
 
         comp, engine, path = stack
-        real = engine._prepare_index_projection
-        calls: list[int] = []
 
-        def mask_after_the_first(file_path, content, scope, **kwargs):
-            calls.append(1)
-            if len(calls) == 1:
-                return real(file_path, content, scope, **kwargs)
+        def mask(file_path, content, scope, **kwargs):
             masked = content.replace("zqsecret", "[MASKED]")
-            return IndexProjection(masked, masked, 1)
+            return IndexProjection(masked, masked, content.count("zqsecret"))
 
-        monkeypatch.setattr(engine, "_prepare_index_projection", mask_after_the_first)
+        monkeypatch.setattr(engine, "_prepare_index_projection", mask)
         stats = await _append(engine, path, "zqsecret entry body.", title="Masked")
 
-        assert len(calls) > 1
-        assert any("[MASKED]" in c.content for c in await _rows(comp, path))
+        rows = await _rows(comp, path)
+        assert any("[MASKED]" in c.content for c in rows)
+        assert all(c.metadata.redaction_count for c in rows)
         assert stats.appended_chunk_ids == ()
         assert stats.appended_attribution == "unverified"
 

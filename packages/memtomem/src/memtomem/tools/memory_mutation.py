@@ -255,6 +255,8 @@ async def mutate_source_and_reindex(
         rejection = await index_engine.refuse_mutation(source_file, preflight)
         rejection.mutation_outcome = "not_written"
         raise rejection
+    if preflight.relinked:
+        await index_engine.hold_relinked_mutation(source_file, preflight)
     blocker = preflight.blocker("edit", source_file.name, needs_valve=force_unsafe)
     if blocker is not None:
         raise MutationBlockedError(blocker)
@@ -350,6 +352,8 @@ async def preflight_refusal(
     if preflight.rejection is not None:
         rejection = await index_engine.refuse_mutation(path, preflight)
         return rejection.mutation_detail(op, outcome="not_written", surface=surface), pre
+    if preflight.relinked:
+        await index_engine.hold_relinked_mutation(path, preflight)
     return preflight.blocker(op, path.name, needs_valve=needs_valve), pre
 
 

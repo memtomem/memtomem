@@ -154,6 +154,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   downloaded by an older huggingface-hub was not affected. In a read-only cache the links cannot
   be made and the load still fails; make the cache writable for the first load.
 
+- **A memory tool that finds its file's path replaced takes that file out of search (#3291).**
+  When the path a memory tool read no longer leads to the same file by the time of its privacy
+  check, the tool writes nothing ("now resolves to a different location than when it was read").
+  It now also holds the chunks of the file it read, as `source_relinked`, until that file is
+  indexed again: a write that is retried once the path is back does that, and so does the
+  watcher. Before, the hold depended on the check refusing the file's content, and that answer
+  could be wrong for exactly this case: with the registered `.memtomem/memories` directory itself
+  replaced by a symlink, a `project_shared` file was judged as a user-scope one, nothing was
+  refused, and chunks indexed from an earlier version of the file stayed searchable. This also
+  hides a file whose content is fine, for as long as its path stays replaced, and one whose path
+  could not be resolved at the check. Reading a held chunk by id still works. Not covered:
+  chunks stored under a path spelling from before Unicode folding on macOS are not held (#2907).
+
 - **A memory tool's privacy preflight judges a file under the path it read it from (#3191).**
   Before a memory tool appends to or rewrites a file, on any surface, it checks that the file as
   it stands may be indexed. That check resolved the path again after the read, so a path replaced
@@ -165,6 +178,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   write is refused with nothing written ("now resolves to a different location than when it was
   read"). A path that was already a symlink when read is judged through it, as before. Not
   covered: a path replaced after this check and before the write.
+
+- **Indexing judges a file under one resolution of its path (#3290).** The redaction check that
+  every index pass runs took the file's stored key, then resolved the path again to choose the
+  scope and the reviewed masking entry, and the chunker looked both up once more. A file replaced
+  by a symlink for the length of one of those lookups and then put back was judged, or masked, as
+  the link's target and stored under its own key: a `project_shared` file declaring
+  `redaction: documents-patterns`, which is refused there, was indexed as a user-scope file, and
+  with `index_masking_manifest_path` set, a line the check had passed masked could be stored
+  unmasked. The key the pass checks, the scope and the masking entry now come from one
+  resolution, and the text that is chunked is the one the check judged. `mm memory doctor`
+  answers through the same code. Not covered: the registered project directories are still
+  resolved when the scope is looked up, so replacing such a directory itself, and putting it
+  back, inside that same step has the effect a replaced file had. Two later steps of the same
+  pass still resolve the path themselves: the store, when it writes the chunks (#3305), and the
+  chunker's read-only check (#3306).
 
 - **Registering a schedule refuses a params key the job does not take (#3247).** `mm schedule add
   --params` and `mem_schedule_register` used to accept any key and store it as given, so a

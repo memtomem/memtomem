@@ -27,8 +27,14 @@ import pytest
 SRC = Path(__file__).resolve().parents[1] / "src" / "memtomem"
 
 #: L2 memory-file acquires. `async_file_lock` is the primitive;
-#: `async_memory_file_lock` keys the sidecar itself from a data path.
-_ACQUIRE_NAMES = {"async_file_lock", "async_memory_file_lock"}
+#: `async_memory_file_lock` keys the sidecar itself from a data path, and so do
+#: the two taken for a source outside every managed directory.
+_ACQUIRE_NAMES = {
+    "async_file_lock",
+    "async_memory_file_lock",
+    "async_detached_source_lock",
+    "async_existing_memory_file_lock",
+}
 _GATE_ATTR = "is_read_only_source"
 
 #: Functions that acquire an L2 lock on a path a *memory write* is about to
