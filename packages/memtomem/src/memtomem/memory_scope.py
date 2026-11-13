@@ -691,24 +691,31 @@ def project_tier_is_relinked(tier_dir: Path) -> bool:
     deliver either one as a symbolic link. The directory then names whatever
     the link points at: ``memories -> ..`` makes the whole project the tier.
     Nothing above the project root is asked about; that part of the path is
-    the machine's, not the repository's. A missing entry is not a link. An
-    entry that cannot be inspected counts as one: a tier nobody can vouch for
-    is not used, and the caller goes on to its other directories. ``lstat`` is
-    asked directly because ``Path.is_symlink`` answers ``False`` for some
-    errors and raises for others, and which ones has changed between Python
-    versions.
+    the machine's, not the repository's. Each entry is judged by
+    :func:`entry_is_link`, so an entry that cannot be inspected counts as a
+    link: a tier nobody can vouch for is not used, and the caller goes on to
+    its other directories.
     """
     tier_dir = tier_dir.expanduser()
-    for entry in (tier_dir, tier_dir.parent):
-        try:
-            mode = entry.lstat().st_mode
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-        except OSError:
-            return True
-        if stat_mod.S_ISLNK(mode) or entry.is_junction():
-            return True
-    return False
+    return any(entry_is_link(entry) for entry in (tier_dir, tier_dir.parent))
+
+
+def entry_is_link(entry: Path) -> bool:
+    """Whether ``entry`` itself is a symbolic link or a junction.
+
+    Only the last component is asked about; links above it are followed. A
+    missing entry is not a link. An entry that cannot be inspected counts as
+    one. ``lstat`` is asked directly because ``Path.is_symlink`` answers
+    ``False`` for some errors and raises for others, and which ones has
+    changed between Python versions.
+    """
+    try:
+        mode = entry.lstat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return stat_mod.S_ISLNK(mode) or entry.is_junction()
 
 
 def is_project_tier_registered(target_dir: Path, project_memory_dirs) -> bool:
