@@ -157,6 +157,25 @@ class TestAttributed:
         assert stats.appended_attribution == "exact"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("lead", ["  \n", "\n  \n", "\t\n\n"])
+    async def test_whitespace_only_lines_before_the_entry(self, stack, lead):
+        # The chunker gives blank lines before a heading to the previous
+        # section's span; counting them as the append's would touch it.
+        comp, engine, path = stack
+        engine._config.min_chunk_tokens = 0
+        path.write_text("## A\n\nzqa body\n", encoding="utf-8")
+        await engine.index_file(path, ingress_guarded=True)
+        pre = read_pre_image_or_empty(path)
+        appended = append_blocks(path, [lead + "## B\n\nzqb body\n"])
+
+        stats = await engine.index_file(
+            path, ingress_guarded=True, append_region=append_region(pre, appended)
+        )
+
+        assert stats.appended_chunk_ids == (await _id_holding(comp, path, "zqb"),)
+        assert stats.appended_attribution == "exact"
+
+    @pytest.mark.asyncio
     async def test_a_lone_cr_in_the_entry(self, stack):
         comp, engine, path = stack
         stats = await _append(engine, path, "zqcr first\rsecond line.", title="CR")
@@ -403,6 +422,19 @@ class TestAttributeAppend:
             (),
             "unverified",
         )
+
+    def test_an_inverted_span(self):
+        a, b = _chunk(3, 1), _chunk(5, 7)
+        assert attribute_append(self.TEXT, self._region(), [a, b], {a.id, b.id}) == (
+            (),
+            "unverified",
+        )
+
+    def test_a_mid_line_start_after_whitespace(self):
+        text = "before   after\n"
+        b = _chunk(1, 1)
+        region = AppendRegion(expected_text=text, start=len("before "))
+        assert attribute_append(text, region, [b], {b.id}) == ((), "unverified")
 
     def test_a_mid_line_start(self):
         text = "before after\n"

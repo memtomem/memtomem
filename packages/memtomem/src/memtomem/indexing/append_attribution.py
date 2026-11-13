@@ -94,33 +94,42 @@ def attribute_append(
     chunks it produced from it, in file order, with the ids the diff assigned.
     ``committed_ids`` are the ids whose rows this run left in the store.
 
-    * ``exact``: every touching chunk's span lies within the appended lines.
+    The appended lines run from the first line holding non-whitespace text of
+    the append to the last: a whitespace-only line before a heading belongs to
+    the previous section's span, so counting it would touch that section.
+
+    * ``exact``: every touching chunk's span starts within the appended lines.
+      Such a chunk holds only appended text, though it can still take its
+      heading context from before the append, when a split puts the appended
+      lines of a continued section in a fragment of their own.
     * ``merged``: a touching chunk's span starts before them (a short entry
       merged into the previous section, an entry header that lands in the
-      previous section's chunk, an entry that continues the section before it,
-      whose heading and tags then come from before the append).
+      previous section's chunk, an entry that continues the section before it
+      in the same chunk).
     * ``unverified``, with no ids: the file is not the expected text (another
       writer's bytes are in it), the region is out of range or blank, the
-      append starts mid-line, any chunk carries overlap or has no line range,
-      no chunk touches the region, or a touching chunk was not committed.
+      append starts mid-line, any chunk carries overlap or has no valid line
+      range, no chunk touches the region, or a touching chunk was not
+      committed.
     """
     if content != region.expected_text or not 0 <= region.start <= len(content):
         return (), "unverified"
     tail = content[region.start :]
-    leading = len(tail) - len(tail.lstrip("\n"))
-    first = region.start + leading
-    last = len(content.rstrip("\n")) - 1
-    if not tail.strip() or last < first:
+    if not tail.strip():
         return (), "unverified"
-    # Spans are whole lines: an append that starts mid-line shares that line
-    # with the text before it.
-    if first > 0 and content[first - 1] != "\n":
+    text_at = region.start + len(tail) - len(tail.lstrip())
+    first = content.rfind("\n", 0, text_at) + 1
+    last = len(content.rstrip()) - 1
+    # Spans are whole lines: an append whose first text line began before it
+    # shares that line with the text before it.
+    if first < region.start:
         return (), "unverified"
-    # ``0..0`` is a chunk no span places. Overlap copies text between
-    # neighbours without moving their spans, so a span no longer says what the
-    # chunk holds.
+    # ``0..0`` is a chunk no span places, and an inverted span places nothing.
+    # Overlap copies text between neighbours without moving their spans, so a
+    # span no longer says what the chunk holds.
     if any(
         chunk.metadata.start_line < 1
+        or chunk.metadata.end_line < chunk.metadata.start_line
         or chunk.metadata.overlap_before
         or chunk.metadata.overlap_after
         for chunk in chunks
