@@ -48,13 +48,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   builds the region with `memtomem.indexing.append_attribution.append_region(pre_image,
   appended)` and gets `IndexingStats.appended_chunk_ids`, the committed chunks whose line spans
   touch the appended lines, in file order, with `appended_attribution`: `"exact"` when every
-  one starts within the appended lines, `"merged"` when one starts before them (a short entry
-  merged into the previous section), and `"unverified"` with no ids otherwise. That covers a
-  file that is not the text the caller expected (another writer's bytes anywhere in it), a
-  file a chunker other than Markdown reads, masked chunks, chunk overlap anywhere in the file,
-  and an append that starts mid-line, because there a span does not say what a chunk holds.
-  Every single-entry append through `mem_add`'s write path reports it; `mem_batch_add` does
-  not yet. `mem_reflect_save`, `mem_agent_share` and a session's write provenance read it:
+  one starts on a line the append wrote, `"merged"` when one starts on a line from before it (a
+  short entry merged into the previous section), and `"unverified"` with no ids otherwise.
+  That covers a file that is not the text the caller expected (another writer's bytes anywhere
+  in it), a file a chunker other than Markdown reads, masked chunks, chunk overlap anywhere in
+  the file, and an append that starts mid-line, because there a span does not say what a chunk
+  holds.
+  Every append through `mem_add`'s write path reports it, and `mem_batch_add` reports one
+  attribution for the whole batch. `mem_reflect_save`, `mem_agent_share` and a session's write
+  provenance read it:
   `mem_consolidate_apply` still picks its chunk from `new_chunk_ids` (#3315).
 
 ### Changed
@@ -119,8 +121,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the indexer attributes to the append (#3292) when it can, and `new_chunk_ids` as before when
   it cannot. An entry merged into a section that was never indexed now marks the session too,
   though nothing was deleted. The rules that marked a session after an append (a deleted
-  chunk, an indexing error, an exclusion or relink) are unchanged. `mem_batch_add`,
-  `mem_index` and `mem_fetch` record what they recorded before.
+  chunk, an indexing error, an exclusion or relink) are unchanged. `mem_batch_add` records the
+  chunks its whole batch became the same way, and a batch whose entries were all empty, which
+  writes nothing, records no event (it recorded the pending section's chunks). An entry that
+  starts with its own `## ` heading in a new file is attributed `"exact"`, not `"merged"`: its
+  chunk opens on the blank line the entry wrote above its header, so it no longer marks the
+  session. `mem_index` and `mem_fetch` record what they recorded before.
 - **`mm embedding-reset` no longer calls a reset of an empty store destructive (#2423).** A
   store stamped with one embedding model that never received a chunk, opened after the config
   names another model, still reports a mismatch and still needs

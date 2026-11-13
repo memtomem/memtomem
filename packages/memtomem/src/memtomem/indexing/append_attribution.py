@@ -98,11 +98,13 @@ def attribute_append(
     the append to the last: a whitespace-only line before a heading belongs to
     the previous section's span, so counting it would touch that section.
 
-    * ``exact``: every touching chunk's span starts within the appended lines.
-      Such a chunk holds only appended text, though it can still take its
-      heading context from before the append, when a split puts the appended
-      lines of a continued section in a fragment of their own.
-    * ``merged``: a touching chunk's span starts before them (a short entry
+    * ``exact``: every touching chunk's span starts on a line the append
+      wrote whole, a blank line above its first text included. Such a chunk
+      holds only appended text, though it can still take its heading context
+      from before the append, when a split puts the appended lines of a
+      continued section in a fragment of their own.
+    * ``merged``: a touching chunk's span starts on a line from before the
+      append, so it holds text the append did not write (a short entry
       merged into the previous section, an entry header that lands in the
       previous section's chunk, an entry that continues the section before it
       in the same chunk).
@@ -148,5 +150,13 @@ def attribute_append(
     if any(chunk.id not in committed_ids for chunk in touching):
         return (), "unverified"
     ids = tuple(chunk.id for chunk in touching)
-    exact = all(chunk.metadata.start_line >= first_line for chunk in touching)
+    # The first line wholly the append's: the one ``region.start`` begins, or
+    # the next when the pre-image ended mid-line. A chunk starting there or
+    # later holds nothing from before the append, even when it starts on a
+    # blank line the append wrote above its first text (a heading-led entry
+    # in a new file: the entry's header and heading open one chunk at line 1).
+    owned_line = content.count("\n", 0, region.start) + 1
+    if region.start and content[region.start - 1] != "\n":
+        owned_line += 1
+    exact = all(chunk.metadata.start_line >= owned_line for chunk in touching)
     return ids, "exact" if exact else "merged"
