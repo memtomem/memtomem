@@ -176,19 +176,10 @@ from memtomem.server.tools.policy import (
     mem_policy_delete,
     mem_policy_run,
 )
-from memtomem.server.tools.context import (
-    mem_context_detect,
-    mem_context_init,
-    mem_context_generate,
-    mem_context_diff,
-    mem_context_sync,
-    mem_context_memory_migrate,
-    mem_context_artifact_migrate,
-    mem_context_artifact_transfer,  # ADR-0023 A-13 — cross-project/tier copy+move
-    mem_context_version,  # ADR-0022 PR2 — version snapshots (list/create)
-    mem_context_promote,  # ADR-0022 PR2 — label pointers (promote/delete)
-    mem_context_pull,  # ADR-0030 PR-H — Pull a runtime artifact into the Store
-)
+
+# Only the two read-only context tools are on MCP; no context write is (see the
+# module docstring of ``server.tools.context``).
+from memtomem.server.tools.context import mem_context_detect, mem_context_diff
 from memtomem.server.tools.ingest import (
     mem_ingest,  # no @mcp.tool; import triggers @register("ingest") for mem_do routing
 )

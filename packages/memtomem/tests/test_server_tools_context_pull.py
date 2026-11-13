@@ -6,8 +6,6 @@ source-selectable §5 semantics and Gate A/B gates. The engine's own behavior is
 pinned by ``test_context_pull_apply.py`` / ``test_context_pull_preview.py``;
 these tests pin the MCP *translation*:
 
-* registry classification: ``@register("context")`` → routed by ``mem_do``, NOT
-  one of the frozen core-9;
 * ``apply=False`` (default) previews and never mutates;
 * prefix-coded refusals (``error:`` / ``refused:`` / ``needs confirmation:`` /
   ``privacy block:``) matching the web ``_finalize_pull`` status routing — every
@@ -17,8 +15,7 @@ these tests pin the MCP *translation*:
   engine transaction with no MCP-side change;
 * consent gates return ``needs confirmation`` (MCP cannot prompt) only once a
   write is imminent, and redact the disclosed host path;
-* ``force_unsafe_import`` opens the Gate A valve for a LITERAL ``True`` only —
-  a ``mem_do`` raw string ``"true"`` must NOT bypass;
+* ``force_unsafe_import`` opens the Gate A valve for a LITERAL ``True`` only;
 * Gate A audit attribution: ``surface="mcp_context_pull"``.
 """
 
@@ -29,9 +26,7 @@ from pathlib import Path
 import pytest
 
 from memtomem.context.scope_resolver import canonical_artifact_dir
-from memtomem.server.tool_registry import ACTIONS
 from memtomem.server.tools.context import _PULL_BOOL_FLAGS, mem_context_pull
-from memtomem.server.tools.meta import mem_do
 
 from .helpers import seed_multi_runtime
 
@@ -72,22 +67,6 @@ def _pull_arg_model() -> type:
     from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 
     return func_metadata(mem_context_pull).arg_model
-
-
-# ── registry classification ───────────────────────────────────────────────────
-
-
-def test_registered_and_routed_by_mem_do() -> None:
-    assert "context_pull" in ACTIONS
-    from memtomem.server import _CORE_TOOLS
-
-    assert "mem_context_pull" not in _CORE_TOOLS
-
-
-async def test_mem_do_routes_the_action(proj: Path) -> None:
-    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
-    out = await mem_do(action="context_pull", params={"kind": "agents", "name": "a"})
-    assert "Pull preview: agents/a" in out
 
 
 # ── dry-run preview (default) ─────────────────────────────────────────────────
@@ -354,25 +333,6 @@ async def test_user_tier_secret_bypassable_with_literal_true(proj: Path) -> None
 
 
 @pytest.mark.parametrize("flag", _PULL_BOOL_FLAGS)
-@pytest.mark.parametrize("bad", ["false", "true", 1, 0, "yes", None])
-async def test_stringified_booleans_are_refused_via_mem_do(
-    proj: Path, flag: str, bad: object
-) -> None:
-    """``mem_do`` forwards params raw. A stringified boolean must be REFUSED,
-    not coerced — ``"false"`` is truthy in Python, so a coercing implementation
-    would turn a declined consent into a write to the git-tracked tier."""
-    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
-    out = await mem_do(
-        action="context_pull",
-        params={"kind": "agents", "name": "a", "scope": "project_shared", flag: bad},
-    )
-    assert out.startswith("error:")
-    assert flag in out
-    assert "literal boolean" in out
-    assert not _store_exists(proj, "agents", "a")
-
-
-@pytest.mark.parametrize("flag", _PULL_BOOL_FLAGS)
 @pytest.mark.parametrize("bad", ["true", "false", 1, 0, "yes"])
 def test_fastmcp_boundary_rejects_non_literal_booleans(flag: str, bad: object) -> None:
     """The OTHER dispatch path: a direct ``mem_context_pull`` tool call goes
@@ -405,23 +365,6 @@ def test_fastmcp_boundary_accepts_real_booleans() -> None:
     # The wire schema stays a plain boolean — clients see no StrictBool leak.
     schema = model.model_json_schema()["properties"]["force_unsafe_import"]
     assert schema["type"] == "boolean"
-
-
-async def test_apply_false_string_does_not_write(proj: Path) -> None:
-    """The headline of the strict-bool guard: apply="false" must NOT execute."""
-    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
-    out = await mem_do(
-        action="context_pull",
-        params={
-            "kind": "agents",
-            "name": "a",
-            "scope": "project_shared",
-            "apply": "false",
-            "confirm_project_shared": "false",
-        },
-    )
-    assert out.startswith("error:")
-    assert not _store_exists(proj, "agents", "a")
 
 
 def test_gate_blocked_reason_is_redacted() -> None:
@@ -492,28 +435,6 @@ def test_pull_reason_scrubs_residual_absolute_paths(path: str, leaked: str) -> N
     )
     assert leaked not in out
     assert "<path>" in out
-
-
-async def test_force_unsafe_string_does_not_bypass_via_mem_do(proj: Path) -> None:
-    """``mem_do`` forwards params raw, so a string ``"true"`` must NOT open the
-    Gate A valve. Strict-bool refuses it outright (stricter than the web
-    ``_only_literal_true``, which silently coerces to False) — either way the
-    secret never lands."""
-    seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", f"tok {_SECRET}")}, scope="user")
-    out = await mem_do(
-        action="context_pull",
-        params={
-            "kind": "agents",
-            "name": "a",
-            "scope": "user",
-            "apply": True,
-            "allow_host_writes": True,
-            "force_unsafe_import": "true",  # string, not literal True
-        },
-    )
-    assert out.startswith("error:")
-    assert "force_unsafe_import" in out
-    assert not _store_exists(proj, "agents", "a", scope="user")
 
 
 # ── PullApplyStatus parity: every status has a rendering branch ────────────────
