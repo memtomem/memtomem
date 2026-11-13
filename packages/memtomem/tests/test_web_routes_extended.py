@@ -536,6 +536,14 @@ class TestTimeline:
         assert sys_filter.namespaces == ()
         assert sys_filter.exclude_prefixes == ("archive:", "agent-runtime:")
 
+    async def test_timeline_malformed_namespace_is_422(self, app, client: AsyncClient):
+        # Same status as /api/search, /api/procedures and /api/chunks/{id}/similar
+        # for filter syntax that cannot be parsed (#3288).
+        resp = await client.get("/api/timeline", params={"namespace": "a,b*"})
+        assert resp.status_code == 422
+        assert "comma list" in resp.json()["detail"]
+        app.state.storage.recall_chunks.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # GET /api/eval  (evaluation / health report)
