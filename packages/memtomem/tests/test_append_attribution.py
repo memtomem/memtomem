@@ -129,6 +129,20 @@ class TestAttributed:
         assert stats.appended_chunk_ids == (await _id_holding(comp, path, "zqcr"),)
 
     @pytest.mark.asyncio
+    async def test_a_newline_led_append_to_a_file_without_a_final_newline(self, stack):
+        # The append's leading ``\n`` only ends the file's last line; no line the
+        # entry's chunks cover holds text from before the append.
+        comp, engine, path = stack
+        engine._config.min_chunk_tokens = 0
+        path.write_text("## Old\n\nzqold body", encoding="utf-8")
+        await engine.index_file(path, ingress_guarded=True)
+
+        stats = await _append(engine, path, "zqnew body.", title="New")
+
+        assert stats.appended_attribution == "exact"
+        assert stats.appended_chunk_ids == (await _id_holding(comp, path, "zqnew"),)
+
+    @pytest.mark.asyncio
     async def test_a_pre_image_with_invalid_utf8(self, stack):
         comp, engine, path = stack
         path.write_bytes(b"## Bad\n\nzqbad \xff byte.\n")
@@ -220,6 +234,32 @@ class TestUnverified:
 
         stats = await _append(engine, path, "zqmine body.", title="Mine", between=edit_seed)
 
+        assert stats.appended_chunk_ids == ()
+        assert stats.appended_attribution == "unverified"
+
+    @pytest.mark.asyncio
+    async def test_masked_after_the_guard_judged_the_file(self, stack, monkeypatch):
+        # ``chunk_content`` computes its own projection after awaits the guard's
+        # did not see (a manifest updated in between), so the chunked text is
+        # not the text the guard projected. Only the first call is unmasked.
+        from memtomem.indexing.privacy_projection import IndexProjection
+
+        comp, engine, path = stack
+        real = engine._prepare_index_projection
+        calls: list[int] = []
+
+        def mask_after_the_first(file_path, content, scope, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                return real(file_path, content, scope, **kwargs)
+            masked = content.replace("zqsecret", "[MASKED]")
+            return IndexProjection(masked, masked, 1)
+
+        monkeypatch.setattr(engine, "_prepare_index_projection", mask_after_the_first)
+        stats = await _append(engine, path, "zqsecret entry body.", title="Masked")
+
+        assert len(calls) > 1
+        assert any("[MASKED]" in c.content for c in await _rows(comp, path))
         assert stats.appended_chunk_ids == ()
         assert stats.appended_attribution == "unverified"
 

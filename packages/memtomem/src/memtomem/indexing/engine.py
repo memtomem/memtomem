@@ -3380,11 +3380,14 @@ class IndexEngine:
         if unchanged_ids:
             result["unchanged_chunk_ids"] = unchanged_ids
         if append_region is not None:
-            # Judged against the text that was chunked: a masking projection
-            # would have chunked other text, so it leaves the append unverified.
+            # Judged against the text that was chunked. ``chunk_content``
+            # computes its own masking projection, after awaits the guard's did
+            # not see, and stamps every chunk with its redaction count; masked
+            # chunks hold other text than ``content``, so the append stays
+            # unverified.
             appended_ids: tuple[UUID, ...] = ()
             attribution: Attribution = "unverified"
-            if masking_exempt or projection.content == content:
+            if not any(chunk.metadata.redaction_count for chunk in new_chunks):
                 committed = persisted_upsert_ids | {
                     chunk.id for chunk in diff_result.unchanged + diff_result.metadata_only
                 }
