@@ -384,6 +384,12 @@ async def mem_consolidate_apply(
     run_namespaces = [group.get("namespace") or "default"]
 
     async def link_published(add_result: str, stats: IndexingStats) -> _ApplyOutcome:
+        # ``new_chunk_ids``, not ``appended_chunk_ids`` (#3315): the summary is
+        # the only text in a file created for it (``consolidation_file_name``),
+        # so there is no pending edit and no stored row whose id it could keep,
+        # and the re-index's new ids are exactly the summary's chunks. The
+        # append attribution adds nothing here and is ``unverified`` whenever
+        # chunk overlap is on and the summary spans several chunks.
         if not stats.new_chunk_ids:
             logger.warning(
                 "mem_consolidate_apply: mem_add produced no new chunk ids — "
