@@ -211,7 +211,7 @@ async def mem_index(
         # string, so a new stat reaches an agent only by being written here.
         # ``mem_index`` has no ``force_unsafe`` parameter, so a declared
         # exemption is the only way a pattern-documenting note gets through
-        # ``mem_index``; naming the files is what keeps that from being silent.
+        # ``mem_index`` verbatim; naming the files is what keeps that from being silent.
         result += (
             f"\n- Declared redaction exemption: {stats.exempted_files} file(s) admitted by "
             "their own frontmatter `redaction: documents-patterns` (audit-logged):\n"
