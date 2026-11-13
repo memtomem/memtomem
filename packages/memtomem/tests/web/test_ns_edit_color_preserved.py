@@ -22,7 +22,7 @@ pytestmark = pytest.mark.browser
 _STORED = "#abc"
 
 
-def _install_stubs(page, patches: list[dict]) -> None:
+def _install_stubs(page, patches: list[dict], stored: str = _STORED) -> None:
     def _route(route) -> None:
         request = route.request
         path = urlparse(request.url).path
@@ -33,7 +33,7 @@ def _install_stubs(page, patches: list[dict]) -> None:
                         "namespace": "work",
                         "chunk_count": 3,
                         "description": "old",
-                        "color": _STORED,
+                        "color": stored,
                     }
                 ],
                 "total": 1,
@@ -65,6 +65,20 @@ def test_description_only_save_omits_color(page) -> None:
         _open_edit_form(page, base_url)
         # The browser normalized the stored value; the form must not send it back.
         assert page.locator("#ns-list .ns-edit-color").input_value() == "#aabbcc"
+        page.locator("#ns-list .ns-edit-desc").fill("new")
+        page.locator("#ns-list .ns-edit-save").click()
+        page.wait_for_selector(".toast-success", timeout=5_000)
+
+    assert patches == [{"description": "new"}]
+
+
+def test_description_only_save_keeps_a_stored_gray(page) -> None:
+    patches: list[dict] = []
+    _install_stubs(page, patches, stored="#808080")
+
+    with _dev_web_server() as base_url:
+        _open_edit_form(page, base_url)
+        assert page.locator("#ns-list .ns-edit-color").input_value() == "#808080"
         page.locator("#ns-list .ns-edit-desc").fill("new")
         page.locator("#ns-list .ns-edit-save").click()
         page.wait_for_selector(".toast-success", timeout=5_000)
