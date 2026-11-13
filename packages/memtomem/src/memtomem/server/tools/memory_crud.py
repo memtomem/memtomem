@@ -2356,6 +2356,7 @@ async def mem_batch_add(
         # Bounded re-target loop, same contract as ``_mem_add_core``
         # (issue #2005): the day file's name depends on the namespace, which
         # is only authoritative once resolved inside the lock.
+        from memtomem.indexing.append_attribution import append_region
         from memtomem.indexing.engine import PrivacyRejection
         from memtomem.tools.memory_mutation import appended_valve_text
 
@@ -2465,6 +2466,10 @@ async def mem_batch_add(
                             ),
                             lock_held=True,
                             written_source=appended.source,
+                            # One region for every entry: the batch's provenance
+                            # event names the chunks the whole batch became, so
+                            # no reader needs them entry by entry.
+                            append_region=append_region(judged.data, appended.text),
                         )
                     except PrivacyRejection as exc:
                         # The entry is on disk and the result may not be indexed
@@ -2516,12 +2521,15 @@ async def mem_batch_add(
                     f"Error: {target} is locked by another process (migration in flight?); retry."
                 )
             app.search_pipeline.invalidate_cache()
-            await record_write_provenance(
-                app,
-                session_id=provenance_session_id,
-                event_type="batch_add",
-                stats=stats,
-            )
+            # A batch of only empty entries wrote nothing, so the re-index's
+            # ids, if any, are another writer's pending text, not this session's.
+            if appended.text:
+                await record_write_provenance(
+                    app,
+                    session_id=provenance_session_id,
+                    event_type="batch_add",
+                    stats=stats,
+                )
             break
         else:
             return NS_RETARGET_EXHAUSTED_ERROR

@@ -202,6 +202,22 @@ class TestAttributed:
         assert stats.appended_chunk_ids == (await _id_holding(comp, path, "zqnew"),)
 
     @pytest.mark.asyncio
+    async def test_an_untagged_heading_led_entry_in_a_new_file(self, stack):
+        # The entry's header goes above its own ``## `` heading (#2762), and the
+        # block's leading blank line opens the file: one chunk from line 1, whose
+        # first line holds no text but is still the append's. (A ``> tags:``
+        # line makes the header a section of its own, and the chunk starts at
+        # the heading.)
+        comp, engine, path = stack
+        stats = await _append(engine, path, "## Mine\n\nzqmine body.")
+
+        chunk_id = await _id_holding(comp, path, "zqmine")
+        (chunk,) = [c for c in await _rows(comp, path) if c.id == chunk_id]
+        assert chunk.metadata.start_line == 1
+        assert stats.appended_chunk_ids == (chunk_id,)
+        assert stats.appended_attribution == "exact"
+
+    @pytest.mark.asyncio
     async def test_a_pre_image_with_invalid_utf8(self, stack):
         comp, engine, path = stack
         path.write_bytes(b"## Bad\n\nzqbad \xff byte.\n")
@@ -437,6 +453,19 @@ class TestAttributeAppend:
             (),
             "unverified",
         )
+
+    def test_a_chunk_opening_on_a_blank_line_the_append_wrote(self):
+        text = "\n> created: x\n\n## B\n\nbody b\n"
+        b = _chunk(1, 6)
+        region = AppendRegion(expected_text=text, start=0)
+        assert attribute_append(text, region, [b], {b.id}) == ((b.id,), "exact")
+
+    def test_a_chunk_opening_on_the_line_the_pre_image_left_unfinished(self):
+        # The append's ``\n`` ends that line; the line itself is the pre-image's.
+        text = "tail\n## B\n\nbody b\n"
+        b = _chunk(1, 4)
+        region = AppendRegion(expected_text=text, start=len("tail"))
+        assert attribute_append(text, region, [b], {b.id}) == ((b.id,), "merged")
 
     def test_a_mid_line_start_after_whitespace(self):
         text = "before   after\n"
