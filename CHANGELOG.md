@@ -433,6 +433,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   as word characters, which is what the Web UI's pre-check already did with the same
   patterns. Nothing changes for a token between ASCII neighbours. A token directly after an
   accented Latin letter is matched too. Text stored before this change is not rescanned.
+- **opentelemetry-api moves from 1.45.1 to 1.45.2 in the lockfile** for
+  [GHSA-mf5v-w3w3-f6cg](https://osv.dev/vulnerability/GHSA-mf5v-w3w3-f6cg)
+  (CVE-2026-126360, published on 2026-11-13): parsing a crafted `traceparent` value takes
+  quadratic time. The memtomem server is reachable through it. The MCP SDK it is built on
+  reads `traceparent` from the `_meta` of a request with this parser, so a client can
+  stall the server with one request: a stdio server on 1.45.1 answered a `ping` whose
+  `_meta.traceparent` was a valid value followed by `-`, 40,000 spaces, a newline and one
+  more character after 3.0 s, against 0.001 s without it. On 1.45.2 the SDK's extraction
+  helper refuses a value longer than 512 characters at once (measured on the helper, not
+  through a server). Over stdio the client is the agent runtime that started the server;
+  over a network transport it is anyone who can reach the port. `opentelemetry-sdk` moves
+  to 1.45.2 and `opentelemetry-semantic-conventions` to 0.66b2 with it, since the SDK pins
+  the API version exactly. No memtomem package declares opentelemetry-api (it comes with
+  `mcp`), so the published constraints are unchanged: what moves is the lockfile, which
+  development and CI install from. An install that resolves its dependencies now gets a
+  fixed release. An environment that already exists keeps the version it has until its
+  dependencies are resolved again, and how to do that depends on how memtomem was
+  installed. The steps of the [AnyIO runtime update guide](docs/guides/anyio-security-update.md)
+  apply with `opentelemetry-api` in place of AnyIO: `mm upgrade` or
+  `uv tool upgrade memtomem` for a `uv tool` install; `uv cache clean opentelemetry-api`
+  and then `uv cache prune` for cached `uvx` launches, the plugin launch lines included;
+  `pip install -U opentelemetry-api` in a virtual environment, with `opentelemetry-sdk`
+  added where the `langfuse` extra is installed. Restart the MCP clients afterwards, and
+  check with the interpreter that runs memtomem that
+  `python -c "from importlib.metadata import version; print(version('opentelemetry-api'))"`
+  prints 1.45.2 or later.
 
 ## [0.7.8] — 2026-11-10
 
