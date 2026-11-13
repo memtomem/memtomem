@@ -141,6 +141,32 @@ def test_an_existing_file_replaced_by_a_symlink_loop_is_refused(tmp_path):
     assert alpha.is_symlink()
 
 
+@pytest.mark.parametrize("is_link", [True, False], ids=["link", "regular"])
+def test_einval_at_the_open_is_a_replacement_only_for_a_link(tmp_path, monkeypatch, is_link):
+    """Windows answers a symlink loop with ``EINVAL``, an errno it also uses elsewhere."""
+    import errno
+
+    alpha, bravo = tmp_path / "alpha.md", tmp_path / "bravo.md"
+    alpha.write_text(_CLEAN_A, encoding="utf-8")
+    bravo.write_text(_CLEAN_B, encoding="utf-8")
+    judged = read_for_append(alpha)
+    if is_link:
+        _relink(alpha, bravo, tmp_path / "moved-alpha.md")
+    real_open = os.open
+
+    def einval(path, *args, **kwargs):
+        if Path(path) == alpha:
+            raise OSError(errno.EINVAL, "Invalid argument", str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", einval)
+
+    with pytest.raises(SourceReplacedError if is_link else OSError) as raised:
+        append_entry(alpha, "gamma", judged=judged)
+
+    assert isinstance(raised.value, SourceReplacedError) is is_link
+
+
 def test_an_existing_file_removed_since_the_read_is_not_recreated(tmp_path):
     alpha = tmp_path / "alpha.md"
     alpha.write_text(_CLEAN_A, encoding="utf-8")
@@ -315,7 +341,12 @@ def test_a_new_files_name_taken_since_the_read_is_refused(tmp_path, occupant):
     with pytest.raises(SourceReplacedError):
         append_entry(target, "gamma", judged=judged)
 
-    assert not elsewhere.exists()
+    if occupant == "link" and not memory_writer._HAS_DIR_FD:
+        # Windows' ``O_EXCL`` follows the dangling link and makes its target;
+        # the write is refused and that empty file is left, by design.
+        assert not elsewhere.exists() or elsewhere.read_bytes() == b""
+    else:
+        assert not elsewhere.exists()
     if occupant == "file":
         assert target.read_text(encoding="utf-8") == _CLEAN_B
 
