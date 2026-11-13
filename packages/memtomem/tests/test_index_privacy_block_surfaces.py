@@ -178,7 +178,7 @@ class TestBulkIndexRedactionGate:
         leak.write_text(_LEAK)
 
         engine = comp.index_engine
-        monkeypatch.setattr(engine, "_resolve_scope", lambda p: ("project_shared", mem_dir))
+        monkeypatch.setattr(engine, "_resolve_scope", lambda p, **_: ("project_shared", mem_dir))
 
         with pytest.raises(PrivacyRejection) as ei:
             await engine.index_file(leak, force_unsafe=True)
@@ -191,7 +191,7 @@ class TestBulkIndexRedactionGate:
         comp, mem_dir = bm25_only_components
         (mem_dir / "leak.md").write_text(_LEAK)
         engine = comp.index_engine
-        monkeypatch.setattr(engine, "_resolve_scope", lambda p: ("project_shared", mem_dir))
+        monkeypatch.setattr(engine, "_resolve_scope", lambda p, **_: ("project_shared", mem_dir))
 
         stats = await engine.index_path(mem_dir, recursive=True)
 
@@ -208,7 +208,7 @@ class TestBulkIndexRedactionGate:
         comp, mem_dir = bm25_only_components
         (mem_dir / "leak.md").write_text(_LEAK)
         engine = comp.index_engine
-        monkeypatch.setattr(engine, "_resolve_scope", lambda p: ("project_shared", mem_dir))
+        monkeypatch.setattr(engine, "_resolve_scope", lambda p, **_: ("project_shared", mem_dir))
 
         events = [
             ev async for ev in engine.index_path_stream(mem_dir, recursive=True, force_unsafe=True)
@@ -256,7 +256,7 @@ class TestShellIndexBlockedSurfacing:
         comp, mem_dir = bm25_only_components
         (mem_dir / "leak.md").write_text(_LEAK)
         monkeypatch.setattr(
-            comp.index_engine, "_resolve_scope", lambda p: ("project_shared", mem_dir)
+            comp.index_engine, "_resolve_scope", lambda p, **_: ("project_shared", mem_dir)
         )
 
         await _cmd_index(comp, [str(mem_dir)])
@@ -568,7 +568,7 @@ class TestDeclaredExemptionIndexing:
         declared = mem_dir / "declared.md"
         declared.write_text(_DECLARED)
         engine = comp.index_engine
-        monkeypatch.setattr(engine, "_resolve_scope", lambda p: ("project_shared", mem_dir))
+        monkeypatch.setattr(engine, "_resolve_scope", lambda p, **_: ("project_shared", mem_dir))
 
         with pytest.raises(PrivacyRejection) as ei:
             await engine.index_file(declared)
@@ -663,7 +663,7 @@ class TestDeclaredExemptionSymlinkParity:
         monkeypatch.setattr(
             engine,
             "_resolve_scope",
-            lambda p: (
+            lambda p, **_: (
                 ("project_shared", shared_dir)
                 if str(p).startswith(str(shared_dir))
                 else ("user", None)

@@ -106,6 +106,7 @@ from memtomem.indexing.privacy_gate import (  # noqa: F401
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
+    from memtomem.indexing.privacy_projection import IndexProjection
     from memtomem.llm.base import LLMProvider
     from memtomem.storage.base import StorageBackend
     from memtomem.storage.sqlite_backend import SqliteBackend
@@ -255,6 +256,22 @@ class SourceRelinkedError(RetryableError):
     Raised between the read and a write, never for a path that was already a
     link when it was read: that one is indexed through the link, as before.
     """
+
+
+def _decision_path(file_path: Path) -> Path:
+    """One resolution of ``file_path``: the path a pass judges a file under and takes its key from.
+
+    Unfolded, so it compares with registered roots and manifest keys as they
+    are written. The key a pass captures from it is
+    ``fold_path_form(str(path))``, which is ``norm_path(file_path)``, fallback
+    included: a resolution that raises ``OSError`` gives ``file_path`` as
+    given. It is the key the pass checks, not a promise about the rows: the
+    store resolves a chunk's source path itself when it writes (#3305).
+    """
+    try:
+        return resolve_path(file_path)
+    except OSError:
+        return file_path
 
 
 def _require_same_source(file_path: Path, source_key: str) -> None:
@@ -989,7 +1006,14 @@ class IndexEngine:
             return self._discover_files(path, recursive, index_roots=index_roots)
         return []
 
-    def chunk_content(self, file_path: Path, content: str, *, exempt: bool = False) -> list[Chunk]:
+    def chunk_content(
+        self,
+        file_path: Path,
+        content: str,
+        *,
+        exempt: bool = False,
+        projection: IndexProjection | None = None,
+    ) -> list[Chunk]:
         """Chunk ``content`` exactly as indexing would, post-processing included.
 
         Single source of truth for "which chunks would this file produce" — the
@@ -1017,16 +1041,23 @@ class IndexEngine:
         make an explicit allow-this into a lossy write — the store would hold a
         masked projection while the audit log said "bypass", and that
         projection is read-only to ``mem_edit``.
+
+        ``projection`` is the one the gate in ``_index_file`` already judged
+        for this content. Passed, it is the text that gets chunked, so the
+        store holds what the gate passed; looked up here a second time, a leaf
+        replaced by a symlink meanwhile would select another manifest entry or
+        another scope (#3290). ``exempt`` wins over it: the gate computes a
+        projection even for content it then lets through verbatim. A caller
+        with no gate answer (the doctor, the budget audit) leaves it out, and
+        it is looked up from one resolution of ``file_path``.
         """
         from memtomem.indexing.privacy_projection import IndexProjection
 
         original_content = content
-        scope, _ = self._resolve_scope(file_path.resolve())
-        projection = (
-            IndexProjection(content, content)
-            if exempt
-            else self._prepare_index_projection(file_path, content, scope)
-        )
+        if exempt:
+            projection = IndexProjection(content, content)
+        elif projection is None:
+            _, _, _, projection = self._gate_inputs(_decision_path(file_path), content)
         content = projection.content
         chunks = self._chunk_projected_content(file_path, content)
         if projection.redaction_count:
@@ -2659,11 +2690,18 @@ class IndexEngine:
                 "mutated": held,
             }
 
-        # The stored key of the source just read, taken before any ``await``.
-        # Every write below either uses it as stored or is checked against it
-        # by ``_require_same_source``: resolved again after an ``await``, a path
-        # relinked meanwhile names another source (#3173, #3180).
-        source_key = norm_path(file_path)
+        # One resolution of the path just read, taken before any ``await``. It
+        # gives both this pass's key for the source (what ``norm_path`` returns,
+        # fallback included) and the path the gate judges under, so those two
+        # cannot name different files (#3290). The reads and writes below
+        # either use the key as stored or are checked against it by
+        # ``_require_same_source``: resolved again after an ``await``, a path
+        # relinked meanwhile names another source (#3173, #3180). Not covered:
+        # ``upsert_chunks`` resolves each chunk's source path itself when it
+        # writes, so a swap undone inside that call is stored under the link
+        # target's key (#3305).
+        decision_path = _decision_path(file_path)
+        source_key = fold_path_form(str(decision_path))
         read_ms = (time.monotonic() - read_started) * 1000
         # Skip binary files (null bytes indicate non-text content)
         if "\x00" in content[:8192]:
@@ -2685,13 +2723,9 @@ class IndexEngine:
         # load-bearing on its own, so a user-dir symlink pointing at a
         # ``project_shared`` note must not be adjudicated as ``user``, and an
         # ``.md`` alias to a non-Markdown target must not claim a Markdown
-        # frontmatter declaration. Storage identity is deliberately NOT
-        # changed: chunks keep keying on ``file_path`` as before.
-        try:
-            decision_path = file_path.resolve()
-        except OSError:  # pragma: no cover - defensive: unreadable parent
-            decision_path = file_path
-
+        # frontmatter declaration. ``decision_path`` is the resolution this
+        # pass's key was taken from, above; the scope and manifest lookups
+        # below take it as given and resolve nothing again.
         if self._registry.get(decision_path.suffix) is None:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
@@ -2714,7 +2748,7 @@ class IndexEngine:
         # reaches every surface at once. The guard still decides: it honours
         # the declaration only for label-shaped hits, and hard-refuses it for
         # ``project_shared`` exactly as it does the valve.
-        scope_val, project_root = self._resolve_scope(decision_path)
+        scope_val, project_root, declared, projection = self._gate_inputs(decision_path, content)
         if force_unsafe and ingress_guarded and valve_text is None:
             # A memory tool's valve must say which bytes it covers; without
             # that it would cover whatever else the file holds by now.
@@ -2728,8 +2762,6 @@ class IndexEngine:
                 file_path.name,
             )
             force_unsafe = False
-        declared = declared_exemption(decision_path, content)
-        projection = self._prepare_index_projection(decision_path, content, scope_val)
         # Verbatim storage is the caller's explicit decision in two cases: a
         # file that declares its own frontmatter exemption, and the
         # ``force_unsafe`` valve. Carried out of this block so the chunker below
@@ -2948,7 +2980,9 @@ class IndexEngine:
                     "source_key": source_key,
                 }
         index_started = time.monotonic()
-        new_chunks = self.chunk_content(file_path, content, exempt=masking_exempt)
+        new_chunks = self.chunk_content(
+            file_path, content, exempt=masking_exempt, projection=projection
+        )
         chunk_ms = (time.monotonic() - index_started) * 1000
 
         # Apply the namespace resolved above (explicit > preserved >
@@ -3861,6 +3895,28 @@ class IndexEngine:
             )
         return prepare_index_content(content, scope=scope)
 
+    def _gate_inputs(
+        self, decision_path: Path, content: str
+    ) -> tuple[str, Path | None, str | None, IndexProjection]:
+        """What the redaction gate judges ``content`` with: scope, root, exemption, projection.
+
+        ``decision_path`` is one resolution of the file's path, the one a pass
+        takes its key from (:func:`_decision_path`). The scope and manifest
+        lookups take it as given, so a leaf replaced by a symlink after that
+        resolution is judged as the file that was read, not as the link's
+        target (#3191, #3290). The scope lookup still resolves the registered
+        project roots when it runs.
+
+        The gate, its two read-only twins and the chunker all get their answer
+        here, so they cannot disagree about a file.
+        """
+        scope_val, project_root = self._resolve_scope(decision_path, resolved=True)
+        declared = declared_exemption(decision_path, content)
+        projection = self._prepare_index_projection(
+            decision_path, content, scope_val, resolved=True
+        )
+        return scope_val, project_root, declared, projection
+
     def _judge_as_it_stands(
         self,
         file_path: Path,
@@ -3872,28 +3928,20 @@ class IndexEngine:
         """The gate's inputs for ``content`` at ``file_path``, and a recorder.
 
         Shared by the two read-only twins of the gate in ``_index_file`` —
-        :meth:`preview_redaction_decision` and :meth:`preflight_mutation` — so
-        they resolve the canonical path, scope, frontmatter exemption and
-        projection the same way the gate does. Returns the projection, the
-        unrecorded guard result, and a callable that runs the same guard with
-        recording on (counter and audit lines, exactly once).
+        :meth:`preview_redaction_decision` and :meth:`preflight_mutation`. The
+        scope, frontmatter exemption and projection come from
+        :meth:`_gate_inputs`, the same call the gate makes, so the twins cannot
+        drift from it. Returns the projection, the unrecorded guard result, and
+        a callable that runs the same guard with recording on (counter and
+        audit lines, exactly once).
 
-        Without ``decision_path`` the path is resolved here and the scope and
-        manifest lookups resolve it again, exactly as the gate does, so the
-        preview answers as the gate would. ``decision_path`` is the resolution
-        the bytes were read under; it is used as given by all three, so a path
-        relinked since the read is not followed (#3191).
+        ``decision_path`` is the resolution the bytes were read under, so a
+        path relinked since the read is not followed (#3191). Without it the
+        path is resolved here, once, as the gate resolves it.
         """
-        # No keyword at all when not frozen: those calls stay the gate's own.
-        frozen: dict[str, bool] = {} if decision_path is None else {"resolved": True}
         if decision_path is None:
-            try:
-                decision_path = file_path.resolve()
-            except OSError:  # pragma: no cover - defensive: unreadable parent
-                decision_path = file_path
-        scope_val, _ = self._resolve_scope(decision_path, **frozen)
-        declared = declared_exemption(decision_path, content)
-        projection = self._prepare_index_projection(decision_path, content, scope_val, **frozen)
+            decision_path = _decision_path(file_path)
+        scope_val, _, declared, projection = self._gate_inputs(decision_path, content)
         guard_input = content if declared else projection.guard_content
 
         def _guard(record: bool) -> privacy.WriteGuardResult:
@@ -3958,10 +4006,11 @@ class IndexEngine:
         If ``file_path`` no longer resolves to ``source_path``, or no longer
         resolves at all, a write would reach a file nobody judged, so the answer
         is ``relinked`` and the caller writes nothing. Bytes the gate refuses are
-        still refused and held under the read's key first. That hold is
-        best-effort: the registered project roots are resolved now, so a root
-        directory itself replaced by a link since the read can make the bytes
-        read as user scope and go unheld; the write is refused either way.
+        still refused and held under the read's key first. The judge's answer
+        for a relinked path is not relied on for the hold: the registered
+        project roots are resolved now, so a root directory itself replaced by a
+        link since the read makes the bytes read as user scope. The caller holds
+        the read's key either way (:meth:`hold_relinked_mutation`, #3291).
         """
         source_key = fold_path_form(str(source_path))
         try:
@@ -3969,7 +4018,7 @@ class IndexEngine:
         except OSError:
             relinked = True
         if not pre_image or self._registry.get(file_path.suffix) is None:
-            return MutationPreflight(None, False, True, relinked=relinked)
+            return MutationPreflight(None, False, True, relinked=relinked, source_key=source_key)
         text = indexer_text(pre_image, errors="replace")
         scope_val, projection, guard, replay = self._judge_as_it_stands(
             file_path, text, surface="index", decision_path=source_path
@@ -3987,7 +4036,59 @@ class IndexEngine:
             projection.redaction_count
         )
         valve_ok = not privacy.scan(text) and not projection.redaction_count
-        return MutationPreflight(rejection, masking_locked, valve_ok, replay, relinked=relinked)
+        return MutationPreflight(
+            rejection,
+            masking_locked,
+            valve_ok,
+            replay,
+            relinked=relinked,
+            source_key=source_key,
+        )
+
+    async def hold_relinked_mutation(self, file_path: Path, preflight: MutationPreflight) -> bool:
+        """Hold the source a preflight read when its path no longer resolves to it (#3291).
+
+        Called by every memory tool whose preflight came back ``relinked``,
+        before it asks for the ``blocker``. A relinked path gets no write, and
+        the source that was read is held with ``source_relinked`` under the
+        read's key, as stored, so its chunks leave search until the file is
+        indexed clean again.
+
+        The hold does not depend on what the judge said. Its scope answer can
+        be wrong exactly when the path was relinked: a registered project
+        directory replaced by a link makes ``project_shared`` bytes read as
+        user scope, so a refusal only that scope makes does not happen and
+        :meth:`refuse_mutation` is never called. Bytes the judge did refuse are
+        held by that method before a caller gets here, and its
+        ``redaction_blocked`` outranks this hold in the store.
+
+        Returns whether rows were held. A source with no chunks holds nothing,
+        and neither do rows stored under a key from before Unicode folding
+        (macOS NFD): the hold uses the folded key, as every stored-key hold
+        does, because one placed under the unfolded key would never lift
+        (#2907). Those rows stay searchable.
+        The hold moves the store's visibility epoch, which is what makes the
+        search pipeline drop its warmed answers; no caller has to. A hold that
+        fails is logged and reported as ``False``: the write is refused either
+        way, and the failure must not replace that refusal.
+        """
+        if not preflight.relinked:
+            raise ValueError(
+                "hold_relinked_mutation needs a preflight that found the path relinked"
+            )
+        if preflight.source_key is None:
+            return False
+        try:
+            held = await self._hold_waiting(file_path, RELINKED_HOLD, key=preflight.source_key)
+        except Exception as exc:
+            logger.error("Could not hold the chunks of relinked source %s: %s", file_path.name, exc)
+            return False
+        if held:
+            logger.warning(
+                "Source path relinked since it was read; holding its indexed chunks: %s",
+                file_path.name,
+            )
+        return held
 
     async def refuse_mutation(
         self, file_path: Path, preflight: MutationPreflight

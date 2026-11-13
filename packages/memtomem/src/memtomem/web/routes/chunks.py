@@ -966,6 +966,8 @@ async def delete_chunk(
                     mutation_attempted = True  # the hold changes what search may serve
                     rejection = await index_engine.refuse_mutation(source, preflight)
                     raise privacy_index_blocked_http(rejection, "delete")
+                if preflight.relinked:
+                    await index_engine.hold_relinked_mutation(source, preflight)
                 blocker = preflight.blocker("delete", source.name, needs_valve=False)
                 if blocker is not None:
                     raise index_blocked_http(blocker)

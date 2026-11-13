@@ -587,13 +587,41 @@ async def test_a_creating_acquirer_in_this_loop_waits_for_the_existing_only_one(
     assert _names(tmp_path) == ["note.md"]
 
 
-async def test_another_spelling_of_the_path_is_not_covered_in_process(tmp_path):
-    """The in-process layer keys on the literal lock path; this is the stated limit, pinned."""
+async def test_an_alias_of_the_source_is_covered_in_process(tmp_path):
+    """Two paths that resolve to one path have one lock path, and so one in-process layer."""
     source = tmp_path / "note.md"
     source.write_text(BODY, encoding="utf-8")
-    respelled = tmp_path / "NOTE.md"
+    alias = tmp_path / "alias.md"
+    _symlink_or_skip(alias, source)
+    assert memory_lock_path(alias) == memory_lock_path(source)
 
     async with async_existing_memory_file_lock(source, timeout=1) as held:
         assert held is False
-        async with async_file_lock(memory_lock_path(respelled), timeout=0.1):
-            pass
+        with pytest.raises(TimeoutError, match="in-process"):
+            async with async_file_lock(memory_lock_path(alias), timeout=0.1):
+                pass
+
+
+async def test_another_case_spelling_is_covered_only_where_it_resolves_alike(tmp_path):
+    """The in-process layer keys on the literal lock path; this is the stated limit, pinned.
+
+    Whether another case spelling of an existing file shares that path is the
+    resolver's answer, not this module's: Windows resolves it to the spelling
+    on disk, so there the two are one lock path and the creating acquirer
+    waits. Where the resolver keeps the spelling it was given (macOS, Linux)
+    they are two lock paths and nothing in this process stands between them.
+    """
+    source = tmp_path / "note.md"
+    source.write_text(BODY, encoding="utf-8")
+    respelled = tmp_path / "NOTE.md"
+    resolves_alike = memory_lock_path(respelled) == memory_lock_path(source)
+
+    async with async_existing_memory_file_lock(source, timeout=1) as held:
+        assert held is False
+        if resolves_alike:
+            with pytest.raises(TimeoutError, match="in-process"):
+                async with async_file_lock(memory_lock_path(respelled), timeout=0.1):
+                    pass
+        else:
+            async with async_file_lock(memory_lock_path(respelled), timeout=0.1):
+                pass
