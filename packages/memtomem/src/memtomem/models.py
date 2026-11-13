@@ -649,10 +649,11 @@ class IndexingStats:
     # append's alone, judged from the text the call chunked, and they include a
     # chunk that kept an existing id because its content matched. In file
     # order. ``appended_attribution`` says how cleanly: ``"exact"`` when every
-    # one lies within the appended text, ``"merged"`` when one also holds text
-    # from before it (a short entry merged into the previous section), and
-    # ``"unverified"`` with no ids when the file was not the text the caller
-    # expected, the append started mid-line, nothing was committed, or the
+    # one's span starts within the appended lines, ``"merged"`` when one starts
+    # before them (a short entry merged into the previous section), and
+    # ``"unverified"`` with no ids wherever a span cannot say what a chunk
+    # holds or the file was not the text the caller expected (see
+    # ``memtomem.indexing.append_attribution.attribute_append``), and when the
     # call did not ask. Appended last for positional construction
     # compatibility.
     appended_chunk_ids: tuple[UUID, ...] = ()

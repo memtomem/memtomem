@@ -2892,6 +2892,9 @@ class IndexEngine:
             and not self._config.enrich_chunk_context
             and not self._config.auto_summarize
             and not held_scope_lost
+            # A receipt hit skips chunking, so it could not say which chunks
+            # an append became.
+            and append_region is None
         ):
             receipt_policy = digest(
                 {
@@ -3461,9 +3464,15 @@ class IndexEngine:
             # masked chunks hold other text than ``content``, so the append
             # stays unverified. Read from the chunks rather than ``projection``:
             # they are what was chunked, whichever projection produced them.
+            # Only Markdown spans are judged: other chunkers decode virtual
+            # lines or keep a scalar's span for every fragment of it.
+            from memtomem.chunking.markdown import MarkdownChunker
+
             appended_ids: tuple[UUID, ...] = ()
             attribution: Attribution = "unverified"
-            if not any(chunk.metadata.redaction_count for chunk in new_chunks):
+            if isinstance(self._registry.get(file_path.suffix), MarkdownChunker) and not any(
+                chunk.metadata.redaction_count for chunk in new_chunks
+            ):
                 committed = persisted_upsert_ids | {
                     chunk.id for chunk in diff_result.unchanged + diff_result.metadata_only
                 }

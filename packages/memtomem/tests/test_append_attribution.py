@@ -122,6 +122,41 @@ class TestAttributed:
         assert stats.appended_attribution == "exact"
 
     @pytest.mark.asyncio
+    async def test_an_explicit_namespace(self, stack):
+        # The namespace and scope steps rebuild every chunk after chunking.
+        comp, engine, path = stack
+        pre = read_pre_image_or_empty(path)
+        appended = append_entry(path, "zqns entry body.", title="NS")
+
+        stats = await engine.index_file(
+            path,
+            namespace="team-a",
+            ingress_guarded=True,
+            append_region=append_region(pre, appended),
+        )
+
+        (chunk,) = [c for c in await _rows(comp, path) if "zqns" in c.content]
+        assert chunk.metadata.namespace == "team-a"
+        assert stats.appended_chunk_ids == (chunk.id,)
+        assert stats.appended_attribution == "exact"
+
+    @pytest.mark.asyncio
+    async def test_a_file_an_earlier_pass_already_indexed(self, stack):
+        # A plain pass after the append records a receipt; a region still
+        # gets its answer instead of the receipt's shortcut.
+        comp, engine, path = stack
+        pre = read_pre_image_or_empty(path)
+        appended = append_entry(path, "zqreceipt entry body.", title="Receipt")
+        await engine.index_file(path)
+        again = await engine.index_file(path)
+        assert again.indexed_chunks == 0
+
+        stats = await engine.index_file(path, append_region=append_region(pre, appended))
+
+        assert stats.appended_chunk_ids == (await _id_holding(comp, path, "zqreceipt"),)
+        assert stats.appended_attribution == "exact"
+
+    @pytest.mark.asyncio
     async def test_a_lone_cr_in_the_entry(self, stack):
         comp, engine, path = stack
         stats = await _append(engine, path, "zqcr first\rsecond line.", title="CR")
@@ -186,26 +221,23 @@ class TestMerged:
         assert await _id_holding(comp, path, "zqmine") in stats.appended_chunk_ids
 
     @pytest.mark.asyncio
-    async def test_overlap_borrowed_from_the_chunk_before(self, stack):
-        # The entry's chunk is wholly after the boundary by its span, but
-        # overlap copies the previous chunk's last line into it.
+    async def test_a_body_that_continues_the_section_before(self, stack):
+        # No heading of its own: the chunk takes its heading and tags from the
+        # section the file ended in, so it is not the append's alone.
         comp, engine, path = stack
-        engine._config.min_chunk_tokens = 0
-        engine._config.chunk_overlap_tokens = 4
-        path.write_text("## Old\n\nzqold body", encoding="utf-8")
+        path.write_bytes(b'## Existing\n> tags: ["old"]\n')
         await engine.index_file(path, ingress_guarded=True)
+        pre = read_pre_image_or_empty(path)
+        appended = append_blocks(path, ["\nzqbody text\n"])
 
-        stats = await _append(engine, path, "zqnew body.", title="New", tags=["t"])
-
-        rows = await _rows(comp, path)
-        holding_new = sorted(
-            (c for c in rows if "zqnew" in c.content), key=lambda c: c.metadata.start_line
+        stats = await engine.index_file(
+            path, ingress_guarded=True, append_region=append_region(pre, appended)
         )
-        # Both directions: the entry's chunk borrows the old line, and the old
-        # chunk borrows the entry's first line, so both hold the append.
-        assert len(holding_new) == 2
-        assert any("zqold" in c.content for c in holding_new)
-        assert stats.appended_chunk_ids == tuple(c.id for c in holding_new)
+
+        chunk_id = await _id_holding(comp, path, "zqbody")
+        (chunk,) = [c for c in await _rows(comp, path) if c.id == chunk_id]
+        assert chunk.metadata.start_line == 1
+        assert stats.appended_chunk_ids == (chunk_id,)
         assert stats.appended_attribution == "merged"
 
 
@@ -283,6 +315,41 @@ class TestUnverified:
         assert stats.appended_attribution == "unverified"
 
     @pytest.mark.asyncio
+    async def test_overlap_anywhere_in_the_file(self, stack):
+        # Overlap copies text both ways across the boundary without moving
+        # spans: the entry's chunk holds the old line, and the old chunk holds
+        # the entry's first line. Narrowed in review from "merged" with both ids
+        # to no answer, because spans cannot say which text a chunk holds.
+        comp, engine, path = stack
+        engine._config.min_chunk_tokens = 0
+        engine._config.chunk_overlap_tokens = 4
+        path.write_text("## Old\n\nzqold body", encoding="utf-8")
+        await engine.index_file(path, ingress_guarded=True)
+
+        stats = await _append(engine, path, "zqnew body.", title="New", tags=["t"])
+
+        holding_new = [c for c in await _rows(comp, path) if "zqnew" in c.content]
+        assert len(holding_new) == 2
+        assert stats.appended_chunk_ids == ()
+        assert stats.appended_attribution == "unverified"
+
+    @pytest.mark.asyncio
+    async def test_a_file_another_chunker_reads(self, stack):
+        comp, engine, path = stack
+        rst = path.with_suffix(".rst")
+        assert type(engine._registry.get(".rst")).__name__ != "MarkdownChunker"
+        pre = read_pre_image_or_empty(rst)
+        appended = append_blocks(rst, ["Title\n=====\n\nzqrst body.\n"])
+
+        stats = await engine.index_file(
+            rst, ingress_guarded=True, append_region=append_region(pre, appended)
+        )
+
+        assert await _rows(comp, rst)
+        assert stats.appended_chunk_ids == ()
+        assert stats.appended_attribution == "unverified"
+
+    @pytest.mark.asyncio
     async def test_not_requested(self, stack):
         comp, engine, path = stack
         append_entry(path, "zqplain body.", title="Plain")
@@ -327,22 +394,9 @@ class TestAttributeAppend:
             "merged",
         )
 
-    def test_a_borrowed_line_from_before_is_merged(self):
-        b = _chunk(5, 7)
-        b.line_map = (-3, 0, 5, 6, 7)
-        assert attribute_append(self.TEXT, self._region(), [b], {b.id}) == ((b.id,), "merged")
-
-    def test_a_chunk_before_that_borrowed_the_appended_line(self):
-        a, b = _chunk(1, 3), _chunk(5, 7)
-        a.line_map = (1, 2, 3, 0, -5)
-        assert attribute_append(self.TEXT, self._region(), [a, b], {a.id, b.id}) == (
-            (a.id, b.id),
-            "merged",
-        )
-
     @pytest.mark.parametrize("field", ["overlap_before", "overlap_after"])
-    def test_overlap_with_no_record_of_its_lines(self, field):
-        # Anywhere in the file: a chunk before the append may hold its text.
+    def test_overlap_anywhere_in_the_file(self, field):
+        # A chunk before the append may hold its text without its span saying so.
         a, b = _chunk(1, 3), _chunk(5, 7)
         a.metadata = dataclasses.replace(a.metadata, **{field: 4})
         assert attribute_append(self.TEXT, self._region(), [a, b], {a.id, b.id}) == (
@@ -374,14 +428,20 @@ class TestAttributeAppend:
             "unverified",
         )
 
+    def test_a_region_out_of_range(self):
+        b = _chunk(5, 7)
+        region = AppendRegion(expected_text=self.TEXT, start=-3)
+        assert attribute_append(self.TEXT, region, [b], {b.id}) == ((), "unverified")
+
     def test_no_chunk_touches_the_region(self):
         # Never a vacuous ``exact``.
         a = _chunk(1, 3)
         assert attribute_append(self.TEXT, self._region(), [a], {a.id}) == ((), "unverified")
 
     def test_a_blank_region(self):
+        # A span that reaches into the blank tail still holds none of it.
         text = "## A\n\nbody\n\n\n"
-        b = _chunk(1, 3)
+        b = _chunk(1, 6)
         region = AppendRegion(expected_text=text, start=len("## A\n\nbody\n"))
         assert attribute_append(text, region, [b], {b.id}) == ((), "unverified")
 
@@ -396,7 +456,10 @@ class TestAppendRegion:
         assert region is not None
         assert region.expected_text[region.start :] == "\nok\n"
 
-    def test_a_pre_image_ending_in_a_lone_cr(self):
+    def test_a_pre_image_ending_in_a_lone_cr(self, monkeypatch):
+        # POSIX write: the appended ``\n`` follows the ``\r`` and the two read
+        # as one newline. On Windows the write adds a ``\r`` of its own.
+        monkeypatch.setattr(append_attribution.os, "linesep", "\n")
         region = append_region(b"abc\r", "\nx\n")
         assert region is not None
         assert region.expected_text == "abc\nx\n"

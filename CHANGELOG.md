@@ -46,13 +46,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   it holds a pending edit's chunk too, and it misses the append's own chunk when that chunk
   matches an existing one and keeps its id. A caller that appended to the file under its lock
   builds the region with `memtomem.indexing.append_attribution.append_region(pre_image,
-  appended)` and gets `IndexingStats.appended_chunk_ids`, in file order, with
-  `appended_attribution`: `"exact"` when every chunk lies within the appended text, `"merged"`
-  when one also holds text from before it, and `"unverified"` with no ids when the file is not
-  the text the caller expected (another writer's bytes anywhere in it), the append starts
-  mid-line, no committed chunk holds the append, or the call did not ask. Every single-entry append through `mem_add`'s
-  write path reports it; `mem_batch_add` does not yet. Only `mem_reflect_save` reads it so far:
-  `mem_agent_share` and `mem_consolidate_apply` still pick their chunk from `new_chunk_ids`.
+  appended)` and gets `IndexingStats.appended_chunk_ids`, the committed chunks whose line spans
+  touch the appended lines, in file order, with `appended_attribution`: `"exact"` when every
+  one starts within the appended lines, `"merged"` when one starts before them (a short entry
+  merged into the previous section), and `"unverified"` with no ids otherwise. That covers a
+  file that is not the text the caller expected (another writer's bytes anywhere in it), a
+  file a chunker other than Markdown reads, masked chunks, chunk overlap anywhere in the file,
+  and an append that starts mid-line, because there a span does not say what a chunk holds.
+  Every single-entry append through `mem_add`'s write path reports it; `mem_batch_add` does
+  not yet. Only `mem_reflect_save` reads it so far: `mem_agent_share` and
+  `mem_consolidate_apply` still pick their chunk from `new_chunk_ids` (#3315).
 
 ### Changed
 
