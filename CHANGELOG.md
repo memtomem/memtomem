@@ -168,6 +168,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   downloaded by an older huggingface-hub was not affected. In a read-only cache the links cannot
   be made and the load still fails; make the cache writable for the first load.
 
+- **The re-index after a memory tool's write reads the file that was written (#3320).** After
+  an append or a by-id edit or delete, the tool asks the engine to index the file, and the engine
+  took the path again and resolved it again. A local process that renamed entries in the memory
+  directory between the write and that re-index had another file indexed as the write: its
+  chunks were rewritten under the caller's namespace, while the written file's chunks kept the
+  old text and stayed searchable. Three ways were measured: a parent directory replaced by a
+  link, the file itself replaced by a link just before the read, and a memory file that is a
+  symlink re-pointed after the append. The tool now tells the engine which file it wrote, by the
+  path its read resolved and the identity of the descriptor it wrote through, and the engine
+  opens that path as given and reads the descriptor only if it is that file. Anything else at
+  the path (a link, a directory that leads elsewhere, another file saved over it) leaves the
+  written file's chunks held as `source_relinked` and indexes nothing, and the result says the
+  file "was replaced at its path". A file saved over the path by an editor in that window used
+  to be indexed and reported as the write; it is now held until its next index pass, since the
+  write is not in it. A memory file that is a symlink is indexed where the write landed,
+  wherever the link points afterwards. Imports still use the older check, which sees only a
+  symlink at the file's own name. Not changed: the lookups a pass makes by path after its read
+  (#3328, #3305, #3306).
+
 - **A memory tool's append writes only to the file its privacy check judged (#3289).** Every
   surface that appends an entry (`mem_add`, `mem_batch_add` and the tools built on them, `mm add`,
   `mm agent share`, `mm review approve`, the shell's `add`, the Web UI's add and scratch promote,

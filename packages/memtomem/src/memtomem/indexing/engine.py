@@ -22,7 +22,7 @@ from collections.abc import (
 )
 from pathlib import Path
 from uuid import UUID
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import IO, TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 import pathspec
 
@@ -63,6 +63,12 @@ from memtomem.storage.sqlite_helpers import resolves_under_any_root as _resolves
 from memtomem.storage.sqlite_helpers import resolve_path
 from memtomem.storage.orphan_detect import RetainRule
 from memtomem.tools.entity_sync import sync_entities_for_chunks
+from memtomem.tools.memory_writer import (
+    SourceRemovedError,
+    SourceReplacedError,
+    WrittenSource,
+    open_written,
+)
 from memtomem.indexing.dir_stats import (  # noqa: F401
     IndexRoots,
     WorktreeMemo,
@@ -288,6 +294,24 @@ def _sqlite_busy(exc: BaseException) -> bool:
         return False
     text = str(cause).lower()
     return "locked" in text or "busy" in text
+
+
+def _opened_text(opened: IO[bytes], name: str) -> str:
+    """The text ``Path.read_text`` would give for the file behind ``opened``, which is closed.
+
+    For a re-index that reads the file its caller wrote off a descriptor
+    (``written_source``, #3320). One read, decoded as the path read decodes:
+    UTF-8 with universal newlines, invalid bytes replaced after a warning.
+    Closed at once rather than when the pass ends, because an open handle
+    keeps Windows from renaming or deleting the file.
+    """
+    with opened:
+        data = opened.read()
+    try:
+        return indexer_text(data)
+    except UnicodeDecodeError:
+        logger.warning("Non-UTF-8 content in %s, replacing invalid bytes", name)
+        return indexer_text(data, errors="replace")
 
 
 def _leaf_relinked(own_key: str, work_path: Path) -> bool:
@@ -1204,6 +1228,7 @@ class IndexEngine:
         purge_key: str | None = None,
         relink_key: str | None = None,
         append_region: AppendRegion | None = None,
+        written_source: WrittenSource | None = None,
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
@@ -1254,10 +1279,53 @@ class IndexEngine:
             # Keyed here, before the pass, and released only if the pass read
             # and committed this same key: a pass that read another source
             # through a link validated that source, not this one (#3180).
-            hold_key = norm_path(path)
+            written_key = None if written_source is None else written_source.key
+            hold_key = norm_path(path) if written_key is None else written_key
             hold_generation = await self._storage.source_hold_snapshot(
                 Path(hold_key), as_stored=True
             )
+
+            async def held_as_relinked(key: str) -> tuple[IndexFileResult, float]:
+                held = await self._hold_relinked_key(key)
+                relinked: IndexFileResult = {
+                    "total": 0,
+                    "indexed": 0,
+                    "skipped": 0,
+                    "deleted": 0,
+                    "errors": [],
+                    "mutated": held,
+                    "relinked": True,
+                }
+                return relinked, (time.monotonic() - start) * 1000
+
+            # A caller that wrote the file names it, and the open decides: what
+            # is read below is that file or nothing (#3320). Under the locks,
+            # with no ``await`` between this open and the read. Every outcome
+            # is keyed by the written file's key, never by a new resolution.
+            opened: IO[bytes] | None = None
+            if written_source is not None and written_key is not None:
+                try:
+                    opened = open_written(written_source)
+                except SourceReplacedError:
+                    return await held_as_relinked(written_key)
+                except SourceRemovedError:
+                    missing = await self._delete_missing_source(
+                        path, path_scope=path_scope, key=written_key
+                    )
+                    return missing, (time.monotonic() - start) * 1000
+                except OSError as exc:
+                    held = await self._hold_waiting(
+                        path, f"read_error:{exc.errno}", key=written_key
+                    )
+                    unread: IndexFileResult = {
+                        "total": 0,
+                        "indexed": 0,
+                        "skipped": 0,
+                        "deleted": 0,
+                        "errors": [],
+                        "mutated": held,
+                    }
+                    return unread, (time.monotonic() - start) * 1000
             try:
                 result = await self._index_file(
                     path,
@@ -1279,27 +1347,26 @@ class IndexEngine:
                     purge_key=purge_key,
                     relink_key=relink_key,
                     append_region=append_region,
+                    written_source=written_source,
+                    opened=opened,
                 )
             except PrivacyRejection as exc:
                 await self._hold_blocked_source(path, exc)
                 raise
             except SourceRelinkedError:
                 # The pass rolled back its writes. A caller that wrote the
-                # regular file at ``relink_key`` gets the hold it would have
-                # got had the swap come before the pass (#3164, #3180).
+                # file gets the hold it would have got had the swap come
+                # before the pass (#3164, #3180): under the written file's key
+                # (#3320), or under ``relink_key`` when the leaf is no longer
+                # that caller's regular file.
+                if written_key is not None:
+                    return await held_as_relinked(written_key)
                 if relink_key is None or not _leaf_relinked(relink_key, path):
                     raise
-                held = await self._hold_relinked_key(relink_key)
-                relinked: IndexFileResult = {
-                    "total": 0,
-                    "indexed": 0,
-                    "skipped": 0,
-                    "deleted": 0,
-                    "errors": [],
-                    "mutated": held,
-                    "relinked": True,
-                }
-                return relinked, (time.monotonic() - start) * 1000
+                return await held_as_relinked(relink_key)
+            finally:
+                if opened is not None:
+                    opened.close()
             # A held source is visible again only after the current contents
             # have been validated/indexed. Receipt hits take this path without
             # embedding; failed, excluded and unreadable paths keep the hold.
@@ -1604,6 +1671,7 @@ class IndexEngine:
         purge_if_excluded: bool = False,
         hold_if_relinked: bool = False,
         append_region: AppendRegion | None = None,
+        written_source: WrittenSource | None = None,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
 
@@ -1681,8 +1749,9 @@ class IndexEngine:
         (#3158).
 
         ``hold_if_relinked=True`` is for a caller that has just written the
-        regular file at ``file_path``: the importers (#3164) and the by-id edit
-        and delete paths (#3172). If that file has been replaced by a symlink,
+        regular file at ``file_path`` and holds no identity for it: the
+        importers (#3164). The memory tools name the file they wrote instead
+        (``written_source``, below). If that file has been replaced by a symlink,
         the rows stored under the path's own key are held with
         ``source_relinked`` and nothing is indexed, so the link's target is
         never indexed, namespaced or tagged as the caller's file. ``IndexingStats.relinked_files`` is then 1. It is
@@ -1704,6 +1773,29 @@ class IndexEngine:
         since the hold uses the folded key, and ``relinked_files`` is 1 all the
         same (#2907). Every other caller keeps the default and indexes through
         the link (#3164).
+
+        ``written_source`` is for a memory tool that has just written the file
+        under its sidecar lock (``lock_held=True`` is required) and names the
+        file it wrote (``memory_writer.WrittenSource``, #3320). The pass then
+        reads that file or nothing. It opens ``written_source.source_path`` as
+        given, with no new resolution of ``file_path``, and the descriptor
+        must be the file the write went through; the content is read off that
+        descriptor, judged under that path and stored under its key, which is
+        also the key a purge deletes. If something else answers to the path —
+        a symlink put at the leaf, a parent directory replaced by a link,
+        another file saved over it — the rows under the written file's key
+        are held with ``source_relinked`` and nothing is indexed, so no other
+        file is indexed, namespaced or tagged as the caller's write;
+        ``IndexingStats.relinked_files`` is then 1. A file removed since the
+        write is held as any missing source is, under the same key. A path
+        that led through a symlink when the tool read it is indexed where the
+        write landed, wherever the link points now. Replaces
+        ``hold_if_relinked`` for these callers and cannot be combined with it.
+        Not covered: the path replaced after the open by another regular file
+        or by a link to itself resolves to the same key, so the written
+        content is stored under it; and the lookups the pass makes by path
+        after the read (stored chunk state, stored namespaces, exclusion, the
+        AI summary) resolve it again, as they do for every caller.
 
         ``append_region`` is for a caller that has just appended to the file
         under its sidecar lock and needs to know which chunks its append
@@ -1732,20 +1824,29 @@ class IndexEngine:
         # ``exists``) is the right predicate — a same-named directory ``exists``
         # but is not indexable, and its old chunks must still be cleaned. (#1566)
         _reject_reassign_with_explicit_ns(namespace, reassign_namespaces, new_source_namespace)
+        if written_source is not None and (not lock_held or hold_if_relinked):
+            raise ValueError(
+                "written_source needs lock_held=True and cannot be combined with hold_if_relinked"
+            )
         force = force or reassign_namespaces
         # A purge decides inside the locks instead, from the same exclusion read
         # that skips the file. Its key never follows the leaf, now or later: a
         # leaf that is, or becomes, a symlink must not redirect the delete to
         # its target's rows (#2835). Resolved parent plus the name matches the
         # key the store wrote while the leaf was a regular file, when the leaf
-        # is spelled as it was stored (#2878).
-        purge_key = own_leaf_key(file_path) if purge_if_excluded else None
+        # is spelled as it was stored (#2878). A caller that names the file it
+        # wrote purges that file's key: resolving the parent now would follow
+        # a directory replaced since the write (#3320).
+        purge_key: str | None = None
+        if purge_if_excluded:
+            purge_key = own_leaf_key(file_path) if written_source is None else written_source.key
         # The relink check runs inside the locks too, so a hold-only call must
         # not stop at the early exclusion return below (#3164).
         relink_key = own_leaf_key(file_path) if hold_if_relinked else None
         if (
             purge_key is None
             and relink_key is None
+            and written_source is None
             and self.is_excluded(file_path)
             and file_path.is_file()
         ):
@@ -1760,7 +1861,12 @@ class IndexEngine:
                 new_chunk_ids=(),
                 excluded_files=1,
             )
-        work_path = resolve_path(file_path)
+        # The written file's path is the resolution its caller's read took. It
+        # is not resolved again here: two resolutions taken now agree with each
+        # other about a parent directory replaced since the write (#3320).
+        work_path = (
+            resolve_path(file_path) if written_source is None else written_source.source_path
+        )
         with self._active_run():
             # Before the locks: the sidecar is keyed on ``work_path``, which for a
             # link is its target's, and a target whose sidecar cannot be taken
@@ -1792,6 +1898,7 @@ class IndexEngine:
                 purge_key=purge_key,
                 relink_key=relink_key,
                 append_region=append_region,
+                written_source=written_source,
             )
         tally = _NamespaceTally()
         decision = result.get("namespace_decision")
@@ -1845,7 +1952,9 @@ class IndexEngine:
         async with self._storage.transaction(wait=WRITER_WAIT_S):
             held = await self._storage.hold_source(Path(own_key), RELINKED_HOLD, as_stored=True)
         if held:
-            logger.info("Held a written source that is now a symlink: %s", Path(own_key).name)
+            logger.info(
+                "Held a written source whose path no longer holds it: %s", Path(own_key).name
+            )
         return held
 
     async def _hold_waiting(self, file_path: Path, reason: str, *, key: str | None = None) -> bool:
@@ -2359,6 +2468,7 @@ class IndexEngine:
         *,
         path_scope: PathScope = "configured",
         absent: bool = True,
+        key: str | None = None,
     ) -> IndexFileResult:
         """Hold chunks for a source whose absence cannot prove deletion.
 
@@ -2371,12 +2481,20 @@ class IndexEngine:
         ``retain_missing_dirs`` is shown instead: its chunks are the archive
         the user asked to keep (#2833). A path that now holds a directory is
         not absent and is held as before.
+
+        ``key`` is the stored key of a source the caller already knows
+        (``written_source``, #3320): it is judged and held as given, where the
+        default resolves ``file_path``, which a path relinked since would
+        answer for another source.
         """
         if absent and self._config.retain_missing_dirs:
-            key = await asyncio.to_thread(self._retained_key, file_path)
-            if key is not None:
+            if key is None:
+                retained = await asyncio.to_thread(self._retained_key, file_path)
+            else:
+                retained = key if RetainRule.prepare(self._config).retains_key(key) else None
+            if retained is not None:
                 async with self._storage.transaction(wait=WRITER_WAIT_S):
-                    shown = await self._storage.release_absence_hold(key)
+                    shown = await self._storage.release_absence_hold(retained)
                 return {
                     "total": 0,
                     "indexed": 0,
@@ -2385,7 +2503,7 @@ class IndexEngine:
                     "errors": [],
                     "mutated": shown,
                 }
-        held = await self._hold_waiting(file_path, "source_missing")
+        held = await self._hold_waiting(file_path, "source_missing", key=key)
         if held:
             logger.warning("Source unavailable; holding indexed chunks: %s", file_path)
         return {
@@ -2521,7 +2639,16 @@ class IndexEngine:
         purge_key: str | None = None,
         relink_key: str | None = None,
         append_region: AppendRegion | None = None,
+        written_source: WrittenSource | None = None,
+        opened: IO[bytes] | None = None,
     ) -> IndexFileResult:
+        # ``opened`` is the descriptor of the file ``written_source`` names,
+        # already checked to be that file (``_index_file_locked``, #3320). With
+        # it, the stat and the read below come off the descriptor, the pass is
+        # judged under ``written_source.source_path``, and every hold is keyed
+        # by ``written_key``: ``file_path`` is not resolved again for any of them.
+        written_key = None if written_source is None else written_source.key
+
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]), and resolved_namespace (str | None) when
         # at least one chunk was successfully upserted. Early/no-write paths
@@ -2549,14 +2676,14 @@ class IndexEngine:
         # only metadata (no content), so statting an excluded file first is
         # safe — its content is still never read below. (#1566)
         try:
-            stat_result = file_path.stat()
+            stat_result = file_path.stat() if opened is None else os.fstat(opened.fileno())
         except (FileNotFoundError, NotADirectoryError):
             # File deleted/renamed away (NotADirectoryError: a parent component
             # was replaced by a file, so the path cannot exist) — purge its
             # stale chunks instead of a silent no-op.
             return await self._delete_missing_source(file_path, path_scope=path_scope)
         except OSError as exc:
-            held = await self._hold_waiting(file_path, f"stat_error:{exc.errno}")
+            held = await self._hold_waiting(file_path, f"stat_error:{exc.errno}", key=written_key)
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2623,6 +2750,22 @@ class IndexEngine:
         )
         if _path_is_excluded(file_path, guard_roots, user_spec, walk_root=walk_root):
             logger.debug("Skipping excluded file %s", file_path)
+            if written_key is not None and norm_path(file_path) != written_key:
+                # The exclusion helpers resolve the path themselves, so this
+                # answer is about whatever the path names now. If that is no
+                # longer the written file — a link to an excluded file put at
+                # the leaf since the open — it is a relink, not an exclusion:
+                # held, where the branches below would skip or purge (#3320).
+                held = await self._hold_relinked_key(written_key)
+                return {
+                    "total": 0,
+                    "indexed": 0,
+                    "skipped": 0,
+                    "deleted": 0,
+                    "errors": [],
+                    "mutated": held,
+                    "relinked": True,
+                }
             if purge_key is None:
                 return {
                     "total": 0,
@@ -2678,7 +2821,10 @@ class IndexEngine:
         # is that caller's job — see ``indexer_text`` for the one that has it.
         read_started = time.monotonic()
         try:
-            content = file_path.read_text(encoding="utf-8")
+            if opened is None:
+                content = file_path.read_text(encoding="utf-8")
+            else:
+                content = _opened_text(opened, file_path.name)
         except UnicodeDecodeError:
             logger.warning("Non-UTF-8 content in %s, replacing invalid bytes", file_path.name)
             content = file_path.read_text(encoding="utf-8", errors="replace")
@@ -2691,7 +2837,7 @@ class IndexEngine:
             # retain dir does not show it as an archive (#2833).
             return await self._delete_missing_source(file_path, path_scope=path_scope, absent=False)
         except OSError as exc:
-            held = await self._hold_waiting(file_path, f"read_error:{exc.errno}")
+            held = await self._hold_waiting(file_path, f"read_error:{exc.errno}", key=written_key)
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2711,7 +2857,11 @@ class IndexEngine:
         # ``upsert_chunks`` resolves each chunk's source path itself when it
         # writes, so a swap undone inside that call is stored under the link
         # target's key (#3305).
-        decision_path = _decision_path(file_path)
+        # A written file is judged under the path its caller's preflight judged
+        # it under, and keyed by it: nothing is resolved here at all (#3320).
+        decision_path = (
+            _decision_path(file_path) if written_source is None else written_source.source_path
+        )
         source_key = fold_path_form(str(decision_path))
         read_ms = (time.monotonic() - read_started) * 1000
         # Skip binary files (null bytes indicate non-text content)

@@ -298,7 +298,7 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                         if refusal is not None:
                             raise click.ClickException(refusal.removeprefix("Error: "))
                         try:
-                            await asyncio.to_thread(
+                            appended = await asyncio.to_thread(
                                 append_entry,
                                 target,
                                 candidate["content"],
@@ -318,7 +318,7 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                                 target,
                                 ingress_guarded=True,
                                 lock_held=True,
-                                hold_if_relinked=judged.leaf_own,
+                                written_source=appended.source,
                             )
                             # Excluded, or replaced by a link, while the entry was
                             # appended: on disk, so the approval stands; say so.
