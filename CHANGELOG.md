@@ -39,8 +39,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   covers it when the interpreter belongs to the `uv tool` install; for any
   other environment, upgrade memtomem there.
 - **Nine context-gateway tools are no longer on MCP; run them with `mm context`.** A client,
-  prompt or workflow that calls one of them, directly in `full` mode or as
-  `mem_do(action="context_…")`, now gets `Error: unknown action '…'`. The replacements are
+  prompt or workflow that calls one of them gets an error: `Unknown tool: mem_context_…` when
+  called directly, `unknown action 'context_…'` through `mem_do`. The replacements are
   `mm context init`, `generate`, `sync`, `pull`, `memory-migrate`, `migrate` (artifact
   migration, and the former `artifact_migrate` alias), `copy` / `move` (artifact transfer) and
   `version list` / `create` / `enable` / `promote` / `delete-label` (the former `promote`
@@ -69,7 +69,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **The first 0.7.9 start rewrites the keyword index's file-name column once (#3208).** No
   migration step and no schema change; see the Fixed entry. Running 0.7.8 or older against the
   same database afterwards puts the full path back for the files it writes or moves, and those
-  rows match path words again until `mm index --force` or an FTS rebuild rewrites them.
+  rows match path words again until `mm index <memory dir> --force` rewrites them.
+- **An append can land and still be held out of search: re-index, do not append again
+  (#3289, #3320).** When the file a memory tool appended to is replaced by a link or another
+  file between the write and its re-index, the entry is on disk but the file's chunks are held
+  (hidden from search), and the tool answers with a warning, not an error; chunks stored under
+  a path spelling from before Unicode folding on macOS are not held and the warning says so
+  (#2907). Put a regular file
+  back at the path and re-index it to lift the hold; repeating the append would write the entry
+  twice. A refusal before the write (`… nothing was written. Try again.`) is different: there,
+  retrying is right.
 - **Narrower inputs and defaults.** Shell recall, the procedures list and Find Similar hide
   system namespaces unless you ask for them (#3117). Registering a schedule refuses a `params`
   key the job does not take (#3247). A credential written next to CJK text is refused by the
@@ -84,6 +93,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `pip install -U filelock`, and an existing model cache keeps its mode until you run
   `chmod 700 ~/.memtomem/cache/fastembed`; see Security.
 - **langchain-memtomem 0.2.1 follows this release** and requires `memtomem>=0.7.9,<0.8`.
+  Items its store wrote before that upgrade keep the `File:` / `Fragment` lines until each is
+  written again; see its CHANGELOG.
 
 - **`mm add --file` and the Web UI's `/api/add` with `file` refuse a file in another memory
   tier (#2821).** A file named relative to the user memory directory that lands in a project
@@ -283,7 +294,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   written file's chunks held as `source_relinked` and indexes nothing, and the result says the
   file "was replaced at its path". A file saved over the path by an editor in that window used
   to be indexed and reported as the write; it is now held until its next index pass, since the
-  write is not in it. A memory file that is a symlink is indexed where the write landed,
+  write is not in it (chunks stored under a pre-folding macOS path spelling excepted, #2907). A memory file that is a symlink is indexed where the write landed,
   wherever the link points afterwards. Imports still use the older check, which sees only a
   symlink at the file's own name. Not changed: the lookups a pass makes by path after its read
   (#3328, #3305, #3306).
@@ -309,9 +320,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   covered: a replacement by another link to the same file; another process changing the file's
   content in place in between; on filesystems that report no file identity, a file replaced and
   put back around the open; on Windows, a directory on a new file's path replaced (a junction,
-  say), whether or not it is put back, and a refused create there can leave an empty file behind;
-  a link put, after the append, at a path that was already a link when read, which the re-index
-  still follows.
+  say), whether or not it is put back, and a refused create there can leave an empty file behind.
+  The re-index after the append no longer follows a link put at the path afterwards (#3320).
 
 - **A memory tool that finds its file's path replaced takes that file out of search (#3291).**
   When the path a memory tool read no longer leads to the same file by the time of its privacy
@@ -408,7 +418,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the first time this version opens them. On a store of 49,496 chunks that took
   about 4 seconds. If an older version later indexes or moves a file in the same
   database, that file's memories go back to the old behavior until this
-  version indexes it with `mm index --force` or rebuilds the FTS index. An
+  version indexes it with `mm index <memory dir> --force` or rebuilds the FTS index. An
   ordinary reindex does not rewrite unchanged memories.
 
 - **Web UI requests no longer answer HTTP 500 at once while another task holds a
@@ -460,9 +470,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (#3231).** `1000000000d`, beyond Python's `timedelta`, and `800000d`, which reaches back past
   year 1, ended in an `OverflowError` traceback. Both now exit 2 with
   `duration '<spec>' is too large.`, before storage is opened, so no session is created.
-- **`mm pinned set --file` reports a bad path instead of a traceback (#3232).** A missing path or
-  a directory is now a usage error (exit 2) before anything runs; a file that cannot be read or
-  decoded is reported as `Could not read <path>: <reason>` (exit 1).
+- **`mm pinned set --file` reports a bad path instead of a traceback (#3232).** A missing path, a
+  directory or a file without read permission is now a usage error (exit 2) before anything
+  runs; a file that still fails to read, or is not UTF-8, is reported as
+  `Could not read <path>: <reason>` (exit 1).
 - **An unknown eval case or run no longer points at the database (#3233).** `mm quality show`,
   `status` and `promote` with a name that does not exist, a name collision or a malformed label
   added `Hint: storage backend error — run mm status …`; the database was fine. Those errors now
@@ -472,7 +483,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   "Config (N↑M↓)" label was replaced by the plain Off text on boot and on every language switch.
   Both labels now come from the locale files (new key `search.context_config`).
 - **Shape checks reject a trailing newline (#3236).** Python's `$` also matches before a final
-  newline, so five checks accepted `"<valid>\n"`: quality profile names and rerank model
+  newline, so six checks accepted `"<valid>\n"`: quality profile names and rerank model
   segments, `mm upgrade --version` (which passed `memtomem==X\n` to uv), the project selector's
   scope-id shape (a `"p-…\n"` value is now read as a path), instance-registry file names (a stray
   `<name>\n` file was read as a live instance), and the storage-layer namespace check (the public
@@ -505,10 +516,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   store's `delete`, now refuse a source that does not resolve under a configured index root, the upload directory
   or, for project memory, that project's own tier directory, with `source_unmanaged`, before any
   lock file is created. A link inside a memory directory that points out of it is not managed,
-  and a project tier directory that is itself a link counts as none. Indexing an explicit path
+  and a project tier directory that is itself a link gives no project-root authority (a
+  directory also listed in `indexing.memory_dirs` stays managed through that entry). Indexing an explicit path
   no longer creates a `.<name>.lock` file beside it either: the lock for a source outside every
   root lives under memtomem's per-user runtime directory. A sidecar already there is still
-  honoured, and a link at that name is never followed.
+  honoured, and a link at that name is never locked through; on Windows, which has no
+  `O_NOFOLLOW`, a link swapped in at that instant can have its target opened and closed again
+  untouched.
 - **Settings sync and the other context-gateway writes are no longer reachable over MCP
   ([GHSA-vx6r-2p97-wjp7](https://github.com/memtomem/memtomem/security/advisories/GHSA-vx6r-2p97-wjp7), high).**
   `mem_context_sync` and `mem_context_generate` merged a project's `.memtomem/settings.json`
@@ -518,7 +532,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   runtime with no consent argument at all. The nine write tools are removed from MCP (see
   Removed), so no tool argument stands in for the user's consent. The CLI asks at the terminal
   before a settings write outside the project, as before.
-- **A project symlink no longer redirects memtomem's writes out of the project
+- **A project symlink no longer redirects memtomem's MCP writes out of the project
   ([GHSA-ffh4-rj5x-2q25](https://github.com/memtomem/memtomem/security/advisories/GHSA-ffh4-rj5x-2q25), high).**
   A link such as `.claude -> ~/.claude`, `.gitignore -> <file>` or
   `.memtomem/memories/pinned/general -> <directory>` in a cloned project carried MCP writes
@@ -526,7 +540,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   or rewrite) and `delete` (unlink). Sync and init are off MCP (above). Project-scope pinned
   writes and deletes refuse when any entry from `.memtomem` down to the block file's parent is a
   symlink, a junction or cannot be inspected; see Upgrading. The check is made when the path is
-  chosen, and the user tier is not judged.
+  chosen, and the user tier is not judged. Not changed: `mm context sync` and the web UI's
+  project-scope sync still write through a linked runtime directory such as `.claude`; check a
+  cloned project's links before running them.
 - **The web UI no longer answers pages on another origin, including another loopback port
   ([GHSA-fpqf-c22f-cw47](https://github.com/memtomem/memtomem/security/advisories/GHSA-fpqf-c22f-cw47), high).**
   Its CORS rule echoed any loopback origin and its origin check accepted any loopback port, so a
