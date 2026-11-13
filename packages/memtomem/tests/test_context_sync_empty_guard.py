@@ -1,4 +1,4 @@
-"""Regression: `mm context sync` / mem_context_sync must NOT overwrite existing
+"""Regression: `mm context sync` must NOT overwrite existing
 agent files when context.md parses to zero sections.
 
 ``parse_context`` returns ``{}`` for any context.md that has content but no
@@ -6,21 +6,18 @@ agent files when context.md parses to zero sections.
 mid-edit on). Before the guard, ``gen.generate({})`` produced header-only /
 empty output that ``sync`` wrote straight over the user's existing
 CLAUDE.md / GEMINI.md / .cursorrules — silent data loss with no backup. The
-sibling ``generate`` verb has always had this guard; ``sync`` (and its MCP
-twin) did not. These tests pin the parity.
+sibling ``generate`` verb has always had this guard; ``sync`` did not. These
+tests pin the parity.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from click.testing import CliRunner
 
 from memtomem.context.parser import CONTEXT_FILENAME
-from memtomem.server.tools.context import mem_context_sync
 
-from .helpers import set_home
 
 PROSE_ONLY = "Just some working notes with no markdown headings yet.\nMore prose.\n"
 WITH_SECTION = "# Context\n\n## Project\n- Name: demo\n- Language: Python\n"
@@ -63,26 +60,4 @@ class TestCliSyncEmptyGuard:
 
         assert result.exit_code == 0
         # CLAUDE.md was regenerated from the parsed sections, replacing the sentinel.
-        assert (project / "CLAUDE.md").read_text(encoding="utf-8") != ORIGINAL_CLAUDE
-
-
-@pytest.mark.anyio
-class TestMcpSyncEmptyGuard:
-    async def test_mem_context_sync_refuses_when_no_sections(self, tmp_path, monkeypatch):
-        project = _seed_project(tmp_path, PROSE_ONLY)
-        monkeypatch.chdir(project)
-        set_home(monkeypatch, tmp_path / "home")
-
-        out = await mem_context_sync()
-
-        assert "empty" in out.lower()
-        assert (project / "CLAUDE.md").read_text(encoding="utf-8") == ORIGINAL_CLAUDE
-
-    async def test_mem_context_sync_still_writes_when_sections_present(self, tmp_path, monkeypatch):
-        project = _seed_project(tmp_path, WITH_SECTION)
-        monkeypatch.chdir(project)
-        set_home(monkeypatch, tmp_path / "home")
-
-        await mem_context_sync()
-
         assert (project / "CLAUDE.md").read_text(encoding="utf-8") != ORIGINAL_CLAUDE

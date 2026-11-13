@@ -1,6 +1,6 @@
 # ADR-0008: Wiki layer for shared canonical artifacts
 
-**Status:** Accepted (PR-A/B/C/D/E merged — read-only browser, dev-tier override-seed, and dev-tier project install/update shipped; the in-browser canonical/override editor + isolated commit affordance also shipped, specified in ADR-0027 — see PR Breakdown; amended 2026-07-04: single-asset install and update are commit-true, #1643/#1652; amended 2026-07-05: `new` scaffold verb + bare-commit canonical default, #1648)
+**Status:** Accepted (PR-A/B/C/D/E merged — read-only browser, dev-tier override-seed, and dev-tier project install/update shipped; the in-browser canonical/override editor + isolated commit affordance also shipped, specified in ADR-0027 — see PR Breakdown; amended 2026-07-04: single-asset install and update are commit-true, #1643/#1652; amended 2026-07-05: `new` scaffold verb + bare-commit canonical default, #1648; amended 2026-11-13: the MCP transfer tool its §"Surface coverage" refers to is retired with every other context write, ADR-0044)
 **Date:** 2026-04-30 (amended 2026-07-05)
 **Context:** Context gateway today is a per-project canonical → multi-runtime
 fan-out router (ADR-0001). Users with several projects must re-author the

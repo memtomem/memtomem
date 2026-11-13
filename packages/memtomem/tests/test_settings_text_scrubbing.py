@@ -41,7 +41,7 @@ from memtomem.context.settings_doctor import (
     format_warning,
     redact_command_shape,
 )
-from memtomem.server.tools.context import _redact_pull_reason, _redact_reason
+from memtomem.server.tools.context import _redact_reason
 
 from .helpers import set_home
 
@@ -209,20 +209,6 @@ class TestMcpWireReasons:
         out = _redact_reason(raw, Path("/tmp/project"))
         assert ESC_RAW not in out
         assert ESC_ESCAPED in out
-
-    def test_pull_composition_keeps_the_relative_remainder(self):
-        """The regression that forced the escape to be the outermost step.
-
-        ``_redact_pull_reason`` runs a second path scrub on top. Escaping
-        before that scrub turns ``\\x1b[2J\\x1b[H`` into something the path
-        regex reads as a two-segment absolute path, and its greedy tail eats
-        the remediation text that follows.
-        """
-        raw = f"bad event: {ESC_RAW} keep this remediation"
-        out = _redact_pull_reason(raw, Path("/tmp/project"))
-        assert ESC_RAW not in out
-        assert ESC_ESCAPED in out
-        assert "keep this remediation" in out
 
     def test_home_redaction_still_applies(self):
         """The escape must not displace the path redaction it composes with."""

@@ -272,3 +272,18 @@ class TestMemoryMigrateRejectsNonMarkdownSource:
 
         result = _resolve_memory_migrate_sources(str(src))
         assert result == [src.resolve()]
+
+    def test_glob_matching_no_markdown_is_a_clean_error(self, tmp_path):
+        """A glob that selects no .md file refuses with the glob named, instead
+        of migrating nothing silently."""
+        from memtomem.cli.context_cmd import _resolve_memory_migrate_sources
+        import click
+        import pytest
+
+        (tmp_path / "notes").mkdir()
+        (tmp_path / "notes" / "a.txt").write_text("not markdown", encoding="utf-8")
+        pattern = str(tmp_path / "notes" / "**" / "*.md")
+
+        with pytest.raises(click.ClickException) as exc:
+            _resolve_memory_migrate_sources(pattern)
+        assert str(exc.value) == f"No .md files matched: {pattern}"

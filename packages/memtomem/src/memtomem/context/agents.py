@@ -751,8 +751,7 @@ def generate_all_agents(
         surface: Gate A audit identifier, forwarded verbatim to the
             engine's privacy scans. The CLI relies on the default
             ``"cli_context_sync"``; the Web sync route passes
-            ``"web_context_agents_sync"`` and the MCP tools pass
-            ``"mcp_context_generate"`` / ``"mcp_context_sync"`` (#1246).
+            ``"web_context_agents_sync"`` (#1246).
         force_unsafe: Reviewed Gate A bypass (ADR-0011 §5) forwarded to
             the engine. ``True`` lets a reviewed false positive fan out
             to ``user`` / ``project_local``; ``project_shared`` stays

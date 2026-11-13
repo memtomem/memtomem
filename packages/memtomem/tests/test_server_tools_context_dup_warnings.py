@@ -1,14 +1,14 @@
-"""MCP parity pin: ``mem_context_generate`` / ``mem_context_diff`` /
-``mem_context_sync`` surface cross-tier duplicate-hook warnings on the
-``settings`` include path (#1123 B5-3).
+"""MCP parity pin: ``mem_context_diff`` surfaces cross-tier duplicate-hook
+warnings on the ``settings`` include path (#1123 B5-3).
 
 The CLI emits these via ``_print_duplicate_tier_warnings`` (ADR-0010 §4) inside
-the real generate / diff / sync workflow. The MCP settings branches dropped
-them, so an MCP caller never learned that a memtomem-managed hook was
-duplicated in a non-active tier. Each test asserts the MCP output contains the
-exact warning line the MCP surface emits — ``format_warning`` over the
-path-redacted duplicate record (#1550/#1556) — so a future revert that forgets
-to thread the warnings fails CI immediately.
+the real generate / diff / sync workflow. The MCP settings branch dropped them,
+so an MCP caller never learned that a memtomem-managed hook was duplicated in a
+non-active tier. Each test asserts the MCP output contains the exact warning
+line the MCP surface emits — ``format_warning`` over the path-redacted
+duplicate record (#1550/#1556) — so a future revert that forgets to thread the
+warnings fails CI immediately. Diff is the only settings path left on MCP
+(ADR-0044).
 
 The same surface carries the malformed-matcher axis (#1987), which duplicate
 detection cannot see because ``_iter_signatures`` skips non-string matchers.
@@ -30,12 +30,7 @@ from memtomem.context.settings_doctor import (
     format_malformed_warning,
     format_warning,
 )
-from memtomem.server.tools.context import (
-    _redact_reason,
-    mem_context_diff,
-    mem_context_generate,
-    mem_context_sync,
-)
+from memtomem.server.tools.context import _redact_reason, mem_context_diff
 
 from .helpers import set_home
 
@@ -98,23 +93,9 @@ def dup_project(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_generate_surfaces_cross_tier_dup_warning(dup_project):
-    _project, expected = dup_project
-    out = await mem_context_generate(include="settings", scope="project_shared")
-    assert expected in out
-
-
-@pytest.mark.anyio
 async def test_diff_surfaces_cross_tier_dup_warning(dup_project):
     _project, expected = dup_project
     out = await mem_context_diff(include="settings", scope="project_shared")
-    assert expected in out
-
-
-@pytest.mark.anyio
-async def test_sync_surfaces_cross_tier_dup_warning(dup_project):
-    _project, expected = dup_project
-    out = await mem_context_sync(include="settings", scope="project_shared")
     assert expected in out
 
 
@@ -158,24 +139,14 @@ def malformed_project(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "tool",
-    [mem_context_generate, mem_context_diff, mem_context_sync],
-    ids=["generate", "diff", "sync"],
-)
-async def test_settings_surfaces_malformed_matcher_warning(malformed_project, tool):
+async def test_settings_surfaces_malformed_matcher_warning(malformed_project):
     _project, expected = malformed_project
-    out = await tool(include="settings", scope="project_shared")
+    out = await mem_context_diff(include="settings", scope="project_shared")
     assert expected in out
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "tool",
-    [mem_context_generate, mem_context_diff, mem_context_sync],
-    ids=["generate", "diff", "sync"],
-)
-async def test_secret_shaped_event_is_redacted_in_warning(tmp_path, monkeypatch, tool):
+async def test_secret_shaped_event_is_redacted_in_warning(tmp_path, monkeypatch):
     """A secret-shaped hook event never reaches the MCP wire verbatim (#2030).
 
     ``event`` is a settings dict key, so nothing stops it from carrying secret
@@ -208,7 +179,7 @@ async def test_secret_shaped_event_is_redacted_in_warning(tmp_path, monkeypatch,
     )
     monkeypatch.chdir(project)
 
-    out = await tool(include="settings", scope="project_shared")
+    out = await mem_context_diff(include="settings", scope="project_shared")
 
     assert "non-string matcher (list)" in out, "fixture did not surface a malformed warning"
     assert "AKIA1234567890ABCDEF" not in out
@@ -219,14 +190,7 @@ async def test_secret_shaped_event_is_redacted_in_warning(tmp_path, monkeypatch,
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "tool",
-    [mem_context_generate, mem_context_diff, mem_context_sync],
-    ids=["generate", "diff", "sync"],
-)
-async def test_secret_shaped_canonical_event_is_redacted_in_drop_warning(
-    tmp_path, monkeypatch, tool
-):
+async def test_secret_shaped_canonical_event_is_redacted_in_drop_warning(tmp_path, monkeypatch):
     """Same scrub on the other malformed-warning producer (#2030 review).
 
     ``_drop_nonstring_matchers`` warns about a malformed rule in the *canonical*
@@ -255,7 +219,7 @@ async def test_secret_shaped_canonical_event_is_redacted_in_drop_warning(
     )
     monkeypatch.chdir(project)
 
-    out = await tool(include="settings", scope="project_shared")
+    out = await mem_context_diff(include="settings", scope="project_shared")
 
     assert "non-string matcher" in out, "fixture did not surface a drop warning"
     assert "AKIA1234567890ABCDEF" not in out
@@ -263,12 +227,7 @@ async def test_secret_shaped_canonical_event_is_redacted_in_drop_warning(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "tool",
-    [mem_context_generate, mem_context_diff, mem_context_sync],
-    ids=["generate", "diff", "sync"],
-)
-async def test_secret_shaped_event_never_reaches_mcp_wire(tmp_path, monkeypatch, tool):
+async def test_secret_shaped_event_never_reaches_mcp_wire(tmp_path, monkeypatch):
     """Surface sweep: no settings warning ships the raw event (#2030 review).
 
     The malformed-matcher axis is only one producer. An event key with a
@@ -300,7 +259,7 @@ async def test_secret_shaped_event_never_reaches_mcp_wire(tmp_path, monkeypatch,
     )
     monkeypatch.chdir(project)
 
-    out = await tool(include="settings", scope="project_shared")
+    out = await mem_context_diff(include="settings", scope="project_shared")
 
     for runtime in ("Codex", "Kimi", "Gemini"):
         assert f"no {runtime} equivalent" in out, f"{runtime} translator did not run"
@@ -325,13 +284,8 @@ async def test_no_dup_warning_when_only_active_tier(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "tool",
-    [mem_context_generate, mem_context_diff, mem_context_sync],
-    ids=["generate", "diff", "sync"],
-)
-async def test_mcp_unportable_command_warning_surfaced(tmp_path, monkeypatch, tool):
-    """Unportable hook commands surface in MCP generate/diff/sync."""
+async def test_mcp_unportable_command_warning_surfaced(tmp_path, monkeypatch):
+    """Unportable hook commands surface in MCP diff."""
     project = tmp_path / "project"
     project.mkdir()
     (project / ".git").mkdir()
@@ -358,19 +312,14 @@ async def test_mcp_unportable_command_warning_surfaced(tmp_path, monkeypatch, to
     )
     monkeypatch.chdir(project)
 
-    out = await tool(include="settings", scope="project_shared")
+    out = await mem_context_diff(include="settings", scope="project_shared")
     assert "contains non-portable absolute home path" in out
     assert "canonical settings" in out
     assert "rewrite with $HOME, ~, or a repo-relative path" in out
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "tool",
-    [mem_context_generate, mem_context_diff, mem_context_sync],
-    ids=["generate", "diff", "sync"],
-)
-async def test_mcp_unportable_command_warning_redacted(tmp_path, monkeypatch, tool):
+async def test_mcp_unportable_command_warning_redacted(tmp_path, monkeypatch):
     """Local home paths and secrets in unportable commands are redacted on MCP wire."""
     secret = "AKIA1234567890ABCDEF"
     project = tmp_path / "project"
@@ -401,7 +350,7 @@ async def test_mcp_unportable_command_warning_redacted(tmp_path, monkeypatch, to
     )
     monkeypatch.chdir(project)
 
-    out = await tool(include="settings", scope="project_shared")
+    out = await mem_context_diff(include="settings", scope="project_shared")
     assert "contains non-portable absolute home path" in out
     assert secret not in out
     assert str(home) not in out
@@ -410,12 +359,7 @@ async def test_mcp_unportable_command_warning_redacted(tmp_path, monkeypatch, to
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "tool",
-    [mem_context_generate, mem_context_diff, mem_context_sync],
-    ids=["generate", "diff", "sync"],
-)
-async def test_mcp_path_bearing_event_sanitized(tmp_path, monkeypatch, tool):
+async def test_mcp_path_bearing_event_sanitized(tmp_path, monkeypatch):
     """Event names containing home paths are sanitized across MCP wire boundary."""
     project = tmp_path / "project"
     project.mkdir()
@@ -447,7 +391,7 @@ async def test_mcp_path_bearing_event_sanitized(tmp_path, monkeypatch, tool):
     )
     monkeypatch.chdir(project)
 
-    out = await tool(include="settings", scope="project_shared")
+    out = await mem_context_diff(include="settings", scope="project_shared")
     # Raw home path must never appear on the MCP wire, even within event name
     assert str(home) not in out
     # ... and the warnings it rides on must still be there (absence alone passes vacuously)
@@ -458,12 +402,7 @@ async def test_mcp_path_bearing_event_sanitized(tmp_path, monkeypatch, tool):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "tool",
-    [mem_context_generate, mem_context_diff, mem_context_sync],
-    ids=["generate", "diff", "sync"],
-)
-async def test_mcp_multiline_hook_with_project_root_redaction(tmp_path, monkeypatch, tool):
+async def test_mcp_multiline_hook_with_project_root_redaction(tmp_path, monkeypatch):
     """Multiline hook commands ending in project root do not crash redaction (_ends_token IndexError)."""
     project = tmp_path / "project"
     project.mkdir()
@@ -493,18 +432,13 @@ async def test_mcp_multiline_hook_with_project_root_redaction(tmp_path, monkeypa
     )
     monkeypatch.chdir(project)
 
-    out = await tool(include="settings", scope="project_shared")
+    out = await mem_context_diff(include="settings", scope="project_shared")
     assert "contains non-portable absolute home path" in out
     assert str(home) not in out
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "tool",
-    [mem_context_generate, mem_context_diff, mem_context_sync],
-    ids=["generate", "diff", "sync"],
-)
-async def test_mcp_unscanned_settings_warning_surfaced_redacted(tmp_path, monkeypatch, tool):
+async def test_mcp_unscanned_settings_warning_surfaced_redacted(tmp_path, monkeypatch):
     """A settings file no check could read is named on MCP, with its home path redacted."""
     project = tmp_path / "project"
     project.mkdir()
@@ -517,7 +451,7 @@ async def test_mcp_unscanned_settings_warning_surfaced_redacted(tmp_path, monkey
     (home / ".claude" / "settings.json").write_text("{broken json", encoding="utf-8")
     monkeypatch.chdir(project)
 
-    out = await tool(include="settings", scope="project_shared")
+    out = await mem_context_diff(include="settings", scope="project_shared")
     assert "user tier file (" in out
     assert "was not checked: invalid JSON." in out
     assert str(home) not in out

@@ -213,10 +213,9 @@ def sync_atomic_artifact(
             per-vendor override bytes) — it dimensions the privacy
             ``record()`` counter and tags the blocked/bypassed audit
             log line. Callers pass their own literal: the CLI relies on
-            the default ``"cli_context_sync"``, the Web sync routes
-            pass ``"web_context_<kind>_sync"``, and the MCP tools pass
-            ``"mcp_context_generate"`` / ``"mcp_context_sync"`` (#1246
-            — sibling of the import-side #1242 fix).
+            the default ``"cli_context_sync"`` and the Web sync routes
+            pass ``"web_context_<kind>_sync"`` (#1246 — sibling of the
+            import-side #1242 fix).
         force_unsafe: Reviewed Gate A bypass (ADR-0011 §5) threaded to
             both :func:`scan_text_content` sites. ``True`` lets a
             reviewed false positive fan out to ``user`` /

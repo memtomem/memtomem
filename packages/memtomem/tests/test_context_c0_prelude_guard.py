@@ -173,9 +173,9 @@ class _Site:
 
     ``key`` is ``(module, qualname, occurrence, callee)`` — deliberately not a
     line number (churns on every unrelated edit) and deliberately not the callee
-    alone (``server/tools/context.py`` takes ``versioning_op_locked`` twice in
-    one function, and a callee-only key would collapse the two into one
-    registry row).
+    alone (``context/migrate.py::_acquire_pair_lock`` takes ``_file_lock`` more
+    than once, and a callee-only key would collapse those into one registry
+    row).
     """
 
     module: str
@@ -636,21 +636,6 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         EXEMPT,
         "",
         "Same; skills refused before the lock.",
-    ),
-    ("server/tools/context.py", "mem_context_version", 0, "versioning_op_locked"): (
-        EXEMPT,
-        "",
-        "MCP twin of the version write surface; skills refused before the lock.",
-    ),
-    ("server/tools/context.py", "mem_context_promote", 0, "versioning_op_locked"): (
-        EXEMPT,
-        "",
-        "MCP promote; skills refused before the lock.",
-    ),
-    ("server/tools/context.py", "mem_context_promote", 1, "versioning_op_locked"): (
-        EXEMPT,
-        "",
-        "MCP delete-label, which shares the promote handler; same gate.",
     ),
     # ── NON_C0 — a sidecar lock, but not a canonical NAME lock ───────────
     ("context/versioning.py", "create_version", 0, "_file_lock"): (
@@ -1642,8 +1627,8 @@ def test_classifications_are_from_the_closed_set_and_explained() -> None:
 def test_registry_keys_are_unique() -> None:
     """A dict cannot hold duplicates — this pins that the KEY can distinguish.
 
-    ``server/tools/context.py::mem_context_promote`` takes ``versioning_op_locked``
-    twice; a callee-only or qualname-only key would silently merge them and
+    ``context/migrate.py::_acquire_pair_lock`` takes ``_file_lock`` more than
+    once; a callee-only or qualname-only key would silently merge them and
     classify one site with the other's reasoning.
     """
     sites = discover_sites()

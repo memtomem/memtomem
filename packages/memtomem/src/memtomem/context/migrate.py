@@ -2253,10 +2253,8 @@ def migrate_scope(
 
     Args:
         surface: Gate A audit identifier forwarded to the staging scan.
-            The CLI relies on the default ``"cli_context_migrate"``; the
-            MCP tool passes ``"mcp_context_artifact_migrate"`` (#1246 —
-            previously MCP-driven moves were misattributed to the CLI
-            literal).
+            The CLI relies on the default ``"cli_context_migrate"``
+            (#1246).
 
     Returns:
         :class:`MigrateScopeResult` with ``moved=True`` on apply
