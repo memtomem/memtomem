@@ -8,6 +8,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._append_target import own_appended_chunk_id
 from memtomem.server.tools._id_access import caller_boundary, in_boundary, resolve_chunk
 from memtomem.tools.temporal import format_source_name
 
@@ -197,7 +198,7 @@ async def mem_reflect_save(
         # Best effort, like the links themselves: the insight is saved by now,
         # and an error here would invite a retry that appends it again.
         try:
-            insight_id = await _own_insight_chunk_id(app, stats, appended)
+            insight_id = await own_appended_chunk_id(app, stats, appended, allow_merged=True)
         except Exception:
             logger.warning("mem_reflect_save: could not attribute the insight", exc_info=True)
             insight_id = None
@@ -236,38 +237,3 @@ async def mem_reflect_save(
 _UNLINKED_NOTICE = (
     "Warning: could not tell which chunk holds this insight; related chunks were not linked."
 )
-
-
-async def _own_insight_chunk_id(app, stats, appended: list[str]):
-    """The id of the chunk this save's insight became, or ``None`` when unsure.
-
-    ``stats.appended_chunk_ids`` names the chunks the append became, judged by
-    the indexer from the text it chunked (#3292), so a pending edit elsewhere
-    in the file, indexed in the same pass, is not among them, and a chunk that
-    kept an existing id because its content matched is. This links only when:
-
-    * the append became exactly one chunk, and
-    * the appended block, projected on its own the way the re-index chunks a
-      file (same chunker, merging and bounding), is one non-empty chunk whose
-      content that chunk contains: equal when the entry stands alone, a
-      superset when a short entry merged into the section before it.
-
-    Anything else (an insight split into several chunks, a file another writer
-    changed between the append and the re-index) is saved but not linked.
-    """
-    from memtomem.indexing.privacy_gate import _read_text_view
-
-    if len(appended) != 1 or len(stats.appended_chunk_ids) != 1:
-        return None
-    chunk = await resolve_chunk(app, stats.appended_chunk_ids[0])
-    if chunk is None:
-        return None
-    # The re-index reads the file with universal newlines; project what it read.
-    projected = app.index_engine._chunk_projected_content(
-        chunk.metadata.source_file, _read_text_view(appended[0])
-    )
-    if len(projected) != 1 or not projected[0].content.strip():
-        return None
-    if projected[0].content not in chunk.content:
-        return None
-    return chunk.id

@@ -54,8 +54,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   file a chunker other than Markdown reads, masked chunks, chunk overlap anywhere in the file,
   and an append that starts mid-line, because there a span does not say what a chunk holds.
   Every single-entry append through `mem_add`'s write path reports it; `mem_batch_add` does
-  not yet. Only `mem_reflect_save` reads it so far: `mem_agent_share` and
-  `mem_consolidate_apply` still pick their chunk from `new_chunk_ids` (#3315).
+  not yet. Only `mem_reflect_save` and `mem_agent_share` read it so far:
+  `mem_consolidate_apply` still picks its chunk from `new_chunk_ids` (#3315).
 
 ### Changed
 
@@ -98,6 +98,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the result says so. That happens when the insight spans several chunks, when another writer
   changed the file between the append and its re-index, when merging it with the section
   before it adds a heading inside it, or when the insight is only a heading.
+- **`mem_agent_share` links the source to the chunk its copy became (#3315).** The
+  `chunk_links` `shared` row took the first id in `IndexingStats.new_chunk_ids`, which covers
+  the whole re-index of the target day file. An unindexed edit earlier in that file came first
+  and took the link. A copy whose chunk matched a stored one and kept its id is not in that
+  list, so the link went to another chunk the re-index rewrote, or nowhere. The link now goes to the one chunk the indexer attributes to the append
+  (#3292), and only when that attribution is `exact`. A short copy merged into the entry before
+  it is not linked: that chunk is not a copy of the source, and a link on it would make the
+  next edit of the neighbouring entry fail re-indexing. Neither is a copy the indexer could not
+  attribute (another writer changed the file between the append and its re-index, or the file
+  was excluded meanwhile). In both cases the copy is still shared and keeps its `shared-from=`
+  tag, the result is unchanged, and a warning is logged.
 - **`mm embedding-reset` no longer calls a reset of an empty store destructive (#2423).** A
   store stamped with one embedding model that never received a chunk, opened after the config
   names another model, still reports a mismatch and still needs
