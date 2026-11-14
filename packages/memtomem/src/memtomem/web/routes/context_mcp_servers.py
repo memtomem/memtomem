@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem.config import TargetScope
+from memtomem.memory_scope import ProjectEntryRelinked
 from memtomem.context._abandon import abandon_sync_on_exit
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import validate_name
@@ -503,6 +504,11 @@ async def _sync_mcp_servers_core(project_root: Path) -> dict:
     except McpServerPrivacyError as exc:
         raise SyncPhaseError(
             422, str(exc), error_kind="validation", reason_code="privacy_blocked"
+        ) from exc
+    except ProjectEntryRelinked as exc:
+        # The message names the project-relative entry only, never its target.
+        raise SyncPhaseError(
+            409, str(exc), error_kind="validation", reason_code="project_entry_relinked"
         ) from exc
     return {
         "generated": [

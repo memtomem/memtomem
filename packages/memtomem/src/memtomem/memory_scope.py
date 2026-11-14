@@ -718,6 +718,51 @@ def entry_is_link(entry: Path) -> bool:
     return stat_mod.S_ISLNK(mode) or entry.is_junction()
 
 
+class ProjectEntryRelinked(ValueError):
+    """A project path memtomem would write through, or copy from, is a link.
+
+    ``entry`` is the linked entry, relative to the project root and spelled
+    with forward slashes. The message names only that entry: the link's
+    target can sit anywhere, and a web response must not carry it.
+    """
+
+    def __init__(self, entry: str) -> None:
+        self.entry = entry
+        super().__init__(
+            f"{entry} is a symbolic link or junction inside the project; memtomem does not "
+            "write through it or copy from it. Replace it with a regular directory or file "
+            "to continue."
+        )
+
+
+def relinked_project_entry(project_root: Path, rel: Path, *, judge_leaf: bool) -> str | None:
+    """The first entry of ``project_root / rel`` that is a link, or ``None``.
+
+    The entries are judged one by one with :func:`entry_is_link`, from the
+    first component of ``rel`` down to its parent, and the last component too
+    when ``judge_leaf`` is set: a writer that replaces its file atomically
+    swaps a link at the leaf for a regular file, while one that opens the file
+    in place writes through it. Where a link points does not matter. Nothing
+    at or above ``project_root`` is judged; that part of the path belongs to
+    the machine, not to the checkout. The answer is the entry relative to
+    ``project_root`` with forward slashes.
+    """
+    if rel.is_absolute() or rel.anchor or ".." in rel.parts or not rel.parts:
+        raise ValueError(f"not a path inside the project: {rel.as_posix()!r}")
+    parts = rel.parts if judge_leaf else rel.parts[:-1]
+    for depth in range(1, len(parts) + 1):
+        if entry_is_link(project_root.joinpath(*parts[:depth])):
+            return Path(*parts[:depth]).as_posix()
+    return None
+
+
+def refuse_relinked_project_entry(project_root: Path, rel: Path, *, judge_leaf: bool) -> None:
+    """Raise :class:`ProjectEntryRelinked` when :func:`relinked_project_entry` finds one."""
+    entry = relinked_project_entry(project_root, rel, judge_leaf=judge_leaf)
+    if entry is not None:
+        raise ProjectEntryRelinked(entry)
+
+
 def is_project_tier_registered(target_dir: Path, project_memory_dirs) -> bool:
     """``True`` iff ``target_dir`` is in the resolved registered set.
 

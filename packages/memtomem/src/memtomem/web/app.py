@@ -280,6 +280,26 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
         msg = re.sub(r"(?:[A-Za-z]:)?(?:[/\\][\w.\-]+){2,}", "<path>", str(exc))
         return JSONResponse(status_code=400, content={"detail": msg})
 
+    # A project runtime path that is a link inside the project (GHSA-ffh4
+    # follow-up): an operational conflict the user resolves by replacing the
+    # link. More specific than ``ValueError`` (its base), so this handler is
+    # the one Starlette picks. The message carries only the project-relative
+    # entry, never where the link points.
+    from memtomem.memory_scope import ProjectEntryRelinked
+
+    @app.exception_handler(ProjectEntryRelinked)
+    async def project_entry_relinked_handler(
+        request: Request, exc: ProjectEntryRelinked
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": str(exc),
+                "entry": exc.entry,
+                "reason_code": "project_entry_relinked",
+            },
+        )
+
     # An unusable-but-loadable configuration (e.g. empty
     # ``indexing.memory_dirs``, #1768) is an operational conflict, not an
     # internal defect — surface the field-naming message with 409, matching
