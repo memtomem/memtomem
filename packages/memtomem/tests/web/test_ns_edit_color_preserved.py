@@ -1,9 +1,11 @@
 """Browser tests: the namespace edit form sends ``color`` only when the user
-changed it (#3116).
+changed it or pressed Reset (#3116).
 
 An ``<input type="color">`` only holds ``#rrggbb``, so the browser rewrites a
-stored ``#abc`` to ``#aabbcc`` (and a 5-digit value to ``#000000``). Saving
-only the description must therefore leave ``color`` out of the PATCH body.
+stored ``#abc`` to ``#aabbcc``, and a stored value that is not a CSS hex color
+(``#12345``, ``blue``) is shown as the default gray. Saving only the
+description must therefore leave ``color`` out of the PATCH body, and Reset
+must clear a color even when the input already shows gray.
 """
 
 from __future__ import annotations
@@ -106,6 +108,64 @@ def test_reset_clears_the_stored_color(page) -> None:
     with _dev_web_server() as base_url:
         _open_edit_form(page, base_url)
         page.locator("#ns-list .ns-edit-reset-color").click()
+        page.locator("#ns-list .ns-edit-save").click()
+        page.wait_for_selector(".toast-success", timeout=5_000)
+
+    assert patches == [{"description": "old", "color": ""}]
+
+
+@pytest.mark.parametrize("stored", ["#12345", "#808080", "blue"])
+def test_reset_clears_a_color_the_input_already_shows_as_gray(page, stored: str) -> None:
+    patches: list[dict] = []
+    _install_stubs(page, patches, stored=stored)
+
+    with _dev_web_server() as base_url:
+        _open_edit_form(page, base_url)
+        assert page.locator("#ns-list .ns-edit-color").input_value() == "#808080"
+        page.locator("#ns-list .ns-edit-reset-color").click()
+        page.locator("#ns-list .ns-edit-save").click()
+        page.wait_for_selector(".toast-success", timeout=5_000)
+
+    assert patches == [{"description": "old", "color": ""}]
+
+
+def test_description_only_save_keeps_a_stored_five_digit_value(page) -> None:
+    patches: list[dict] = []
+    _install_stubs(page, patches, stored="#12345")
+
+    with _dev_web_server() as base_url:
+        _open_edit_form(page, base_url)
+        page.locator("#ns-list .ns-edit-desc").fill("new")
+        page.locator("#ns-list .ns-edit-save").click()
+        page.wait_for_selector(".toast-success", timeout=5_000)
+
+    assert patches == [{"description": "new"}]
+
+
+def test_picking_a_color_after_reset_sends_the_picked_color(page) -> None:
+    patches: list[dict] = []
+    _install_stubs(page, patches)
+
+    with _dev_web_server() as base_url:
+        _open_edit_form(page, base_url)
+        page.locator("#ns-list .ns-edit-reset-color").click()
+        page.locator("#ns-list .ns-edit-color").fill("#112233")
+        page.locator("#ns-list .ns-edit-save").click()
+        page.wait_for_selector(".toast-success", timeout=5_000)
+
+    assert patches == [{"description": "old", "color": "#112233"}]
+
+
+@pytest.mark.parametrize("stored", ["#12345", "#808080"])
+def test_picking_gray_clears_even_when_the_form_opened_on_gray(page, stored: str) -> None:
+    patches: list[dict] = []
+    _install_stubs(page, patches, stored=stored)
+
+    with _dev_web_server() as base_url:
+        _open_edit_form(page, base_url)
+        page.locator("#ns-list .ns-edit-reset-color").click()
+        page.locator("#ns-list .ns-edit-color").fill("#112233")
+        page.locator("#ns-list .ns-edit-color").fill("#808080")
         page.locator("#ns-list .ns-edit-save").click()
         page.wait_for_selector(".toast-success", timeout=5_000)
 

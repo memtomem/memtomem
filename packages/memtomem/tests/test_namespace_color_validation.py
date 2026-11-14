@@ -1,4 +1,5 @@
-"""Namespace colors are stored only as ``#`` + 3-8 hex digits (#3109).
+"""Namespace colors are stored only as ``#`` + 3, 4, 6 or 8 hex digits
+(#3109, #3116).
 
 The Web UI interpolates ``ns.color`` into ``style`` and ``value`` attributes,
 so the value is validated where every writer lands
@@ -28,10 +29,13 @@ from test_validate_namespace import _StubCtx
 
 _STATIC = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / "static"
 
-ACCEPTED = ["#abc", "#ABCD", "#a1b2c3", "#AbCdEf12", "#12345"]
+ACCEPTED = ["#abc", "#ABCD", "#a1b2c3", "#AbCdEf12"]
 REJECTED = [
     "blue",
     "#12",
+    # 5 and 7 digits are not CSS colors: a browser draws nothing for them.
+    "#12345",
+    "#1234567",
     "#123456789",
     "abc",
     "#abc\n",
@@ -54,8 +58,9 @@ def test_validator_passes_none_and_empty_through(color: str | None) -> None:
 
 @pytest.mark.parametrize("color", [*REJECTED, 123])
 def test_validator_rejects_everything_else(color: object) -> None:
-    with pytest.raises(ValueError, match="Invalid namespace color"):
+    with pytest.raises(ValueError, match="Invalid namespace color") as excinfo:
         validate_namespace_color(color)
+    assert "3, 4, 6 or 8 hex digits" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("color", [*ACCEPTED, *REJECTED, ""])
@@ -81,18 +86,20 @@ def test_spa_fallback_uses_the_same_pattern() -> None:
 
 
 class TestStorageRefusesBeforeWriting:
-    async def test_invalid_color_leaves_an_existing_row_unchanged(self, storage) -> None:
+    @pytest.mark.parametrize("bad", ['"><b>', "#12345", "#1234567"])
+    async def test_invalid_color_leaves_an_existing_row_unchanged(self, storage, bad) -> None:
         await storage.set_namespace_meta("proj", description="d", color="#123456")
 
         with pytest.raises(ValueError, match="Invalid namespace color"):
-            await storage.set_namespace_meta("proj", description="new", color='"><b>')
+            await storage.set_namespace_meta("proj", description="new", color=bad)
 
         meta = await storage.get_namespace_meta("proj")
         assert (meta["description"], meta["color"]) == ("d", "#123456")
 
-    async def test_invalid_color_creates_no_row(self, storage) -> None:
+    @pytest.mark.parametrize("bad", ["red", "#12345", "#1234567"])
+    async def test_invalid_color_creates_no_row(self, storage, bad) -> None:
         with pytest.raises(ValueError):
-            await storage.set_namespace_meta("fresh", color="red")
+            await storage.set_namespace_meta("fresh", color=bad)
 
         assert await storage.get_namespace_meta("fresh") is None
 
@@ -104,24 +111,28 @@ class TestStorageRefusesBeforeWriting:
 
 
 class TestMcpSurfaces:
-    async def test_mem_ns_update_returns_an_error_and_stores_nothing(self, components) -> None:
+    @pytest.mark.parametrize("bad", ['"><img src=x onerror=alert(1)>', "#12345"])
+    async def test_mem_ns_update_returns_an_error_and_stores_nothing(self, components, bad) -> None:
         ctx = _StubCtx(AppContext.from_components(components))
 
         out = await mem_ns_update(
             namespace="proj",
-            color='"><img src=x onerror=alert(1)>',
+            color=bad,
             ctx=ctx,  # type: ignore[arg-type]
         )
 
         assert out.startswith("Error:") and "Invalid namespace color" in out
         assert await components.storage.get_namespace_meta("proj") is None
 
-    async def test_mem_agent_register_returns_an_error_and_stores_nothing(self, components) -> None:
+    @pytest.mark.parametrize("bad", ["red", "#1234567"])
+    async def test_mem_agent_register_returns_an_error_and_stores_nothing(
+        self, components, bad
+    ) -> None:
         ctx = _StubCtx(AppContext.from_components(components))
 
         out = await mem_agent_register(
             agent_id="alpha",
-            color="red",
+            color=bad,
             ctx=ctx,  # type: ignore[arg-type]
         )
 
