@@ -1,4 +1,4 @@
 name: "memtomem-memory"
-version: "0.2.0"
+version: "0.2.1"
 description: "memtomem memory provider: injects relevant long-term memories on each turn through Hermes's own memtomem MCP connection, and can mirror Hermes's built-in memory writes into memtomem (opt-in)."
 requires_hermes: ">=0.21.5"

@@ -5,6 +5,12 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
 
 ## [Unreleased]
 
+### Changed
+
+- **Requires `memtomem>=0.7.9,<0.8`** (was `>=0.7.4,<0.8`). The store passes the
+  `bm25_path_fallback` and `chunk_source_labels` options to `create_components`, which
+  memtomem 0.7.9 adds; against an earlier memtomem the store would fail to open.
+
 ### Fixed
 
 - BM25 no longer matches every item for a query whose words match no value but name a word of
