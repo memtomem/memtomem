@@ -43,6 +43,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   is held rather than indexed through. A cancelled session end waits for its write to finish
   before releasing the lock. An index call that finds the summary's directory missing still
   skips the lock (#3345).
+- **The hook settings fan-out and the Web UI's settings conflict resolve now run the write
+  guard (#3343).** `mm context sync --include=settings` (and `generate`, the Web UI sync and
+  Sync All) copied `.memtomem/settings.json` into each runtime's settings file without
+  scanning it, so a rule that reached the canonical by a hand edit or a merge, rather than
+  through copy, migrate or promote, was written out unchecked. Resolving a conflict with
+  memtomem's version did the same for one rule. The fan-out now scans the canonical file as
+  written, before the first target, and again as each target re-reads it; resolve scans the
+  rule it writes. The skills, commands, agents and MCP server fan-outs already did this
+  (ADR-0011 §5). The canonical is itself tracked by git, so the copies exposed nothing it had
+  not already exposed; the change makes settings refuse like the other fan-outs.
 
 ### Security
 
@@ -70,15 +80,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   LangGraph and LangChain stores. Stored content is unchanged; the copies are only scanned.
   Content stored before this release is not re-scanned until you run `mm mem rescan` or
   `mm context rescan`. YAML `\x` and TOML `\U` escapes are not resolved.
-- **The hook settings fan-out and the Web UI's settings conflict resolve now run the write
-  guard (#3343).** `mm context sync --include=settings` (and `generate`, the Web UI sync and
-  Sync All) copied `.memtomem/settings.json` into each runtime's
-  settings file without scanning it, so a rule that reached the canonical by a hand edit or a
-  merge, rather than through copy, migrate or promote, was written out unchecked. Resolving a
-  conflict with memtomem's version did the same for one rule. The fan-out now scans the
-  canonical file as written, before the first target, and again as each target re-reads it;
-  resolve scans the rule it writes. The skills, commands, agents and MCP server fan-outs
-  already did this (ADR-0011 §5).
 
 ## [0.7.9] — 2026-11-14
 
