@@ -849,7 +849,18 @@ def _print_duplicate_tier_warnings(root: Path, *, scope: str) -> None:
 
 def _print_settings_generate(root: Path, *, scope: str, allow_host_writes: bool) -> None:
     _print_duplicate_tier_warnings(root, scope=scope)
-    results = generate_all_settings(root, scope=scope, allow_host_writes=allow_host_writes)
+    try:
+        results = generate_all_settings(
+            root,
+            scope=scope,
+            allow_host_writes=allow_host_writes,
+            surface="cli_context_settings_sync",
+        )
+    except PrivacyScanError as exc:
+        # Gate A refused the canonical before any target was written (#3343).
+        # ``--force-unsafe`` is deliberately not threaded here: the canonical is
+        # tracked by git whatever the target tier, so there is no valve.
+        raise click.ClickException(exc.message) from exc
     for name, r in results.items():
         if r.status == "ok":
             click.secho(f"  Settings: {name} → {scrub_text(str(r.target))}", fg="green")

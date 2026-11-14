@@ -297,6 +297,21 @@ project_shared, the sync write is blocked regardless of `--force-unsafe`.
 > stay unscanned by design: not git-tracked, gated by
 > `allow_host_writes`, and still subject to the sync-time valve.
 
+> **2026-11 (#3343):** the hook settings fan-out (`generate_all_settings`)
+> and the web conflict resolve now take the fan-out chokepoint above; both
+> wrote canonical-derived hook rules into runtime settings files unscanned.
+> The settings canonical has one tier, `project_shared`, so both scan with
+> that scope and no valve whatever `hooks.target_scope` names. The fan-out
+> scans the canonical's text — the buffer it parses, so a shadowed duplicate
+> key is still seen — before the first target that would take a lock, then
+> again on each target's under-lock reread; a hit at the second point means
+> the canonical changed mid-sync, so targets already written stay written and
+> the rest are refused. Resolve scans the `{event: [rule]}` fragment it writes,
+> as promote does. Not every canonical-derived runtime write scans:
+> `settings-migrate` reads the canonical to build target rules but keeps its
+> documented private-target exemption (below), and rule deletion adds no
+> content.
+
 **Gate B (surface).** Explicit `--scope project_shared` flag plus
 confirm prompt at the CLI/MCP write surface (`mm add`,
 `mm context init`, `mm context migrate --to project_shared`). The flag must be passed

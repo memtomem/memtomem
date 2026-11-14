@@ -434,6 +434,13 @@ them out:
   only — the Web UI has no Project (local) write surface (its write routes
   reject that tier before any privacy check).
 
+Hook settings are the exception to the tier rules. Their source,
+`.memtomem/settings.json`, is tracked by git whatever `hooks.target_scope` is, so a
+settings sync (CLI, Web UI, Sync All) refuses a detected secret anywhere in that
+file for every target tier, with no override. Resolving a hook conflict with
+memtomem's version refuses the same way when the rule it would write has one.
+Remove the secret from `.memtomem/settings.json`, then sync again.
+
 The override flag has two spellings, one per direction: `mm context sync
 --force-unsafe` (Store → runtimes) and `mm context init --force-unsafe-import`
 (existing runtime files being pulled into the Store). Both follow the tier
