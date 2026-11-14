@@ -10,7 +10,10 @@ memtomem leaves the working tree for the user to resolve.
 
 from __future__ import annotations
 
+import random
+import re
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -334,10 +337,50 @@ class TestRedactUrlUserinfo:
             ("https://example.com/p?email=a@b", "https://example.com/p?email=a@b"),
             ("https://user@example.com/p?x=a@b", "https://example.com/p?x=a@b"),
             ("https://us:p@ss@host?q=a@b", "https://host?q=a@b"),
+            # A scheme run that starts with digits or ``+.-``: the scheme still
+            # starts at the run's first letter, and the prefix is kept.
+            ("+https://u:p@host/r", "+https://host/r"),
+            ("1https://u:p@host/r", "1https://host/r"),
+            ("x1https://u:p@host/r", "x1https://host/r"),
+            ("a.b-c+d://tok@host", "a.b-c+d://host"),
+            ("see:https://u:p@host", "see:https://host"),
         ],
     )
     def test_redacts(self, raw: str, expected: str) -> None:
         assert _redact_url_userinfo(raw) == expected
+
+    @pytest.mark.parametrize(
+        ("prefix", "run"),
+        [("", "a"), ("", "a1"), ("", "+a"), ("", "1"), ("x://", "b")],
+        ids=["letters", "letter-digit", "plus-letter", "digits", "authority-without-at"],
+    )
+    def test_long_scheme_character_runs_are_linear(self, prefix: str, run: str) -> None:
+        """A long run of scheme characters with no ``://`` (git output can carry
+        one) is scanned once, not once per position. Timed as the best of
+        several runs and compared between two sizes, so a slow machine does not
+        decide it: linear is about 8x for 8x the input, quadratic about 64x."""
+
+        def best(n: int) -> float:
+            text = prefix + run * (n // len(run))
+            times = []
+            for _ in range(7):
+                start = time.perf_counter()
+                _redact_url_userinfo(text)
+                times.append(time.perf_counter() - start)
+            return min(times)
+
+        assert best(80_000) / best(10_000) < 30
+
+    def test_matches_the_unanchored_expression(self) -> None:
+        """The anchor changes how the engine searches, not what it replaces:
+        on random strings over URL-ish characters the result equals that of
+        the expression before the anchor."""
+        unanchored = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/?#\s]*@")
+        rng = random.Random(7)
+        alphabet = "aB1+.-:/@ ?#x"
+        for _ in range(20_000):
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 24)))
+            assert _redact_url_userinfo(text) == unanchored.sub(r"\1", text), text
 
     def test_redacts_within_free_text(self) -> None:
         text = "fatal: unable to access 'https://tok@github.com/r.git/': Could not resolve host"
