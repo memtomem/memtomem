@@ -82,9 +82,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **Narrower inputs and defaults.** Shell recall, the procedures list and Find Similar hide
   system namespaces unless you ask for them (#3117). Registering a schedule refuses a `params`
   key the job does not take (#3247). A credential written next to CJK text is refused by the
-  write guard where it used to pass; stored notes are not rescanned (#3298). A Notion ZIP whose
-  member names carry a root, a drive, a colon or an all-dots part is refused on every platform
-  (#3299). `GET /api/timeline` answers 422 for unparseable namespace syntax (#3288).
+  write guard where it used to pass; stored notes are not rescanned (#3298). The LangGraph
+  stores refuse a value whose strings hold a secret only their JSON form hid (#3300). A Notion
+  ZIP whose member names carry a root, a drive, a colon or an all-dots part is refused on every
+  platform (#3299). `GET /api/timeline` answers 422 for unparseable namespace syntax (#3288).
   `ContextInfo(ranked_siblings=..., related_chunks=...)` raises `TypeError` (#3004). Each has
   its entry below.
 - **`memtomem[onnx]` now requires `fastembed>=0.9.1` and `pillow>=13`, and the potion models
@@ -564,6 +565,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   checks. A request that names no origin still passes, a hostname named with
   `--trusted-origin` passes on every port, and paths outside `/api/` are not gated, as before.
   See Upgrading for proxies.
+- **The LangGraph stores' write guard now reads the strings inside a value as they are
+  stored (#3300).** `MemtomemBaseStore` (0.3.9 through 0.7.8) and `MemtomemHybridStore`
+  (0.6.0 through 0.7.8) scanned a value only in its JSON-serialized form, where `"` reads
+  `\"` and a newline reads `\n`. A rule that needs a literal quote or whitespace, such as the
+  quoted-label rule (`{"password": "…"}` inside a string) or a PEM header split across lines,
+  then did not match, and the store kept and returned the string verbatim: in every scope,
+  `project_shared` included, and without `force_unsafe`. Provider-prefixed tokens were still
+  caught. Both guards now also scan every key and string of the value raw
+  (`privacy.value_scan_parts`), so such a write is refused, or with `force_unsafe` outside
+  `project_shared` written as before. `MemtomemBaseStore` now separates the parts it scans
+  the way the hybrid store does, so a label in one identifier no longer pairs with the next
+  identifier. Records written before this release are not re-scanned.
 - **`mem_import_notion` no longer writes a ZIP member outside the output directory on
   Windows (#3299).** From 0.3.6 through 0.7.8 the member-name check asked only whether the
   name was absolute on the host or had a `..` part. On Windows a name with a root but no
