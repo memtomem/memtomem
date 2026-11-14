@@ -52,6 +52,31 @@ def _valid_index(index: Any) -> bool:
     )
 
 
+def _value_scan_parts(value: Any) -> list[str]:
+    """Every dict key and string inside a JSON value, raw, in a fixed order.
+
+    A copy of ``memtomem.privacy.value_scan_parts``, so the guard does not need
+    a memtomem release that has it; ``test_lcmm_record_guard.py`` holds the two
+    to the same output. The serialized form shows each string JSON-escaped, so
+    a rule that needs a literal quote or whitespace would miss a secret the
+    record stores and returns verbatim. Order: a dict's keys sorted, each
+    followed by its value; a list's items in order.
+    """
+    parts: list[str] = []
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            parts.append(node)
+        elif isinstance(node, dict):
+            for key in sorted(node, key=str, reverse=True):
+                stack.append(node[key])
+                stack.append(key)
+        elif isinstance(node, list):
+            stack.extend(reversed(node))
+    return parts
+
+
 def _namespace_matches(namespace: tuple[str, ...], condition: MatchCondition) -> bool:
     path = tuple(condition.path)
     if len(path) > len(namespace):
@@ -135,9 +160,10 @@ class RecordStore:
     ) -> PreparedRecord:
         """Validate a value and run the record guard. Writes nothing.
 
-        The guard scans the serialized value, every namespace segment, the key
-        and the selectors, as ``MemtomemBaseStore`` does: a secret in any of
-        them is refused before the first write of the ``put``.
+        The guard scans the serialized value, every key and string inside it
+        raw, every namespace segment, the key and the selectors, as
+        ``MemtomemBaseStore`` does: a secret in any of them is refused before
+        the first write of the ``put``.
         """
         if not isinstance(value, dict):
             raise ValueError("Store value must be a JSON object")
@@ -146,8 +172,16 @@ class RecordStore:
         index = list(index) if isinstance(index, list) else index
         if not _valid_index(index):
             raise ValueError("index must be a boolean, None, or string selectors")
-        scan_text = "\n".join(
-            [serialized, *namespace, key, *(index if isinstance(index, list) else [])]
+        # The separator is not whitespace, so a label in one part cannot pair
+        # with the next.
+        scan_text = "\n---\n".join(
+            [
+                serialized,
+                *_value_scan_parts(normalized),
+                *namespace,
+                key,
+                *(index if isinstance(index, list) else []),
+            ]
         )
         guard = privacy.enforce_write_guard(
             scan_text,

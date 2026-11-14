@@ -241,6 +241,13 @@ repo forever," so the bypass valve does not belong here.
 > supply the persisted record and its indexes even if an embedding callback
 > changes the original selectors or value.
 >
+> **2026-11 (#3300):** the same escaping hides a quoted credential in a string
+> *inside* the value, which the store persists and returns verbatim. The record
+> guards of `MemtomemHybridStore`, `MemtomemBaseStore` and langchain-memtomem's
+> `RecordStore` now also scan every key and string of the decoded value raw
+> (`privacy.value_scan_parts`), and all three join scan parts with the same
+> non-whitespace separator.
+>
 > This is a whole-operation refusal, never redaction or renaming of a routing
 > key. A clean value cannot make a sensitive identifier safe: callers must
 > remove the credential from that identifier or choose a private destination
