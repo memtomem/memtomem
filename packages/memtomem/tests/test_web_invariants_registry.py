@@ -30,11 +30,15 @@ Pattern lineage: ``feedback_ast_architectural_guard_pattern.md``
 from __future__ import annotations
 
 import ast
+import functools
 import re
 import textwrap
 from pathlib import Path
 
 import pytest
+from fastapi.routing import APIRoute
+
+from memtomem.web.app import create_app
 
 from .helpers import CTX_GATEWAY_JS_FILES
 
@@ -42,6 +46,7 @@ ROUTES_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / "static"
 
 _UNSAFE_DECORATOR_METHODS = frozenset({"post", "patch", "put", "delete"})
+_UNSAFE_HTTP_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
 
 
 # --- CSRF registry ---------------------------------------------------------
@@ -102,6 +107,9 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "decay.expire_old_chunks",
         "dedup.merge_duplicates",
         "export.import_memories",
+        "namespaces.delete_namespace",
+        "namespaces.rename_namespace",
+        "namespaces.update_metadata",
         "quality.promote_quality_case",
         "quality.run_quality_replay",
         "scratch.delete_scratch",
@@ -207,6 +215,7 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_commands.delete_command": "delete-only, no payload",
     "context_projects.delete_known_project": "delete-only, no payload",
     "context_skills.delete_skill": "delete-only, no payload",
+    "namespaces.delete_namespace": "delete-only, no payload",
     "scratch.delete_scratch": "delete-only, no payload",
     "search_runs.save_search_feedback": (
         "body is IDs echoed from prior server output plus a closed-vocabulary "
@@ -339,6 +348,16 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "tags.rename_tag": "tags are short labels; rewrites existing chunk metadata only",
     "tags.delete_tag": "tags are short labels; rewrites existing chunk metadata only",
     "tags.merge_tags": "tags are short labels; rewrites existing chunk metadata only",
+    # Namespace admin / cosmetic metadata (ADR-0005 / ADR-0007 / #3303).
+    # Rename moves existing chunks without introducing new user prose; metadata
+    # update stores description/color in the namespace metadata table without
+    # writing to LTM chunks.
+    "namespaces.rename_namespace": (
+        "namespace rename moves existing chunks; no new prose content persisted"
+    ),
+    "namespaces.update_metadata": (
+        "namespace metadata (description/color) stored in metadata table, not written to LTM chunks"
+    ),
     # Maintenance / control plane: no user-supplied content.
     "decay.expire_old_chunks": "control plane; operates on existing chunks",
     "dedup.merge_duplicates": "operates on existing chunks; redaction "
@@ -381,44 +400,54 @@ _REDACTION_EXEMPT: dict[str, str] = {
 }
 
 
-# --- AST walk --------------------------------------------------------------
+# --- Route discovery -------------------------------------------------------
 
 
+@functools.cache
 def _iter_unsafe_route_handlers() -> list[tuple[str, str, str]]:
     """Return ``(module, function, http_method)`` for every unsafe handler.
 
     "Unsafe" here is the CSRF / RFC sense: ``POST``/``PATCH``/``PUT``/
-    ``DELETE``. The walk is purely AST-based so the test never imports
-    the FastAPI app — that keeps it fast and decouples it from runtime
-    component wiring (storage, embedder, etc.). A function is reported
-    once even if it has multiple ``@router`` decorators (e.g. legacy +
-    new path), since the registry classifies the *handler*, not the URL.
+    ``DELETE``. Handlers are discovered from the route table registered on
+    the FastAPI app across both ``prod`` and ``dev`` modes, ensuring that
+    every state-changing endpoint actually exposed by the server under
+    ``web/routes/`` is classified — whether registered via ``@router``, a
+    non-standard router variable (e.g. ``@admin_router``), or
+    ``router.add_api_route(...)`` (#3303).
+
+    A function is reported once even if it is registered on multiple paths
+    or with multiple HTTP methods, since the registry classifies the
+    *handler*, not the URL.
     """
     handlers: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for path in sorted(ROUTES_DIR.glob("*.py")):
-        if path.name.startswith("_") or path.name == "__init__.py":
-            continue
-        module = path.stem
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+
+    def _walk_routes(routes):
+        for r in routes:
+            if isinstance(r, APIRoute):
+                yield r
+            elif hasattr(r, "original_router"):
+                yield from _walk_routes(r.original_router.routes)
+            elif hasattr(r, "routes"):
+                yield from _walk_routes(r.routes)
+
+    for mode in ("prod", "dev"):
+        app = create_app(lifespan=None, mode=mode)
+        for route in _walk_routes(app.routes):
+            unsafe_methods = route.methods & _UNSAFE_HTTP_METHODS
+            if not unsafe_methods:
                 continue
-            for deco in node.decorator_list:
-                if not (isinstance(deco, ast.Call) and isinstance(deco.func, ast.Attribute)):
-                    continue
-                func = deco.func
-                if not (
-                    isinstance(func.value, ast.Name)
-                    and func.value.id == "router"
-                    and func.attr in _UNSAFE_DECORATOR_METHODS
-                ):
-                    continue
-                key = (module, node.name)
-                if key in seen:
-                    continue
-                seen.add(key)
-                handlers.append((module, node.name, func.attr.upper()))
+            mod = getattr(route.endpoint, "__module__", "")
+            if not mod.startswith("memtomem.web.routes."):
+                continue
+            module_name = mod.removeprefix("memtomem.web.routes.")
+            func_name = route.endpoint.__name__
+            key = (module_name, func_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            handlers.append((module_name, func_name, sorted(unsafe_methods)[0]))
+
     return handlers
 
 
@@ -761,7 +790,7 @@ def _source_scans_and_refuses(
 def test_csrf_classification_covers_every_unsafe_route() -> None:
     """Every unsafe-method route under ``web/routes/`` is classified."""
     handlers = _iter_unsafe_route_handlers()
-    assert handlers, "AST walk found no @router.{post,patch,put,delete} handlers"
+    assert handlers, "Found no unsafe-method route handlers"
 
     seen = {f"{m}.{f}" for m, f, _ in handlers}
     classified = _CSRF_PROTECTED | _CSRF_EXEMPT.keys()
@@ -782,6 +811,24 @@ def test_csrf_classification_covers_every_unsafe_route() -> None:
                 "renamed or removed):\n  - " + "\n  - ".join(stale)
             )
         pytest.fail("\n\n".join(msg))
+
+
+def test_unsafe_route_discovery_sees_non_standard_router_and_add_api_route() -> None:
+    """Discovery sees handlers registered via non-standard routers and add_api_route (#3303)."""
+    handlers = _iter_unsafe_route_handlers()
+    seen = {f"{m}.{f}": method for m, f, method in handlers}
+
+    # Registered with router.add_api_route(..., methods=["PATCH"]) in namespaces_read.py
+    assert "namespaces.update_metadata" in seen
+    assert seen["namespaces.update_metadata"] == "PATCH"
+
+    # Registered with @admin_router.post in namespaces.py
+    assert "namespaces.rename_namespace" in seen
+    assert seen["namespaces.rename_namespace"] == "POST"
+
+    # Registered with @admin_router.delete in namespaces.py
+    assert "namespaces.delete_namespace" in seen
+    assert seen["namespaces.delete_namespace"] == "DELETE"
 
 
 def test_preview_namespace_spa_uses_csrf_protected_post() -> None:
