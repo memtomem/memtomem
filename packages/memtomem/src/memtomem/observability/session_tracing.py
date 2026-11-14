@@ -204,8 +204,8 @@ def _redact_value(val: Any) -> Any:
                         continue
                 else:
                     merged.append([start, end])
-                if index in BOUNDED_VALUE_RULES:
-                    end = _TOKEN_RUN.match(val, end).end()
+                if index in BOUNDED_VALUE_RULES and (run := _TOKEN_RUN.match(val, end)):
+                    end = run.end()
                 merged[-1][1] = max(merged[-1][1], end)
             # Replace from right to left so earlier spans keep their indexes.
             for start, end in reversed(merged):

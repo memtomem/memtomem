@@ -117,11 +117,11 @@ _JWT_RULE = (
 # character. ``re.ASCII`` is not the fix: ``\s`` and ``(?i)`` are
 # Unicode-aware on purpose, and an ideographic space between a label and its
 # ``=`` has to keep matching.
-#: Printable ASCII a URL's user / password may hold in the userinfo rule below:
+#: Printable ASCII the userinfo rule below allows before and after the ``:``:
 #: no whitespace, string quotes (``"'`` and backtick) or ``/?#@``, and no ``:``
 #: in the user.
-_URL_USER = r"[\x21\x24-\x26\x28-\x2E\x30-\x39\x3B-\x3E\x41-\x5F\x61-\x7E]"
-_URL_PASS = r"[\x21\x24-\x26\x28-\x2E\x30-\x3E\x41-\x5F\x61-\x7E]"
+_URL_BEFORE_COLON = r"[\x21\x24-\x26\x28-\x2E\x30-\x39\x3B-\x3E\x41-\x5F\x61-\x7E]"
+_URL_AFTER_COLON = r"[\x21\x24-\x26\x28-\x2E\x30-\x3E\x41-\x5F\x61-\x7E]"
 
 DEFAULT_PATTERNS: tuple[str, ...] = (
     r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]",
@@ -320,20 +320,20 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     # one is not.
     (
         r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]{0,30}://"
-        + _URL_USER
+        + _URL_BEFORE_COLON
         + r"{0,256}:"
         + r"(?!(?:<"
-        + _URL_PASS
+        + _URL_AFTER_COLON
         + r"{0,256}>|\$\{"
-        + _URL_PASS
+        + _URL_AFTER_COLON
         + r"{0,256}\}"
         + r"|\$[A-Za-z_][A-Za-z0-9_]{0,256}|\{\{"
-        + _URL_PASS
+        + _URL_AFTER_COLON
         + r"{0,256}\}\}|\*{1,256})@)"
         + r"(?="
-        + _URL_PASS
+        + _URL_AFTER_COLON
         + r"{0,255}[0-9])"
-        + _URL_PASS
+        + _URL_AFTER_COLON
         + r"{8,256}@"
     ),
     # OAuth and API-key labels the older rules do not name, quoted or not.
