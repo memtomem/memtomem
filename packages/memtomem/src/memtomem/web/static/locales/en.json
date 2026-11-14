@@ -1496,6 +1496,7 @@
   "toast.settings_reset": "Settings reset to defaults",
   "toast.ns_updated": "Namespace updated",
   "toast.ns_description_redaction_blocked": "Description not saved: it matches {hits} secret-like pattern(s). Remove the secret and save again.",
+  "toast.ns_description_redaction_blocked_label": "Description not saved: it has a credential label before ':' or '=' (such as 'password:' or 'api_key='). Reword it, for example 'password rotation', and save again. A real credential does not belong in a description.",
   "toast.search_removed": "Search removed from saved",
   "toast.config_saved": "Config saved",
   "toast.fts_rebuilt": "FTS index rebuilt ({count} chunks).",

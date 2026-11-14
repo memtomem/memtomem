@@ -162,6 +162,11 @@ That is the point — it is how the note stays searchable — but it means the
 declaration should describe why the file needs it, and only files that really
 document the patterns should carry one.
 
+A namespace description has neither the declaration nor `--force-unsafe`: a
+description that trips a label rule is refused, and the refusal names the label
+wording so it can be reworded (see
+[Namespace metadata](organization-maintenance.md#namespace-metadata)).
+
 See [ADR-0006](../../adr/0006-web-ui-folder-upload-redaction.md) (Axis E,
 Axis E.5) for the full trust-boundary design.
 

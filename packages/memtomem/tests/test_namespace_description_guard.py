@@ -5,6 +5,10 @@ Four surfaces set it: the web PATCH, MCP ``mem_ns_update`` and
 ``storage.set_namespace_meta``, which scans a non-empty description before any
 DB work and raises ``RedactionBlockedError``; each surface's existing error
 path renders the refusal. There is no bypass valve: a description is a label.
+
+The two unquoted label rules also match prose that names a credential without
+holding one (#3354). The refusal stands, and when every hit is one of those
+rules the error says what to reword.
 """
 
 from __future__ import annotations
@@ -27,6 +31,11 @@ from test_validate_namespace import _StubCtx
 
 # Built at runtime so the source holds no credential-shaped literal.
 SECRET = "deploy token sk-" + "a" * 30
+# Prose and a credential that the guard cannot tell apart: same rule, one hit.
+LABEL_PROSE = "set password: rotate monthly"
+LABEL_VALUE = "hunter" + "22"
+LABEL_CREDENTIAL = "password=" + LABEL_VALUE + " for staging"
+HINT = RedactionBlockedError.LABEL_HINT
 
 
 @pytest.fixture(autouse=True)
@@ -79,6 +88,77 @@ class TestStorage:
         expected = "d" if description is None else ""
         assert (await storage.get_namespace_meta("proj"))["description"] == expected
 
+    @pytest.mark.parametrize(
+        "description",
+        [
+            LABEL_PROSE,
+            LABEL_CREDENTIAL,
+            "api_key: stored in the vault",
+            # The spellings the hint and the docs name: whitespace before the
+            # separator, a label inside a longer word, a JSON-style escape.
+            "password = rotate monthly",
+            "mypassword: rotate monthly",
+            "monkeypwd=1",
+            "password\\t= rotate monthly",
+        ],
+    )
+    async def test_a_label_only_refusal_says_what_to_reword(self, storage, description) -> None:
+        with pytest.raises(RedactionBlockedError) as excinfo:
+            await storage.set_namespace_meta("proj", description=description, surface="s")
+
+        assert excinfo.value.label_only is True
+        assert str(excinfo.value) == (
+            f"Namespace description matches {excinfo.value.hits} privacy pattern(s); "
+            f"not saved. {HINT}"
+        )
+        assert await storage.get_namespace_meta("proj") is None
+        assert (_counts("s")["blocked"], _counts("s")["pass"]) == (1, 0)
+
+    async def test_the_hint_does_not_echo_the_value_after_the_label(self, storage) -> None:
+        with pytest.raises(RedactionBlockedError) as excinfo:
+            await storage.set_namespace_meta("proj", description=LABEL_CREDENTIAL)
+
+        assert LABEL_VALUE not in str(excinfo.value)
+        assert "staging" not in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "description",
+        [
+            SECRET,
+            # All-or-nothing: one hit outside the label rules drops the hint.
+            f"{LABEL_PROSE}; {SECRET}",
+            # The quoted-JSON label rule is not one of the two.
+            'config {"password": "' + LABEL_VALUE + '"}',
+        ],
+    )
+    async def test_any_other_hit_gets_no_hint(self, storage, description) -> None:
+        with pytest.raises(RedactionBlockedError) as excinfo:
+            await storage.set_namespace_meta("proj", description=description)
+
+        assert excinfo.value.label_only is False
+        assert str(excinfo.value) == (
+            f"Namespace description matches {excinfo.value.hits} privacy pattern(s); not saved"
+        )
+
+    async def test_the_reword_the_hint_suggests_is_accepted(self, storage) -> None:
+        assert "'password rotation' instead of 'password: rotation'" in HINT
+
+        with pytest.raises(RedactionBlockedError) as excinfo:
+            await storage.set_namespace_meta("proj", description="password: rotation")
+        assert excinfo.value.label_only is True
+
+        await storage.set_namespace_meta("proj", description="password rotation")
+        assert (await storage.get_namespace_meta("proj"))["description"] == "password rotation"
+
+    @pytest.mark.parametrize("example", ["password:", "api_key="])
+    async def test_each_label_the_hint_names_is_a_label_only_hit(self, storage, example) -> None:
+        assert f"'{example}'" in HINT
+
+        with pytest.raises(RedactionBlockedError) as excinfo:
+            await storage.set_namespace_meta("proj", description=f"notes {example} see vault")
+
+        assert excinfo.value.label_only is True
+
 
 class TestWeb:
     async def test_a_secret_answers_the_redaction_payload_and_stores_nothing(
@@ -95,12 +175,31 @@ class TestWeb:
                 "detail": "redaction_blocked",
                 "hits": resp.json()["detail"]["hits"],
                 "surface": "web_api_namespace_update",
+                "label_only": False,
             }
         }
         assert resp.json()["detail"]["hits"] >= 1
         assert "sk-" not in resp.text
         assert (await components.storage.get_namespace_meta("proj"))["description"] == "old"
         assert _counts("web_api_namespace_update")["blocked"] == 1
+
+    async def test_a_label_only_refusal_is_flagged_in_the_payload(self, components) -> None:
+        async with _web_client(components) as client:
+            resp = await client.patch(
+                "/api/namespaces/proj", json={"description": LABEL_CREDENTIAL}
+            )
+
+        assert resp.status_code == 403, resp.text
+        assert resp.json() == {
+            "detail": {
+                "detail": "redaction_blocked",
+                "hits": 1,
+                "surface": "web_api_namespace_update",
+                "label_only": True,
+            }
+        }
+        assert LABEL_VALUE not in resp.text
+        assert await components.storage.get_namespace_meta("proj") is None
 
     async def test_a_clean_description_saves(self, components) -> None:
         async with _web_client(components) as client:
@@ -140,6 +239,23 @@ class TestMcp:
         assert await components.storage.get_namespace_meta("shared") is None
         assert _counts("mem_agent_register")["blocked"] == 1
 
+    async def test_mem_agent_register_tells_an_agent_what_to_reword(self, components) -> None:
+        ctx = _StubCtx(AppContext.from_components(components))
+
+        out = await mem_agent_register(agent_id="alpha", description=LABEL_PROSE, ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error:") and out.endswith(HINT), out
+        assert await components.storage.get_namespace_meta("agent-runtime:alpha") is None
+        assert await components.storage.get_namespace_meta("shared") is None
+
+    async def test_mem_ns_update_tells_an_agent_what_to_reword(self, components) -> None:
+        ctx = _StubCtx(AppContext.from_components(components))
+
+        out = await mem_ns_update(namespace="proj", description=LABEL_PROSE, ctx=ctx)  # type: ignore[arg-type]
+
+        assert out.startswith("Error:") and out.endswith(HINT), out
+        assert await components.storage.get_namespace_meta("proj") is None
+
     async def test_mem_agent_register_saves_a_clean_description(self, components) -> None:
         ctx = _StubCtx(AppContext.from_components(components))
 
@@ -177,13 +293,17 @@ class TestCli:
         assert "storage" not in privacy.snapshot()["by_tool"]
 
 
-def test_cli_register_reports_the_refusal_as_an_error_exit(monkeypatch) -> None:
+@pytest.mark.parametrize("label_only", [False, True])
+def test_cli_register_reports_the_refusal_as_an_error_exit(monkeypatch, label_only) -> None:
     """The refusal is pinned on real storage above; this pins that the command
-    turns it into a non-zero exit with the count, not a traceback."""
+    turns it into a non-zero exit with the count, not a traceback, and that
+    the label hint reaches the terminal when the refusal carries it."""
     from contextlib import asynccontextmanager
 
     def refuse(ns, description=None, color=None, *, surface="storage"):
-        raise RedactionBlockedError("Namespace description", hits=2, surface=surface)
+        raise RedactionBlockedError(
+            "Namespace description", hits=2, surface=surface, label_only=label_only
+        )
 
     storage = SimpleNamespace(
         set_namespace_meta=AsyncMock(side_effect=refuse),
@@ -200,5 +320,7 @@ def test_cli_register_reports_the_refusal_as_an_error_exit(monkeypatch) -> None:
 
     assert result.exit_code != 0
     assert "Namespace description matches 2 privacy pattern(s); not saved" in result.output
+    # Click may wrap the message, so compare with the whitespace collapsed.
+    assert (HINT in " ".join(result.output.split())) is label_only
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert storage.set_namespace_meta.await_args.kwargs["surface"] == "cli_agent_register"

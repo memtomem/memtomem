@@ -43,6 +43,17 @@ mem_ns_list()
 mem_ns_update(namespace="work", description="Company project docs", color="#3B82F6")
 ```
 
+The description is scanned by the write guard on every surface that sets it
+(`mem_ns_update`, `mem_agent_register`, `mm agent register --description`, the
+Web UI's edit form), and there is no bypass for it. Two of the guard's rules
+match a credential label before `:` or `=` whatever follows, so
+`description="set password: rotate monthly"` is refused although it holds no
+credential. Spaces before the separator (`password = …`), a label inside a
+longer word (`mypassword:`) and a JSON-style escape (`password\t=`) match too.
+The refusal names the label wording; reword the description, for example
+`password rotation`. The rules are described under
+[Documenting the patterns in a note](core-memory-tools.md#documenting-the-patterns-in-a-note).
+
 ### Rename and delete
 
 ```

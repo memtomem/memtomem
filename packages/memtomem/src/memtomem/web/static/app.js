@@ -434,7 +434,7 @@ async function csrfFetch(url, options = {}, { withToken = false } = {}) {
 // SPA parses it via ``api()`` below and surfaces a confirm-and-retry UX
 // through ``apiWithRedactionRetry()``. Issue #785.
 class RedactionBlockedError extends Error {
-  constructor({ hits, surface, scope }) {
+  constructor({ hits, surface, scope, labelOnly }) {
     super('redaction_blocked');
     this.name = 'RedactionBlockedError';
     this.hits = hits;
@@ -443,6 +443,9 @@ class RedactionBlockedError extends Error {
     // on surfaces that do not report one — callers must treat undefined as
     // "unknown", never as "not shared".
     this.scope = scope;
+    // True when every hit was a label rule (``password:``, ``api_key=``).
+    // Only the namespace description route reports it; undefined elsewhere.
+    this.labelOnly = labelOnly;
   }
 }
 
@@ -503,6 +506,7 @@ async function api(method, path, body, opts = {}) {
         hits: err.detail.hits,
         surface: err.detail.surface,
         scope: err.detail.scope,
+        labelOnly: err.detail.label_only,
       });
     }
     if (
