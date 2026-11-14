@@ -35,7 +35,7 @@ from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.background import track_task
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
-from memtomem.server.helpers import _set_config_key
+from memtomem.server.helpers import _set_config_key, mcp_saved_fields
 from memtomem.secret_masking import is_secret_key, mask_secrets
 from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources, source_state
 
@@ -1410,13 +1410,16 @@ class _PersistRefused(Exception):
 def _save_or_restore(config: Mem2MemConfig, snapshot: _ConfigSectionSnapshot | None) -> SaveReceipt:
     """Save the runtime config, restoring *snapshot* if the save fails.
 
+    Writes only the sections MCP may change (:func:`mcp_saved_fields`), so the
+    file keeps its own ``session_trace`` settings.
+
     Timeouts and validation failures become :class:`_PersistRefused` with the
     message ``mem_config`` returns; anything else propagates after the restore.
     """
     from memtomem.config import save_config_overrides
 
     try:
-        return save_config_overrides(config)
+        return save_config_overrides(config, mcp_saved_fields())
     except Exception as e:
         if snapshot is not None:
             snapshot.restore()
