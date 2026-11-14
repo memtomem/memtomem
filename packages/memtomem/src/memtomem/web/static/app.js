@@ -377,10 +377,13 @@ async function ensureCsrfToken() {
   finally { if (_csrfTokenPromise === pending) _csrfTokenPromise = null; }
 }
 
-async function csrfFetch(url, options = {}) {
+// ``withToken`` attaches the token to a safe-method request as well: the
+// server records a search (history, access counts, a run id) only when the
+// request carries it, so a page elsewhere cannot write those records.
+async function csrfFetch(url, options = {}, { withToken = false } = {}) {
   const unsafe = _UNSAFE_METHODS.has((options.method || 'GET').toUpperCase());
   let token = '';
-  if (unsafe) {
+  if (unsafe || withToken) {
     token = await ensureCsrfToken();
     // Preserve plain objects, Headers and tuple lists. Normalize iterable
     // forms through Headers so repeated names retain fetch's merge semantics.
@@ -395,7 +398,18 @@ async function csrfFetch(url, options = {}) {
     if (token) options.headers['X-Memtomem-CSRF'] = token;
   }
   const res = await fetch(url, options);
-  if (!unsafe || res.status !== 403) return res;
+  if (!unsafe) {
+    // The server answered but did not record: the token it was sent is not the
+    // current one (it restarted since this page fetched it). Fetch the current
+    // token and send the read once more; the first one recorded nothing.
+    if (!token || res.headers?.get?.('X-Memtomem-CSRF-Stale') !== '1') return res;
+    if (_csrfToken === token) _csrfToken = null;
+    const fresh = await ensureCsrfToken();
+    if (!fresh || fresh === token) return res;
+    options.signal?.throwIfAborted();
+    return fetch(url, { ...options, headers: { ...options.headers, 'X-Memtomem-CSRF': fresh } });
+  }
+  if (res.status !== 403) return res;
   // Inspect a clone: other refusals retain their original response body for
   // the caller's privacy/consent/permission handling.
   if (typeof res.clone !== 'function') return res;
@@ -466,13 +480,18 @@ function formatProjectTierBlockedToast(err) {
   return lines.join('\n');
 }
 
+// Reads the server records only when they carry the CSRF token (``GET
+// /api/search``); ``api()`` sends it on them unless the caller says otherwise.
+const _RECORDED_READS = /^\/api\/search(\?|$)/;
+
 async function api(method, path, body, opts = {}) {
   if (typeof opts !== 'object' || Array.isArray(opts)) opts = {};
   const fetchOpts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body !== undefined) fetchOpts.body = JSON.stringify(body);
   if (opts.signal) fetchOpts.signal = opts.signal;
   else fetchOpts.signal = AbortSignal.timeout(opts.timeout ?? 30_000);
-  const res = await csrfFetch(API + path, fetchOpts);
+  const withToken = opts.withToken ?? _RECORDED_READS.test(path);
+  const res = await csrfFetch(API + path, fetchOpts, { withToken });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     if (

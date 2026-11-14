@@ -130,6 +130,28 @@ def _own_origin(request: Request) -> tuple[str, str, int | None] | None:
     return _origin_of(f"{request.url.scheme}://{request.headers.get('host', '')}")
 
 
+def request_carries_csrf_token(request: Request) -> bool:
+    """Whether ``request`` carries this process's CSRF token.
+
+    The middleware asks it of every unsafe method. A safe-method route whose
+    answer is harmless to give but which also records something (a search's
+    history) asks it to decide whether to record.
+    """
+    expected = getattr(request.app.state, "csrf_token", None)
+    if not expected:
+        # If the app has no token configured (degraded startup),
+        # don't pretend the check passed — flag it so the observe
+        # log surfaces a misconfiguration rather than silent success.
+        return False
+    provided = request.headers.get("X-Memtomem-CSRF")
+    if not provided:
+        return False
+    # Compare bytes: Starlette decodes header values as latin-1, and
+    # ``compare_digest`` raises ``TypeError`` on a non-ASCII ``str`` rather
+    # than reporting the mismatch. ``latin-1`` restores the bytes as sent.
+    return secrets.compare_digest(provided.encode("latin-1"), expected.encode())
+
+
 class CSRFGuardMiddleware(BaseHTTPMiddleware):
     """Observe-mode CSRF / Origin / Host guard.
 
@@ -203,19 +225,7 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _check_token(request: Request) -> bool:
-        expected = getattr(request.app.state, "csrf_token", None)
-        if not expected:
-            # If the app has no token configured (degraded startup),
-            # don't pretend the check passed — flag it so the observe
-            # log surfaces a misconfiguration rather than silent success.
-            return False
-        provided = request.headers.get("X-Memtomem-CSRF")
-        if not provided:
-            return False
-        # Compare bytes: Starlette decodes header values as latin-1, and
-        # ``compare_digest`` raises ``TypeError`` on a non-ASCII ``str`` rather
-        # than reporting the mismatch. ``latin-1`` restores the bytes as sent.
-        return secrets.compare_digest(provided.encode("latin-1"), expected.encode())
+        return request_carries_csrf_token(request)
 
     @staticmethod
     def _check_origin(request: Request) -> bool:

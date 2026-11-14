@@ -99,6 +99,30 @@ describe('api() helper — CSRF token bootstrap', () => {
     }
   });
 
+  it('GET /api/search carries the token, so the server records the search', async () => {
+    await window.api('GET', '/api/search?q=falcon');
+
+    expect(calls.filter(c => c.url === '/api/session')).toHaveLength(1);
+    const search = calls.find(c => c.url.startsWith('/api/search?'));
+    expect(search.method).toBe('GET');
+    expect(search.headers['X-Memtomem-CSRF']).toBe('srv-token-XYZ');
+  });
+
+  it('other GETs, /api/search/runs included, still send no token', async () => {
+    await window.api('GET', '/api/search/runs?limit=50');
+    await window.api('GET', '/api/stats');
+
+    expect(calls.filter(c => c.url === '/api/session')).toHaveLength(0);
+    for (const c of calls) expect(c.headers['X-Memtomem-CSRF']).toBeUndefined();
+  });
+
+  it('a caller can opt a search out of the token', async () => {
+    await window.api('GET', '/api/search?q=x', undefined, { withToken: false });
+
+    const search = calls.find(c => c.url.startsWith('/api/search?'));
+    expect(search.headers['X-Memtomem-CSRF']).toBeUndefined();
+  });
+
   it('POST gracefully degrades when /api/session fails', async () => {
     sessionResponseStatus = 'fail';
     await window.api('POST', '/echo', { foo: 1 });
@@ -109,5 +133,79 @@ describe('api() helper — CSRF token bootstrap', () => {
     // will still log the would_block event; PR2 enforcement will 403
     // and the api() error path surfaces it as a normal HTTP error.
     expect(echoCall.headers['X-Memtomem-CSRF']).toBeUndefined();
+  });
+});
+
+describe('api() helper — a search whose token went stale', () => {
+  let window;
+  let calls;
+  let sessionTokens;
+
+  beforeEach(async () => {
+    const dom = await bootApp({ scripts: ['i18n.js', 'app.js'] });
+    window = dom.window;
+    calls = [];
+    sessionTokens = ['tok-A', 'tok-B'];
+    window.fetch = async function fetchSpy(input, init) {
+      const url = typeof input === 'string' ? input : input?.url;
+      const headers = init?.headers ? { ...init.headers } : {};
+      calls.push({ url, method: init?.method || 'GET', headers });
+      if (url === '/api/session') {
+        const csrf = sessionTokens.shift();
+        return { ok: true, status: 200, json: async () => ({ csrf, mode: 'prod' }) };
+      }
+      // The server restarted: it holds tok-B now, so tok-A is not recorded.
+      const stale = url.startsWith('/api/search?') && headers['X-Memtomem-CSRF'] === 'tok-A';
+      return {
+        ok: true,
+        status: 200,
+        headers: new window.Headers(stale ? { 'X-Memtomem-CSRF-Stale': '1' } : {}),
+        json: async () => ({ results: [], token: headers['X-Memtomem-CSRF'] }),
+      };
+    };
+  });
+
+  it('fetches the current token and searches once more', async () => {
+    const data = await window.api('GET', '/api/search?q=falcon');
+
+    const searches = calls.filter(c => c.url.startsWith('/api/search?'));
+    expect(searches.map(c => c.headers['X-Memtomem-CSRF'])).toEqual(['tok-A', 'tok-B']);
+    expect(calls.filter(c => c.url === '/api/session')).toHaveLength(2);
+    expect(data.token).toBe('tok-B');
+
+    // The fresh token is cached: the next search sends it straight away.
+    await window.api('GET', '/api/search?q=again');
+    const again = calls.filter(c => c.url.startsWith('/api/search?q=again'));
+    expect(again.map(c => c.headers['X-Memtomem-CSRF'])).toEqual(['tok-B']);
+  });
+
+  it('sends the search again at most once, even if that answer is stale too', async () => {
+    // Every token is refused as stale: one resend, then the answer is returned.
+    sessionTokens = ['tok-A', 'tok-A2', 'tok-A3'];
+    const realFetch = window.fetch;
+    window.fetch = async (input, init) => {
+      const res = await realFetch(input, init);
+      const url = typeof input === 'string' ? input : input?.url;
+      if (!url.startsWith('/api/search?')) return res;
+      return { ...res, headers: new window.Headers({ 'X-Memtomem-CSRF-Stale': '1' }) };
+    };
+
+    await window.api('GET', '/api/search?q=falcon');
+
+    expect(calls.filter(c => c.url.startsWith('/api/search?'))).toHaveLength(2);
+  });
+
+  it('does not send it again when the refreshed token is the same one', async () => {
+    sessionTokens = ['tok-A', 'tok-A'];
+    await window.api('GET', '/api/search?q=falcon');
+
+    expect(calls.filter(c => c.url.startsWith('/api/search?'))).toHaveLength(1);
+  });
+
+  it('does not search again when the answer is not marked stale', async () => {
+    sessionTokens = ['tok-B'];
+    await window.api('GET', '/api/search?q=falcon');
+
+    expect(calls.filter(c => c.url.startsWith('/api/search?'))).toHaveLength(1);
   });
 });

@@ -104,7 +104,10 @@ def test_searchByTag_does_not_pollute_search_input(page, mm_web_url: str) -> Non
     # selector. The ``foo`` pill is positioned by deterministic hash
     # rotation, so explicit visibility/stable-position waiting via the
     # data-tag selector is the right hook.
-    page.locator('.tag-cloud-item[data-tag="foo"]').click()
+    # The search goes out after the CSRF token is fetched (the server records a
+    # search only with it), so wait for the request rather than for the field.
+    with page.expect_request(lambda r: "/api/search?" in r.url, timeout=5_000):
+        page.locator('.tag-cloud-item[data-tag="foo"]').click()
 
     page.wait_for_function(
         "() => document.getElementById('tag-filter').value === 'foo'",

@@ -150,7 +150,13 @@ async def env(bm25_only_components, tmp_path_factory, monkeypatch):
     app = _web_app(comp)
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
-        resp = await client.get("/api/search", params={"q": "alpha"})
+        # With the token, as the UI sends it: only then is the search recorded
+        # and a run id returned.
+        resp = await client.get(
+            "/api/search",
+            params={"q": "alpha"},
+            headers={"X-Memtomem-CSRF": app.state.csrf_token},
+        )
         run_id = resp.json()["query_run_id"]
         await comp.search_pipeline.flush_observation()
         detail = (await client.get(f"/api/search/runs/{run_id}")).json()

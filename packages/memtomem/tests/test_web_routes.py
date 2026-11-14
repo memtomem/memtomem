@@ -1278,8 +1278,14 @@ class TestSearch:
         run_id = "e38ab6c7-4db4-4d68-8dca-93c1da2dcfe6"
         app.state.search_pipeline.search.return_value[1].query_run_id = run_id
 
-        resp = await client.get("/api/search", params={"q": "hello world"})
+        # Only a search that carries the token is recorded and given a run id.
+        resp = await client.get(
+            "/api/search",
+            params={"q": "hello world"},
+            headers={"X-Memtomem-CSRF": app.state.csrf_token},
+        )
 
+        assert app.state.search_pipeline.search.call_args.kwargs["record"] is True
         assert resp.status_code == 200
         assert resp.json()["query_run_id"] == run_id
         assert resp.json()["retrieval_stats"]["query_run_id"] == run_id
