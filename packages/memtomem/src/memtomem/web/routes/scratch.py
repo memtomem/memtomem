@@ -160,6 +160,22 @@ async def promote_scratch(
             raise HTTPException(
                 status_code=403, detail="Path is outside configured memory directories"
             )
+        # Promotion writes to the user tier, and the guard above ran for it. A
+        # tier registered inside a memory directory is another tier with its
+        # own gates (a project_shared file is tracked by git and refuses
+        # ``force_unsafe``), so a file there is refused, as on ``/api/add``.
+        from memtomem.memory_scope import explicit_target_tier_refusal
+        from memtomem.web.routes.system_indexing import _web_scope_hint
+
+        tier_err = explicit_target_tier_refusal(
+            target,
+            "user",
+            memory_dirs=config.indexing.memory_dirs,
+            project_memory_dirs=config.indexing.project_memory_dirs,
+            scope_hint=lambda tier: f"POST /api/add and {_web_scope_hint(tier)}",
+        )
+        if tier_err is not None:
+            raise HTTPException(status_code=422, detail=tier_err)
     else:
         from memtomem.memory_scope import MemoryScopeError, require_user_base, resolve_scope_target
 
