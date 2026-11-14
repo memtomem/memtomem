@@ -474,7 +474,33 @@ function renderImportResult(data) {
   return html;
 }
 
-async function _ctxErrorMessageFromResponse(resp, fallback) {
+// Reason text for one settings sync result row. A row refused because the
+// canonical .memtomem/settings.json changed to a secret-bearing one mid-sync
+// carries ``reason_code: 'privacy_blocked'`` and gets the localized hint
+// instead of the server's English reason (#3343).
+function _ctxSettingsRowReason(row) {
+  if (row && row.reason_code === 'privacy_blocked') {
+    return t('settings.ctx.privacy_blocked_settings_hint');
+  }
+  return (row && row.reason) || '';
+}
+
+// Reason text for a failed phase of the ``/context/sync-all`` report. Only the
+// settings phase is localized here; other phases keep the server message. A
+// settings phase fails in two shapes: an ``error`` envelope (refused before
+// any write) or, with no envelope, ``error`` result rows (refused mid-sync).
+function _ctxSyncAllPhaseReason(phase, fallback) {
+  const error = phase && phase.error;
+  if (phase && phase.type === 'settings') {
+    const rows = Array.isArray(phase.results) ? phase.results : [];
+    const privacyBlocked = (error && error.reason_code === 'privacy_blocked')
+      || rows.some((row) => row && row.reason_code === 'privacy_blocked');
+    if (privacyBlocked) return t('settings.ctx.privacy_blocked_settings_hint');
+  }
+  return (error && error.message) || fallback;
+}
+
+async function _ctxErrorMessageFromResponse(resp, fallback, type) {
   const contentType = resp.headers.get('content-type') || '';
   if (contentType.includes('application/json')) {
     const err = await resp.json().catch(() => ({}));
@@ -484,7 +510,11 @@ async function _ctxErrorMessageFromResponse(resp, fallback) {
     // way the per-row Sync button does (``_ctxSyncErrToast``), instead of
     // surfacing the raw locale-unaware English ``detail``.
     if (err && err.reason_code === 'privacy_blocked') {
-      return t('settings.ctx.privacy_blocked_shared_sync_hint');
+      // The settings source is always the git-tracked canonical, whatever the
+      // target tier, so the "shared push" wording would be wrong for it (#3343).
+      return type === 'settings'
+        ? t('settings.ctx.privacy_blocked_settings_hint')
+        : t('settings.ctx.privacy_blocked_shared_sync_hint');
     }
     const detail = err.detail;
     // Defensive branch for structured payloads shaped like `{detail: "..."}`

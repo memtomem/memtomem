@@ -22,6 +22,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   from search) until a clean index; a new file is simply not indexed. In `mm mem rescan` and
   `mm context rescan` JSON output, a span at or past the content's length points into a
   resolved copy (see the operations guide).
+- **A settings sync refuses a canonical `.memtomem/settings.json` that holds a credential, at
+  every target tier (#3343).** The canonical is tracked by git whatever `hooks.target_scope`
+  is, so there is no `--force-unsafe` valve, including for `user` and `project_local`
+  targets that synced before. The check covers the whole file, keys the fan-out does not copy
+  (such as a top-level `env`) included. Remove the text from the canonical, then sync again.
+  Nothing is written when the refusal comes first; if the canonical changes to a refused one
+  during a sync, targets already written stay written and the rest report `error`.
 
 ### Fixed
 
@@ -36,6 +43,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   is held rather than indexed through. A cancelled session end waits for its write to finish
   before releasing the lock. An index call that finds the summary's directory missing still
   skips the lock (#3345).
+- **The hook settings fan-out and the Web UI's settings conflict resolve now run the write
+  guard (#3343).** `mm context sync --include=settings` (and `generate`, the Web UI sync and
+  Sync All) copied `.memtomem/settings.json` into each runtime's settings file without
+  scanning it, so a rule that reached the canonical by a hand edit or a merge, rather than
+  through copy, migrate or promote, was written out unchecked. Resolving a conflict with
+  memtomem's version did the same for one rule. The fan-out now scans the canonical file as
+  written, before the first target, and again as each target re-reads it; resolve scans the
+  rule it writes. The skills, commands, agents and MCP server fan-outs already did this
+  (ADR-0011 §5). The canonical is itself tracked by git, so the copies exposed nothing it had
+  not already exposed; the change makes settings refuse like the other fan-outs.
 
 ### Security
 

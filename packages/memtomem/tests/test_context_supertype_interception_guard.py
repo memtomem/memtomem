@@ -1613,6 +1613,11 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "no_recovery_callee",
         "settings json read; " + _NONSKILL,
     ),
+    ("context/settings.py", "_load_canonical_settings", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "canonical settings read kept for the Gate A scan; " + _NONSKILL,
+    ),
     ("context/settings.py", "_read_settings_target", ("OSError",), 0): (
         _U,
         "no_recovery_callee",
