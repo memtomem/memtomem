@@ -7,6 +7,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Upgrading
 
+- **memtomem now requires `opentelemetry-api>=1.45.2`.** The package was already installed
+  with `mcp`; the floor is new (see Security). An environment that holds OpenTelemetry at
+  an older version no longer resolves with memtomem until that pin moves. That includes a
+  pin on the SDK, which requires the API at exactly its own version:
+  `opentelemetry-sdk==1.45.1` needs `opentelemetry-api==1.45.1`.
 - **The write guard refuses a credential hidden by JSON-style escaping (#3300).** A write,
   index or sync that passed before can now be refused when resolving `\"`, `\n`, `\t` or
   `\uXXXX` in its text completes a rule: a JSON note or file holding `{"password": "…"}` in a
@@ -20,6 +25,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **Upgrading memtomem now upgrades opentelemetry-api to the fix for
+  [GHSA-mf5v-w3w3-f6cg](https://osv.dev/vulnerability/GHSA-mf5v-w3w3-f6cg).** 0.7.9 moved the
+  lockfile to 1.45.2, but memtomem did not declare the package (it comes with `mcp`, which
+  accepts 1.28.0 and later), so an upgrade that did not re-resolve every dependency, such as
+  `pip install -U memtomem`, could keep 1.45.1: the case 0.7.9's Upgrading section describes.
+  memtomem now requires `opentelemetry-api>=1.45.2`, so any install that resolves 0.7.10 or
+  later gets a fixed release, and the release's artifact check refuses to publish a build
+  whose metadata lacks that floor. `mm upgrade` already reinstalled with a refreshed index;
+  for it the floor changes nothing.
 - **Every write guard now also reads its input with JSON-style escapes resolved (#3300).**
   The guard scanned the text it was given. In a JSON file, or a JSON string inside other
   text, a quote reads `\"`, a newline `\n`, and any character can be `\uXXXX`, so the
