@@ -23,10 +23,16 @@ Back up, restore, and ingest memories; inspect and change settings; and the full
 > [Stability](../../../README.md#stability).
 
 ```
-mem_export(output_file="~/backup.json")
-mem_export(output_file="~/work-backup.json", namespace="work")
-mem_export(output_file="~/recent.json", since="2026-03-01")
+mem_export(output_file="backup.json")
+mem_export(output_file="work-backup.json", namespace="work")
+mem_export(output_file="recent.json", since="2026-03-01")
 ```
+
+`output_file` is a file name, not a path: the bundle is written to
+`~/.memtomem/exports/` and the result names the full path. The name may use
+ASCII letters, digits, `.`, `_` and `-`; a path such as `~/backup.json` is
+refused, and so is an `exports` directory that is a symbolic link. Copy the
+bundle elsewhere yourself if you want it there.
 
 Exports chunks with content, metadata, and tags as a JSON bundle, together with
 the links between them (`mem_link` relations and the `consolidated_into` edges
@@ -46,11 +52,11 @@ is a comment and not part of the value; see
 ### Restore
 
 ```
-mem_import(input_file="~/backup.json")                                # skip duplicates (default)
-mem_import(input_file="~/backup.json", namespace="imported")
-mem_import(input_file="~/backup.json", on_conflict="update")          # overwrite metadata
-mem_import(input_file="~/backup.json", on_conflict="duplicate")       # add distinct keys; skip occupied keys
-mem_import(input_file="~/backup.json", preserve_ids=True)             # keep bundle UUIDs
+mem_import(input_file="~/.memtomem/exports/backup.json")                           # skip duplicates (default)
+mem_import(input_file="~/.memtomem/exports/backup.json", namespace="imported")
+mem_import(input_file="~/.memtomem/exports/backup.json", on_conflict="update")     # overwrite metadata
+mem_import(input_file="~/.memtomem/exports/backup.json", on_conflict="duplicate")  # add distinct keys; skip occupied keys
+mem_import(input_file="~/.memtomem/exports/backup.json", preserve_ids=True)        # keep bundle UUIDs
 ```
 
 Import re-embeds chunks using the current model. New exports use memory bundle

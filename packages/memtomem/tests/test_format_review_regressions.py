@@ -193,13 +193,17 @@ async def test_self_relations_omitted_and_reported_without_losing_valid_data(
 async def test_mcp_export_reports_omitted_self_edges(storage, tmp_path, monkeypatch):
     from memtomem.server.tools import export_import as tools
 
+    from .helpers import set_home
+
+    set_home(monkeypatch, tmp_path / "home")
+
     c = Chunk("ordinary", ChunkMetadata(source_file=tmp_path / "n.md"))
     await storage.upsert_chunks([c])
     await storage.add_relation(c.id, c.id)
     monkeypatch.setattr(
         tools, "_get_app_initialized", AsyncMock(return_value=SimpleNamespace(storage=storage))
     )
-    result = await tools.mem_export(output_file=str(tmp_path / "export.json"))
+    result = await tools.mem_export(output_file="export.json")
     assert "1 self-relation(s) omitted" in result
 
 

@@ -171,6 +171,65 @@ class ImportPrivacyError(Exception):
 # ---------------------------------------------------------------------------
 
 
+#: Where an MCP export is written (ADR-0006 Axis G, as amended): memtomem's own
+#: directory, not a caller-chosen path. Expanded at call time.
+EXPORT_DIR = Path("~/.memtomem/exports")
+
+
+class ExportTargetError(ValueError):
+    """An MCP ``output_file`` that does not name a file in :data:`EXPORT_DIR`."""
+
+
+def resolve_export_target(output_file: str) -> Path:
+    """Return the path an MCP export named ``output_file`` is written to.
+
+    ``output_file`` must be a bare file name in ADR-0037's portable grammar
+    (ASCII letters, digits, ``.``, ``_``, ``-``; no leading hyphen, no trailing
+    dot, no Windows device name). One grammar on every platform excludes
+    separators, drive-relative ``C:x`` names, alternate data streams, spaces
+    and NUL alike. A bundle written over a file a program executes, such as a
+    shell startup file, runs the note text inside it, so the caller does not
+    choose the directory.
+
+    The export directory must be a real directory: through a link at it, a
+    bare name would land wherever the link points. Links above it are the
+    user's own layout and are followed. The check is made when the path is
+    chosen; a link put there before the write is not seen.
+
+    Raises :class:`ExportTargetError` with a message for the caller.
+    """
+    from memtomem.context.bundle import _MAX_SEGMENT_CHARS, _RESERVED_DEVICE_WORDS, _SEGMENT_RE
+    from memtomem.memory_scope import entry_is_link
+
+    export_dir = EXPORT_DIR.expanduser()
+    name = output_file
+    if (
+        not _SEGMENT_RE.fullmatch(name)
+        or name in (".", "..")
+        or name.startswith("-")
+        or name.endswith(".")
+        or name.lower().split(".", 1)[0] in _RESERVED_DEVICE_WORDS
+    ):
+        raise ExportTargetError(
+            f"output_file must be a file name, not a path: it is written to {export_dir}. "
+            f"Use ASCII letters, digits, '.', '_' and '-' (at most {_MAX_SEGMENT_CHARS} "
+            "characters), for example 'backup.json'."
+        )
+
+    def check_dir() -> None:
+        if entry_is_link(export_dir):
+            raise ExportTargetError(
+                f"{export_dir} is a link; exports are written only to a real directory there."
+            )
+        if export_dir.exists() and not export_dir.is_dir():
+            raise ExportTargetError(f"{export_dir} exists and is not a directory.")
+
+    check_dir()
+    export_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    check_dir()
+    return export_dir / name
+
+
 async def export_chunks(
     storage: SqliteBackend,
     output_path: Path | None = None,
