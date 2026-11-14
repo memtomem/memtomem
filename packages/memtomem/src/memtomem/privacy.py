@@ -706,6 +706,81 @@ def value_scan_parts(value: object) -> list[str]:
     return parts
 
 
+_HEX = "[0-9a-fA-F]"
+# One escape sequence, matched left to right so ``\\n`` reads as an escaped
+# backslash followed by ``n``. A high+low surrogate pair is tried before a
+# single ``\uXXXX`` so the pair becomes one character.
+_ESCAPE_RE = re.compile(
+    rf"\\(?:u([dD][89abAB]{_HEX}{{2}})\\u([dD][c-fC-F]{_HEX}{{2}})"
+    rf"|u({_HEX}{{4}})"
+    r'|(["\\/bfnrt]))'
+)
+_SIMPLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+_ESCAPE_PASSES = 2
+VIEW_SEPARATOR = "\n---\n"
+
+
+def _resolve_escape(match: re.Match[str]) -> str:
+    high, low, single, simple = match.groups()
+    if simple is not None:
+        return _SIMPLE_ESCAPES[simple]
+    if high is not None:
+        code = 0x10000 + ((int(high, 16) - 0xD800) << 10) + (int(low, 16) - 0xDC00)
+        return chr(code)
+    code = int(single, 16)
+    # A lone surrogate cannot be encoded; leave it spelled out.
+    return match.group(0) if 0xD800 <= code <= 0xDFFF else chr(code)
+
+
+def escape_views(text: str) -> list[str]:
+    """``text``, then up to two copies with JSON-style escape sequences resolved.
+
+    A JSON file, a JSON string inside a header or a shell command inside a
+    JSON string spells ``"`` as ``\\"``, a newline as ``\\n`` and any
+    character as ``\\uXXXX``. Rules that need a literal quote or whitespace
+    (the quoted-label rule, a PEM header split across lines) miss that
+    spelling, while whoever reads the file decodes it. Each view resolves
+    one level of ``\\"``, ``\\\\``, ``\\/``, ``\\b``, ``\\f``, ``\\n``,
+    ``\\r``, ``\\t`` and ``\\uXXXX``; a lone surrogate stays escaped and
+    any other ``\\X`` is left as is. A view keeps the text's structure, so a
+    key and its value stay side by side; nothing is parsed.
+
+    The views exist only to be scanned. Join them with
+    :data:`VIEW_SEPARATOR`, which is not whitespace, so a match cannot run
+    from the end of one view into the next.
+    """
+    views = [text]
+    current = text
+    for _ in range(_ESCAPE_PASSES):
+        if "\\" not in current:
+            break
+        resolved = _ESCAPE_RE.sub(_resolve_escape, current)
+        if resolved == current:
+            break
+        views.append(resolved)
+        current = resolved
+    return views
+
+
+def scan_with_escape_views(text: str) -> list[RedactionHit]:
+    """:func:`scan` over ``text`` and its :func:`escape_views`.
+
+    A hit's span is an offset into ``VIEW_SEPARATOR.join(escape_views(text))``:
+    one at or past ``len(text)`` lies in a view, not in ``text``. The same
+    secret can be counted once per view it appears in.
+    """
+    return scan(VIEW_SEPARATOR.join(escape_views(text)))
+
+
 def _jwt_old_start(text: str, start: int, floor: int) -> int:
     """Where ``_JWT_RULE_OLD`` began the match ``_JWT_RULE`` began at ``start``.
 
@@ -791,8 +866,11 @@ class WriteGuardResult:
     """Outcome of a single ``enforce_write_guard`` call.
 
     ``decision`` is one of ``_VALID_OUTCOMES``. ``hits`` is the raw
-    ``scan()`` result so callers can size-quote it in user-facing
-    errors (length only, never the matched bytes).
+    :func:`scan_with_escape_views` result so callers can size-quote it in
+    user-facing errors (length only, never the matched bytes). Spans are
+    offsets into the content joined with its escape views, so a span at or
+    past the content's length points into a view, and one secret can be
+    counted once per view.
     """
 
     decision: str
@@ -814,14 +892,14 @@ def sanitize_audit_value(value: object) -> object:
     leak it through the log line.
 
     Non-string values (``None``, ``int``, ``bool``) pass through. Strings
-    are re-scanned with the same ``DEFAULT_PATTERNS`` used for content;
+    are re-scanned the way the guard scans content, escape views included;
     any hit replaces the value entirely with a fixed marker, and very
     long strings are truncated so a multi-megabyte path can't blow up
     the audit line either.
     """
     if not isinstance(value, str):
         return value
-    if scan(value):
+    if scan_with_escape_views(value):
         return _AUDIT_REDACTED_MARKER
     if len(value) > _AUDIT_VALUE_MAX_LEN:
         return value[:_AUDIT_VALUE_MAX_LEN] + "...(truncated)"
@@ -1080,7 +1158,7 @@ def enforce_write_guard(
         if count_outcome:
             _record_outcome(outcome, tool)
 
-    hits = scan(content)
+    hits = scan_with_escape_views(content)
     if not hits:
         if record_outcome:
             record("pass", surface)

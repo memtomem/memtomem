@@ -11,6 +11,7 @@ exec-bit preservation, and skip-listed/symlink source files.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -138,6 +139,23 @@ def test_promote_privacy_blocked_no_bytes_leaked(wiki_root: Path, tmp_path: Path
     assert "AKIA1234567890ABCDEF" not in str(excinfo.value)
     assert excinfo.value.rel == "SKILL.md"
     # Nothing landed in the wiki: no dir, no new commit, clean tree.
+    assert not (wiki_root / "skills" / "demo").exists()
+    assert store.is_dirty() is False
+
+
+def test_promote_blocks_a_secret_hidden_in_a_json_asset(wiki_root: Path, tmp_path: Path) -> None:
+    # A skill's JSON asset holds a PEM header with escaped newlines (#3300).
+    store = _init_wiki()
+    project = tmp_path / "proj"
+    asset = _seed_project_asset(project, "skills", "demo", "SKILL.md")
+    (asset / "config.json").write_text(
+        json.dumps({"key": "BEGIN\nRSA\nPRIVATE\nKEY"}), encoding="utf-8"
+    )
+
+    with pytest.raises(PromotePrivacyError) as excinfo:
+        promote_asset(store, project, "skills", "demo")
+
+    assert excinfo.value.rel == "config.json"
     assert not (wiki_root / "skills" / "demo").exists()
     assert store.is_dirty() is False
 
