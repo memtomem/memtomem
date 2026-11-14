@@ -31,9 +31,10 @@ projection per item, in an index the store owns.
 pip install langchain-memtomem
 ```
 
-Requires Python 3.12+, `langgraph>=1.0,<2` and `memtomem>=0.7.4,<0.8`, the
-first memtomem release that carries the ADR-0042 public names (the package
-refuses to import against an older memtomem). Embedding is off by default (`embedding.provider = "none"`,
+Requires Python 3.12+, `langgraph>=1.0,<2` and `memtomem>=0.7.9,<0.8`, the
+first memtomem release whose `create_components` takes the options the store
+passes (the package refuses to import against a memtomem older than 0.7.4,
+which lacks the ADR-0042 public names). Embedding is off by default (`embedding.provider = "none"`,
 BM25 only, no model download); pass an `embedding` section to turn it on.
 
 ## Use

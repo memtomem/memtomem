@@ -996,6 +996,14 @@ async def _write_summary_archive(
         )
         return None, None
 
+    # ``new_chunk_ids``, not ``appended_chunk_ids`` (#3315): the summary
+    # replaces a file named for this session alone, so when this call is the
+    # first to index it, the new ids are the summary's chunks in file order and
+    # the first one opens the file. The append attribution adds nothing there
+    # and is ``unverified`` whenever chunk overlap is on and the summary spans
+    # several chunks. When another indexer got to the file first, no id is new
+    # and the rows carry that indexer's namespace, so a kept id would not be
+    # the archive's either (#3340).
     summary_chunk_id = stats.new_chunk_ids[0] if stats.new_chunk_ids else None
     return (
         f"- Summary chunk: {prepared.namespace} ({stats.indexed_chunks} chunks)",
