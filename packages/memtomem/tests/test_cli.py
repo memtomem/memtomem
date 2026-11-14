@@ -2221,6 +2221,23 @@ class TestHelpEpilog:
         assert "mm index ./notes --recursive" in lines
         assert "mm index ./notes --force --namespace shared" in lines
 
+    def test_tags_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["tags", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert "mm tags list" in lines
+        assert "mm tags rename bugfix fix" in lines
+        assert "mm tags rename bugfix fix --apply" in lines
+        assert "mm tags merge pm post-mortem --into postmortem --apply" in lines
+        assert "mm tags delete wip --apply --yes" in lines
+
+        # Click wraps prose, while examples must remain separate lines.
+        flattened = " ".join(result.output.split())
+        assert (
+            "rename, merge and delete only preview until you add --apply; --yes needs --apply."
+        ) in flattened
+
     def test_epilog_examples_fit_an_80_column_terminal(self, runner: CliRunner) -> None:
         """Raw paragraphs are exempt from Click's wrapping, so width is on us.
 
@@ -2228,7 +2245,7 @@ class TestHelpEpilog:
         left for the terminal to soft-wrap, which breaks it mid-flag on screen.
         Nothing else in the help output can regress this, so pin it here.
         """
-        for command in ("search", "add", "recall", "index"):
+        for command in ("search", "add", "recall", "index", "tags"):
             result = runner.invoke(cli, [command, "--help"])
             assert result.exit_code == 0
             examples = [
