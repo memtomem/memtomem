@@ -12,6 +12,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   an older version no longer resolves with memtomem until that pin moves. That includes a
   pin on the SDK, which requires the API at exactly its own version:
   `opentelemetry-sdk==1.45.1` needs `opentelemetry-api==1.45.1`.
+- **The write guard refuses a credential hidden by JSON-style escaping (#3300).** A write,
+  index or sync that passed before can now be refused when resolving `\"`, `\n`, `\t` or
+  `\uXXXX` in its text completes a rule: a JSON note or file holding `{"password": "…"}` in a
+  string, or a PEM header with escaped newlines. Text that only looks like an escape can match
+  too: `password\t=` in a regex or a path reads as `password`, a tab and `=`. Outside
+  `project_shared`, `force_unsafe` still writes it; in `project_shared` remove the text. When
+  the indexer now refuses a file it indexed before, the file's older chunks are held (hidden
+  from search) until a clean index; a new file is simply not indexed. In `mm mem rescan` and
+  `mm context rescan` JSON output, a span at or past the content's length points into a
+  resolved copy (see the operations guide).
 
 ### Security
 
@@ -24,6 +34,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   later gets a fixed release, and the release's artifact check refuses to publish a build
   whose metadata lacks that floor. `mm upgrade` already reinstalled with a refreshed index;
   for it the floor changes nothing.
+- **Every write guard now also reads its input with JSON-style escapes resolved (#3300).**
+  The guard scanned the text it was given. In a JSON file, or a JSON string inside other
+  text, a quote reads `\"`, a newline `\n`, and any character can be `\uXXXX`, so the
+  quoted-label rule and a PEM header split across lines missed a credential that the file's
+  reader decodes. Measured before this change, the copied settings hook fragment, an MCP
+  server definition and a `.json` file in a canonical directory all passed with
+  `{"password": "…"}` or `BEGIN\nRSA\nPRIVATE\nKEY` in a string, in `project_shared`.
+  `enforce_write_guard` and the audit-value sanitizer now scan the text plus up to two
+  copies with `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t` and `\uXXXX` resolved; nothing
+  is parsed, so duplicate keys, deep nesting and JSON after a header are covered. This
+  applies to every surface that calls the guard: memory writes and edits, indexing, context
+  sync, copy, migrate, install, bundles and pull, wiki promote, the Hermes mirror and the
+  LangGraph and LangChain stores. Stored content is unchanged; the copies are only scanned.
+  Content stored before this release is not re-scanned until you run `mm mem rescan` or
+  `mm context rescan`. YAML `\x` and TOML `\U` escapes are not resolved.
 
 ## [0.7.9] — 2026-11-14
 
