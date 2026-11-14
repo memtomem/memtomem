@@ -297,6 +297,20 @@ def test_gate_a_env_secret_blocks_with_standard_envelope(roots) -> None:
     assert src.is_file()  # source never consumed
 
 
+@pytest.mark.parametrize(
+    "value",
+    ['{"password": "synthetic-example"}', "BEGIN\nRSA\nPRIVATE\nKEY"],
+    ids=["quoted-label", "pem"],
+)
+def test_gate_a_env_secret_hidden_by_json_escaping_blocks(roots, value) -> None:
+    # On disk the env value is JSON-escaped; the MCP client decodes it (#3300).
+    src = _seed_server(roots["a"], definition={"command": "npx", "env": {"CONFIG": value}})
+    with pytest.raises(PrivacyBlockedError):
+        _copy(roots, apply_=True)
+    assert not _dst_path(roots).exists()
+    assert src.is_file()
+
+
 # ── concurrency: in-lock re-check, no-clobber promote, lock budget ───
 
 

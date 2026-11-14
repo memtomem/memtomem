@@ -165,6 +165,15 @@ file you deleted, an excluded path, a file over 10 MB, or a file whose
 `mm index` run reported an error — so remove those chunks with the delete
 workflow instead.
 
+The guard and both rescans also read text with its JSON-style escape
+sequences resolved (`\"`, `\\`, `\n`, `\t`, `\uXXXX`, …), up to two levels
+deep, so a credential inside a JSON string or a JSON file is found as its
+reader will decode it. In `--json` output, a hit's `span_start`/`span_end`
+are offsets into the content followed by those resolved copies, each preceded
+by a line holding `---`; an offset at or past the content's length points into a copy, and
+one secret can be reported once per copy. Other escape syntaxes (YAML `\x`,
+TOML `\U`) are not resolved.
+
 ---
 
 ## Troubleshooting
