@@ -623,6 +623,13 @@ mm context import ~/foo.json --to project_local --apply --as foo2  # land under 
 # staging-dir-first scan + atomic os.replace promote so a blocked push leaves
 # the existing dst tree unchanged.
 #
+# Gate A on `sync --include=settings` (#3343): the canonical
+# .memtomem/settings.json is git-tracked for every hooks.target_scope, so
+# a hit anywhere in it raises ClickException before any runtime settings
+# file is written, at every tier; `--force-unsafe` does not apply. If the
+# canonical turns secret-bearing while the sync runs, files already written
+# stay written and the remaining targets report `error`.
+#
 # Web Context Gateway missing-canonical remediation:
 #   project_shared → web Pull can initialize from detected runtime files;
 #                    CLI bootstrap requires explicit git-tracked-tier confirmation.

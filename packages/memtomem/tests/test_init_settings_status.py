@@ -37,7 +37,7 @@ def _drive_step_settings(tmp_path: Path, monkeypatch, results: dict) -> str:
     # must be patched on the source module, not on init_cmd.
     monkeypatch.setattr(
         "memtomem.context.settings.generate_all_settings",
-        lambda project_root, scope: results,
+        lambda project_root, scope, **_: results,
     )
 
     import click
@@ -99,3 +99,47 @@ def test_ok_and_skipped_still_reported(tmp_path, monkeypatch):
     # ``"merged" in out.lower()`` would pass even if that branch regressed.
     assert f"Merged → {target}" in out
     assert "skipped codex: not installed" in out
+
+
+def test_privacy_refusal_is_reported_without_a_traceback(tmp_path, monkeypatch):
+    """A pre-existing canonical with a secret: the real fan-out refuses it (#3343)
+    and the wizard step reports the refusal instead of raising.
+
+    The wizard writes the user tier without host-write consent, so the fan-out
+    only reaches Gate A when that tier is inside the project root — ``mm init``
+    run from HOME itself, which is the case built here."""
+    import json
+
+    import click
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    set_home(monkeypatch, home)
+    project = home
+    canonical = project / ".memtomem" / "settings.json"
+    canonical.parent.mkdir(parents=True)
+    rule = {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "api_key=AKIA1234567890ABCDEF"}],
+    }
+    canonical.write_text(json.dumps({"hooks": {"Stop": [rule]}}), encoding="utf-8")
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(init_cmd, "step_header", lambda *a, **k: None)
+    monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **k: True)
+    buf: list[str] = []
+    monkeypatch.setattr(click, "echo", lambda *a, **k: buf.append(a[0] if a else ""))
+    monkeypatch.setattr(click, "secho", lambda msg="", *a, **k: buf.append(msg))
+
+    from memtomem import privacy
+
+    def blocked() -> int:
+        return privacy.snapshot()["by_tool"].get("cli_init_settings", {}).get("blocked", 0)
+
+    before = blocked()
+    init_cmd._step_settings({"step_index": 0, "total_steps": 1})
+
+    out = "\n".join(str(x) for x in buf)
+    assert blocked() == before + 1
+    assert "Gate A" in out
+    assert "AKIA1234567890ABCDEF" not in out
+    assert not (home / ".claude" / "settings.json").exists()

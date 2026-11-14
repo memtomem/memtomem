@@ -56,6 +56,14 @@ function _hooksErrDetail(detail, fallback) {
   return fallback;
 }
 
+// A Gate A refusal of the canonical .memtomem/settings.json (#3343) arrives as a
+// 422 whose top-level ``reason_code`` is ``privacy_blocked`` (sync and resolve),
+// or as a per-target result row carrying the same code when the canonical
+// changed mid-sync. Show the localized hint; the server's text is English only.
+function _hooksIsPrivacyBlocked(obj) {
+  return !!obj && obj.reason_code === 'privacy_blocked';
+}
+
 function _hooksScopedUrl(path) {
   if (typeof _ctxWithTargetScope === 'function') {
     return _ctxWithTargetScope(path);
@@ -863,7 +871,10 @@ async function loadHooksSync() {
           // the sync-eligibility write-guard 409 whose body carries only
           // {detail: {reason_code, ...}} — keep the generic detail toast.
           if (!r.ok && !(r.status === 409 && typeof result.status === 'string')) {
-            showToast(_hooksErrDetail(result.detail, t('toast.request_failed')), 'error');
+            const msg = _hooksIsPrivacyBlocked(result)
+              ? t('settings.ctx.privacy_blocked_settings_hint')
+              : _hooksErrDetail(result.detail, t('toast.request_failed'));
+            showToast(msg, 'error');
             return;
           }
           if (result.status === 'ok') {
@@ -908,6 +919,9 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
+      if (_hooksIsPrivacyBlocked(err)) {
+        throw new Error(t('settings.ctx.privacy_blocked_settings_hint'));
+      }
       throw new Error(_hooksErrDetail(err.detail, `Request failed: ${res.status}`));
     }
     return res.json();
@@ -945,7 +959,12 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     // actually synced.
     const failed = results.filter(r => r.status === 'error' || r.status === 'aborted');
     if (failed.length) {
-      const detail = failed.map(r => `${r.name}: ${r.reason || r.status}`).join('; ');
+      const detail = failed.map(r => {
+        const reason = _hooksIsPrivacyBlocked(r)
+          ? t('settings.ctx.privacy_blocked_settings_hint')
+          : (r.reason || r.status);
+        return `${r.name}: ${reason}`;
+      }).join('; ');
       showToast(t('toast.sync_failed', { error: detail }), 'error');
       loadHooksSync();
       return;

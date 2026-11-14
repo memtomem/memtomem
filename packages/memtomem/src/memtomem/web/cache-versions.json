@@ -76,7 +76,8 @@
     "/context-gateway-core.js": {
       "versions": {
         "3": "b34248bc90af38f6cd94e2b0ffe6bb3daba0bef96f30f76e9d40b4571de28bf5",
-        "4": "1500c70a694587bc1b5b9543ea7cf5cac2bd15b8e0160ca08cb222f6c20a03e7"
+        "4": "1500c70a694587bc1b5b9543ea7cf5cac2bd15b8e0160ca08cb222f6c20a03e7",
+        "5": "c4b3238377d5d5efa17b7d66206cfd3c4c1d23706738ab110a6a54c342fd9527"
       }
     },
     "/context-gateway-detail.js": {
@@ -106,7 +107,8 @@
         "7": "81e4e912d6c2ba358c2f3376c33b4b18cf2a589b0ff91129a1dead07b99dfbf2",
         "8": "2e9ffdaeb64c737d9edd9056f35c0faffa77d65d9e4e89d766aa89782aee3a0b",
         "9": "363f75d95be108487a46a4d9c758b4a481df0f17de1ba0b0fff61863ce42632c",
-        "10": "798fcf2c80558d5b42a7741c3b73555bfb9fa6a0a6ad8499c3bd08d2ad92776a"
+        "10": "798fcf2c80558d5b42a7741c3b73555bfb9fa6a0a6ad8499c3bd08d2ad92776a",
+        "11": "1bff9290f3d1eab39f8af7387da9110cb2108497350ee40b7b1998fe745b5b99"
       }
     },
     "/context-gateway-pull.js": {
@@ -195,7 +197,8 @@
         "26": "f461bab7fc287eddd4739e64c0b75633eda9b8e00334d9cdf55b121871ebf8b1",
         "27": "f1d36b0efc01548de6728c6d837fdc783b7e8aa4255ee7f97d0113e856501bd3",
         "28": "e5cec42d8702f7095797866aa93c3cfeac665417d5427f7f7072765442d33459",
-        "29": "aacecc60ff4ec27bbcf854dff3f364cb97e4c2fa86b95746dc24115934d138c8"
+        "29": "aacecc60ff4ec27bbcf854dff3f364cb97e4c2fa86b95746dc24115934d138c8",
+        "30": "8c766705cc038968eaff27affdc3aaae02811b704d807e01e8e95f8c4c6a40e7"
       }
     },
     "/settings-maintenance.js": {

@@ -18,6 +18,7 @@ from memtomem.context._atomic import _file_lock, _lock_path_for
 from memtomem.context._abandon import sync_is_abandoned
 from memtomem.context.privacy_scan import (
     PrivacyBlockedError,
+    PrivacyScanError,
     format_scan_block_message,
     scan_text_content,
 )
@@ -53,6 +54,7 @@ from memtomem.context.settings_doctor import (
 from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
+from memtomem.web.routes._sync_phase import SyncPhaseError
 from memtomem.context.error_redact import redact_engine_reason
 from memtomem.web.routes.context_gateway import sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
@@ -82,6 +84,16 @@ _PRIVACY_BLOCK_DETAIL = (
     "Privacy scan blocked this settings copy: a secret was detected in the hook "
     "bytes. git history is forever — no force bypass for project_shared "
     "(ADR-0011 §5). Remove the secret and retry."
+)
+
+#: Path-free 422 detail for a settings fan-out or resolve that Gate A refused
+#: (#3343). The canonical ``.memtomem/settings.json`` is tracked by git, so
+#: unlike the skills push there is no tier to retry into: the only remedy is
+#: removing the secret from the canonical.
+_SETTINGS_SYNC_PRIVACY_BLOCK_DETAIL = (
+    "Privacy scan blocked this settings sync: a secret was detected in the canonical "
+    ".memtomem/settings.json. It is tracked by git, so there is no force bypass at any "
+    "target tier (ADR-0011 §5). Remove the secret from the canonical, then re-run the sync."
 )
 
 
@@ -621,7 +633,12 @@ async def _sync_settings_core(
 
     Refusals stay in-band by design: host-target generators report a
     ``needs_confirmation`` *result row* instead of raising (the
-    ``_confirm.py`` hold-out), so this core raises no ``SyncPhaseError``.
+    ``_confirm.py`` hold-out). The one exception is a Gate A block of the
+    canonical before any target is written (#3343): it is translated here,
+    not in the route, to a path-free ``SyncPhaseError`` with
+    ``reason_code="privacy_blocked"`` so ``/context/sync-all`` and
+    ``/context/sync-all-projects``, which call this core directly, report a
+    422 phase rather than an unclassified 500.
     """
     # Pin the host homes before the hand-off, and keep duplicate detection
     # inside the same pin so the warning and the write agree on one set of
@@ -630,14 +647,25 @@ async def _sync_settings_core(
     # request resolved rather than to whatever ``$HOME`` says once it lands
     # (#2211) — and, leaving abnormally, hands that worker the abort flag
     # that stops it writing at all (#2218).
-    with pinned_host_homes(), abandon_sync_on_exit():
-        duplicates = detect_duplicate_tiers(project_root, active_scope=target_scope)
-        results = await asyncio.to_thread(
-            generate_all_settings,
-            project_root,
-            scope=target_scope,
-            allow_host_writes=allow_host_writes,
-        )
+    try:
+        with pinned_host_homes(), abandon_sync_on_exit():
+            duplicates = detect_duplicate_tiers(project_root, active_scope=target_scope)
+            results = await asyncio.to_thread(
+                generate_all_settings,
+                project_root,
+                scope=target_scope,
+                allow_host_writes=allow_host_writes,
+                surface="web_context_settings_sync",
+            )
+    except PrivacyScanError as exc:
+        # ``exc.message`` names only the relative canonical path, but the fixed
+        # string keeps this route on the path-free privacy-422 convention.
+        raise SyncPhaseError(
+            422,
+            _SETTINGS_SYNC_PRIVACY_BLOCK_DETAIL,
+            error_kind="validation",
+            reason_code="privacy_blocked",
+        ) from exc
     # Settings reasons embed absolute ``canonical_path`` / ``target_path``
     # values (context/settings.py f-strings), and the ok-row target is an
     # absolute path ($HOME-anchored for user scope) — the settings axis of the
@@ -655,6 +683,7 @@ async def _sync_settings_core(
                 "reason": sanitize_diff_reason(r.reason, project_root),
                 "warnings": r.warnings,
                 "target": (sanitize_diff_reason(str(r.target), project_root) if r.target else None),
+                "reason_code": r.reason_code,
             }
         )
     return {
@@ -806,6 +835,34 @@ async def resolve_conflict(
                         else f"Rule '{label}' not in canonical source"
                     )
                     raise _error(404, "missing", detail)
+
+                # Gate A (ADR-0011 §5, #3343): this route writes a canonical
+                # rule into the runtime target — what the fan-out does, which
+                # refuses a blocked canonical — so without a scan here it would
+                # be the way around that refusal. Scan the exact fragment
+                # written, event key included, as promote does. Before the
+                # target is read, so a refused resolve reports 422 ahead of a
+                # missing target (404) or a stale one (409).
+                proposed_fragment = json.dumps(
+                    {body.event: [proposed]},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                proposed_scan = scan_text_content(
+                    proposed_fragment,
+                    source_path=canonical_path,
+                    surface="web_settings_rule_resolve",
+                    scope="project_shared",
+                    project_root=project_root,
+                )
+                if proposed_scan.decision in ("blocked", "blocked_project_shared"):
+                    raise SyncPhaseError(
+                        422,
+                        _SETTINGS_SYNC_PRIVACY_BLOCK_DETAIL,
+                        error_kind="validation",
+                        reason_code="privacy_blocked",
+                    )
 
                 # Read target + mtime guard. ``st_mtime_ns`` matches
                 # ``hot_reload.py`` precision and detects sub-second writes

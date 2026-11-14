@@ -1166,7 +1166,17 @@ def _step_settings(state: dict) -> None:
         # (ADR-0010 §3) instead of loading config — loading would mask
         # the wizard's own write. Users can flip the scope post-install
         # via ``mm config set hooks.target_scope …`` and re-run sync.
-        results = generate_all_settings(project_root, scope="user")
+        from memtomem.context.privacy_scan import PrivacyScanError
+
+        try:
+            results = generate_all_settings(project_root, scope="user", surface="cli_init_settings")
+        except PrivacyScanError as exc:
+            # A pre-existing canonical with a secret in it: Gate A refused the
+            # fan-out before writing anything (#3343). Report it and move on to
+            # the next wizard step instead of aborting the wizard.
+            click.secho(f"  {exc.message}", fg="red")
+            click.echo()
+            return
         for name, r in results.items():
             if r.status == "ok":
                 click.secho(f"  Merged → {r.target}", fg="green")

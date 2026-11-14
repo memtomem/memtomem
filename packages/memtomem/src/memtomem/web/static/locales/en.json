@@ -866,6 +866,7 @@
   "settings.ctx.privacy_blocked_shared_hint_remove_only": "Shared (project) pulls can't override a flagged secret — git history is permanent. Remove the flagged line from the source, then pull again.",
   "settings.ctx.privacy_blocked_shared_sync_hint": "Shared (project) push can't override a flagged secret — git history is permanent. Remove the flagged line, then re-run push.",
   "settings.ctx.privacy_blocked_editor_hint": "A secret was detected in this content, so it can't be saved to the shared (project) tier — git history is permanent, with no force override. Remove the secret, or save it to your private user library instead.",
+  "settings.ctx.privacy_blocked_settings_hint": "A secret was detected in the shared hook settings (.memtomem/settings.json), so the refused runtime settings files were left unchanged. That file is tracked by git, so this can't be overridden for any target. Remove the secret from it, then sync again.",
   "settings.ctx.privacy_blocked_mcp_hint": "A secret was detected in this MCP server config, so it can't be saved to the shared project .mcp.json — git history is permanent, with no force override. Remove the secret before saving.",
   "settings.ctx.import_to_user": "Pull to user library",
   "settings.ctx.import_to_user_success": "Pulled into your user library (~/.memtomem)",
