@@ -31,6 +31,7 @@ _SECURITY_DIRECT_NAMES = {
     "idna",
     "pyjwt",
     "python-multipart",
+    "opentelemetry-api",
 }
 _REQUIRED_URLLIB3_EXTRAS = {"all", "langfuse", "onnx"}
 _TERMINAL_FAILURES = {"action_required", "cancelled", "failure", "stale", "timed_out"}
