@@ -239,19 +239,70 @@ def format_entry_block(
     bare timestamp — see ``_default_heading`` for why two entries must never
     share one.
     """
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return _render_entry_block(
+        content,
+        title,
+        tags,
+        created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        untitled_heading=lambda: _default_heading(
+            datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        ),
+    )
+
+
+def _render_entry_block(
+    content: str,
+    title: str | None,
+    tags: list[str] | None,
+    *,
+    created: str,
+    untitled_heading: Callable[[], str],
+) -> str:
+    """The block for one entry, with the generated parts supplied by the caller."""
     tag_line = f"\n> tags: {json.dumps(list(tags), ensure_ascii=False)}" if tags else ""
 
     # Skip heading if content already starts with one (e.g., from a template)
     stripped = content.strip()
     if stripped.startswith("## "):
-        return f"\n> created: {now}{tag_line}\n\n{stripped}\n"
-    heading = (
-        f"## {title}"
-        if title
-        else _default_heading(datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
+        return f"\n> created: {created}{tag_line}\n\n{stripped}\n"
+    heading = f"## {title}" if title else untitled_heading()
+    return f"\n{heading}\n\n> created: {created}{tag_line}\n\n{stripped}\n"
+
+
+#: Separates the parts :func:`entry_guard_text` joins. Not whitespace and not a
+#: character any credential pattern accepts, so no match spans two parts that
+#: are not next to each other in the file.
+_GUARD_PART_SEPARATOR = "\n\x00\n"
+
+
+def entry_guard_text(
+    content: str,
+    title: str | None = None,
+    tags: list[str] | None = None,
+) -> str:
+    """The text the write guard scans for an entry ``append_entry`` will write.
+
+    The guard must see what lands in the file, not the body alone: the title
+    becomes the heading and the tags a ``> tags:`` line. So this is the block
+    :func:`format_entry_block` writes for the same arguments, which carries
+    the title exactly when the file does (content that already starts with
+    ``## `` keeps its own heading) and the tags in their written, JSON-escaped
+    form. The generated parts, the creation time and an untitled entry's
+    heading, are fixed, so the text is the same on every call and holds only
+    caller text and fixed markup. Each raw tag follows the block as well: the
+    JSON form adds a level of escaping, and the guard resolves only so many.
+
+    Callers pass the same ``content``, ``title`` and ``tags`` they pass to
+    :func:`append_entry`.
+    """
+    block = _render_entry_block(
+        content,
+        title,
+        tags,
+        created="1970-01-01T00:00:00+00:00",
+        untitled_heading=lambda: "## Entry",
     )
-    return f"\n{heading}\n\n> created: {now}{tag_line}\n\n{stripped}\n"
+    return _GUARD_PART_SEPARATOR.join([block, *(tags or [])])
 
 
 def append_blocks(file_path: Path, blocks: Sequence[str], *, judged: JudgedSource) -> Appended:

@@ -226,8 +226,11 @@ async def _add(
         except InvalidNameError as exc:
             raise click.ClickException(str(exc)) from exc
 
+    from memtomem.tools.memory_writer import entry_guard_text
+
+    # The entry as it is written: the title and tags go into the file too.
     guard = privacy.enforce_write_guard(
-        content,
+        entry_guard_text(content, title, tags),
         surface="cli_mm_add",
         force_unsafe=force_unsafe,
         scope=scope,

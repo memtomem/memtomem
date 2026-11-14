@@ -25,6 +25,25 @@ _CLEAN = "## A\n\nalpha entry about deploys\n\n## B\n\nbeta entry about reviews\
 _SECRET_SECTION = f"\n## K\n\naws {_KEY}\n"
 
 
+def _intruder_after_the_append(monkeypatch, line: str) -> None:
+    """Right after the append, another program writes ``line`` into the file.
+
+    The write guard reads every byte ``append_entry`` writes, so a refusal by
+    the re-index after the append needs bytes the guard never saw.
+    """
+    import memtomem.tools.memory_writer as memory_writer
+
+    real = memory_writer.append_blocks
+
+    def append_then_intruder(file_path, blocks, *, judged):
+        appended = real(file_path, blocks, judged=judged)
+        with open(file_path, "a", encoding="utf-8") as fh:
+            fh.write(f"\n## Intruder\n\n{line}\n")
+        return appended
+
+    monkeypatch.setattr(memory_writer, "append_blocks", append_then_intruder)
+
+
 def _preflight(engine, path, pre_image):
     """The preflight as the memory tools call it: the source path resolved with the read."""
     return engine.preflight_mutation(path, pre_image, source_path=path.resolve())
@@ -157,16 +176,19 @@ class TestTheValveCoversOnlyTheCallersOwnWrite:
         assert _KEY in await _stored_text(comp, target)
 
     @pytest.mark.asyncio
-    async def test_unscanned_title_is_refused_after_the_append(self, bm25_only_components):
-        """A post-write refusal: the title is not part of the ingress scan."""
+    async def test_unscanned_bytes_are_refused_after_the_append(
+        self, bm25_only_components, monkeypatch
+    ):
+        """A post-write refusal: bytes the ingress scan never saw reach the re-index."""
         comp, mem_dir = bm25_only_components
         target = mem_dir / "titled.md"
         target.write_text(_CLEAN, encoding="utf-8")
         await comp.index_engine.index_file(target)
+        _intruder_after_the_append(monkeypatch, "password: hunter2-title-value")
 
         result = await mem_add(  # type: ignore[arg-type]
             content="delta entry",
-            title="password: hunter2-title-value",
+            title="clean title",
             file=str(target),
             ctx=StubCtx(AppContext.from_components(comp)),
         )
@@ -434,13 +456,16 @@ class TestRefusalAfterTheWriteReportsTheRestore:
 
 class TestAppendedRefusalsSpeakAtEveryPublicTool:
     @pytest.mark.asyncio
-    async def test_reflection_save_names_the_unindexed_append(self, bm25_only_components):
+    async def test_reflection_save_names_the_unindexed_append(
+        self, bm25_only_components, monkeypatch
+    ):
         from memtomem.server.tools.reflection import mem_reflect_save
 
         comp, _ = bm25_only_components
+        _intruder_after_the_append(monkeypatch, "password: tag-value-xyz")
         result = await mem_reflect_save(  # type: ignore[arg-type]
             insight="deploys go smoother on tuesdays",
-            tags=["password: tag-value-xyz"],
+            tags=["clean-tag"],
             ctx=StubCtx(AppContext.from_components(comp)),
         )
 
@@ -547,15 +572,16 @@ class TestAForcedWriteCoversOnlyItsOwnBytes:
 
 class TestScratchPromotionIsNotRepeatable:
     @pytest.mark.asyncio
-    async def test_mcp(self, bm25_only_components):
+    async def test_mcp(self, bm25_only_components, monkeypatch):
         from memtomem.server.tools.scratch import mem_scratch_promote
 
         comp, mem_dir = bm25_only_components
         ctx = StubCtx(AppContext.from_components(comp))
         await comp.storage.scratch_set("note", "scratch-body-marker")
+        _intruder_after_the_append(monkeypatch, "password: hunter2-title-value")
 
         first = await mem_scratch_promote(  # type: ignore[arg-type]
-            key="note", title="password: hunter2-title-value", ctx=ctx
+            key="note", title="clean title", ctx=ctx
         )
         assert "appended" in first
         retried = await mem_scratch_promote(key="note", title="clean", ctx=ctx)  # type: ignore[arg-type]

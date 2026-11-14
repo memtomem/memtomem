@@ -119,13 +119,14 @@ async def promote_scratch(
         raise HTTPException(status_code=404, detail=f"Key '{key}' not found")
 
     from memtomem import privacy
-    from memtomem.tools.memory_writer import append_entry
+    from memtomem.tools.memory_writer import append_entry, entry_guard_text
 
     # Promotion is the trust-boundary crossing — scratch is short-term
     # and stays in SQLite, but LTM markdown lands on disk and feeds
-    # search. Apply the same guard as ``mem_add``.
+    # search. Apply the same guard as ``mem_add``, to the entry as it is
+    # written (title and tags go into the file too).
     guard = privacy.enforce_write_guard(
-        entry["value"],
+        entry_guard_text(entry["value"], body.title, body.tags),
         surface="web_api_scratch_promote",
         force_unsafe=body.force_unsafe,
         audit_context={"key": key},

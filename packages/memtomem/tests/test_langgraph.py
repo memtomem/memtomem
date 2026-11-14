@@ -653,7 +653,10 @@ class TestAddPrivacyGate:
 
         # Guard saw the langgraph surface + the audit request shape.
         content, kwargs = guard_calls[0]
-        assert content == "safe content"
+        # The guard reads the entry as written, title and tags included.
+        from memtomem.tools.memory_writer import entry_guard_text
+
+        assert content == entry_guard_text("safe content", "T", ["t1"])
         assert kwargs["surface"] == "langgraph_add"
         assert kwargs["force_unsafe"] is False
         assert kwargs["audit_context"] == {

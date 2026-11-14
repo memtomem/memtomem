@@ -207,9 +207,17 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
             raise click.ClickException(f"Candidate is not pending (status={candidate['status']})")
         if decision == "approved":
             from memtomem import privacy
+            from memtomem.tools.memory_writer import entry_guard_text
 
+            # Read as the daily-file entry is written (its title and tags carry
+            # the candidate's kind); a pinned destination writes less than that.
             guard = privacy.enforce_write_guard(
-                candidate["content"], surface="cli_candidate_approve"
+                entry_guard_text(
+                    candidate["content"],
+                    f"Approved {candidate['kind']}",
+                    ["formation-approved", candidate["kind"]],
+                ),
+                surface="cli_candidate_approve",
             )
             if guard.decision != "pass":
                 raise click.ClickException("Candidate now fails the privacy gate")

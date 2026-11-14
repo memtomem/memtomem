@@ -1040,8 +1040,24 @@ async def _mem_add_core(
     # signal, while this is the write-rejection gate at the trust boundary.
     # (Kept as a comment rather than in the tool description: it explains why
     # the server behaves this way, which no caller needs in order to call it.)
+    #
+    # The template is rendered first and the guard reads the entry as it will
+    # be written, title and tags included: a template puts the title into its
+    # own heading, so scanning the arguments as given would miss it there.
+    if template:
+        from memtomem.templates import list_templates, render_template
+
+        try:
+            content = render_template(template, content, title=title)
+            # Template already includes its own heading — don't duplicate
+            title = None
+        except ValueError as exc:
+            return (f"Error: {exc}\n\nAvailable templates:\n{list_templates()}", None)
+
+    from memtomem.tools.memory_writer import entry_guard_text
+
     guard = privacy.enforce_write_guard(
-        content,
+        entry_guard_text(content, title, tags),
         surface="mem_add",
         force_unsafe=force_unsafe,
         scope=effective_scope,
@@ -1068,17 +1084,6 @@ async def _mem_add_core(
             "if a project_shared write is required.",
             None,
         )
-
-    # Apply template if specified
-    if template:
-        from memtomem.templates import list_templates, render_template
-
-        try:
-            content = render_template(template, content, title=title)
-            # Template already includes its own heading — don't duplicate
-            title = None
-        except ValueError as exc:
-            return (f"Error: {exc}\n\nAvailable templates:\n{list_templates()}", None)
 
     if target is None:
         # ADR-0011: route the default-dated file to the canonical
@@ -2197,13 +2202,20 @@ async def mem_batch_add(
     # only record outcomes after deciding whether to commit the
     # whole batch (transactional invariant: no pass record on a
     # rejected batch).
+    from memtomem.tools.memory_writer import entry_guard_text
+
+    def _entry_fields(entry: dict) -> tuple[str | None, str, list[str] | None]:
+        """``(title, value, tags)`` as the block is written; the guard reads the same."""
+        key = entry.get("key") or entry.get("title", "")
+        return key or None, entry.get("value") or entry.get("content", ""), entry.get("tags")
+
     decisions: list[tuple[int, str, int]] = []  # (idx, decision, hit_count)
     for idx, entry in enumerate(entries):
-        value = entry.get("value") or entry.get("content", "")
+        entry_title, value, entry_tags = _entry_fields(entry)
         if not value:
             continue
         guard = privacy.enforce_write_guard(
-            value,
+            entry_guard_text(value, entry_title, entry_tags),
             surface="mem_batch_add",
             force_unsafe=force_unsafe,
             scope=effective_scope,
@@ -2331,13 +2343,11 @@ async def mem_batch_add(
         skipped = 0
         blocks: list[str] = []
         for entry in entries:
-            key = entry.get("key") or entry.get("title", "")
-            value = entry.get("value") or entry.get("content", "")
-            entry_tags = entry.get("tags")
+            entry_title, value, entry_tags = _entry_fields(entry)
             if not value:
                 skipped += 1
                 continue
-            blocks.append(format_entry_block(value, title=key or None, tags=entry_tags))
+            blocks.append(format_entry_block(value, title=entry_title, tags=entry_tags))
         return skipped, append_blocks(path, blocks, judged=judged)
 
     # Serialize the batch append + re-index under the per-file lock (issue
