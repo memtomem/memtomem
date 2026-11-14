@@ -160,7 +160,16 @@ def _wiki_path_from_env() -> Path:
 # keeps the greedy match inside it: it strips up to the LAST ``@`` in the
 # authority (so a password containing ``@`` still goes) without reaching into a
 # path/query/fragment that legitimately contains ``@`` (e.g. ``?email=a@b``).
-_URL_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/?#\s]*@")
+#
+# A match may only start where a run of scheme characters starts (the
+# lookbehind), so a long run is entered once and the search stays linear;
+# without it the engine tried a scheme at every position of the run and
+# scanned to its end each time. A scheme begins with a letter, but the run can
+# begin with digits or ``+.-`` (``1https://…``): group 1 keeps those, so the
+# scheme still starts at the run's first letter, as before the anchor.
+_URL_USERINFO_RE = re.compile(
+    r"(?<![a-zA-Z0-9+.\-])([0-9+.\-]*)([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/?#\s]*@"
+)
 
 
 def _redact_url_userinfo(text: str) -> str:
@@ -184,7 +193,7 @@ def _redact_url_userinfo(text: str) -> str:
     (``git@host:repo``) is left untouched: no scheme, no password syntax — the
     ``git@`` is a username, not a secret.
     """
-    return _URL_USERINFO_RE.sub(r"\1", text)
+    return _URL_USERINFO_RE.sub(r"\1\2", text)
 
 
 def _git(
