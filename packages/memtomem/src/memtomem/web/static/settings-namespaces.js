@@ -288,20 +288,26 @@ function editNamespaceMeta(ns, card) {
     </div>
   `;
 
-  // A color input only holds #rrggbb, so this is the stored color as the
-  // browser normalized it. Save sends `color` only when it moved off this.
-  const initialColor = form.querySelector('.ns-edit-color').value;
+  // A color input only holds #rrggbb, so it cannot show every stored color
+  // (#abc reads #aabbcc, a non-hex value reads as the gray fallback). Save
+  // therefore sends `color` only when the user touched the picker or pressed
+  // Reset, never by comparing what the input shows with what it showed first.
+  let colorTouched = false;
+  const markColorTouched = () => { colorTouched = true; };
 
   form.querySelector('.ns-edit-cancel').addEventListener('click', () => form.remove());
   form.querySelector('.ns-edit-reset-color').addEventListener('click', () => {
     form.querySelector('.ns-edit-color').value = '#808080';
+    markColorTouched();
   });
+  form.querySelector('.ns-edit-color').addEventListener('input', markColorTouched);
+  form.querySelector('.ns-edit-color').addEventListener('change', markColorTouched);
   form.querySelector('.ns-edit-save').addEventListener('click', async () => {
     const desc = form.querySelector('.ns-edit-desc').value.trim();
     const colorVal = form.querySelector('.ns-edit-color').value;
     const body = { description: desc };
-    // Only send color if the user changed it; default gray clears it
-    if (colorVal !== initialColor) body.color = colorVal === '#808080' ? '' : colorVal;
+    // Default gray means "no color", so it clears the stored one.
+    if (colorTouched) body.color = colorVal === '#808080' ? '' : colorVal;
     try {
       await api('PATCH', `/api/namespaces/${encodeURIComponent(ns.namespace)}`, body);
       showToast(t('toast.ns_updated'), 'success');

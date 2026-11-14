@@ -8194,10 +8194,11 @@ function escapeHtml(str) {
 // quote handling moved into escapeHtml.
 function escapeAttr(str) { return escapeHtml(str); }
 // Namespace colors are interpolated into ``style``/``value`` attributes. The
-// server only stores ``#`` + 3-8 hex digits (``NAMESPACE_COLOR_PATTERN``), but a
-// row written before that check may hold anything, so render it as the fallback.
+// server only stores ``#`` + 3, 4, 6 or 8 hex digits (``NAMESPACE_COLOR_PATTERN``),
+// but a row written before that check may hold anything, so render it as the
+// fallback.
 function safeCssColor(color, fallback) {
-  return typeof color === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(color) ? color : fallback;
+  return typeof color === 'string' && /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(color) ? color : fallback;
 }
 
 // ---------------------------------------------------------------------------

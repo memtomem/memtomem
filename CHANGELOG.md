@@ -29,8 +29,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (such as a top-level `env`) included. Remove the text from the canonical, then sync again.
   Nothing is written when the refusal comes first; if the canonical changes to a refused one
   during a sync, targets already written stay written and the rest report `error`.
+- **A namespace color must have 3, 4, 6 or 8 hex digits (#3116).** 0.7.7 accepted `#` and
+  any 3 to 8 hex digits, but a 5- or 7-digit value such as `#12345` is not a CSS color: the
+  Web UI left its Settings dot and Home bar uncolored, and its edit form showed black.
+  `mem_ns_update`, `mem_agent_register`, `mm agent register --color` and the Web UI's
+  namespace API now return an error for such a value and store nothing. A 5- or 7-digit color
+  stored earlier stays in the database and shows as the default color until you set a new one.
 
 ### Fixed
+
+- **The Web UI's namespace edit form changes the stored color only when you pick one or
+  press Reset (#3116).** Every Save sent the color the form's color picker showed, so editing
+  only the description rewrote the stored value: `#abc` became `#aabbcc`, an alpha digit was
+  dropped, and `#808080` was cleared. Save now leaves the color out unless you picked a new
+  one; Reset still clears it, including a color the picker already shows as gray.
 
 - **A session summary is filed in its archive namespace even when another indexer reaches
   the file first (#3340).** `mem_session_end` wrote the summary file and then indexed it
