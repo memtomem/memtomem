@@ -8,7 +8,10 @@ Thank you for your interest in contributing to memtomem!
    [`good first issue`](https://github.com/memtomem/memtomem/labels/good%20first%20issue).
    Each one names the files to change, what to test, and the test file to run.
 2. Comment on the issue to claim it. You don't need to be assigned: the
-   comment is the claim. If someone has already claimed it, pick another one.
+   comment is the claim. If someone has already claimed it, or an open pull
+   request will already close it, pick another one. When there is such a pull
+   request, a bot comments on the issue with its number, once per issue, so
+   look for that comment too.
 3. Set up with [Development Setup](#development-setup). While you work,
    running only the test file the issue names is enough; before you open the
    pull request, run the checks in
