@@ -197,7 +197,7 @@ def version_envelope(capabilities: Optional[Dict[str, Any]] = None) -> Dict[str,
 
     caps: Dict[str, Any] = {"search_formats": ["compact", "verbose", "structured"]}
     caps.update(capabilities or {})
-    return {"ok": True, "result": json.dumps({"version": "0.7.8", "capabilities": caps})}
+    return {"ok": True, "result": json.dumps({"version": "0.7.9", "capabilities": caps})}
 
 
 #: The capabilities a server carrying the mirror and deadline features advertises.
