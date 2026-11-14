@@ -4,8 +4,7 @@
 through the helpers in this module", and every artifact fan-out family
 (agents, commands, skills, settings, MCP servers, web mutators) honors it —
 but the project-memory fan-out (CLAUDE.md / GEMINI.md / ...) and the canonical
-``.memtomem/context.md`` writes used bare ``Path.write_text`` on the CLI and
-MCP surfaces. A crash mid-write truncates the target; for ``context.md`` the
+``.memtomem/context.md`` writes used bare ``Path.write_text``. A crash mid-write truncates the target; for ``context.md`` the
 loss is not even regenerable.
 
 These tests pin the MECHANISM (the write goes through ``atomic_write_text``
@@ -15,7 +14,7 @@ the helper's own crash semantics are already pinned by
 brittle.
 
 Patch-site note: ``cli.context_cmd`` binds the helper at module import time
-(patch the bound name); the MCP tools import it function-locally at call time
+(patch the bound name); other callers import it function-locally at call time
 (patch the source module attribute). The spy fixture patches both.
 """
 
@@ -28,7 +27,6 @@ from click.testing import CliRunner
 
 from memtomem.cli import cli
 from memtomem.context._atomic import atomic_write_text as _real_atomic_write_text
-from memtomem.context.parser import CONTEXT_FILENAME
 
 from .helpers import set_home
 
@@ -129,66 +127,5 @@ class TestCliProjectMemoryAtomic:
         text = claude_md.read_text(encoding="utf-8")
         assert "stale sentinel" not in text
         assert "atomic-pin" in text
-        assert claude_md in _spied_paths(atomic_spy)
-        _assert_mode_644(atomic_spy, claude_md)
-
-
-# ── MCP surface ───────────────────────────────────────────────────────
-
-
-class TestMcpProjectMemoryAtomic:
-    def _setup_project(self, tmp_path, monkeypatch) -> Path:
-        project = tmp_path / "proj"
-        project.mkdir()
-        (project / ".git").mkdir()
-        set_home(monkeypatch, tmp_path / "home")
-        monkeypatch.chdir(project)
-        return project
-
-    @pytest.mark.anyio
-    async def test_init_writes_context_md_atomically(self, tmp_path, monkeypatch, atomic_spy):
-        from memtomem.server.tools.context import mem_context_init
-
-        project = self._setup_project(tmp_path, monkeypatch)
-
-        out = await mem_context_init()
-
-        assert f"Created {CONTEXT_FILENAME}" in out
-        ctx_path = project / ".memtomem" / "context.md"
-        assert ctx_path.is_file()
-        assert ctx_path in _spied_paths(atomic_spy)
-        _assert_mode_644(atomic_spy, ctx_path)
-
-    @pytest.mark.anyio
-    async def test_generate_writes_project_memory_atomically(
-        self, tmp_path, monkeypatch, atomic_spy
-    ):
-        from memtomem.server.tools.context import mem_context_generate
-
-        project = self._setup_project(tmp_path, monkeypatch)
-        _ctx_with_sections(project)
-
-        out = await mem_context_generate(agent="claude")
-
-        assert "claude" in out
-        claude_md = project / "CLAUDE.md"
-        assert claude_md.is_file()
-        assert claude_md in _spied_paths(atomic_spy)
-        _assert_mode_644(atomic_spy, claude_md)
-
-    @pytest.mark.anyio
-    async def test_sync_writes_project_memory_atomically(self, tmp_path, monkeypatch, atomic_spy):
-        from memtomem.server.tools.context import mem_context_sync
-
-        project = self._setup_project(tmp_path, monkeypatch)
-        _ctx_with_sections(project)
-        (project / "CLAUDE.md").write_text("stale sentinel\n", encoding="utf-8")
-
-        out = await mem_context_sync()
-
-        assert "claude" in out
-        claude_md = project / "CLAUDE.md"
-        text = claude_md.read_text(encoding="utf-8")
-        assert "stale sentinel" not in text
         assert claude_md in _spied_paths(atomic_spy)
         _assert_mode_644(atomic_spy, claude_md)

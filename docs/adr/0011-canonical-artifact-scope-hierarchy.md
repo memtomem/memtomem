@@ -1,6 +1,6 @@
 # ADR-0011: Canonical artifact scope hierarchy (user / project shared / project local)
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-11-13: the MCP memory-migration and Pull tools it refers to are retired, ADR-0044)
 **Date:** 2026-05-09
 **Context:** ADR-0010 introduced a 3-tier `target_scope` axis for settings
 hooks. This ADR records whether and how to extend the same axis to the
@@ -240,6 +240,13 @@ repo forever," so the bypass valve does not belong here.
 > Caller-owned mutable inputs are copied before scanning, and those copies
 > supply the persisted record and its indexes even if an embedding callback
 > changes the original selectors or value.
+>
+> **2026-11 (#3300):** the same escaping hides a quoted credential in a string
+> *inside* the value, which the store persists and returns verbatim. The record
+> guards of `MemtomemHybridStore`, `MemtomemBaseStore` and langchain-memtomem's
+> `RecordStore` now also scan every key and string of the decoded value raw
+> (`privacy.value_scan_parts`), and all three join scan parts with the same
+> non-whitespace separator.
 >
 > This is a whole-operation refusal, never redaction or renaming of a routing
 > key. A clean value cannot make a sensitive identifier safe: callers must

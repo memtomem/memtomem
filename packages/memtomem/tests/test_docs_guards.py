@@ -1641,8 +1641,18 @@ _PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
     ),
     (
         "packages/langchain-memtomem/README.md",
-        "`memtomem>=0.7.4,<0.8`",
-        "langchain-memtomem's floor: first release with the ADR-0042 public names",
+        "`memtomem>=0.7.9,<0.8`",
+        "langchain-memtomem's floor: first release whose create_components takes its options",
+    ),
+    (
+        "packages/memtomem-hermes-memory/README.md",
+        "memtomem 0.7.8 or newer",
+        "floor for Hermes mirroring: first release with hermes_mirror_apply",
+    ),
+    (
+        "packages/memtomem-hermes-plugin/README.md",
+        "0.7.8 and earlier also offered them",
+        "last release with the context write tools on MCP",
     ),
     # The update workflow's tool-absent stop, in its source and every rendered skill.
     *(
@@ -1718,7 +1728,7 @@ class TestRegistryAndInstallDocs:
             f"MCP table drifted; missing={sorted(current - documented)}, "
             f"extra={sorted(documented - current)}"
         )
-        assert len(current) == 102
+        assert len(current) == 93
         assert len(_CORE_TOOLS) == 9
         standard = set(_CORE_TOOLS) | {
             f"mem_{name}" for name, info in ACTIONS.items() if info.category in _STANDARD_PACKS

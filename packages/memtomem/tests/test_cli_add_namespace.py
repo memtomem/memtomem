@@ -65,7 +65,9 @@ def _components(tmp_path: Path, session_row: dict | None = None) -> SimpleNamesp
             namespace=SimpleNamespace(default_namespace="default"),
         ),
         index_engine=SimpleNamespace(
-            index_file=AsyncMock(return_value=SimpleNamespace(indexed_chunks=1, excluded_files=0)),
+            index_file=AsyncMock(
+                return_value=SimpleNamespace(indexed_chunks=1, excluded_files=0, relinked_files=0)
+            ),
             effective_namespace_for=AsyncMock(side_effect=lambda p, ns=None, **k: ns),
             is_excluded=lambda path: False,
             is_read_only_source=lambda path: False,

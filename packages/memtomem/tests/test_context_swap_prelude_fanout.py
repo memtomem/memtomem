@@ -909,89 +909,6 @@ class TestWikiInstall:
         _assert_converged(store, p["dst"], "replacement")
 
 
-class TestMcpTransfer:
-    """MCP parity: the refusal is prefix-coded, not flattened into a collision."""
-
-    async def test_row_4_source_returns_swap_recovery_pending(
-        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from memtomem.server.tools.context import mem_context_artifact_transfer
-
-        home = _isolate_home(monkeypatch, tmp_path / "home")
-        monkeypatch.chdir(project)
-        p = _row_4(store)
-        before = _wedge_state(p)
-
-        out = await mem_context_artifact_transfer(
-            asset_type="skills",
-            name="skill",
-            from_scope="project_shared",
-            to_scope="user",
-            mode="move",
-            apply=True,
-            allow_host_writes=True,  # user tier writes outside the project root
-        )
-
-        assert out.startswith("refused: swap_recovery_pending:")
-        # NOT the plain collision line the base class would have produced.
-        assert "destination already exists" not in out
-        _assert_no_demotion(out)
-        assert _wedge_state(p) == before
-        assert not (home / ".memtomem" / "skills" / "skill").exists()
-
-    async def test_row_2_resolves_the_default_tier_cross_project(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The third discovery probe: MCP's own default-tier lookup.
-
-        Reached when ``to_project_scope_id`` is given without ``to_scope`` —
-        the tool then resolves the source tier itself, through a
-        ``_detect_source_scope`` handed to ``to_thread``. Without the marker
-        opt-in there it answers "not found" and the engine that would have
-        recovered the artifact is never called. That third call site was missed
-        by a grep for the function because it is passed as a callable, not
-        called (Codex code gate).
-        """
-        from memtomem.cli.context_cmd import ContextGatewayConfig  # noqa: F401 — patched below
-        from memtomem.context.projects import KnownProjectsStore, compute_scope_id
-        from memtomem.server.tools.context import mem_context_artifact_transfer
-
-        home = tmp_path / "home"
-        home.mkdir()
-        _isolate_home(monkeypatch, home)
-        proj_a, proj_b = tmp_path / "proj-a", tmp_path / "proj-b"
-        for proj in (proj_a, proj_b):
-            (proj / ".git").mkdir(parents=True)
-            (proj / ".memtomem").mkdir()
-        kp = tmp_path / "known_projects.json"
-
-        class _FakeCfg:
-            known_projects_path = kp
-            experimental_claude_projects_scan = False
-            auto_display_configured_projects = True
-
-        monkeypatch.setattr("memtomem.cli.context_cmd.ContextGatewayConfig", lambda: _FakeCfg())
-        monkeypatch.chdir(proj_a)
-        KnownProjectsStore(kp).add(proj_b)
-
-        store = proj_a / ".memtomem" / "skills"
-        store.mkdir()
-        p = _row_2(store)
-
-        out = await mem_context_artifact_transfer(
-            asset_type="skills",
-            name="skill",
-            mode="copy",
-            to_project_scope_id=compute_scope_id(proj_b),
-            # Dry run: discovery must resolve the tier, and nothing may be written.
-        )
-
-        assert "not found" not in out, out
-        assert _residue(store) == sorted([p["marker"].name, p["old"].name, p["staging"].name]), (
-            "a dry run must not recover anything"
-        )
-
-
 class TestSeeder:
     """The dev seeder stops loudly rather than seeding over a wedged Store."""
 
@@ -1675,180 +1592,6 @@ class TestWebImportRoutes:
         assert _wedge_state(p) == before
 
 
-class TestMcpMigrate:
-    """``mem_context_artifact_migrate`` — prefix-coded, before the ClickException arm."""
-
-    async def test_row_4_source_returns_swap_recovery_pending(
-        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from memtomem.server.tools.context import mem_context_artifact_migrate
-
-        home = _isolate_home(monkeypatch, tmp_path / "home")
-        monkeypatch.chdir(project)
-        p = _row_4(store)
-        before = _wedge_state(p)
-
-        out = await mem_context_artifact_migrate(
-            asset_type="skills", name="skill", to_scope="user", apply=True
-        )
-
-        assert out.startswith("refused: swap_recovery_pending:"), out
-        _assert_no_demotion(out)
-        assert _wedge_state(p) == before
-        assert (p["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "candidate-a"
-        assert not (home / ".memtomem" / "skills" / "skill").exists()
-
-
-class TestMcpPull:
-    """``mem_context_pull`` — the swap status rides ``error:``, NOT ``refused:``.
-
-    Pinned classification (#1917 `_PULL_ERROR_STATUSES`): recovery needs an
-    operator, so it sits with the errors; asserting the prefix keeps a future
-    refactor from silently re-bucketing it.
-    """
-
-    async def test_row_4_without_overwrite_refuses_as_canonical_exists(
-        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from memtomem.server.tools.context import mem_context_pull
-
-        _isolate_home(monkeypatch, tmp_path / "home")
-        monkeypatch.chdir(project)
-        seed_multi_runtime(project, "skills", "skill", {"claude": "---\nname: skill\n---\nnew\n"})
-        p = _row_4(store)
-        before = _wedge_state(p)
-
-        out = await mem_context_pull(
-            kind="skills",
-            name="skill",
-            scope="project_shared",
-            apply=True,
-            confirm_project_shared=True,
-        )
-
-        assert out.startswith("refused: "), out
-        assert "swap_recovery_pending" not in out
-        assert _wedge_state(p) == before
-
-    async def test_overwrite_pull_surfaces_the_wedge_as_error(
-        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from memtomem.server.tools.context import mem_context_pull
-
-        _isolate_home(monkeypatch, tmp_path / "home")
-        monkeypatch.chdir(project)
-        seed_multi_runtime(project, "skills", "skill", {"claude": "---\nname: skill\n---\nnew\n"})
-        p = _row_4(store)
-        before = _wedge_state(p)
-
-        out = await mem_context_pull(
-            kind="skills",
-            name="skill",
-            scope="project_shared",
-            apply=True,
-            confirm_project_shared=True,
-            overwrite=True,
-        )
-
-        assert out.startswith("error: "), out
-        assert not out.startswith("refused:"), out
-        assert "interrupted directory swap" in out
-        _assert_no_demotion(out)
-        assert _wedge_state(p) == before
-        assert (p["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "candidate-a"
-        assert not (p["dst"] / "versions").exists(), "refusal must precede the snapshot"
-
-
-class TestMcpInitExtract:
-    """``mem_context_init`` — the extract engine's typed skips, prefix intact."""
-
-    async def test_broken_marker_is_a_skipped_row_not_a_blocked_one(
-        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from memtomem.server.tools.context import mem_context_init
-
-        _isolate_home(monkeypatch, tmp_path / "home")
-        monkeypatch.chdir(project)
-        _skill(project / ".claude" / "skills", "skill", "---\nname: skill\n---\nruntime\n")
-        p = _broken_marker(store)
-        before = _wedge_state(p)
-
-        out = await mem_context_init(include="skills")
-
-        assert "skipped skill:" in out, out
-        assert "swap marker" in out, out
-        assert "blocked skill" not in out, "a wedge is not a privacy block"
-        _assert_no_demotion(out)
-        assert str(store) not in out, "MCP reasons are redacted"
-        assert _wedge_state(p) == before
-        assert p["marker"].read_text(encoding="utf-8") == "not json at all"
-
-    async def test_row_4_skips_as_canonical_exists(
-        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from memtomem.server.tools.context import mem_context_init
-
-        _isolate_home(monkeypatch, tmp_path / "home")
-        monkeypatch.chdir(project)
-        _skill(project / ".claude" / "skills", "skill", "---\nname: skill\n---\nruntime\n")
-        p = _row_4(store)
-        before = _wedge_state(p)
-
-        out = await mem_context_init(include="skills")
-
-        assert "skipped skill: canonical exists" in out, out
-        assert "swap" not in out.lower(), out
-        assert _wedge_state(p) == before
-
-
-class TestMcpGenerateAndSync:
-    """``mem_context_generate`` / ``mem_context_sync`` — two separate formatting
-    sites of the same batch engine (the code is dropped by design; the WORDING
-    is the contract these surfaces keep)."""
-
-    def _seed(self, project: Path, store: Path) -> dict[str, Path]:
-        (project / ".memtomem" / "context.md").write_text("# ctx\n", encoding="utf-8")
-        _skill(store, "demo-skill")
-        runtime_root = project / ".claude" / "skills"
-        runtime_root.mkdir(parents=True)
-        return _row_4(runtime_root, "demo-skill")
-
-    async def test_generate_reports_the_typed_skip_wording(
-        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from memtomem.server.tools.context import mem_context_generate
-
-        _isolate_home(monkeypatch, tmp_path / "home")
-        monkeypatch.chdir(project)
-        p = self._seed(project, store)
-        before = _wedge_state(p)
-
-        out = await mem_context_generate(include="skills")
-
-        assert "skipped demo-skill:" in out, out
-        assert "interrupted directory swap" in out, out
-        _assert_no_demotion(out)
-        assert _wedge_state(p) == before
-        assert (p["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "candidate-a"
-
-    async def test_sync_reports_the_typed_skip_wording(
-        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        from memtomem.server.tools.context import mem_context_sync
-
-        _isolate_home(monkeypatch, tmp_path / "home")
-        monkeypatch.chdir(project)
-        p = self._seed(project, store)
-        before = _wedge_state(p)
-
-        out = await mem_context_sync(include="skills")
-
-        assert "skipped demo-skill:" in out, out
-        assert "interrupted directory swap" in out, out
-        _assert_no_demotion(out)
-        assert _wedge_state(p) == before
-
-
 class TestCliSyncSkipRow:
     """``mm context sync --include skills`` — the fan-out skip row, paths verbatim."""
 
@@ -2094,6 +1837,49 @@ class TestCliTransfer:
         assert _wedge_state(p) == before
         assert (p["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "candidate-a"
         assert not (proj_b / ".memtomem" / "skills" / "skill").exists()
+
+    def test_row_2_resolves_the_default_tier_cross_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CLI's own default-tier lookup, reached with ``--to-project`` and no
+        ``--to``: ``copy`` resolves the source tier itself through
+        ``_detect_source_scope`` before the engine runs. Without the marker opt-in
+        there, a source mid-swap answers "not found" and the engine that would
+        have recovered it is never called. A dry run, so nothing may move.
+        """
+        from click.testing import CliRunner
+
+        from memtomem.cli.context_cmd import context
+        from memtomem.context.projects import KnownProjectsStore
+
+        _isolate_home(monkeypatch, tmp_path / "home")
+        proj_a, proj_b = tmp_path / "proj-a", tmp_path / "proj-b"
+        for proj in (proj_a, proj_b):
+            (proj / ".git").mkdir(parents=True)
+            (proj / ".memtomem").mkdir()
+        kp = tmp_path / "known_projects.json"
+
+        class _FakeCfg:
+            known_projects_path = kp
+            experimental_claude_projects_scan = False
+            auto_display_configured_projects = True
+
+        monkeypatch.setattr("memtomem.cli.context_cmd.ContextGatewayConfig", lambda: _FakeCfg())
+        monkeypatch.chdir(proj_a)
+        KnownProjectsStore(kp).add(proj_b)
+        store = proj_a / ".memtomem" / "skills"
+        store.mkdir()
+        p = _row_2(store)
+
+        result = CliRunner().invoke(
+            context, ["copy", "skills", "skill", "--to-project", str(proj_b)]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "not found" not in result.output
+        assert _residue(store) == sorted([p["marker"].name, p["old"].name, p["staging"].name]), (
+            "a dry run must not recover anything"
+        )
 
 
 class TestCliUpdateAll:

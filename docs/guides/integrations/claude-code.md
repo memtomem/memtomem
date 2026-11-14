@@ -55,7 +55,7 @@ Before `/plugin install`, review existing registrations in `/mcp`, then run
 the diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.7.8" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.7.9" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin registers an MCP server; it does
@@ -85,7 +85,7 @@ optional.
 
 > **Already registered via `claude mcp add`?** What happens depends on
 > whether your manual entry launches the server with the **same command and
-> arguments** as the plugin — `uvx --from 'memtomem[onnx]==0.7.8' memtomem-server`
+> arguments** as the plugin — `uvx --from 'memtomem[onnx]==0.7.9' memtomem-server`
 > (environment variables are not compared; measured on Claude Code 2.1.218):
 >
 > - **Same command** — Claude Code suppresses the plugin-managed copy, your
@@ -94,7 +94,7 @@ optional.
 >   the manual entry wins, including its environment.
 > - **Different command** — and the manual registrations this guide and
 >   [mcp-clients.md](../mcp-clients.md) teach (`memtomem-server` from your
->   environment, or `uvx --isolated --from "memtomem[all]==0.7.8"
+>   environment, or `uvx --isolated --from "memtomem[all]==0.7.9"
 >   memtomem-server`) *are* different — **duplicate registrations are possible**,
 >   exposing tools under
 >   `mcp__memtomem__mem_*` plus `mcp__plugin_memtomem_memtomem__mem_*`.
@@ -187,7 +187,7 @@ that file by hand.
 
 The direct command preserves the extras in the persistent environment used by
 `mm`. For a no-install setup, use `uvx --isolated --from
-"memtomem[all]==0.7.8" memtomem-server`. If an older user-scope registration
+"memtomem[all]==0.7.9" memtomem-server`. If an older user-scope registration
 already exists, replace it explicitly:
 
 ```bash
@@ -316,15 +316,15 @@ only when those side effects are wanted:
 Install the exact CLI version expected by the automation bundle:
 
 ```bash
-uv tool install 'memtomem==0.7.8'
+uv tool install 'memtomem==0.7.9'
 ```
 
 That command installs no extras. If your store uses a local ONNX model (the
-`mm init` English and Korean presets do), install `'memtomem[onnx]==0.7.8'`
-or `'memtomem[all]==0.7.8'` instead; a base-only `mm` reports the missing
+`mm init` English and Korean presets do), install `'memtomem[onnx]==0.7.9'`
+or `'memtomem[all]==0.7.9'` instead; a base-only `mm` reports the missing
 ONNX dependencies rather than indexing.
 
-Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.7.8`
+Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.7.9`
 instead of reinstalling; the
 [CLI reference](../reference/data-config-cli.md#cli-reference) covers what it
 preserves and stops.
@@ -432,8 +432,8 @@ event, rule index, and matcher type. A matcher may be omitted for match-all;
 `null`, numbers, arrays, and objects are malformed.
 
 Malformed rules ride the same non-blocking warning surface as duplicates:
-`mm context sync|diff --include=settings`, the equivalent `mem_context_*` MCP
-tools, and the Web UI hooks panel all report them. In the panel's payload,
+`mm context sync|diff --include=settings`, the `mem_context_diff` MCP tool, and
+the Web UI hooks panel all report them. In the panel's payload,
 malformed rules in the **target tier** appear under `target_hooks.malformed`
 (with an `owned` flag), while malformed rules in the **canonical** file are
 dropped before indexing and reported as `matcher_warnings`.
@@ -444,7 +444,7 @@ that touches that file refused to run.
 
 Unportable hook commands and unscanned settings files ride the same
 non-blocking warning surface on CLI (`mm context sync|diff --include=settings`)
-and MCP (`mem_context_*` tools).
+and MCP (`mem_context_diff`).
 
 <details>
 <summary>Fixing duplicates — migrate and copy hooks across tiers and projects</summary>

@@ -108,7 +108,7 @@ The refusal is deliberate: the Web UI is an **unauthenticated** single-page app 
 | Flag | Effect |
 |------|--------|
 | `--allow-remote-ui` | Acknowledge the off-loopback bind. Required whenever `--host` is non-loopback; startup refuses without it. |
-| `--trusted-origin HOST` | Add a hostname to the CSRF Origin/Referer allow-list (repeatable). Loopback (`127.0.0.1`, `::1`, `localhost`) is always trusted; anything else must be named explicitly. |
+| `--trusted-origin HOST` | Add a hostname to the CSRF Origin/Referer allow-list (repeatable); an entry covers every port of that hostname. A loopback origin passes without an entry only when it is the UI's own; every other origin must be named. |
 | `--trusted-host HOST` | Add a hostname to the Host-header allow-list (repeatable). Defends DNS rebinding when running with `--allow-remote-ui`. |
 
 A trusted-LAN example — serving the UI to browsers that reach this machine as `workstation.local`:
@@ -120,6 +120,8 @@ mm web --host 0.0.0.0 --allow-remote-ui \
 ```
 
 Requests whose `Origin`/`Referer` or `Host` headers are not on the allow-list are rejected by the three-layer request guard — see [SECURITY.md](../../../SECURITY.md#csrf--origin--host-guard-rfc-787) for the full model and the `MEMTOMEM_WEB__CSRF_ENFORCE` rollback valve.
+
+A loopback origin is the UI's own when its scheme, host and port are the ones the request was addressed to: the connection's scheme and the `Host` header. A page served from another local port (a dev server, another local web app) is a different origin and is refused. Opening the UI through a forwarded port works unchanged (`ssh -L 9000:127.0.0.1:8080`, then `http://localhost:9000`), because the browser's origin and `Host` still agree. A proxy on the same machine has to keep them agreeing: pass `Host` through with its port (nginx: `proxy_set_header Host $http_host;`), and when it terminates TLS, send `X-Forwarded-Proto` over a `127.0.0.1` connection — the only peer the server accepts that header from unless `FORWARDED_ALLOW_IPS` names others. If the proxy cannot do that, `--trusted-origin localhost` accepts every origin on `localhost`, whatever its port; the server still sends no CORS headers, so other origins cannot read its responses.
 
 **Anything beyond a trusted LAN needs an authenticating reverse proxy** — TLS plus auth in front, with memtomem still bound to loopback behind it. The [authenticated reverse proxy recipe](../mcp-clients.md#authenticated-reverse-proxy-required-for-public-exposure) (nginx, TLS + Basic auth) applies to the Web UI the same way it does to MCP network transports.
 
@@ -162,6 +164,15 @@ it should report nothing. A source it still reports was not reindexed — a
 file you deleted, an excluded path, a file over 10 MB, or a file whose
 `mm index` run reported an error — so remove those chunks with the delete
 workflow instead.
+
+The guard and both rescans also read text with its JSON-style escape
+sequences resolved (`\"`, `\\`, `\n`, `\t`, `\uXXXX`, …), up to two levels
+deep, so a credential inside a JSON string or a JSON file is found as its
+reader will decode it. In `--json` output, a hit's `span_start`/`span_end`
+are offsets into the content followed by those resolved copies, each preceded
+by a line holding `---`; an offset at or past the content's length points into a copy, and
+one secret can be reported once per copy. Other escape syntaxes (YAML `\x`,
+TOML `\U`) are not resolved.
 
 ---
 

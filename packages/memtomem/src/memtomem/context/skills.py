@@ -1085,11 +1085,10 @@ def generate_all_skills(
             and the per-destination path) — it dimensions the privacy
             ``record()`` counter and tags the blocked/bypassed audit
             log line. Callers pass their own literal: the CLI relies on
-            the default ``"cli_context_sync"``, the Web sync route
-            passes ``"web_context_skills_sync"``, and the MCP tools
-            pass ``"mcp_context_generate"`` / ``"mcp_context_sync"``
-            (#1246 — previously every surface was misattributed to the
-            CLI literal; sibling of the import-side #1242 fix).
+            the default ``"cli_context_sync"`` and the Web sync route
+            passes ``"web_context_skills_sync"`` (#1246 — previously
+            every surface was misattributed to the CLI literal; sibling
+            of the import-side #1242 fix).
     """
     generated: list[tuple[str, Path]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []

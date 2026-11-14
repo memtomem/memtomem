@@ -1046,3 +1046,289 @@ def test_unattributed_message_offers_strict_only_when_it_is_off(watched: Path) -
     violation = hg.Violation(str(watched), "modified", "byte content changed")
     assert f"{hg.DISABLE_ENV}=strict" in hg.format_unattributed("t", [violation], "on")
     assert "This run is in strict mode" in hg.format_unattributed("t", [violation], "strict")
+
+
+# -- strict mode fails write-capable access with no net change (#2302) --------
+
+
+def _present_claude_settings(home: Path) -> None:
+    """The Claude settings target exists, with fixed bytes, when the session arms."""
+    target = home / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('{"model": "opus"}', encoding="utf-8")
+
+
+def _empty_claude_dir(home: Path) -> None:
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+
+
+_TARGET = 'Path.home() / ".claude" / "settings.json"'
+
+_BYTE_IDENTICAL_REWRITE_TEST = f"""
+from pathlib import Path
+
+def test_rewrites_the_same_bytes():
+    target = {_TARGET}
+    target.write_bytes(target.read_bytes())
+"""
+
+#: ``context/_atomic.py``'s shape: a sibling tempfile replaced onto the target.
+_ATOMIC_SAME_BYTES_TEST = f"""
+import os
+import tempfile
+from pathlib import Path
+
+def test_replaces_with_the_same_bytes():
+    target = {_TARGET}
+    data = target.read_bytes()
+    fd, tmp = tempfile.mkstemp(dir=target.parent)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    os.replace(tmp, target)
+"""
+
+_WRITE_THEN_RESTORE_TEST = f"""
+from pathlib import Path
+
+def test_writes_then_restores():
+    target = {_TARGET}
+    original = target.read_bytes()
+    target.write_text("{{}}", encoding="utf-8")
+    target.write_bytes(original)
+"""
+
+_OPEN_RDWR_UNUSED_TEST = f"""
+import os
+from pathlib import Path
+
+def test_opens_for_writing_and_writes_nothing():
+    fd = os.open({_TARGET}, os.O_RDWR)
+    os.close(fd)
+"""
+
+#: The same bytes written back through a name relative to the cwd.
+_RELATIVE_REWRITE_TEST = f"""
+from pathlib import Path
+
+def test_rewrites_the_same_bytes_through_a_relative_name(monkeypatch):
+    target = {_TARGET}
+    data = target.read_bytes()
+    monkeypatch.chdir(target.parent)
+    with open(target.name, "wb") as handle:
+        handle.write(data)
+"""
+
+_FAILED_REMOVE_TEST = f"""
+import os
+from pathlib import Path
+
+def test_tries_to_remove_a_missing_file():
+    try:
+        os.remove({_TARGET})
+    except FileNotFoundError:
+        pass
+"""
+
+_CREATE_THEN_DELETE_TEST = f"""
+from pathlib import Path
+
+def test_creates_then_deletes():
+    target = {_TARGET}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{{}}", encoding="utf-8")
+    target.unlink()
+"""
+
+_MOVE_DIR_AWAY_AND_BACK_TEST = """
+import os
+from pathlib import Path
+
+def test_moves_the_directory_away_and_back():
+    claude = Path.home() / ".claude"
+    aside = Path.home() / ".claude-aside"
+    os.rename(claude, aside)
+    os.rename(aside, claude)
+"""
+
+
+@pytest.mark.parametrize(
+    ("body", "prepare", "event"),
+    [
+        pytest.param(_BYTE_IDENTICAL_REWRITE_TEST, _present_claude_settings, "open", id="rewrite"),
+        # ``os.replace`` raises the ``os.rename`` audit event.
+        pytest.param(_ATOMIC_SAME_BYTES_TEST, _present_claude_settings, "os.rename", id="atomic"),
+        pytest.param(_WRITE_THEN_RESTORE_TEST, _present_claude_settings, "open", id="restore"),
+        pytest.param(_OPEN_RDWR_UNUSED_TEST, _present_claude_settings, "open", id="rdwr-unused"),
+        pytest.param(
+            _RELATIVE_REWRITE_TEST, _present_claude_settings, "open", id="relative-rewrite"
+        ),
+        pytest.param(_FAILED_REMOVE_TEST, None, "os.remove", id="failed-remove"),
+        pytest.param(_CREATE_THEN_DELETE_TEST, None, "open", id="create-delete"),
+    ],
+)
+def test_strict_mode_fails_access_that_leaves_no_net_change(
+    tmp_path: Path, body: str, prepare: Callable[[Path], None] | None, event: str
+) -> None:
+    result = _run_nested_pytest(tmp_path, body, mode="strict", prepare=prepare)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1, combined
+    flat = " ".join(combined.split())
+    assert "was observed attempting write-capable access to real user settings" in flat
+    assert "so it may not have succeeded" in flat
+    assert "Their bytes are unchanged at teardown" in flat
+    assert f"settings.json — {event} on thread MainThread" in flat
+    assert "test_nested_guard.py" in combined
+    assert "changed real user settings outside its test sandbox" not in combined
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(_BYTE_IDENTICAL_REWRITE_TEST, id="rewrite"),
+        pytest.param(_WRITE_THEN_RESTORE_TEST, id="restore"),
+    ],
+)
+def test_default_mode_still_allows_access_that_leaves_no_net_change(
+    tmp_path: Path, body: str
+) -> None:
+    result = _run_nested_pytest(tmp_path, body, prepare=_present_claude_settings)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "1 passed" in combined
+
+
+@pytest.mark.parametrize(
+    "prepare",
+    [
+        pytest.param(_empty_claude_dir, id="empty-dir"),
+        pytest.param(_present_claude_settings, id="dir-holding-settings"),
+    ],
+)
+def test_strict_mode_does_not_judge_an_ancestor_rename_alone(
+    tmp_path: Path, prepare: Callable[[Path], None]
+) -> None:
+    """Only operations naming the file itself count (#2302).
+
+    A rename of ``~/.claude`` is projected onto the settings path whether or
+    not the file is inside, so it cannot be a verdict on its own. Moving the
+    directory away and back leaves no net change, so both cases pass; the
+    projection still attributes a net change (pinned elsewhere).
+    """
+    result = _run_nested_pytest(
+        tmp_path, _MOVE_DIR_AWAY_AND_BACK_TEST, mode="strict", prepare=prepare
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "1 passed" in combined
+
+
+#: Writes only its own sandbox, through a name that would resolve onto the real
+#: settings file if it were read against the cwd instead of the descriptor.
+_DIR_FD_SANDBOX_WRITE_TEST = """
+import os
+from pathlib import Path
+
+def test_writes_its_sandbox_through_a_dir_fd(monkeypatch, tmp_path):
+    sandbox = tmp_path / "sandbox"
+    (sandbox / ".claude").mkdir(parents=True)
+    monkeypatch.chdir(Path.home())
+    dir_fd = os.open(sandbox, os.O_RDONLY)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        os.close(os.open(".claude/settings.json", flags, dir_fd=dir_fd))
+    finally:
+        os.close(dir_fd)
+    assert (sandbox / ".claude" / "settings.json").exists()
+"""
+
+
+@pytest.mark.skipif(os.open not in os.supports_dir_fd, reason="os.open takes no dir_fd here")
+def test_strict_mode_reads_a_relative_open_under_a_dir_fd_against_the_cwd(
+    tmp_path: Path,
+) -> None:
+    """The documented false positive: the ``open`` audit event carries no ``dir_fd`` (#2302).
+
+    A relative name is read against the cwd, so a test whose cwd is the home
+    directory fails ``strict`` here although only its sandbox file changed.
+    Exempting relative opens instead would let every cwd-relative write to a
+    watched file pass ``strict`` silently; a loud failure the test can fix by
+    using an absolute path is the cheaper blind spot.
+    """
+    result = _run_nested_pytest(
+        tmp_path, _DIR_FD_SANDBOX_WRITE_TEST, mode="strict", prepare=_present_claude_settings
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1, combined
+    flat = " ".join(combined.split())
+    assert "was observed attempting write-capable access to real user settings" in flat
+    assert "settings.json — open on thread MainThread" in flat
+
+
+def test_strict_mode_passes_a_clean_test_beside_existing_settings(tmp_path: Path) -> None:
+    result = _run_nested_pytest(
+        tmp_path, _CLEAN_TEST, mode="strict", prepare=_present_claude_settings
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "home guard" not in combined
+
+
+def _ancestor_observation(path: Path) -> hg.WriteObservation:
+    return hg.WriteObservation(
+        event="os.rename",
+        path=hg.normalise_target(path),
+        window="test_window",
+        thread="MainThread",
+        direct=False,
+    )
+
+
+def test_access_without_change_keeps_a_direct_observation(watched: Path) -> None:
+    observation = _observation(watched)
+    assert hg.access_without_change([], [observation], ()) == [observation]
+
+
+def test_access_without_change_skips_a_path_that_already_has_a_violation(watched: Path) -> None:
+    violation = hg.Violation(str(watched), "modified", "content changed")
+    assert hg.access_without_change([violation], [_observation(watched)], ()) == []
+
+
+def test_access_without_change_leaves_degraded_targets_to_degraded_writes(watched: Path) -> None:
+    degraded = (hg.DegradedTarget(str(watched), "is a symlink", (hg.normalise_target(watched),)),)
+    assert hg.access_without_change([], [_observation(watched)], degraded) == []
+
+
+def test_access_without_change_ignores_an_ancestor_projection(watched: Path) -> None:
+    assert hg.access_without_change([], [_ancestor_observation(watched)], ()) == []
+
+
+def test_witness_marks_an_ancestor_rename_as_not_direct(
+    witness: hg.WriteWitness, watched: Path
+) -> None:
+    aside = watched.parent.with_name(".claude-aside")
+    os.rename(watched.parent, aside)
+    os.rename(aside, watched.parent)
+    observed = witness.drain()
+    assert [item.direct for item in observed] == [False, False]
+    assert {item.path for item in observed} == {hg.normalise_target(watched)}
+
+
+def test_witness_marks_a_write_to_the_file_as_direct(
+    witness: hg.WriteWitness, watched: Path
+) -> None:
+    watched.write_text("{}", encoding="utf-8")
+    assert [item.direct for item in witness.drain()] == [True]
+
+
+def test_witness_marks_a_relative_open_as_direct(
+    witness: hg.WriteWitness, watched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cwd-relative write to a watched file is a ``strict`` verdict (#2302)."""
+    monkeypatch.chdir(watched.parent)
+    with open(watched.name, "w", encoding="utf-8") as handle:
+        handle.write("{}")
+    observed = witness.drain()
+    assert [(item.event, item.path, item.direct) for item in observed] == [
+        ("open", hg.normalise_target(watched), True)
+    ]
+    assert hg.access_without_change([], observed, ()) == observed

@@ -1,6 +1,6 @@
 [project]
 name = "memtomem"
-version = "0.7.8"
+version = "0.7.9"
 description = "Long-term memory for AI coding agents, kept as Markdown you own. Hybrid BM25 + vector search via MCP."
 authors = [
     {name = "DAPADA Inc.", email = "contact@dapada.co.kr"},
@@ -91,6 +91,12 @@ dependencies = [
     "idna>=3.15",
     "pyjwt>=2.13.0",
     "python-multipart>=0.0.27",
+    # Security floor for a dependency memtomem never imports. ``mcp`` installs
+    # it and by default passes each request's ``_meta`` to its trace-context
+    # parser, which takes quadratic time on a crafted ``traceparent`` before
+    # 1.45.2 (GHSA-mf5v-w3w3-f6cg). ``mcp`` itself accepts ``>=1.28.0``, so
+    # without this an upgrade of memtomem leaves an old copy in place.
+    "opentelemetry-api>=1.45.2",
     "pyyaml>=6.0",
     # Reading an agent's index file means reading Markdown as Markdown: a
     # destination can be escaped, entity-encoded or angle-bracketed, and a link

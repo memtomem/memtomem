@@ -31,6 +31,7 @@ from memtomem.server.tools._provenance import (
 from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
 from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_errors import is_writer_busy
+from memtomem.storage.sqlite_helpers import fold_path_form
 from memtomem.source_provenance import (
     EXCLUDED_AFTER_APPEND_NOTICE,
     EXCLUDED_SOURCE_DETAIL,
@@ -48,6 +49,7 @@ from memtomem.tools.memory_writer import (
     EditBaseMismatchError,
     RestoreOutcome,
     SourceChangedError,
+    WrittenSource,
     read_pre_image,
     read_with_source_key,
     restore_pre_image_quietly,
@@ -71,7 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from memtomem.models import Chunk, ChunkMetadata, IndexingStats
-    from memtomem.tools.memory_writer import PreImage, Rewrite
+    from memtomem.tools.memory_writer import Appended, JudgedSource, PreImage, Rewrite
 
 logger = logging.getLogger(__name__)
 
@@ -446,18 +448,33 @@ async def _scope_loss_refusal(app: AppContext, chunk: Chunk, chunk_id: str) -> s
 async def _flag_imprecise_write(
     app: AppContext, session_id: str | None, stats: IndexingStats, *, appended: bool = True
 ) -> None:
-    """Mark the session when an append's own record may overstate it.
+    """Mark the session when an append's own record may not be exact.
 
-    Three cases, each of which leaves ``new_chunk_ids`` describing something
-    other than "exactly what this call contributed":
+    The record names :func:`~memtomem.server.tools._provenance.written_chunk_ids`:
+    the chunks the indexer attributed to the append when it could
+    (``appended_attribution`` ``exact`` or ``merged``, #3292/#3315), the
+    whole file's ``new_chunk_ids`` otherwise. The cases below each leave
+    that record describing something other than "exactly what this call
+    contributed", or leave earlier records of the session in doubt.
+
+    ``appended_attribution`` is ``merged``. A chunk the append touches
+    starts before it: a short entry merged into the section before it, or
+    an entry that continues a section in the same chunk. That chunk holds
+    text from outside this call's append, whether the earlier text was
+    indexed (its old chunk is deleted) or still pending (nothing is
+    deleted, so the rule below does not see it).
 
     ``deleted_chunks`` is non-zero. An append re-indexes the whole file,
     and the chunker merges adjacent small sections — so appending under a
     heading another session already wrote to produces one chunk holding
-    both texts, with a new id, and the old chunk deleted. That id is in
-    ``new_chunk_ids``, so this session's record names content it did not
-    author. A pure append to fresh material deletes nothing, which is
-    what makes this a precise signal rather than a blanket one.
+    both texts, with a new id, and the old chunk deleted. That case is
+    also ``merged``, but this rule stays for every attribution: a deletion
+    says the re-index rewrote text outside this call's append, and an id
+    an earlier event recorded can survive such a rewrite holding other
+    text (content-hash reuse keeps the id across a heading rename, #3333),
+    which an ``exact`` attribution of this append says nothing about. A
+    pure append to fresh material deletes nothing, which is what makes
+    this a precise signal rather than a blanket one.
 
     ``errors`` is non-empty. Indexing reports some failures by returning
     them rather than raising — an embedding failure typically comes back
@@ -468,32 +485,46 @@ async def _flag_imprecise_write(
     ``excluded_files`` is non-zero. An exclusion installed between the
     append and its re-index made the engine skip the file: the entry is on
     disk with no new ids, and ``record_write_provenance`` records nothing
-    for an empty list (#3165). ``appended`` is false for a batch whose entries
-    were all empty: it wrote nothing, so there is nothing missing from the
-    record.
-
-    Attributing precisely instead of flagging would mean tracking the
-    appended span through chunking and diffing, which is a change to the
-    indexing contract rather than to this call site. Until then, saying
-    "this record is not exact" is the honest answer.
+    for an empty list (#3165). ``relinked_files`` is the same shape: the file
+    was replaced by a symlink between the append and its re-index, which held
+    it instead of indexing the link's target (#3289). ``appended`` is false
+    for a batch whose entries were all empty: it wrote nothing, so there is
+    nothing missing from the record.
     """
-    if stats.deleted_chunks or stats.errors or (stats.excluded_files and appended):
+    if (
+        stats.appended_attribution == "merged"
+        or stats.deleted_chunks
+        or stats.errors
+        or ((stats.excluded_files or stats.relinked_files) and appended)
+    ):
         await mark_provenance_incomplete(app, session_id)
 
 
 async def _preflight_refusal(
     app: AppContext, path: Path, *, op: str, needs_valve: bool
-) -> tuple[str | None, bytes]:
+) -> tuple[str | None, JudgedSource]:
     """:func:`~memtomem.tools.memory_mutation.preflight_refusal`, dropping warmed
     queries when a refusal held the file."""
     from memtomem.tools.memory_mutation import preflight_refusal
 
-    refusal, pre = await preflight_refusal(
+    refusal, judged = await preflight_refusal(
         app.index_engine, path, op=op, needs_valve=needs_valve, surface="mcp"
     )
     if refusal is not None:
         app.search_pipeline.invalidate_cache()
-    return refusal, pre
+    return refusal, judged
+
+
+async def _changed_append_refusal(
+    app: AppContext, path: Path, judged: JudgedSource, *, op: str
+) -> str:
+    """:func:`~memtomem.tools.memory_mutation.refuse_changed_append`, dropping warmed
+    queries the way a preflight refusal does."""
+    from memtomem.tools.memory_mutation import refuse_changed_append
+
+    refusal = await refuse_changed_append(app.index_engine, path, judged, op=op)
+    app.search_pipeline.invalidate_cache()
+    return refusal
 
 
 def _rewrite_notices(op: str, stats: IndexingStats, source_file: Path) -> str:
@@ -600,6 +631,8 @@ async def _mutate_file_and_reindex(
         rejection = await app.index_engine.refuse_mutation(source_file, preflight)
         app.search_pipeline.invalidate_cache()
         return None, rejection.mutation_detail(f"mem_{op}", outcome="not_written", surface="mcp")
+    if preflight.relinked:
+        await app.index_engine.hold_relinked_mutation(source_file, preflight)
     blocker = preflight.blocker(f"mem_{op}", source_file.name, needs_valve=force_unsafe)
     if blocker is not None:
         return None, blocker
@@ -614,9 +647,10 @@ async def _mutate_file_and_reindex(
         # ``exclude_patterns`` is runtime-mutable: one installed since would
         # make the engine skip the file and leave the pre-edit chunks beside
         # the new bytes. The purge judges it again under the locks (#3163).
-        # A file replaced by a symlink since the write, which the caller's
-        # relinked-key refusal (#2923) could not see, is held rather than
-        # indexed through the link (#3172).
+        # A path that stopped holding the rewritten file since the write,
+        # which the caller's relinked-key refusal (#2923) could not see, is
+        # held rather than indexed as this edit (#3172). The engine reads the
+        # file the rewrite went through, by identity, or nothing (#3320).
         stats = await app.index_engine.index_file(
             source_file,
             ingress_guarded=True,
@@ -624,7 +658,7 @@ async def _mutate_file_and_reindex(
             valve_text=valve_text,
             lock_held=True,
             purge_if_excluded=True,
-            hold_if_relinked=True,
+            written_source=WrittenSource(source_path, pre_image.identity),
         )
         app.search_pipeline.invalidate_cache()
         await flag_untracked_write(app, provenance_session_id)
@@ -870,10 +904,9 @@ async def _mem_add_core(
     Ignored when ``file`` is given.
 
     ``on_appended`` is called once with the text this call appended, under the
-    file lock, right after the append and before the re-index. ``stats``
-    describes the whole file's re-index, so a caller that needs to tell this
-    entry's chunk from others in ``new_chunk_ids`` needs the appended text
-    too (``mem_reflect_save``, #3273).
+    file lock, right after the append and before the re-index.
+    ``stats.appended_chunk_ids`` names the chunks this entry became (#3292),
+    while ``stats.new_chunk_ids`` describes the whole file's re-index.
 
     Returns:
         Tuple of ``(user_facing_message, stats)``. ``stats`` is ``None``
@@ -1141,6 +1174,7 @@ async def _mem_add_core(
         # from (issue #2005). Nothing durable happens before the append and the
         # idempotency claim is taken *after* the re-target check, so an aborted
         # attempt leaves no trace — not on disk, and not in the ledger.
+        from memtomem.indexing.append_attribution import append_region
         from memtomem.indexing.engine import PrivacyRejection
         from memtomem.tools.memory_mutation import appended_valve_text
 
@@ -1210,7 +1244,7 @@ async def _mem_add_core(
                     # the claim. ``force_unsafe`` covers this write only when the
                     # file holds nothing flagged or masked.
                     needs_valve = guard.decision == "bypassed"
-                    refusal, pre = await _preflight_refusal(
+                    refusal, judged = await _preflight_refusal(
                         app, target, op="mem_add", needs_valve=needs_valve
                     )
                     if refusal is not None:
@@ -1229,22 +1263,31 @@ async def _mem_add_core(
                         if state == "pending":
                             return (_idempotency_in_progress_error(idempotency_key), None)
                     # Release the claim only for a failure *before* the append is
-                    # durable (mkdir / append itself) — nothing landed, so the key must
+                    # durable (the append itself) — nothing landed, so the key must
                     # stay re-runnable. Once the append lands we NEVER release: a keyed
                     # retry must not re-append. If index_file (below) raises, the claim
                     # is left pending (retry gets "in progress", not a duplicate) and
                     # the watcher / ``mm index --force`` recovers the un-indexed entry.
+                    # The append makes any missing directory itself, under the judged
+                    # path (#3289): a ``mkdir`` here would follow a parent relinked
+                    # since the preflight.
                     try:
-                        target.parent.mkdir(parents=True, exist_ok=True)
                         appended = await asyncio.to_thread(
-                            append_entry, target, content, title=title, tags=tags
+                            append_entry, target, content, title=title, tags=tags, judged=judged
                         )
+                    except SourceChangedError:
+                        # The path stopped holding the judged file before the open:
+                        # nothing was written. A refusal, so ``stats is None``.
+                        if idempotency_key is not None:
+                            await _release_idempotency_claim(app, "mem_add", idempotency_key)
+                        refusal = await _changed_append_refusal(app, target, judged, op="mem_add")
+                        return (refusal, None)
                     except Exception:
                         if idempotency_key is not None:
                             await _release_idempotency_claim(app, "mem_add", idempotency_key)
                         raise
                     if on_appended is not None:
-                        on_appended(appended)
+                        on_appended(appended.text)
                     # Re-index the whole file via the standard pipeline so the watcher
                     # (which also calls index_file) produces identical hashes → no dups.
                     # The append is already durable, so a failure here leaves
@@ -1262,9 +1305,18 @@ async def _mem_add_core(
                             # Bound to the judged file plus this append: the
                             # valve covers nothing another writer added since.
                             valve_text=(
-                                appended_valve_text(pre, appended) if needs_valve else None
+                                appended_valve_text(judged.data, appended.text)
+                                if needs_valve
+                                else None
                             ),
                             lock_held=True,
+                            # The engine reads the file the append went through,
+                            # by identity, or nothing: a path that stopped holding
+                            # it since is held, not followed (#3320).
+                            written_source=appended.source,
+                            # ``judged.data`` was read under this lock right before
+                            # the append, so the engine can say which chunks it became.
+                            append_region=append_region(judged.data, appended.text),
                         )
                     except PrivacyRejection as exc:
                         # The entry is on disk and the result may not be indexed
@@ -1292,6 +1344,10 @@ async def _mem_add_core(
                     # base result, so a replay reports it too (#3165).
                     if stats.excluded_files:
                         result += f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}"
+                    if stats.relinked_files:
+                        result += "\n- " + relinked_after_write_notice(
+                            "entry", fold_path_form(str(judged.source_path))
+                        )
                     # Fill in the won claim with the base result, under the lock. Only
                     # the deterministic base message is stored — the advisory tails
                     # below are non-deterministic and original-only. A complete failure
@@ -2260,9 +2316,9 @@ async def mem_batch_add(
 
     assert target is not None
 
-    def _append_entries(path: Path) -> tuple[int, str]:
+    def _append_entries(path: Path, judged: JudgedSource) -> tuple[int, Appended]:
         """Append all non-empty entries in ONE write; returns the skipped
-        count and the text appended. Composing every block up front and doing a single append
+        count and what was appended. Composing every block up front and doing a single append
         makes the batch all-or-nothing (issue #1573) — a mid-batch failure
         can no longer leave entries ``0..k-1`` stranded on disk. Runs in one
         worker thread so formatting up to 500 blocks doesn't block the loop.
@@ -2282,7 +2338,7 @@ async def mem_batch_add(
                 skipped += 1
                 continue
             blocks.append(format_entry_block(value, title=key or None, tags=entry_tags))
-        return skipped, append_blocks(path, blocks)
+        return skipped, append_blocks(path, blocks, judged=judged)
 
     # Serialize the batch append + re-index under the per-file lock (issue
     # #1570) plus the cross-process sidecar (#1587) so a concurrent
@@ -2300,6 +2356,7 @@ async def mem_batch_add(
         # Bounded re-target loop, same contract as ``_mem_add_core``
         # (issue #2005): the day file's name depends on the namespace, which
         # is only authoritative once resolved inside the lock.
+        from memtomem.indexing.append_attribution import append_region
         from memtomem.indexing.engine import PrivacyRejection
         from memtomem.tools.memory_mutation import appended_valve_text
 
@@ -2355,7 +2412,7 @@ async def mem_batch_add(
                     # the claim. ``force_unsafe`` covers this write only when the
                     # file holds nothing flagged or masked.
                     needs_valve = any(d[1] == "bypassed" for d in decisions)
-                    refusal, pre = await _preflight_refusal(
+                    refusal, judged = await _preflight_refusal(
                         app, target, op="mem_batch_add", needs_valve=needs_valve
                     )
                     if refusal is not None:
@@ -2377,8 +2434,13 @@ async def mem_batch_add(
                     # as ``_mem_add_core``); once the single append lands the claim is
                     # never released, so a keyed retry can't duplicate the batch.
                     try:
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        skipped, appended = await asyncio.to_thread(_append_entries, target)
+                        skipped, appended = await asyncio.to_thread(_append_entries, target, judged)
+                    except SourceChangedError:
+                        if idempotency_key is not None:
+                            await _release_idempotency_claim(app, "mem_batch_add", idempotency_key)
+                        return await _changed_append_refusal(
+                            app, target, judged, op="mem_batch_add"
+                        )
                     except Exception:
                         if idempotency_key is not None:
                             await _release_idempotency_claim(app, "mem_batch_add", idempotency_key)
@@ -2398,9 +2460,16 @@ async def mem_batch_add(
                             # Bound to the judged file plus this append: the
                             # valve covers nothing another writer added since.
                             valve_text=(
-                                appended_valve_text(pre, appended) if needs_valve else None
+                                appended_valve_text(judged.data, appended.text)
+                                if needs_valve
+                                else None
                             ),
                             lock_held=True,
+                            written_source=appended.source,
+                            # One region for every entry: the batch's provenance
+                            # event names the chunks the whole batch became, so
+                            # no reader needs them entry by entry.
+                            append_region=append_region(judged.data, appended.text),
                         )
                     except PrivacyRejection as exc:
                         # The entry is on disk and the result may not be indexed
@@ -2415,7 +2484,7 @@ async def mem_batch_add(
                         await mark_provenance_incomplete(app, provenance_session_id)
                         raise
                     await _flag_imprecise_write(
-                        app, provenance_session_id, stats, appended=bool(appended)
+                        app, provenance_session_id, stats, appended=bool(appended.text)
                     )
                     display_ns = await _written_namespace_label(app, target, effective_ns, stats)
                     result = (
@@ -2427,8 +2496,12 @@ async def mem_batch_add(
                         result += f"\n- Skipped: {skipped} entries (empty content)"
                     # Part of the stored base result, as in ``_mem_add_core`` (#3165).
                     # Not for a batch of only empty entries: it appended nothing.
-                    if stats.excluded_files and appended:
+                    if stats.excluded_files and appended.text:
                         result += f"\n- {EXCLUDED_AFTER_APPEND_NOTICE}"
+                    if stats.relinked_files and appended.text:
+                        result += "\n- " + relinked_after_write_notice(
+                            "batch", fold_path_form(str(judged.source_path))
+                        )
                     # Fill in the won claim under the lock. A complete failure leaves the
                     # row pending (never released — the append is durable), so a retry
                     # replays/blocks instead of duplicating.
@@ -2448,12 +2521,15 @@ async def mem_batch_add(
                     f"Error: {target} is locked by another process (migration in flight?); retry."
                 )
             app.search_pipeline.invalidate_cache()
-            await record_write_provenance(
-                app,
-                session_id=provenance_session_id,
-                event_type="batch_add",
-                stats=stats,
-            )
+            # A batch of only empty entries wrote nothing, so the re-index's
+            # ids, if any, are another writer's pending text, not this session's.
+            if appended.text:
+                await record_write_provenance(
+                    app,
+                    session_id=provenance_session_id,
+                    event_type="batch_add",
+                    stats=stats,
+                )
             break
         else:
             return NS_RETARGET_EXHAUSTED_ERROR

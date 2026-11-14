@@ -2,9 +2,11 @@
 
 It used to take the newest row in the store as "the chunk just written", so a
 write elsewhere that landed between the append and that lookup received the
-``informs_reflection`` edges. ``new_chunk_ids`` is no substitute on its own: it
-lists every chunk the re-index of ``reflections.md`` upserted. So the save
-links only when the attribution is unambiguous and says so when it is not.
+``informs_reflection`` edges. ``new_chunk_ids`` is no substitute: it lists every
+chunk the re-index of ``reflections.md`` upserted, and misses a chunk that kept
+an existing id. The save reads the chunks the indexer attributes to the append
+(``appended_chunk_ids``, #3292), links only when that is one chunk holding the
+whole insight, and says so when it is not.
 
 Every test asserts the edge's target id (or its absence) against a real store.
 """
@@ -20,7 +22,7 @@ import pytest
 from helpers import StubCtx
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
-from memtomem.server.tools import memory_crud, reflection
+from memtomem.server.tools import _append_target, memory_crud, reflection
 
 UNLINKED = reflection._UNLINKED_NOTICE
 
@@ -112,6 +114,57 @@ class TestLinksItsOwnChunk:
         assert await _edges(comp, related) == [(insight.id, "informs_reflection")]
 
     @pytest.mark.asyncio
+    async def test_a_pending_edit_indexed_with_the_insight(self, stack, monkeypatch):
+        # The re-index upserts the pending section too, so ``new_chunk_ids`` has
+        # two ids; the append's own attribution has one.
+        comp, mem_dir, ctx, related = stack
+        await _seed(comp, mem_dir, "## Seed\n\nseed body that is already indexed.\n")
+        await _seed(
+            comp, mem_dir, "\n## Earlier\n\nzqearlier body nobody indexed yet.\n", index=False
+        )
+        seen = []
+        real = memory_crud._mem_add_core
+
+        async def record(*args, **kwargs):
+            out = await real(*args, **kwargs)
+            seen.append(out[1])
+            return out
+
+        monkeypatch.setattr(memory_crud, "_mem_add_core", record)
+        result = await _save(ctx, "zqpending insight body.", related)
+
+        insight = await _chunk_holding(comp, mem_dir, "zqpending")
+        earlier = await _chunk_holding(comp, mem_dir, "zqearlier")
+        assert len(seen[0].new_chunk_ids) == 2
+        assert seen[0].appended_chunk_ids == (insight.id,)
+        assert await _edges(comp, related) == [(insight.id, "informs_reflection")]
+        assert (earlier.id, "informs_reflection") not in await _edges(comp, related)
+        assert UNLINKED not in result
+
+    @pytest.mark.asyncio
+    async def test_a_reused_id_and_a_rewritten_neighbour(self, stack):
+        # The insight matches a stored chunk by content hash and keeps that id,
+        # so it is not in ``new_chunk_ids``; a pending edit leaves another chunk
+        # holding the whole insight text as the only new id. That neighbour
+        # took the edge before #3292.
+        comp, mem_dir, ctx, related = stack
+        comp.index_engine._config.min_chunk_tokens = 0
+        path = _reflections(mem_dir)
+        path.write_text("## Reflection\n\nrepeat\n\n## Other\n\nprefix\n", encoding="utf-8")
+        await comp.index_engine.index_file(path, ingress_guarded=True)
+        (reused_id,) = [
+            c.id for c in await comp.storage.list_chunks_by_source(path) if c.content == "repeat"
+        ]
+        # Unindexed: drops Reflection and makes Other hold the insight's text.
+        path.write_text("## Other\n\nprefix repeat\n", encoding="utf-8")
+
+        await _save(ctx, "repeat", related)
+
+        rewritten = await _chunk_holding(comp, mem_dir, "prefix repeat")
+        assert await _edges(comp, related) == [(reused_id, "informs_reflection")]
+        assert rewritten.id != reused_id
+
+    @pytest.mark.asyncio
     async def test_a_short_entry_merged_into_the_previous_section_links_the_merge(self, stack):
         comp, mem_dir, ctx, related = stack
         await _save(ctx, "zqfirst short insight.", related)
@@ -122,6 +175,62 @@ class TestLinksItsOwnChunk:
         # The first save's chunk was replaced by the merge, and its edge went
         # with it (relations follow chunk ids); that is not this fix's to change.
         assert await _edges(comp, related) == [(merged.id, "informs_reflection")]
+
+    @pytest.mark.asyncio
+    async def test_a_merge_into_a_pending_section_links_it_and_flags_the_session(self, stack):
+        # Reflect accepts a merged chunk as its link target; the session's
+        # provenance records the same chunk and says it is not exact (#3315),
+        # though nothing was deleted: the earlier section was never indexed.
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, mem_dir, ctx, related = stack
+        app = ctx.request_context.lifespan_context
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await _seed(comp, mem_dir, "## Reflection\n\nzqpending short.\n", index=False)
+
+        await _save(ctx, "zqmine short insight.", related)
+
+        merged = await _chunk_holding(comp, mem_dir, "zqmine")
+        assert "zqpending" in merged.content
+        assert await _edges(comp, related) == [(merged.id, "informs_reflection")]
+        (event,) = [
+            e
+            for e in await comp.storage.get_session_events(session_id)
+            if e["event_type"] == "reflect_save"
+        ]
+        assert event["chunk_ids"] == [str(merged.id)]
+        row = await comp.storage.get_session(session_id)
+        assert row["metadata"]["provenance_incomplete"] is True
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_the_session_event_names_the_insight_not_a_pending_section(self, stack):
+        # A non-``add`` label through ``_mem_add_core``: the pending section is
+        # in ``new_chunk_ids`` and the insight alone is attributed (#3315).
+        from memtomem.server.tools.session import mem_session_end, mem_session_start
+
+        comp, mem_dir, ctx, related = stack
+        app = ctx.request_context.lifespan_context
+        comp.index_engine._config.min_chunk_tokens = 0
+        await _seed(comp, mem_dir, "## Earlier\n\nzqearlier indexed body.\n")
+        await mem_session_start(ctx=ctx)  # type: ignore[arg-type]
+        session_id = app.current_session_id
+        await _seed(comp, mem_dir, "\n## Pending\n\nzqpending unindexed body.\n", index=False)
+
+        await _save(ctx, "zqmine standalone insight.", related)
+
+        mine = await _chunk_holding(comp, mem_dir, "zqmine")
+        assert "zqpending" not in mine.content
+        (event,) = [
+            e
+            for e in await comp.storage.get_session_events(session_id)
+            if e["event_type"] == "reflect_save"
+        ]
+        assert event["chunk_ids"] == [str(mine.id)]
+        row = await comp.storage.get_session(session_id)
+        assert "provenance_incomplete" not in row["metadata"]
+        await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -149,28 +258,6 @@ class TestLinksItsOwnChunk:
 
 class TestUnsureLinksNothing:
     @pytest.mark.asyncio
-    async def test_a_pending_edit_indexed_with_the_insight(self, stack, monkeypatch):
-        comp, mem_dir, ctx, related = stack
-        await _seed(comp, mem_dir, "## Seed\n\nseed body that is already indexed.\n")
-        await _seed(
-            comp, mem_dir, "\n## Earlier\n\nzqearlier body nobody indexed yet.\n", index=False
-        )
-        seen = []
-        real = memory_crud._mem_add_core
-
-        async def record(*args, **kwargs):
-            out = await real(*args, **kwargs)
-            seen.append(out[1])
-            return out
-
-        monkeypatch.setattr(memory_crud, "_mem_add_core", record)
-        result = await _save(ctx, "zqpending insight body.", related)
-
-        assert len(seen[0].new_chunk_ids) == 2
-        assert await _edges(comp, related) == []
-        assert result.endswith(f"\n- {UNLINKED}")
-
-    @pytest.mark.asyncio
     async def test_a_heading_only_insight(self, stack):
         # The formatter puts the entry's metadata before a ``## `` heading, so
         # the previous section changes, and a bare heading yields no chunk.
@@ -183,18 +270,19 @@ class TestUnsureLinksNothing:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("ids", ["none", "unrelated", "insight-and-unrelated"])
-    async def test_new_ids_that_do_not_single_out_the_insight(self, stack, monkeypatch, ids):
+    async def test_attributions_that_do_not_single_out_the_insight(self, stack, monkeypatch, ids):
         comp, mem_dir, ctx, related = stack
         real = memory_crud._mem_add_core
 
         async def rewrite_ids(*args, **kwargs):
             result, stats = await real(*args, **kwargs)
+            assert len(stats.appended_chunk_ids) == 1
             new_ids = {
                 "none": (),
                 "unrelated": (related.id,),
-                "insight-and-unrelated": (*stats.new_chunk_ids, related.id),
+                "insight-and-unrelated": (*stats.appended_chunk_ids, related.id),
             }[ids]
-            return result, dataclasses.replace(stats, new_chunk_ids=new_ids)
+            return result, dataclasses.replace(stats, appended_chunk_ids=new_ids)
 
         monkeypatch.setattr(memory_crud, "_mem_add_core", rewrite_ids)
         result = await _save(ctx, "zqstub insight body.", related)
@@ -225,7 +313,7 @@ class TestUnsureLinksNothing:
         # invite a retry that appends it a second time.
         comp, mem_dir, ctx, related = stack
 
-        real = reflection.resolve_chunk
+        real = _append_target.resolve_chunk
 
         async def boom(app, chunk_id):
             # Only the attribution's read of the new chunk fails; the related
@@ -234,7 +322,7 @@ class TestUnsureLinksNothing:
                 raise RuntimeError("store read failed")
             return await real(app, chunk_id)
 
-        monkeypatch.setattr(reflection, "resolve_chunk", boom)
+        monkeypatch.setattr(_append_target, "resolve_chunk", boom)
         result = await _save(ctx, "zqboom insight body.", related)
 
         assert result.endswith(f"\n- {UNLINKED}")
@@ -346,29 +434,3 @@ class TestContextDependentMerge:
         assert len(seen[0].new_chunk_ids) == 1
         assert await _edges(comp, related) == []
         assert result.endswith(f"\n- {UNLINKED}")
-
-
-class TestKnownGap:
-    @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason="#3292: the insight reuses an existing chunk's id, and a pending edit "
-        "leaves another chunk holding the whole insight as the only new id",
-    )
-    async def test_a_reused_id_and_a_rewritten_neighbour(self, stack):
-        comp, mem_dir, ctx, related = stack
-        comp.index_engine._config.min_chunk_tokens = 0
-        path = _reflections(mem_dir)
-        path.write_text("## Reflection\n\nrepeat\n\n## Other\n\nprefix\n", encoding="utf-8")
-        await comp.index_engine.index_file(path, ingress_guarded=True)
-        # Unindexed: drops Reflection and makes Other hold the insight's text.
-        path.write_text("## Other\n\nprefix repeat\n", encoding="utf-8")
-
-        await _save(ctx, "repeat", related)
-
-        rewritten = await _chunk_holding(comp, mem_dir, "prefix repeat")
-        edges = await _edges(comp, related)
-        # Today the rewritten neighbour gets the edge. A fix may link the
-        # insight's own (reused) chunk or link nothing; either passes.
-        assert (rewritten.id, "informs_reflection") not in edges
-        assert len(edges) <= 1

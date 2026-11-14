@@ -5,6 +5,12 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
 
 ## [Unreleased]
 
+### Changed
+
+- **Requires `memtomem>=0.7.9,<0.8`** (was `>=0.7.4,<0.8`). The store passes the
+  `bm25_path_fallback` and `chunk_source_labels` options to `create_components`, which
+  memtomem 0.7.9 adds; against an earlier memtomem the store would fail to open.
+
 ### Fixed
 
 - BM25 no longer matches every item for a query whose words match no value but name a word of
@@ -25,6 +31,17 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
   key matched its item. The store now opens its components with `chunk_source_labels=False`,
   which leaves both lines out. Rows indexed before the upgrade keep them until their item is
   written again. Needs memtomem 0.7.9 as well.
+
+### Security
+
+- **The record guard now reads the strings inside a value as they are stored (#3300).**
+  From 0.1.0 through 0.2.0 `put` scanned the value only JSON-serialized, where `"` reads `\"`
+  and a newline reads `\n`, so a rule that needs a literal quote or whitespace missed a
+  string the record keeps verbatim. The projection guard caught it only for a field an
+  `index` selector names. The guard now also scans every key and string of the value raw,
+  and separates every part it scans so a label in one cannot pair with the next.
+  Records written before the upgrade are not re-scanned; a repair still guards only the
+  projection it rewrites.
 
 ## [0.2.0] — 2026-11-10
 

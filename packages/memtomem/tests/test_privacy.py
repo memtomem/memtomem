@@ -51,7 +51,7 @@ def _reset_counters():
 # LTM-origin addition awaiting its reverse mirror), bump the leading side's
 # constant with a sync-tracking note, then re-align the trailing side's
 # constant when the sync lands.
-_SECRET_CLASS_SET_SHA256 = "631d79e538a2000424dd3493737bb60580f7516a20bdacddd12df9432caa99d8"
+_SECRET_CLASS_SET_SHA256 = "f6f3d9c324867d786fa5d58b199494872f179b68f5fe42bacc96546989ecfa76"
 
 
 class TestPatternSurface:
@@ -66,10 +66,11 @@ class TestPatternSurface:
     def test_pattern_content_pinned_for_stm_sync(self):
         joined = "\n".join(privacy.DEFAULT_PATTERNS).encode("utf-8")
         assert hashlib.sha256(joined).hexdigest() == _SECRET_CLASS_SET_SHA256, (
-            "DEFAULT_PATTERNS content changed — this set is mirrored "
-            "byte-identical and same-order with memtomem-stm's "
-            "CREDENTIAL_PATTERNS; bump _SECRET_CLASS_SET_SHA256 together "
-            "with the STM-side pin of the same name (memtomem-stm#559)"
+            "DEFAULT_PATTERNS content changed — this set mirrors memtomem-stm's "
+            "CREDENTIAL_PATTERNS in the same order; bump _SECRET_CLASS_SET_SHA256 "
+            "and mirror the change into STM with its pin of the same name "
+            "(memtomem-stm#559). While one side is ahead, the note above the "
+            "constant says which strings differ"
         )
 
     @pytest.mark.parametrize(
@@ -386,10 +387,11 @@ class TestCounter:
 # silently.
 #
 # Fixture-domain assumption: all positive/negative fixtures here are
-# pure-ASCII. Word-boundary semantics (``\b``) align between Python and
-# JS in the ASCII domain. A future pattern that depends on Unicode
-# ``\b`` would need a different parity strategy than direct re vs JS
-# comparison.
+# pure-ASCII. No rule uses ``\b``, which Python and JS read differently
+# next to non-ASCII text (#3298; ``test_privacy_ascii_boundary.py`` covers
+# those neighbours). ``\s`` and ``(?i)`` still differ between the two
+# engines outside ASCII, which a direct re vs JS comparison would need a
+# JS engine to see.
 # ---------------------------------------------------------------------------
 
 

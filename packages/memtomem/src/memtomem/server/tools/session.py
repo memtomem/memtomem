@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import json
 import logging
 from datetime import datetime, timezone
@@ -955,17 +957,34 @@ async def _write_summary_archive(
     The caller ran :func:`_guard_and_prepare_summary` over these exact bytes
     and only reaches here when it did not refuse. The index still judges the
     file under its own scope; ``valve_text`` keeps the caller's
-    ``force_unsafe`` to the bytes it scanned, since the index runs without the
-    file's lock. Writes the markdown file and indexes it under
-    ``archive:session:<session_id>`` (an ``archive:`` default system
-    namespace, hidden from ``mem_search`` without an explicit
+    ``force_unsafe`` to the bytes it scanned. Writes the markdown file and
+    indexes it under ``archive:session:<session_id>`` (an ``archive:`` default
+    system namespace, hidden from ``mem_search`` without an explicit
     ``namespace_filter``). Returns ``(status_line, summary_chunk_id)``; both
     ``None`` when the indexer rejected the file (zero chunks). A body that
     landed as multiple chunks (uncommon for a short narrative) yields the
     first id — Phase B-2's link writer anchors its rows there.
+
+    The write and the index share one hold of the file's sidecar lock (#3340).
+    The watcher, ``mm index`` and another server take that sidecar before
+    reading a file whose directory exists, so they cannot index it between the
+    write and this call. One that did would store it under its own namespace,
+    which the explicit namespace here does not move for unchanged chunks, and
+    leave no new chunk id. Not covered: an index call that found the directory
+    missing skips the sidecar and can still get there first (#3345). The index
+    reads only the file the write placed (``written_source``), so a path
+    replaced in between is held, not indexed through under this lock.
     """
-    from memtomem.context._atomic import atomic_write_text
+    from memtomem._settlement import settle_shielded_value
+    from memtomem.context._atomic import (
+        _CRUD_SIDECAR_LOCK_BUDGET_S,
+        async_file_lock,
+        atomic_write_bytes,
+        memory_lock_path,
+    )
     from memtomem.source_provenance import refuse_replace_target
+    from memtomem.storage.sqlite_helpers import resolve_path
+    from memtomem.tools.memory_writer import WrittenSource
 
     # #2488: an excluded archive path would be written and indexed to zero chunks,
     # and a symlinked one would be judged through the link but replaced itself.
@@ -976,26 +995,60 @@ async def _write_summary_archive(
         logger.warning("session_summary_target_refused reason=%s path=%s", refusal, prepared.target)
         return None, None
 
-    await asyncio.to_thread(atomic_write_text, prepared.target, prepared.content, 0o600)
-    stats = await app.index_engine.index_file(
-        prepared.target,
-        namespace=prepared.namespace,
-        ingress_guarded=True,
-        force_unsafe=force_unsafe,
-        valve_text=prepared.content,
-    )
+    def write() -> WrittenSource:
+        identity = atomic_write_bytes(prepared.target, prepared.content.encode("utf-8"), 0o600)
+        # The resolved parent plus the name as given, never the leaf: a leaf
+        # replaced by a symlink after the write must not name the link's
+        # target, whose rows the index would then hold as this file's.
+        return WrittenSource(resolve_path(prepared.target.parent) / prepared.target.name, identity)
+
+    async with async_file_lock(
+        memory_lock_path(prepared.target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
+    ):
+        # A cancel waits for the write thread before it propagates, so the
+        # sidecar is never released while the file is still being written.
+        future = asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(contextvars.copy_context().run, write)
+        )
+        written, cancelled = await settle_shielded_value(
+            future, what="session summary archive write"
+        )
+        if cancelled is not None:
+            raise cancelled
+        if not isinstance(written, WrittenSource):
+            # The settlement helper erases the result type to ``object``.
+            raise RuntimeError(f"unexpected archive write result: {written!r}")
+        stats = await app.index_engine.index_file(
+            prepared.target,
+            namespace=prepared.namespace,
+            ingress_guarded=True,
+            force_unsafe=force_unsafe,
+            valve_text=prepared.content,
+            lock_held=True,
+            written_source=written,
+        )
     app.search_pipeline.invalidate_cache()
 
     if not stats.indexed_chunks:
         # File written but indexer produced no chunks (empty body, dedup
-        # collision, or a chunker reject). Surface the path so an operator
-        # can investigate; suppress the misleading "0 chunks" status line.
+        # collision, a chunker reject, or a path replaced after the write,
+        # ``relinked=1``). Surface the path so an operator can investigate;
+        # suppress the misleading "0 chunks" status line.
         logger.warning(
-            "session_summary_chunk_indexed_zero path=%s",
+            "session_summary_chunk_indexed_zero path=%s relinked=%d",
             prepared.target,
+            stats.relinked_files,
         )
         return None, None
 
+    # ``new_chunk_ids``, not ``appended_chunk_ids`` (#3315): the summary
+    # replaces a file named for this session alone, and the sidecar hold above
+    # keeps other indexers off it until this call has indexed it (#3340; the
+    # missing-directory gap is #3345), so the new ids are the summary's chunks
+    # in file order and the first one opens the file. The append attribution
+    # adds nothing there and is ``unverified`` whenever chunk overlap is on and
+    # the summary spans several chunks. Another indexer that did get there
+    # first leaves no new id, and the summary then gets none.
     summary_chunk_id = stats.new_chunk_ids[0] if stats.new_chunk_ids else None
     return (
         f"- Summary chunk: {prepared.namespace} ({stats.indexed_chunks} chunks)",

@@ -19,12 +19,10 @@ many. Three classes must never move together, so they are pinned here:
 **Scope, stated honestly.** This guard covers the surface PR-H2 swept; it does
 NOT prove the trees are free of Sync/Import copy. Scanning is line-based over a
 hand-maintained module tuple, so it cannot see a literal implicitly concatenated
-across lines, an unlisted module, or a hyphenated form no pattern names. An MCP
-tool's docstring is published as its tool description, but one is checked only
-where a test below names the tool (``mem_context_init``). The timeout suffix
-``another sync may be in progress`` is not policed: whether "sync" is wrong
-there depends on which lock each site waits on. Read a green run as "the swept
-surface has not regressed", never as "the sweep is complete".
+across lines, an unlisted module, or a hyphenated form no pattern names. The
+timeout suffix ``another sync may be in progress`` is not policed: whether
+"sync" is wrong there depends on which lock each site waits on. Read a green
+run as "the swept surface has not regressed", never as "the sweep is complete".
 
 Exemptions are deliberately narrow, because each one is a place a regression
 could hide: ``#`` comments (never user-facing), docstrings in non-route modules
@@ -48,6 +46,7 @@ from memtomem.context import (
     mcp_servers_copy,
     privacy_scan,
     skills,
+    transfer,
 )
 from memtomem.server.tools import context as mcp_context
 from memtomem.web.routes import (
@@ -97,9 +96,6 @@ def _src(mod: object) -> str:
 @pytest.mark.parametrize(
     ("mod", "needle"),
     [
-        (mcp_context, '"Pushed:\\n"'),
-        (mcp_context, '"Nothing to push."'),
-        (mcp_context, "Pulled skills:"),
         (context_skills, '"Push skills"'),
         (context_mcp_servers, '"Push MCP servers"'),
         (context_sync_all, "Push All is a project-tier action"),
@@ -253,23 +249,6 @@ def test_no_stale_sync_import_action_copy_remains(pattern: str) -> None:
     assert not offenders, "stale action copy:\n" + "\n".join(offenders)
 
 
-def test_mem_context_init_description_says_pull() -> None:
-    """``mem_context_init``'s docstring is its MCP tool description.
-
-    The scanner above exempts docstrings outside the route layer, so this tool
-    is checked by name. ``force_unsafe_import`` is a parameter name and stays.
-    """
-    import re
-
-    doc = inspect.getdoc(mcp_context.mem_context_init)
-    assert doc is not None
-    words = set(re.findall(r"(?i)\b\w*import\w*\b", doc))
-    assert words == {"force_unsafe_import"}
-    flat = " ".join(doc.split())
-    for phrase in ("during the runtime pull", "artifact pull refresh", "unsafe pulls"):
-        assert phrase in flat
-
-
 # ── 2. frozen wire identifiers did NOT move ───────────────────────────────────
 
 
@@ -277,12 +256,11 @@ def test_mem_context_init_description_says_pull() -> None:
     ("mod", "wire_id"),
     [
         # surface ids — Gate A audit attribution.
-        (mcp_context, '"mcp_context_sync"'),
         (context_skills, '"web_context_skills_sync"'),
         # route paths.
         (context_sync_all, '"/context/sync-all"'),
         # the follow-up command the transfer result prints stays runnable.
-        (mcp_context, "mm context sync"),
+        (transfer, 'f"mm context sync --scope {to_scope}"'),
     ],
 )
 def test_wire_identifiers_are_frozen(mod: object, wire_id: str) -> None:

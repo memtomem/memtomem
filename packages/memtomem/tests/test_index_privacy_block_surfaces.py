@@ -178,7 +178,7 @@ class TestBulkIndexRedactionGate:
         leak.write_text(_LEAK)
 
         engine = comp.index_engine
-        monkeypatch.setattr(engine, "_resolve_scope", lambda p: ("project_shared", mem_dir))
+        monkeypatch.setattr(engine, "_resolve_scope", lambda p, **_: ("project_shared", mem_dir))
 
         with pytest.raises(PrivacyRejection) as ei:
             await engine.index_file(leak, force_unsafe=True)
@@ -191,7 +191,7 @@ class TestBulkIndexRedactionGate:
         comp, mem_dir = bm25_only_components
         (mem_dir / "leak.md").write_text(_LEAK)
         engine = comp.index_engine
-        monkeypatch.setattr(engine, "_resolve_scope", lambda p: ("project_shared", mem_dir))
+        monkeypatch.setattr(engine, "_resolve_scope", lambda p, **_: ("project_shared", mem_dir))
 
         stats = await engine.index_path(mem_dir, recursive=True)
 
@@ -208,7 +208,7 @@ class TestBulkIndexRedactionGate:
         comp, mem_dir = bm25_only_components
         (mem_dir / "leak.md").write_text(_LEAK)
         engine = comp.index_engine
-        monkeypatch.setattr(engine, "_resolve_scope", lambda p: ("project_shared", mem_dir))
+        monkeypatch.setattr(engine, "_resolve_scope", lambda p, **_: ("project_shared", mem_dir))
 
         events = [
             ev async for ev in engine.index_path_stream(mem_dir, recursive=True, force_unsafe=True)
@@ -256,7 +256,7 @@ class TestShellIndexBlockedSurfacing:
         comp, mem_dir = bm25_only_components
         (mem_dir / "leak.md").write_text(_LEAK)
         monkeypatch.setattr(
-            comp.index_engine, "_resolve_scope", lambda p: ("project_shared", mem_dir)
+            comp.index_engine, "_resolve_scope", lambda p, **_: ("project_shared", mem_dir)
         )
 
         await _cmd_index(comp, [str(mem_dir)])
@@ -568,7 +568,7 @@ class TestDeclaredExemptionIndexing:
         declared = mem_dir / "declared.md"
         declared.write_text(_DECLARED)
         engine = comp.index_engine
-        monkeypatch.setattr(engine, "_resolve_scope", lambda p: ("project_shared", mem_dir))
+        monkeypatch.setattr(engine, "_resolve_scope", lambda p, **_: ("project_shared", mem_dir))
 
         with pytest.raises(PrivacyRejection) as ei:
             await engine.index_file(declared)
@@ -663,7 +663,7 @@ class TestDeclaredExemptionSymlinkParity:
         monkeypatch.setattr(
             engine,
             "_resolve_scope",
-            lambda p: (
+            lambda p, **_: (
                 ("project_shared", shared_dir)
                 if str(p).startswith(str(shared_dir))
                 else ("user", None)
@@ -706,16 +706,18 @@ class TestIndexingStatsFieldOrder:
         from memtomem.models import IndexingStats
 
         names = [f.name for f in fields(IndexingStats)]
-        # #3168 appended ``current_files`` last, after #3164's ``relinked_files``,
-        # #3158's ``excluded_files``, ADR-0043's two day-file-name counters,
-        # #2923's ``scope_held`` and #2141's ``mutated``.
-        assert names[-1] == "current_files"
-        assert names[-3:-1] == ["excluded_files", "relinked_files"]
-        assert names[-5:-3] == ["namespaces_restored_from_name", "day_file_names_undecoded"]
-        assert names[-7:-5] == ["mutated", "scope_held"]
-        assert names[-9:-7] == ["exempted_files", "exempted_paths"]
+        # #3292 appended the append attribution pair last, after #3168's
+        # ``current_files``, #3164's ``relinked_files``, #3158's
+        # ``excluded_files``, ADR-0043's two day-file-name counters, #2923's
+        # ``scope_held`` and #2141's ``mutated``.
+        assert names[-2:] == ["appended_chunk_ids", "appended_attribution"]
+        assert names[-3] == "current_files"
+        assert names[-5:-3] == ["excluded_files", "relinked_files"]
+        assert names[-7:-5] == ["namespaces_restored_from_name", "day_file_names_undecoded"]
+        assert names[-9:-7] == ["mutated", "scope_held"]
+        assert names[-11:-9] == ["exempted_files", "exempted_paths"]
         # The tail that existed before #2076 keeps its order.
-        assert names[-13:-9] == [
+        assert names[-15:-11] == [
             "namespaces_preserved_against_rules",
             "namespaces_reassigned",
             "namespace_moves",

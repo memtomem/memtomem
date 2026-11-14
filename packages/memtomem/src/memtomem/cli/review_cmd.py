@@ -170,7 +170,8 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
     from memtomem.indexing.engine import PrivacyRejection
     from memtomem.pinned import PinnedContextStore
     from memtomem.server.tools.search import _resolve_project_context_root
-    from memtomem.tools.memory_writer import append_entry
+    from memtomem.tools.memory_mutation import append_warning, refuse_changed_append
+    from memtomem.tools.memory_writer import SourceChangedError, append_entry
 
     reviewer = reviewer.strip()
     if not reviewer:
@@ -287,7 +288,7 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                         # The re-index judges the whole file: refuse a file whose
                         # content may not be indexed before appending (the claim
                         # is released below, nothing was written).
-                        refusal, _ = await preflight_refusal(
+                        refusal, judged = await preflight_refusal(
                             comp.index_engine,
                             target,
                             op="approve",
@@ -296,25 +297,32 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                         )
                         if refusal is not None:
                             raise click.ClickException(refusal.removeprefix("Error: "))
-                        await asyncio.to_thread(
-                            append_entry,
-                            target,
-                            candidate["content"],
-                            title=f"Approved {candidate['kind']}",
-                            tags=["formation-approved", candidate["kind"]],
-                        )
+                        try:
+                            appended = await asyncio.to_thread(
+                                append_entry,
+                                target,
+                                candidate["content"],
+                                title=f"Approved {candidate['kind']}",
+                                tags=["formation-approved", candidate["kind"]],
+                                judged=judged,
+                            )
+                        except SourceChangedError as exc:
+                            # Nothing was written: the claim is released below, as
+                            # for a preflight refusal.
+                            refusal = await refuse_changed_append(
+                                comp.index_engine, target, judged, op="approve"
+                            )
+                            raise click.ClickException(refusal.removeprefix("Error: ")) from exc
                         try:
                             stats = await comp.index_engine.index_file(
-                                target, ingress_guarded=True, lock_held=True
+                                target,
+                                ingress_guarded=True,
+                                lock_held=True,
+                                written_source=appended.source,
                             )
-                            if stats.excluded_files:
-                                # Excluded while the entry was appended (#3165):
-                                # on disk, so the approval stands; say so.
-                                from memtomem.source_provenance import (
-                                    EXCLUDED_AFTER_APPEND_NOTICE,
-                                )
-
-                                excluded_warning = EXCLUDED_AFTER_APPEND_NOTICE
+                            # Excluded, or replaced by a link, while the entry was
+                            # appended: on disk, so the approval stands; say so.
+                            excluded_warning = append_warning(stats, judged)
                         except PrivacyRejection as exc:
                             # Appended, unindexed. Quarantine the claim rather than
                             # releasing it, or a re-approval appends it again.

@@ -121,7 +121,11 @@ def _real_home_write_guard(
 
     A net change is only charged to this test when the witness saw this process
     write that path (#2355).  A change nobody here was seen making is recorded
-    for the session summary, and fails only in strict mode.
+    for the session summary, and fails only in strict mode.  Strict mode also
+    fails a test the witness saw attempt to open one of these files for
+    writing, or to rename, remove or truncate it, even when its bytes are
+    unchanged at teardown (#2302): a write restored before the test ended
+    passes the digest check.
     """
     guard = _real_home_guard_session
     witness = guard.witness
@@ -144,6 +148,13 @@ def _real_home_write_guard(
             _home_guard.format_violations(nodeid, attributed, observations),
             pytrace=False,
         )
+    if guard.mode == "strict":
+        accesses = _home_guard.access_without_change(violations, observations, guard.degraded)
+        if accesses:
+            pytest.fail(
+                _home_guard.format_access_without_change(nodeid, accesses),
+                pytrace=False,
+            )
     if unattributed:
         if guard.mode == "strict":
             pytest.fail(

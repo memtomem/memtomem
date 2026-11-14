@@ -18,7 +18,6 @@ from memtomem.constants import InvalidNameError, writable_namespace_arg
 from memtomem.errors import NamespaceResolutionError, TransactionOwnedError
 from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.source_provenance import (
-    EXCLUDED_AFTER_APPEND_NOTICE,
     EXCLUDED_TARGET_DETAIL,
     READ_ONLY_TARGET_DETAIL,
     ExcludedSourceError,
@@ -1015,40 +1014,59 @@ async def add_memory(
             # and let the valve cover this entry only in a file with nothing
             # flagged or masked in it.
             from memtomem.indexing.engine import PrivacyRejection
-            from memtomem.tools.memory_mutation import appended_valve_text
-            from memtomem.tools.memory_writer import read_pre_image_or_empty, read_with_source_key
+            from memtomem.indexing.redaction_exemption import indexer_text
+            from memtomem.tools.memory_mutation import (
+                append_warning,
+                appended_valve_text,
+                refuse_changed_append,
+            )
+            from memtomem.tools.memory_writer import SourceChangedError, read_for_append
             from memtomem.web.routes import system as _sys
 
             needs_valve = guard.decision == "bypassed"
-            pre, source_path = await _asyncio.to_thread(
-                read_with_source_key, read_pre_image_or_empty, target
-            )
+            judged = await _asyncio.to_thread(read_for_append, target)
             preflight = await _asyncio.to_thread(
-                index_engine.preflight_mutation, target, pre, source_path=source_path
+                index_engine.preflight_mutation,
+                target,
+                judged.data,
+                source_path=judged.source_path,
             )
             if preflight.rejection is not None:
                 rejection = await index_engine.refuse_mutation(target, preflight)
                 search_pipeline.invalidate_cache()
                 raise privacy_index_blocked_http(rejection, "add")
+            if preflight.relinked:
+                await index_engine.hold_relinked_mutation(target, preflight)
             blocker = preflight.blocker("add", target.name, needs_valve=needs_valve)
             if blocker is not None:
                 raise index_blocked_http(blocker)
-            pre_lines = (
-                len(target.read_text(encoding="utf-8", errors="replace").splitlines())
-                if target.exists()
-                else 0
-            )
-            appended = await _asyncio.to_thread(
-                _sys.append_entry, target, req.content, title=req.title, tags=tags
-            )
+            # Counted from the bytes the preflight judged, not a later read that
+            # would follow a link put at the path since (#3289).
+            pre_lines = len(indexer_text(judged.data, errors="replace").splitlines())
+            try:
+                appended = await _asyncio.to_thread(
+                    _sys.append_entry,
+                    target,
+                    req.content,
+                    title=req.title,
+                    tags=tags,
+                    judged=judged,
+                )
+            except SourceChangedError as exc:
+                refusal = await refuse_changed_append(index_engine, target, judged, op="add")
+                search_pipeline.invalidate_cache()
+                raise index_blocked_http(refusal) from exc
             try:
                 stats = await index_engine.index_file(
                     target,
                     namespace=write_ns,
                     ingress_guarded=True,
                     force_unsafe=needs_valve,
-                    valve_text=appended_valve_text(pre, appended) if needs_valve else None,
+                    valve_text=(
+                        appended_valve_text(judged.data, appended.text) if needs_valve else None
+                    ),
                     lock_held=True,
+                    written_source=appended.source,
                 )
             except PrivacyRejection as exc:
                 # The entry is on disk; its result may not be indexed (a title
@@ -1129,6 +1147,6 @@ async def add_memory(
     return AddMemoryResponse(
         file=str(target),
         indexed_chunks=stats.indexed_chunks,
-        # The file became excluded while the entry was appended (#3165).
-        warning=EXCLUDED_AFTER_APPEND_NOTICE if stats.excluded_files else None,
+        # Excluded, or replaced by a link, while the entry was appended.
+        warning=append_warning(stats, judged),
     )

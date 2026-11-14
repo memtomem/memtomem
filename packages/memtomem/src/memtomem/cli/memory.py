@@ -210,8 +210,13 @@ async def _add(
     from memtomem.cli._session_state import resolve_session_write_namespace
     from memtomem.constants import InvalidNameError, validate_namespace
     from memtomem.indexing.engine import PrivacyRejection
-    from memtomem.tools.memory_mutation import appended_valve_text, preflight_refusal
-    from memtomem.tools.memory_writer import append_entry
+    from memtomem.indexing.redaction_exemption import indexer_text
+    from memtomem.tools.memory_mutation import (
+        appended_valve_text,
+        preflight_refusal,
+        refuse_changed_append,
+    )
+    from memtomem.tools.memory_writer import SourceChangedError, append_entry
 
     if namespace is not None:
         # Raised as a ClickException so ``--json`` runs get the ``{"ok": false}``
@@ -443,7 +448,7 @@ async def _add(
                     # refuse a file whose content may not be indexed before
                     # writing anything.
                     needs_valve = guard.decision == "bypassed"
-                    refusal, pre = await preflight_refusal(
+                    refusal, judged = await preflight_refusal(
                         comp.index_engine,
                         target,
                         op="mm add",
@@ -452,19 +457,21 @@ async def _add(
                     )
                     if refusal is not None:
                         raise click.ClickException(refusal.removeprefix("Error: "))
-                    target.parent.mkdir(parents=True, exist_ok=True)
                     # Counted the way chunk ``start_line`` is, not ``str.splitlines``,
-                    # which also breaks at U+0085, ``\x0c`` and friends.
-                    pre_lines = (
-                        len(
-                            split_source_lines(target.read_text(encoding="utf-8", errors="replace"))
+                    # which also breaks at U+0085, ``\x0c`` and friends. From the bytes
+                    # the preflight judged, not a later read that would follow a link
+                    # put at the path since; the append makes any missing directory
+                    # under the judged path itself (#3289).
+                    pre_lines = len(split_source_lines(indexer_text(judged.data, errors="replace")))
+                    try:
+                        appended = await asyncio.to_thread(
+                            append_entry, target, content, title=title, tags=tags, judged=judged
                         )
-                        if target.exists()
-                        else 0
-                    )
-                    appended = await asyncio.to_thread(
-                        append_entry, target, content, title=title, tags=tags
-                    )
+                    except SourceChangedError as exc:
+                        refusal = await refuse_changed_append(
+                            comp.index_engine, target, judged, op="mm add"
+                        )
+                        raise click.ClickException(refusal.removeprefix("Error: ")) from exc
                     try:
                         stats = await comp.index_engine.index_file(
                             target,
@@ -472,9 +479,12 @@ async def _add(
                             ingress_guarded=True,
                             force_unsafe=needs_valve,
                             valve_text=(
-                                appended_valve_text(pre, appended) if needs_valve else None
+                                appended_valve_text(judged.data, appended.text)
+                                if needs_valve
+                                else None
                             ),
                             lock_held=True,
+                            written_source=appended.source,
                         )
                     except PrivacyRejection as exc:
                         # On disk, unindexed: e.g. a title the ingress never scanned.
@@ -522,11 +532,12 @@ async def _add(
         else:
             raise click.ClickException(NS_RETARGET_EXHAUSTED_ERROR)
 
-        from memtomem.source_provenance import EXCLUDED_AFTER_APPEND_NOTICE
+        from memtomem.tools.memory_mutation import append_warning
 
-        # The file became excluded while the entry was appended (#3165). Exit 0:
-        # the entry is on disk, and a failure status would invite a duplicate.
-        warning = EXCLUDED_AFTER_APPEND_NOTICE if stats.excluded_files else None
+        # The file became excluded, or was replaced by a link, while the entry was
+        # appended. Exit 0: the entry is on disk, and a failure status would invite
+        # a duplicate.
+        warning = append_warning(stats, judged)
         if as_json:
             payload: dict[str, object] = {
                 "ok": True,

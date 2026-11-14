@@ -1,10 +1,10 @@
 """Content redaction guard at the LTM trust boundary.
 
-The pattern set has two provenance tiers, both secret-class only. As of
-memtomem-stm's GHSA-mf67-ghgq-cv54 fix (the PKCS#8 private-key rule) the two
-sides are in sync: this module's 20
-secret-class patterns are byte-identical to memtomem-stm
-``proxy/privacy.py:CREDENTIAL_PATTERNS``.
+The pattern set has two provenance tiers, both secret-class only. This
+module's 20 secret-class patterns are byte-identical to memtomem-stm
+``proxy/privacy.py:CREDENTIAL_PATTERNS`` as of memtomem-stm#1378, which
+mirrored the ASCII word boundaries of #3298 (see the note above
+``DEFAULT_PATTERNS``).
 
 1. **STM-synced subset** (13 patterns) — originally mirrored from
    memtomem-stm; the AWS secret-material label rule (memtomem-stm#553),
@@ -14,7 +14,7 @@ secret-class patterns are byte-identical to memtomem-stm
    The reference above tracks the STM change this module is
    audited-consistent with (history: ``a98636e`` -> ``3e585b5`` ->
    ``8c884cb`` -> ``5ab5467`` -> ``67689db`` -> GHSA-3v6c-9qpg-gf63 ->
-   GHSA-mf67-ghgq-cv54).
+   GHSA-mf67-ghgq-cv54 -> memtomem-stm#1378).
    STM's full set also carries PII patterns
    (email, etc.); those are excluded here by design because PII false
    positives on prose ingress would be unworkable — they live in STM's
@@ -23,9 +23,9 @@ secret-class patterns are byte-identical to memtomem-stm
 2. **LTM-origin additions** (7 patterns, issue #1488) — secret-class
    provider-token patterns added at this trust boundary first, ahead of
    STM, then mirrored back into STM's ``CREDENTIAL_PATTERNS`` for routing
-   coherence (reverse sync, #1491 / memtomem-stm#549). The two sets now
-   match; if LTM again adds a secret-class pattern ahead of STM it is a
-   temporary strict superset until the next reverse sync lands.
+   coherence (reverse sync, #1491 / memtomem-stm#549). The two sets matched
+   after that sync; whenever LTM is ahead of STM again, the difference lasts
+   until the next reverse sync lands.
 
 Redaction at the LTM ingress is the trust boundary where blocking
 semantics demand a tight false-positive profile.
@@ -80,7 +80,10 @@ logger = logging.getLogger(__name__)
 # of the run, so ``eyJ-`` repeated cost quadratic time. ``_JWT_RULE`` replaces
 # it in ``DEFAULT_PATTERNS``; this text stays as the browser's copy (see
 # ``_JS_PATTERN_OVERRIDES``) and as the reference ``_jwt_old_start`` reproduces.
-_JWT_RULE_OLD = r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+_JWT_RULE_OLD = (
+    r"(?<![A-Za-z0-9_])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r"(?<=[A-Za-z0-9_])(?![A-Za-z0-9_])"
+)
 # Same tokens as ``_JWT_RULE_OLD`` — the same yes/no answer, match count and
 # match ends — in linear time. The first segment does not run past another
 # start that has 8 characters after it: such a start shares the rest of the
@@ -90,11 +93,24 @@ _JWT_RULE_OLD = r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b
 # backtracking state builds up. Only a ``.`` may follow it, and giving
 # characters back never exposes one. Byte-identical to memtomem-stm's rule.
 _JWT_RULE = (
-    r"\beyJ(?=[A-Za-z0-9_-]{8})[A-Za-z0-9_]*+(?:-(?!eyJ[A-Za-z0-9_-]{8})[A-Za-z0-9_]*+)*+"
-    r"\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+    r"(?<![A-Za-z0-9_])eyJ(?=[A-Za-z0-9_-]{8})[A-Za-z0-9_]*+"
+    r"(?:-(?!eyJ[A-Za-z0-9_-]{8})[A-Za-z0-9_]*+)*+"
+    r"\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?<=[A-Za-z0-9_])(?![A-Za-z0-9_])"
 )
 
 # Patterns are secret-class only. See module docstring for sync rule.
+#
+# Token boundaries are written as ASCII lookarounds, never ``\b``. Python's
+# ``\b`` counts every Unicode letter and digit as a word character, so a token
+# written against Hangul, kana or Han text (a key id with a Korean particle
+# attached) has no boundary there and ``\b`` misses it (#3298).
+# ``(?<![A-Za-z0-9_])`` in front and ``(?![A-Za-z0-9_])`` behind are what
+# ``\b`` means over ASCII, which is also what the browser's engine does with
+# ``\b``. After a class that includes ``-`` the trailing form is
+# ``(?<=[A-Za-z0-9_])(?![A-Za-z0-9_])``, so the match still ends at a word
+# character. ``re.ASCII`` is not the fix: ``\s`` and ``(?i)`` are
+# Unicode-aware on purpose, and an ideographic space between a label and its
+# ``=`` has to keep matching.
 DEFAULT_PATTERNS: tuple[str, ...] = (
     r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]",
     r"(?i)(password|passwd|pwd)\s*[:=]",
@@ -181,8 +197,8 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     r"(?i)(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|xox[bps]-[0-9A-Za-z-]+)",
     r"github_pat_[A-Za-z0-9_]{20,}",
     r"(?:(?:sk|pk|rk)_(?:live|test)|whsec)_[A-Za-z0-9]{20,}",
-    r"\bnpm_[A-Za-z0-9]{20,}\b",
-    r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+    r"(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{20,}(?![A-Za-z0-9_])",
+    r"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9_])",
     # JWT-ish: three base64url segments separated by dots, anchored to the
     # canonical ``eyJ`` header prefix to limit false positives on arbitrary
     # dotted identifiers. Linear-time form; see ``_JWT_RULE``.
@@ -224,7 +240,8 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     # the Anthropic fix): without it the capped greedy would match the first
     # 200 chars of a longer token-char run. The pre-marker segment needs no
     # guard — the literal ``T3BlbkFJ`` is its terminator.
-    r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,200}T3BlbkFJ[A-Za-z0-9_-]{20,200}(?![A-Za-z0-9_-])",
+    r"(?<![A-Za-z0-9_])sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,200}T3BlbkFJ"
+    r"[A-Za-z0-9_-]{20,200}(?![A-Za-z0-9_-])",
     # Anthropic keys (sk-ant-apiNN-/adminNN-): also missed by the legacy
     # rule (hyphen after "ant"). Anchored on the exact canonical body —
     # 93 base64url chars + the literal "AA" terminal (a bit-alignment
@@ -238,34 +255,34 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     # (sk-ant-oat01-) has no canonical length and is omitted rather than
     # matched loosely — a follow-up once a stable shape exists (gitleaks
     # issue #2104).
-    r"\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{93}AA(?![A-Za-z0-9_-])",
+    r"(?<![A-Za-z0-9_])sk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{93}AA(?![A-Za-z0-9_-])",
     # GitHub token family completion: gho_ (OAuth), ghu_ (user-to-server),
     # ghs_ (server-to-server / Actions GITHUB_TOKEN), ghr_ (refresh). Same
     # base62 shape as the already-covered ghp_ (excluded from the class to
     # avoid duplicating it). {36,} min — ghs_ tokens run longer than 40.
-    r"\bgh[ousr]_[A-Za-z0-9]{36,}\b",
+    r"(?<![A-Za-z0-9_])gh[ousr]_[A-Za-z0-9]{36,}(?![A-Za-z0-9_])",
     # Google API key (GCP / Firebase / Maps / Gemini): fixed AIza + 35
     # base64url chars (39 total). Trailing negative lookahead pins the exact
     # length so it won't fire on the AIza-prefixed head of a longer blob.
-    r"\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])",
+    r"(?<![A-Za-z0-9_])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])",
     # GitLab personal access token: unique ``glpat-`` literal + the exact
     # classic 20-char body (gitleaks ``glpat-[\w-]{20}``) with a terminal
     # guard. Exact length is what rejects digit-bearing kebab slugs like
     # "glpat-form-builder-component-name-2026" — a ``{20,}`` superset
     # matched those. Newer 17.x routable tokens (longer body + a
     # ".<checksum>" suffix) are a separate dot-anchored follow-up.
-    r"\bglpat-[0-9A-Za-z_-]{20}(?![0-9A-Za-z_-])",
+    r"(?<![A-Za-z0-9_])glpat-[0-9A-Za-z_-]{20}(?![0-9A-Za-z_-])",
     # Hugging Face access token (this repo loads HF models). The short
     # ``hf_`` prefix is collision-prone (hf_hub, hf_model), so: exact
     # 34-char alnum body (trufflehog charset — digits matter), both word
     # boundaries, and a digit-in-body lookahead to reject letter-only
     # identifiers.
-    r"\bhf_(?=[A-Za-z0-9]{0,33}[0-9])[A-Za-z0-9]{34}\b",
+    r"(?<![A-Za-z0-9_])hf_(?=[A-Za-z0-9]{0,33}[0-9])[A-Za-z0-9]{34}(?![A-Za-z0-9_])",
     # PyPI / TestPyPI upload token (this repo publishes to PyPI). The
     # macaroon header ``AgEIcHlwaS5vcmc`` / ``AgENdGVzdC5weXBpLm9yZw``
     # (base64 of "pypi.org" / "test.pypi.org") is an exact fingerprint →
     # lowest FP of the set.
-    r"\bpypi-Ag(?:EIcHlwaS5vcmc|ENdGVzdC5weXBpLm9yZw)[A-Za-z0-9_-]{50,}",
+    r"(?<![A-Za-z0-9_])pypi-Ag(?:EIcHlwaS5vcmc|ENdGVzdC5weXBpLm9yZw)[A-Za-z0-9_-]{50,}",
 )
 
 
@@ -470,7 +487,7 @@ def to_js_pattern(pat: str) -> tuple[str, str]:
 
 # The browser's copy of a pattern whose server form ``to_js_pattern`` rejects.
 # The JWT rule's linear form needs possessive quantifiers, so the browser keeps
-# the old rule: the same tokens, and exactly what it was sent before.
+# the old rule: the same tokens.
 _JS_PATTERN_OVERRIDES: dict[str, str] = {_JWT_RULE: _JWT_RULE_OLD}
 
 # Pre-computed JS-shape view of ``DEFAULT_PATTERNS`` and a stable hash over
@@ -657,7 +674,111 @@ def scan(text: str, patterns: tuple[str, ...] | None = None) -> list[RedactionHi
 
 
 _JWT_SEGMENT_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
-_WORD_CHAR_RE = re.compile(r"\w")
+_WORD_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
+
+
+def value_scan_parts(value: object) -> list[str]:
+    """Every dict key and string inside a JSON value, raw, in a fixed order.
+
+    A guard that scans only ``json.dumps(value)`` sees each string with
+    ``"`` as ``\\"`` and a newline as ``\\n``, so a rule that needs a literal
+    quote or whitespace misses a secret the store will persist and return
+    verbatim. Scan these parts alongside the serialized form, which still
+    carries the key/value pairing the quoted-label rule matches.
+
+    ``value`` is the decoded form that is persisted (``json.loads`` of the
+    serialized value). Order: a dict's keys in sorted order, each followed by
+    its value; a list's items in order. Join the parts with a non-whitespace
+    separator so a label in one part cannot pair with the next one.
+    """
+    parts: list[str] = []
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            parts.append(node)
+        elif isinstance(node, dict):
+            for key in sorted(node, key=str, reverse=True):
+                stack.append(node[key])
+                stack.append(key)
+        elif isinstance(node, list):
+            stack.extend(reversed(node))
+    return parts
+
+
+_HEX = "[0-9a-fA-F]"
+# One escape sequence, matched left to right so ``\\n`` reads as an escaped
+# backslash followed by ``n``. A high+low surrogate pair is tried before a
+# single ``\uXXXX`` so the pair becomes one character.
+_ESCAPE_RE = re.compile(
+    rf"\\(?:u([dD][89abAB]{_HEX}{{2}})\\u([dD][c-fC-F]{_HEX}{{2}})"
+    rf"|u({_HEX}{{4}})"
+    r'|(["\\/bfnrt]))'
+)
+_SIMPLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+_ESCAPE_PASSES = 2
+VIEW_SEPARATOR = "\n---\n"
+
+
+def _resolve_escape(match: re.Match[str]) -> str:
+    high, low, single, simple = match.groups()
+    if simple is not None:
+        return _SIMPLE_ESCAPES[simple]
+    if high is not None:
+        code = 0x10000 + ((int(high, 16) - 0xD800) << 10) + (int(low, 16) - 0xDC00)
+        return chr(code)
+    code = int(single, 16)
+    # A lone surrogate cannot be encoded; leave it spelled out.
+    return match.group(0) if 0xD800 <= code <= 0xDFFF else chr(code)
+
+
+def escape_views(text: str) -> list[str]:
+    """``text``, then up to two copies with JSON-style escape sequences resolved.
+
+    A JSON file, a JSON string inside a header or a shell command inside a
+    JSON string spells ``"`` as ``\\"``, a newline as ``\\n`` and any
+    character as ``\\uXXXX``. Rules that need a literal quote or whitespace
+    (the quoted-label rule, a PEM header split across lines) miss that
+    spelling, while whoever reads the file decodes it. Each view resolves
+    one level of ``\\"``, ``\\\\``, ``\\/``, ``\\b``, ``\\f``, ``\\n``,
+    ``\\r``, ``\\t`` and ``\\uXXXX``; a lone surrogate stays escaped and
+    any other ``\\X`` is left as is. A view keeps the text's structure, so a
+    key and its value stay side by side; nothing is parsed.
+
+    The views exist only to be scanned. Join them with
+    :data:`VIEW_SEPARATOR`, which is not whitespace, so a match cannot run
+    from the end of one view into the next.
+    """
+    views = [text]
+    current = text
+    for _ in range(_ESCAPE_PASSES):
+        if "\\" not in current:
+            break
+        resolved = _ESCAPE_RE.sub(_resolve_escape, current)
+        if resolved == current:
+            break
+        views.append(resolved)
+        current = resolved
+    return views
+
+
+def scan_with_escape_views(text: str) -> list[RedactionHit]:
+    """:func:`scan` over ``text`` and its :func:`escape_views`.
+
+    A hit's span is an offset into ``VIEW_SEPARATOR.join(escape_views(text))``:
+    one at or past ``len(text)`` lies in a view, not in ``text``. The same
+    secret can be counted once per view it appears in.
+    """
+    return scan(VIEW_SEPARATOR.join(escape_views(text)))
 
 
 def _jwt_old_start(text: str, start: int, floor: int) -> int:
@@ -665,7 +786,7 @@ def _jwt_old_start(text: str, start: int, floor: int) -> int:
 
     Both rules end the match at the same place, but the new one may begin at
     a later ``eyJ`` in the same run of segment characters. The old one began
-    at the run's first ``eyJ`` that sits on a word boundary, since everything
+    at the run's first ``eyJ`` that sits on an ASCII word boundary, since everything
     from there to ``start`` is segment characters. Redaction masks from the
     start and the audit commands report it, so callers get the old one.
     ``floor`` is the previous match's end: neither rule overlaps matches, and
@@ -745,8 +866,11 @@ class WriteGuardResult:
     """Outcome of a single ``enforce_write_guard`` call.
 
     ``decision`` is one of ``_VALID_OUTCOMES``. ``hits`` is the raw
-    ``scan()`` result so callers can size-quote it in user-facing
-    errors (length only, never the matched bytes).
+    :func:`scan_with_escape_views` result so callers can size-quote it in
+    user-facing errors (length only, never the matched bytes). Spans are
+    offsets into the content joined with its escape views, so a span at or
+    past the content's length points into a view, and one secret can be
+    counted once per view.
     """
 
     decision: str
@@ -768,14 +892,14 @@ def sanitize_audit_value(value: object) -> object:
     leak it through the log line.
 
     Non-string values (``None``, ``int``, ``bool``) pass through. Strings
-    are re-scanned with the same ``DEFAULT_PATTERNS`` used for content;
+    are re-scanned the way the guard scans content, escape views included;
     any hit replaces the value entirely with a fixed marker, and very
     long strings are truncated so a multi-megabyte path can't blow up
     the audit line either.
     """
     if not isinstance(value, str):
         return value
-    if scan(value):
+    if scan_with_escape_views(value):
         return _AUDIT_REDACTED_MARKER
     if len(value) > _AUDIT_VALUE_MAX_LEN:
         return value[:_AUDIT_VALUE_MAX_LEN] + "...(truncated)"
@@ -901,9 +1025,9 @@ def emit_project_shared_confirmation(
     says a human (or an agent acting for one) authorised a git-tracked write
     at ``surface``, which is the thing that has no other record. A dry run
     writes nothing and so emits nothing — which is a statement about what
-    is *recorded*, not about what is *asked*: ``mem_context_memory_migrate``
-    still requires the confirmation argument on a preview call, its own
-    pre-existing contract and not something this line reports on.
+    is *recorded*, not about what is *asked*: a surface may still require the
+    confirmation on a preview call, its own contract and not something this
+    line reports on.
 
     **Log line only, no counter.** :data:`_VALID_OUTCOMES` labels the outcome
     of a *content scan*; a consent is not a scan, and folding it into those
@@ -1034,7 +1158,7 @@ def enforce_write_guard(
         if count_outcome:
             _record_outcome(outcome, tool)
 
-    hits = scan(content)
+    hits = scan_with_escape_views(content)
     if not hits:
         if record_outcome:
             record("pass", surface)

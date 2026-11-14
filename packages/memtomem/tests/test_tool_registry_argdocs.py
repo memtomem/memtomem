@@ -3,9 +3,8 @@
 ``_parse_arg_docs`` feeds the only parameter documentation an agent sees for a
 non-core action in the default core mode. It used to accept ANY
 ``\\s{4,}(\\w+):`` line inside the ``Args:`` block, so nested ``key: value``
-content — the JSON schemas under ``mem_policy_add``'s ``config``, the format
-list under ``mem_context_generate`` — registered as parameters that do not
-exist. ``mem_do`` then advertised ``auto_expire`` / ``auto_tag`` /
+content — the JSON schemas under ``mem_policy_add``'s ``config``, a format
+list under a context tool — registered as parameters that do not exist. ``mem_do`` then advertised ``auto_expire`` / ``auto_tag`` /
 ``conversion`` as callable arguments.
 
 The fix is two-layered and both layers are pinned here: the parser only starts
@@ -172,25 +171,17 @@ def test_category_help_output_stays_readable() -> None:
 
     A per-parameter ceiling would allow unbounded aggregate growth (many
     just-under-the-limit entries) while rejecting one legitimately long
-    description, so budget the rendered category instead. ``context`` is the
-    outlier by design — 11 actions with the ADR-0030 scope/consent surface —
-    and gets its own line rather than pulling the general budget up to meet
-    it.
+    description, so budget the rendered category instead. One budget covers
+    every category; ``context`` had its own 16,000 while it carried eleven
+    actions, and since ADR-0044 left it two reads it fits the general one.
     """
     from memtomem.server.tools.meta import _help
 
-    # ``context`` was raised from 14,000 when the parameter documentation for
-    # detect / sync / migrate moved into their ``Args:`` blocks: that text
-    # already existed in the tool descriptions, it just was not reachable from
-    # the help catalog that core-mode agents read. Growth of this kind is the
-    # point; the next increase should trim instead — 16 KB is about as much as
-    # a single help response should ever be.
-    budgets = {"context": 16_000}
-    default_budget = 4_000
+    budget = 4_000
     offenders = {
         category: size
         for category in sorted({info.category for info in ACTIONS.values()})
-        if (size := len(_help(category))) > budgets.get(category, default_budget)
+        if (size := len(_help(category))) > budget
     }
     assert not offenders, (
         f"category help outgrew its budget: {offenders}. Move detail into the "

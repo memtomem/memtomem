@@ -587,3 +587,22 @@ class TestGateA:
         with pytest.raises(PrivacyBlockedError):
             apply_hook_copy(_plan(src, dst_project, matcher="Edit", scope="user"))
         assert not (fake_home / ".claude" / "settings.json").exists()
+
+    @pytest.mark.parametrize(
+        "command",
+        ['echo \'{"password": "synthetic-example"}\'', "printf 'BEGIN\nRSA\nPRIVATE\nKEY'"],
+        ids=["quoted-label", "pem"],
+    )
+    def test_secret_hidden_by_json_escaping_blocks(self, tmp_path, dst_project, command):
+        # The fragment is scanned as JSON text, where the quote and the
+        # newline are escaped; the hook runs the decoded command (#3300).
+        src = tmp_path / "src-escaped"
+        src.mkdir()
+        _write_doc(
+            src / CANONICAL_SETTINGS_FILE,
+            {"hooks": {"PostToolUse": [_rule("Edit", inners=[_inner(command)])]}},
+        )
+        with pytest.raises(PrivacyBlockedError):
+            apply_hook_copy(_plan(src, dst_project, matcher="Edit"))
+        assert not (dst_project / CANONICAL_SETTINGS_FILE).exists()
+        assert not (dst_project / ".claude" / "settings.json").exists()

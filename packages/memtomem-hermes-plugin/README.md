@@ -21,7 +21,7 @@ from `packages/memtomem-plugin-assets/`; edit the sources there, not the files h
   extra to Hermes's environment to fix it.
 - Git on `PATH`, for the commit lookup under [Install](#install).
 - `uv` on `PATH`. The server is started with
-  `uvx --python 3.12 --from 'memtomem[onnx]==0.7.8' memtomem-server`.
+  `uvx --python 3.12 --from 'memtomem[onnx]==0.7.9' memtomem-server`.
   Without `uv` the plugin still installs and enables, and the server fails at start with
   `missing executable 'uvx'`.
 - Python 3.12. uv uses a 3.12 it can find; if there is none, it downloads one (about 70 MiB)
@@ -130,7 +130,7 @@ your own server entry to `config.yaml`:
 mcp_servers:
   memtomem:
     command: uvx
-    args: ["--python", "3.12", "--from", "memtomem[onnx]==0.7.8", "memtomem-server"]
+    args: ["--python", "3.12", "--from", "memtomem[onnx]==0.7.9", "memtomem-server"]
     env:
       MEMTOMEM_TOOL_MODE: core
       MEMTOMEM_EXTRA_TOOLS: mem_update_coverage
@@ -149,13 +149,16 @@ reads the nearest `.env` again (see "First run" above).
 The server is not confined to `~/.memtomem` or to the directories you ask it to index. It
 runs as your user, and some of its `mem_do` actions read and write files wherever you can:
 
-- The context-gateway actions (`context_init`, `context_detect`, `context_generate`,
-  `context_diff`, `context_sync`, `context_pull`, `context_version`, `context_promote`,
-  `context_memory_migrate`, `context_artifact_migrate`, `context_artifact_transfer`) keep
-  other coding agents' instruction files, skills, sub-agents, commands, hook settings and
-  MCP server lists in step with a canonical copy under `.memtomem/`. They read and write
-  those agents' files in projects and in the agents' own configuration, for example
-  `~/.claude.json`, `~/.claude/`, `~/.codex/`, `~/.gemini/` and `~/.kimi-code/`.
+- The context-gateway actions keep other coding agents' instruction files, skills,
+  sub-agents, commands, hook settings and MCP server lists in step with a canonical copy
+  under `.memtomem/`, in projects and in the agents' own configuration, for example
+  `~/.claude.json`, `~/.claude/`, `~/.codex/`, `~/.gemini/` and `~/.kimi-code/`. In
+  memtomem 0.7.9, the version this package runs, only the two reads are `mem_do` actions:
+  `context_detect` and `context_diff`. The writes (`context_init`, `context_generate`,
+  `context_sync`, `context_pull`, `context_version`, `context_promote`,
+  `context_memory_migrate`, `context_artifact_migrate` and `context_artifact_transfer`)
+  run from the `mm context` CLI and are not on MCP; 0.7.8 and earlier also offered them as
+  `mem_do` actions.
 - Actions that take a path from the caller, such as indexing, `ingest` (which imports other
   agents' instruction files and native memory), export and import, read or write that path.
 - While the server runs, a file watcher watches memtomem's configured index roots (its
@@ -163,8 +166,9 @@ runs as your user, and some of its `mem_do` actions read and write files whereve
   change there, and an existing configuration can enable scheduled maintenance jobs.
 
 Those files can hold other tools' credentials, and hooks are commands those agents run.
-Some of these actions ask for confirmation through a parameter (`allow_host_writes`,
-`confirm_project_shared`) before certain writes, but this package adds no limit of its own.
+Some of these actions ask for confirmation through a parameter (`confirm_project_shared`)
+before certain writes; the model sets that parameter itself, and this package adds no limit
+of its own.
 The six skills call none of the context-gateway actions or `ingest`; they run only when the
 model passes them to `mem_do`.
 

@@ -552,9 +552,9 @@ class TestLangGraphAddRedactionGuard:
 
         real_append = _memory_writer.append_entry
 
-        def _spy_append(target, content, *, title=None, tags=None):
+        def _spy_append(target, content, *, title=None, tags=None, judged):
             events.append(("append", {"target": str(target)}))
-            return real_append(target, content, title=title, tags=tags)
+            return real_append(target, content, title=title, tags=tags, judged=judged)
 
         monkeypatch.setattr(_memory_writer, "append_entry", _spy_append)
 

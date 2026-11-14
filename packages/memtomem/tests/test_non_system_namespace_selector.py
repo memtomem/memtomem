@@ -272,9 +272,9 @@ class TestWeb:
 
     @pytest.mark.asyncio
     async def test_timeline_refuses_the_selector_in_a_list(self, seeded):
-        # The route lets the parser's ValueError reach the app-wide handler: 400.
+        # Same status as /api/search for filter syntax it cannot parse (#3288).
         resp = await _get(_web_app(seeded), "/api/timeline", namespace="!system,default")
-        assert resp.status_code == 400
+        assert resp.status_code == 422
         assert "selector in a list" in resp.json()["detail"]
 
 

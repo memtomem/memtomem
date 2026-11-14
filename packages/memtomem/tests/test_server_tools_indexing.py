@@ -292,8 +292,8 @@ class TestMemIndexMissingVectorAdvisory:
 
 class TestMemIndexDeclaredExemption:
     """#2076: ``mem_index`` has no ``force_unsafe`` parameter, so a
-    frontmatter declaration is the only way a pattern-documenting note indexes
-    over MCP at all. Same hand-rendered-surface rule as the advisories above —
+    frontmatter declaration is the only way a pattern-documenting note gets
+    through ``mem_index`` verbatim. Same hand-rendered-surface rule as the advisories above —
     an unrendered field never reaches an agent."""
 
     async def test_exempted_files_are_named(

@@ -16,6 +16,8 @@ from memtomem.errors import ConfigError
 from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
 from memtomem.memory_scope import (
     EMPTY_MEMORY_DIRS_ERROR,
+    entry_is_link,
+    project_tier_dir,
     require_user_base,
     resolve_memory_scope_dir,
 )
@@ -196,12 +198,56 @@ class PinnedContextStore:
             if not (scope == "user" and self.user_base is None)
         )
 
-    def _path(self, scope: TargetScope, block_id: str, agent_id: str | None) -> Path:
+    @staticmethod
+    def _relative_path(block_id: str, agent_id: str | None) -> Path:
+        """A block's file below a tier's ``pinned`` directory, ids validated."""
         block_id = _validate_id(block_id, "block id")
         if agent_id is not None:
             agent_id = _validate_id(agent_id, "agent id")
-            return self._base(scope) / "agents" / agent_id / f"{block_id}.md"
-        return self._base(scope) / "general" / f"{block_id}.md"
+            return Path("agents") / agent_id / f"{block_id}.md"
+        return Path("general") / f"{block_id}.md"
+
+    def _path(self, scope: TargetScope, block_id: str, agent_id: str | None) -> Path:
+        # Ids first: an invalid id is reported before anything about the scope.
+        relative = self._relative_path(block_id, agent_id)
+        return self._base(scope) / relative
+
+    def _mutation_path(self, scope: TargetScope, block_id: str, agent_id: str | None) -> Path:
+        """Where ``set`` and ``delete`` act, refusing a project tier reached through a link.
+
+        A project tier's directories live in the project's checkout, and a
+        checkout can deliver any of them as a symbolic link. The block would
+        then be written or removed wherever the link points. So for a project
+        scope no entry from ``.memtomem`` down to the block file's parent
+        directory may be a link or a junction. Each entry is asked directly
+        instead of comparing resolved paths, which refuses a link that stays
+        inside the tier as well.
+
+        The block file itself is not asked about: the atomic writer replaces
+        whatever is at that name, and ``unlink`` removes a link, not its
+        target. The user tier is the user's own layout and is not judged.
+        Nothing above the project root is asked about either. The check is
+        made when the path is chosen; a link put there afterwards is not seen.
+        Reads do not call this and behave as before.
+        """
+        relative = self._relative_path(block_id, agent_id)
+        root = self.project_root
+        if scope in ("project_shared", "project_local") and root is not None:
+            # Asked before ``_base`` resolves the tier: a link there is what
+            # this refuses, and resolving a link that loops raises on its own.
+            tier = project_tier_dir(scope, root)
+            entries = [tier.parent, tier, tier / "pinned"]
+            for part in relative.parent.parts:
+                entries.append(entries[-1] / part)
+            for entry in entries:
+                if entry_is_link(entry):
+                    raise ValueError(
+                        f"{entry.relative_to(root).as_posix()} in this project is a link (or "
+                        "cannot be inspected); Pinned Context is not written or deleted "
+                        "through a link, and nothing was changed. Replace the link with a "
+                        "regular directory, or make the entry readable."
+                    )
+        return self._base(scope) / relative
 
     def set(
         self,
@@ -249,7 +295,7 @@ class PinnedContextStore:
         )
         if guard.decision not in {"pass", "bypassed"}:
             raise ValueError(f"Pinned Context blocked by {len(guard.hits)} privacy pattern(s)")
-        path = self._path(scope, block_id, agent_id)
+        path = self._mutation_path(scope, block_id, agent_id)
         metadata = {
             "id": block_id,
             "description": description,
@@ -324,7 +370,7 @@ class PinnedContextStore:
                 action="delete",
                 audit_context={"block_id": block_id},
             )
-        path = self._path(scope, block_id, agent_id)
+        path = self._mutation_path(scope, block_id, agent_id)
         self._refuse_if_read_only(path)
         existed = path.exists()
         path.unlink(missing_ok=True)

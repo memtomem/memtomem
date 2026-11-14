@@ -128,6 +128,7 @@ async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
                     comp.storage,
                     old,
                     new,
+                    is_managed_source=comp.index_engine.is_managed_source,
                     merge=new in existing,
                 )
             except NamespaceMutationBusyError as exc:
@@ -516,12 +517,17 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 if mix_err is not None:
                     raise click.ClickException(mix_err)
                 from memtomem.indexing.engine import PrivacyRejection
-                from memtomem.tools.memory_mutation import appended_valve_text, preflight_refusal
+                from memtomem.tools.memory_mutation import (
+                    appended_valve_text,
+                    preflight_refusal,
+                    refuse_changed_append,
+                )
+                from memtomem.tools.memory_writer import SourceChangedError
 
                 # The re-index after the append judges the whole file: refuse a
                 # file whose content may not be indexed before writing anything.
                 needs_valve = guard.decision == "bypassed"
-                refusal, pre = await preflight_refusal(
+                refusal, judged = await preflight_refusal(
                     comp.index_engine,
                     path,
                     op="mm agent share",
@@ -530,15 +536,26 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 )
                 if refusal is not None:
                     raise click.ClickException(refusal.removeprefix("Error: "))
-                appended = append_entry(path, chunk.content, title=title, tags=tags)
+                try:
+                    appended = append_entry(
+                        path, chunk.content, title=title, tags=tags, judged=judged
+                    )
+                except SourceChangedError as exc:
+                    refusal = await refuse_changed_append(
+                        comp.index_engine, path, judged, op="mm agent share"
+                    )
+                    raise click.ClickException(refusal.removeprefix("Error: ")) from exc
                 try:
                     stats = await comp.index_engine.index_file(
                         path,
                         namespace=target,
                         ingress_guarded=True,
                         force_unsafe=needs_valve,
-                        valve_text=(appended_valve_text(pre, appended) if needs_valve else None),
+                        valve_text=(
+                            appended_valve_text(judged.data, appended.text) if needs_valve else None
+                        ),
                         lock_held=True,
+                        written_source=appended.source,
                     )
                 except PrivacyRejection as exc:
                     raise click.ClickException(
@@ -554,11 +571,12 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
     click.echo(f"Shared to namespace '{target}'.")
     click.echo(f"- File: {path}")
     click.echo(f"- Indexed chunks: {stats.indexed_chunks}")
-    if stats.excluded_files:
-        # The file became excluded while the entry was appended (#3165).
-        from memtomem.source_provenance import EXCLUDED_AFTER_APPEND_NOTICE
+    from memtomem.tools.memory_mutation import append_warning
 
-        click.echo(f"Warning: {EXCLUDED_AFTER_APPEND_NOTICE}", err=True)
+    # Excluded, or replaced by a link, while the entry was appended.
+    warning = append_warning(stats, judged)
+    if warning is not None:
+        click.echo(f"Warning: {warning}", err=True)
 
 
 # ── search ──────────────────────────────────────────────────────────────

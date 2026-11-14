@@ -13,7 +13,6 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Literal, TypeGuard, get_args
 
 from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -314,13 +313,10 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
             return JSONResponse(status_code=500, content={"detail": exc.public_message})
         return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Accept", "X-Memtomem-CSRF"],
-    )
-
+    # No CORS middleware: the SPA is served by this app, so every request it
+    # makes is same-origin, and no other origin is given a readable response
+    # or an answered preflight.
+    #
     # CSRF / Origin / Host guard (RFC #787).
     #
     # Order with SecurityHeaders matters: ``add_middleware`` stacks last-added
