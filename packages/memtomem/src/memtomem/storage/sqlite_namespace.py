@@ -25,7 +25,7 @@ from memtomem.errors import (
     RedactionBlockedError,
     StorageError,
 )
-from memtomem.privacy import enforce_write_guard
+from memtomem.privacy import enforce_write_guard, exemption_covers
 from memtomem.storage.base import (
     NamespaceAssignResult,
     NamespaceChunkCandidate,
@@ -956,8 +956,15 @@ class NamespaceOps:
             # attributes the pass/blocked counter to the caller.
             guard = enforce_write_guard(description, surface=surface)
             if guard.decision != "pass":
+                # ``exemption_covers`` is the ``documents-patterns`` predicate:
+                # true when every hit is one of ``EXEMPTIBLE_DOC_PATTERNS``.
+                # Here it only picks the refusal wording, so widening that
+                # allowlist also widens which refusals get the label hint.
                 raise RedactionBlockedError(
-                    "Namespace description", hits=len(guard.hits), surface=surface
+                    "Namespace description",
+                    hits=len(guard.hits),
+                    surface=surface,
+                    label_only=exemption_covers(guard.hits),
                 )
         db = self._get_db()
         now = now_iso()

@@ -317,6 +317,9 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
                     "detail": "redaction_blocked",
                     "hits": exc.hits,
                     "surface": exc.surface,
+                    # Picks the wording only: true means every hit was a
+                    # label rule, not that the text holds no credential.
+                    "label_only": exc.label_only,
                 }
             },
         )

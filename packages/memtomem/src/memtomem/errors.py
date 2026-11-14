@@ -252,14 +252,31 @@ class RedactionBlockedError(ValueError):
     maps this type to the 403 ``redaction_blocked`` payload the SPA parses.
 
     ``hits`` is the pattern-match count and ``surface`` the surface the guard
-    counted the refusal under. The message carries the count only, never the
-    matched text.
+    counted the refusal under. ``label_only`` says every hit came from the
+    two unquoted label rules (``password:``, ``api_key=``), which also match
+    prose that names a credential without holding one; the message then says
+    what to reword. It does not say the text holds no credential: the same
+    rules match ``password=<a real one>``. The message carries the count and
+    fixed examples only, never the matched text.
     """
 
-    def __init__(self, what: str, *, hits: int, surface: str) -> None:
+    #: Appended to the message when ``label_only``. Fixed text: the examples
+    #: come from the rules, not from the refused input.
+    LABEL_HINT = (
+        "Every match is a credential label before ':' or '=' (such as 'password:' "
+        "or 'api_key='); spaces before the ':' or '=' and a label inside a longer "
+        "word match too. Reword it, for example 'password rotation' instead of "
+        "'password: rotation'. A real credential does not belong in a description."
+    )
+
+    def __init__(self, what: str, *, hits: int, surface: str, label_only: bool = False) -> None:
         self.hits = hits
         self.surface = surface
-        super().__init__(f"{what} matches {hits} privacy pattern(s); not saved")
+        self.label_only = label_only
+        message = f"{what} matches {hits} privacy pattern(s); not saved"
+        if label_only:
+            message = f"{message}. {self.LABEL_HINT}"
+        super().__init__(message)
 
 
 class RetryableError(Exception):

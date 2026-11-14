@@ -317,7 +317,12 @@ function editNamespaceMeta(ns, card) {
       // The server scans the description and has no bypass for it (#3352),
       // so this is a plain refusal: no confirm-and-retry, unlike /api/add.
       if (err instanceof RedactionBlockedError) {
-        showToast(t('toast.ns_description_redaction_blocked', { hits: err.hits }), 'error');
+        // Label rules also match prose that names a credential without
+        // holding one (#3354), so that refusal says what to reword.
+        const key = err.labelOnly === true
+          ? 'toast.ns_description_redaction_blocked_label'
+          : 'toast.ns_description_redaction_blocked';
+        showToast(t(key, { hits: err.hits }), 'error');
         return;
       }
       showToast(t('toast.error', { error: err.message }), 'error');
