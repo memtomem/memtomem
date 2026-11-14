@@ -36,12 +36,22 @@ explicitly still overrides both.
 
 ```
 mem_ns_list()
-→ default: 200 chunks
-  work: 150 chunks (description="Company project docs", color="#3B82F6")
-  personal: 94 chunks
+```
 
+```text
+Namespaces (3 total):
+
+  default: 200 chunks
+  personal: 94 chunks
+  work: 150 chunks
+```
+
+```
 mem_ns_update(namespace="work", description="Company project docs", color="#3B82F6")
 ```
+
+The Web UI shows the description and color under **Settings** → **Namespaces**,
+and `mm agent list` shows descriptions for agent namespaces.
 
 The description is scanned by the write guard on every surface that sets it
 (`mem_ns_update`, `mem_agent_register`, `mm agent register --description`, the
