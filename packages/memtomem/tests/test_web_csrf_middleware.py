@@ -60,6 +60,14 @@ def _build_app(*, enforce: bool = True) -> FastAPI:
     async def echo() -> dict[str, str]:
         return {"echo": "ok"}
 
+    @app.put("/api/thing/{tid}")
+    async def put_thing(tid: str) -> dict[str, str]:
+        return {"put": tid}
+
+    @app.patch("/api/thing/{tid}")
+    async def patch_thing(tid: str) -> dict[str, str]:
+        return {"patched": tid}
+
     @app.delete("/api/thing/{tid}")
     async def delete_thing(tid: str) -> dict[str, str]:
         return {"deleted": tid}
@@ -245,16 +253,47 @@ def test_post_with_right_token_but_attacker_origin_returns_403(caplog_csrf) -> N
     assert ev["would_block"] == "True"
 
 
-def test_delete_without_token_returns_403(caplog_csrf) -> None:
-    """DELETE — the ``<form>``-impossible method that ``fetch`` can
-    still issue — is gated identically to POST."""
+_OWN_ORIGIN = {"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080"}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/echo"),
+        ("PUT", "/api/thing/42"),
+        ("PATCH", "/api/thing/42"),
+        ("DELETE", "/api/thing/42"),
+    ],
+)
+def test_every_unsafe_method_is_refused_for_its_missing_token(
+    caplog_csrf, method: str, path: str
+) -> None:
+    """PUT, PATCH and DELETE — the methods a ``<form>`` cannot send but
+    ``fetch`` can — need the token exactly as POST does.
+
+    The request comes from the UI's own origin, so the Host and Origin
+    checks pass and the token is the only thing missing. Sent with the
+    default ``Host: testserver`` the same request is refused by the Host
+    check, whether or not its method is in ``_UNSAFE_METHODS``.
+    """
     client = TestClient(_build_app())
-    res = client.delete("/api/thing/42")
+    res = client.request(method, path, headers=_OWN_ORIGIN)
     assert res.status_code == 403
+    assert res.json().get("code") == "csrf_token_mismatch"
     events = _parse_observe(caplog_csrf.records)
     assert len(events) == 1
-    assert events[0]["method"] == "DELETE"
-    assert events[0]["would_block"] == "True"
+    ev = events[0]
+    assert ev["method"] == method
+    assert ev["token_ok"] == "False"
+    assert ev["origin_ok"] == "True"
+    assert ev["host_ok"] == "True"
+    assert ev["would_block"] == "True"
+
+    # The control: the route exists, and the token is all it lacked.
+    with_token = client.request(
+        method, path, headers={**_OWN_ORIGIN, "X-Memtomem-CSRF": "test-token-abc"}
+    )
+    assert with_token.status_code == 200
 
 
 def test_session_bootstrap_get_is_host_origin_checked(caplog_csrf) -> None:
