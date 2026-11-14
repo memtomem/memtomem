@@ -51,7 +51,10 @@ def _reset_counters():
 # LTM-origin addition awaiting its reverse mirror), bump the leading side's
 # constant with a sync-tracking note, then re-align the trailing side's
 # constant when the sync lands.
-_SECRET_CLASS_SET_SHA256 = "f6f3d9c324867d786fa5d58b199494872f179b68f5fe42bacc96546989ecfa76"
+# LTM ahead of STM: the six GHSA-h6g8-pjgf-2j99 rules at the tail await their
+# reverse mirror into memtomem-stm, whose suite still pins f6f3d9c3… for the
+# first 20.
+_SECRET_CLASS_SET_SHA256 = "f79e0a897c1355f19b1eeb5076411befa7ee614f5815874d369feba02c8ca7b1"
 
 
 class TestPatternSurface:
@@ -59,9 +62,9 @@ class TestPatternSurface:
         # 13 STM-synced secret-class patterns (incl. the memtomem-stm#553
         # AWS-label, #562 quoted-label, #561 x-amz-security-token and
         # GHSA-mf67-ghgq-cv54 PKCS#8 forward-syncs) + 7 LTM-origin additions
-        # (#1488). Bump deliberately when adding a pattern so a silent
-        # add/drop surfaces here.
-        assert len(privacy.DEFAULT_PATTERNS) == 20
+        # (#1488) + 6 LTM-origin additions (GHSA-h6g8-pjgf-2j99). Bump
+        # deliberately when adding a pattern so a silent add/drop surfaces here.
+        assert len(privacy.DEFAULT_PATTERNS) == 26
 
     def test_pattern_content_pinned_for_stm_sync(self):
         joined = "\n".join(privacy.DEFAULT_PATTERNS).encode("utf-8")
@@ -465,6 +468,19 @@ _PATTERN_FIXTURES: tuple[tuple[str, str], ...] = (
         "pypi-AgEIcHlwaS5vcmcFAKEfake0123456789FAKEfake0123456789FAKEfake0123456789",
         "pypi-package-name-here",
     ),
+    # 20-25: GHSA-h6g8-pjgf-2j99. Negatives: a placeholder or digit-free value.
+    ("redis://:" + "s3cretpass9" + "@host:6379/0", "postgres://user:password@localhost/db"),
+    ('{"client_secret": "' + "abc123def456" + '"}', "refresh_token: str"),
+    ("GITHUB_TOKEN=" + "ghx1234567890abcdef", "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}"),
+    (
+        "aws_secret_access_key " + "wJalrXUtnFEMI/K7MDENG/bPxRfiCY" + "EXAMPLE1KE",
+        "aws_secret_access_key is stored in the vault",
+    ),
+    ("xapp-1-" + "A0123456789-1234567890-abcdef", "xapp is the app-level token prefix"),
+    (
+        "Authorization: Bearer " + "eyJhbGciOiJIUzI1NiJ9abc123",
+        "Authorization: Bearer YOUR_ACCESS_TOKEN_HERE",
+    ),
 )
 
 
@@ -713,8 +729,10 @@ _NEW_PATTERN_NEAR_MISSES = [
 ]
 
 
-#: Number of LTM-origin rules (#1488) at the end of ``DEFAULT_PATTERNS``.
+#: Number of LTM-origin rules (#1488), just before the GHSA-h6g8 tier.
 _LTM_ORIGIN_COUNT = 7
+#: Number of LTM-origin rules (GHSA-h6g8-pjgf-2j99) at the end of ``DEFAULT_PATTERNS``.
+_H6G8_COUNT = 6
 
 
 def _pattern_index_containing(fragment: str) -> int:
@@ -736,8 +754,9 @@ class TestNewSecretPatterns1488:
         # clean of the earlier rules too, but those are pinned elsewhere;
         # here we isolate the new set so a future loosening surfaces
         # precisely.
-        first = len(privacy.DEFAULT_PATTERNS) - _LTM_ORIGIN_COUNT
-        offending = [h.pattern_index for h in privacy.scan(text) if h.pattern_index >= first]
+        end = len(privacy.DEFAULT_PATTERNS) - _H6G8_COUNT
+        first = end - _LTM_ORIGIN_COUNT
+        offending = [h.pattern_index for h in privacy.scan(text) if first <= h.pattern_index < end]
         assert not offending, f"#1488 pattern(s) {offending} false-positived on {text[:50]!r}"
 
     def test_ghp_still_covered_by_legacy_not_duplicated(self):
@@ -1111,3 +1130,183 @@ class TestProjectSharedConfirmationAudit:
             "blocked_project_shared",
             "exempted",
         )
+
+
+# GHSA-h6g8-pjgf-2j99: credentials in URL userinfo and under labels the older
+# rules do not name. Values are filler with a digit, never real secrets.
+_H6G8_POSITIVES = [
+    "postgresql://admin:" + "Pa55w0rdX" + "@host:5432/db",
+    "redis://:" + "s3cretpass9" + "@host:6379/0",
+    "https://deploy:" + "ghx9AbCdEf12" + "@host/repo.git",
+    '{"client_secret": "' + "abc123def456" + '"}',
+    '{"x-api-key": "' + "k9k9k9k9k9" + '"}',
+    '{"refresh_token": "' + "rt_1a2b3c4d5e" + '"}',
+    "X-Api-Key: " + "k9k9k9k9k9",
+    "client_secret=" + "abcd1234efgh",
+    "auth_token: " + "tok9tok9tok9",
+    "GITHUB_TOKEN=" + "ghx1234567890abcdef",
+    "API_TOKEN='" + "tok_9a8b7c6d" + "'",
+    "WEBHOOK_SECRET=" + "whs3cr3tvalue",
+    "aws_secret_access_key " + "wJalrXUtnFEMI/K7MDENG/bPxRfiCY" + "EXAMPLE1KE",
+    "xapp-1-" + "A0123456789-1234567890-abcdef",
+    "xoxe.xoxp-1-" + "Mi0yLTEyMzQ1Ng",
+    "xoxe-1-" + "My0xLTEyMzQ1Ng",
+    "Authorization: Bearer " + "eyJhbGciOiJIUzI1NiJ9abc123",
+    # Characters a real password can hold, and a digit late in a long value.
+    "postgres://u:" + "Abcd1234$" + "@host/db",
+    "postgres://u:" + "Abcd1234*" + "@host/db",
+    "x://u:" + "a" * 201 + "1@h",
+    "client_secret=" + "a" * 201 + "1",
+    # Quoted header keys and values (YAML, JSON).
+    'Authorization: "Bearer ' + "aaaaaaaaaaaaaaaaaaa1" + '"',
+    '{"Authorization":"Bearer ' + "aaaaaaaaaaaaaaaaaaa1" + '"}',
+    "AUTHORIZATION: BEARER " + "aaaaaaaaaaaaaaaaaaa1",
+    # Pretty-printed JSON: the value on the line after the key.
+    '{"client_secret":\n "' + "abc12345" + '"}',
+    '{"Authorization":\n "Bearer ' + "aaaaaaaaaaaaaaaaaaa1" + '"}',
+    # A secret followed by a note in parentheses: only a value that runs straight
+    # into "(" is read as a function call, so a spaced call is still flagged.
+    "client_secret = " + "abcd1234" + " (rotated)",
+    # Passwords that only start like a placeholder.
+    "postgres://u:" + "$abc!123456" + "@host/db",
+    "postgres://u:" + "${NAME}Abcd1234" + "@host/db",
+]
+
+# Shapes the new rules must leave alone: placeholders, values without a digit,
+# type annotations, templated values, and URLs with no password.
+_H6G8_NEAR_MISSES = [
+    "postgres://user:password@localhost/db",
+    "postgres://user:<pw>@host/db",
+    "postgres://user:${PGPASSWORD}@host/db",
+    "redis://:***@host:6379",
+    "ssh://git@github.com/org/repo.git",
+    "http://localhost:8080/path?next=a@b",
+    "https://user@example.com/x",
+    "refresh_token: str",
+    "client_secret = None",
+    "auth_token=changeme",
+    "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}",
+    "API_TOKEN=$API_TOKEN",
+    "WEBHOOK_SECRET=<your-secret>",
+    "PAGE_TOKEN=nextpagecursor",
+    "aws_secret_access_key is stored in the vault",
+    "xapp is the app-level token prefix",
+    "Authorization: Bearer <token>",
+    "Authorization: Bearer YOUR_ACCESS_TOKEN_HERE",
+    # A URL whose "password" would run across JSON string boundaries.
+    '{"url":"http://localhost:8080","email":"a@example.invalid"}',
+    # Whole-placeholder passwords.
+    "postgres://u:$PGPASS@h",
+    "redis://:********@h",
+    "postgres://u:{{password}}@h",
+    # A 40-character AWS value with no digit (the accepted miss).
+    "aws_secret_access_key " + "a" * 40,
+    # Characters Python and the browser read differently, kept out of both:
+    # a non-ASCII digit, NEL and BOM as whitespace. (Case folding of letters
+    # such as a dotless i still differs, as for the older ``(?i)`` rules.)
+    "xapp-\u0661-aaaaaaaaaa",
+    "client_secret\u0085=abcd1234",
+    "client_secret\ufeff=abcd1234",
+    # A value that is code, not a secret.
+    "refresh_token=uuid.uuid4().hex",
+    "client_secret = base64.b64encode(raw).decode()",
+    "API_TOKEN=base64.b64encode(raw)",
+    # Non-ASCII in a URL password (a browser counts an emoji as two units).
+    "postgres://u:\U0001f600\U0001f600\U0001f600\U0001f6001@h",
+    # The accepted miss: a value read for 256 characters whose digit comes later.
+    "client_secret=" + "a" * 300 + "1",
+]
+
+
+def _h6g8_indexes(text: str) -> set[int]:
+    first = len(privacy.DEFAULT_PATTERNS) - _H6G8_COUNT
+    return {h.pattern_index for h in privacy.scan(text) if h.pattern_index >= first}
+
+
+class TestPatternsH6g8:
+    @pytest.mark.parametrize("sample", _H6G8_POSITIVES)
+    def test_each_form_is_caught_by_a_new_rule(self, sample):
+        assert _h6g8_indexes(sample), f"not caught by the new rules: {sample[:30]!r}"
+
+    @pytest.mark.parametrize("text", _H6G8_NEAR_MISSES)
+    def test_placeholders_and_annotations_are_left_alone(self, text):
+        assert not _h6g8_indexes(text), f"new rule false-positived on {text!r}"
+
+    def test_the_rules_that_read_a_bounded_value_are_marked(self):
+        # Session tracing extends these hits to the end of the token run.
+        marked = {privacy.DEFAULT_PATTERNS[i] for i in privacy.BOUNDED_VALUE_RULES}
+        assert len(marked) == 3
+        assert any("client[_-]?secret" in p for p in marked)
+        assert any("_(?:TOKEN|SECRET)" in p for p in marked)
+        assert any("bearer" in p for p in marked)
+
+    def test_every_new_rule_is_used(self):
+        first = len(privacy.DEFAULT_PATTERNS) - _H6G8_COUNT
+        used = set().union(*(_h6g8_indexes(s) for s in _H6G8_POSITIVES))
+        assert used == set(range(first, len(privacy.DEFAULT_PATTERNS)))
+
+    def test_every_new_rule_translates_for_the_browser(self):
+        for pattern in privacy.DEFAULT_PATTERNS[-_H6G8_COUNT:]:
+            body, flags = privacy.to_js_pattern(pattern)
+            assert not re.match(r"\(\?[aimsux]+\)", body) and set(flags) <= {"i"}
+            # Spelled-out whitespace and digits: ``\s`` and ``\d`` mean different
+            # sets in Python and in a browser RegExp.
+            assert "\\s" not in body and "\\d" not in body
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "a" * 40_000,
+            "x://" + "b" * 40_000,
+            "x://u:" + "1" * 40_000,
+            "A" * 40_000,
+            "A_" * 20_000,
+            "client_secret=" + "1" * 40_000,
+            "authorization: bearer " + "1" * 40_000,
+        ],
+        ids=["letters", "scheme", "password-run", "upper", "upper-underscore", "label", "bearer"],
+    )
+    def test_long_runs_scan_in_linear_time(self, text):
+        """8x the input must take well under 64x the time (best of five runs)."""
+        import time
+
+        def best(sample: str) -> float:
+            times = []
+            for _ in range(5):
+                start = time.perf_counter()
+                privacy.scan(sample)
+                times.append(time.perf_counter() - start)
+            return min(times)
+
+        small = text[: len(text) // 8]
+        assert best(text) / best(small) < 30
+
+    @pytest.mark.parametrize(
+        "unit",
+        [
+            "client_secret=/",
+            "A_TOKEN=/",
+            "authorization: bearer /",
+            "x://u:/",
+            "x://u:a",
+            "aws_secret_access_key ",
+            "xoxe-1-",
+        ],
+    )
+    @pytest.mark.parametrize("scanner", ["scan", "scan_with_escape_views"])
+    def test_a_label_repeated_inside_its_own_value_scans_in_linear_time(self, unit, scanner):
+        """Each start reads a bounded value, so a run of labels is not re-read per label."""
+        import time
+
+        scan = getattr(privacy, scanner)
+
+        def best(n: int) -> float:
+            text = unit * n + r"\u0041"
+            times = []
+            for _ in range(3):
+                start = time.perf_counter()
+                scan(text)
+                times.append(time.perf_counter() - start)
+            return min(times)
+
+        assert best(8_000) / best(1_000) < 30

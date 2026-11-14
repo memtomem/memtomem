@@ -12,6 +12,9 @@ from typing import Any, Dict, Generator, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
 
+#: Characters of a token value, for extending a hit a bounded rule cut short.
+_TOKEN_RUN = re.compile(r"[A-Za-z0-9._~+/=-]*")
+
 _trace_config: Optional[Any] = None
 _langfuse_client: Optional[Any] = None
 
@@ -186,13 +189,24 @@ def _redact_value(val: Any) -> Any:
         if hits:
             # Merge overlapping spans first: two patterns can match
             # overlapping text, and splicing one span shifts the text the
-            # other indexes, which ate whatever followed the pair.
+            # other indexes, which ate whatever followed the pair. A rule that
+            # reads a value for at most 256 characters can stop inside a longer
+            # token, so its span is extended over the rest of that token run, or
+            # the rest would be logged. Spans are taken left to right and an
+            # extension starts only past the current span's end, so no part of
+            # the text is read twice.
+            from memtomem.privacy import BOUNDED_VALUE_RULES
+
             merged: list[list[int]] = []
-            for start, end in sorted(hit.span for hit in hits):
+            for start, end, index in sorted((*hit.span, hit.pattern_index) for hit in hits):
                 if merged and start < merged[-1][1]:
-                    merged[-1][1] = max(merged[-1][1], end)
+                    if end <= merged[-1][1]:
+                        continue
                 else:
                     merged.append([start, end])
+                if index in BOUNDED_VALUE_RULES:
+                    end = _TOKEN_RUN.match(val, end).end()
+                merged[-1][1] = max(merged[-1][1], end)
             # Replace from right to left so earlier spans keep their indexes.
             for start, end in reversed(merged):
                 val = val[:start] + "***" + val[end:]

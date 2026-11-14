@@ -1,10 +1,10 @@
 """Content redaction guard at the LTM trust boundary.
 
-The pattern set has two provenance tiers, both secret-class only. This
-module's 20 secret-class patterns are byte-identical to memtomem-stm
+The pattern set has three provenance tiers, all secret-class only. This
+module's first 20 secret-class patterns are byte-identical to memtomem-stm
 ``proxy/privacy.py:CREDENTIAL_PATTERNS`` as of memtomem-stm#1378, which
 mirrored the ASCII word boundaries of #3298 (see the note above
-``DEFAULT_PATTERNS``).
+``DEFAULT_PATTERNS``); the last 6 (tier 3) are ahead of it.
 
 1. **STM-synced subset** (13 patterns) — originally mirrored from
    memtomem-stm; the AWS secret-material label rule (memtomem-stm#553),
@@ -26,6 +26,12 @@ mirrored the ASCII word boundaries of #3298 (see the note above
    coherence (reverse sync, #1491 / memtomem-stm#549). The two sets matched
    after that sync; whenever LTM is ahead of STM again, the difference lasts
    until the next reverse sync lands.
+
+3. **LTM-origin additions** (6 patterns, GHSA-h6g8-pjgf-2j99) — URL
+   userinfo, OAuth / API-key labels, ``*_TOKEN=`` / ``*_SECRET=``
+   assignments, an AWS secret after its label without a separator, Slack
+   ``xapp-`` / ``xoxe-`` tokens, and bearer tokens. Each needs a value with a
+   digit (see the comment above them). Awaiting the reverse mirror into STM.
 
 Redaction at the LTM ingress is the trust boundary where blocking
 semantics demand a tight false-positive profile.
@@ -111,6 +117,12 @@ _JWT_RULE = (
 # character. ``re.ASCII`` is not the fix: ``\s`` and ``(?i)`` are
 # Unicode-aware on purpose, and an ideographic space between a label and its
 # ``=`` has to keep matching.
+#: Printable ASCII a URL's user / password may hold in the userinfo rule below:
+#: no whitespace, string quotes (``"'`` and backtick) or ``/?#@``, and no ``:``
+#: in the user.
+_URL_USER = r"[\x21\x24-\x26\x28-\x2E\x30-\x39\x3B-\x3E\x41-\x5F\x61-\x7E]"
+_URL_PASS = r"[\x21\x24-\x26\x28-\x2E\x30-\x3E\x41-\x5F\x61-\x7E]"
+
 DEFAULT_PATTERNS: tuple[str, ...] = (
     r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]",
     r"(?i)(password|passwd|pwd)\s*[:=]",
@@ -283,6 +295,69 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     # (base64 of "pypi.org" / "test.pypi.org") is an exact fingerprint →
     # lowest FP of the set.
     r"(?<![A-Za-z0-9_])pypi-Ag(?:EIcHlwaS5vcmc|ENdGVzdC5weXBpLm9yZw)[A-Za-z0-9_-]{50,}",
+    # --- LTM-origin additions, GHSA-h6g8-pjgf-2j99 (awaiting the reverse mirror) ---
+    # Unlike the label rules above, which fire on the label alone, these need
+    # a value: 8+ token characters with a digit (a 20+ run for a bearer token,
+    # exactly 40 for an AWS key). Each value is read for at most 256 characters
+    # and its digit must fall inside them: an unbounded search re-reads the same
+    # run from every label repeated inside it, which is quadratic, and a longer
+    # value whose first digit comes later is the accepted miss. (Slack's tokens
+    # run on: a match that starts consumes the run greedily with nothing after
+    # it that can fail, so that stays linear too.) A value that is a function call (``uuid.uuid4().hex``) is code,
+    # not a secret, and is skipped. Whitespace and digits are spelled out
+    # (``[ \t\r\n]``, ``[0-9]``) because ``\s`` and ``\d`` mean other sets in the
+    # browser's RegExp; ``(?i)`` folds case like the older rules. Measured on a few thousand real notes and docs, that keeps
+    # placeholders (``<pw>``, ``${X}``, ``***``, ``changeme``, ``str``) out; a
+    # letters-only secret is the accepted miss. Every rule starts only where its
+    # leading run starts (the lookbehind), so a long run is entered once.
+    #
+    # Credentials in a URL's userinfo: ``scheme://[user]:password@``. User and
+    # password are printable ASCII without whitespace, string quotes or the URL
+    # delimiters (``/?#@``, and ``:`` in the user), so both runtimes count
+    # them alike and neighbouring JSON strings do not read as one URL. A
+    # password that is a whole placeholder up to the ``@`` (``<pw>``, ``${X}``,
+    # ``$X``, ``{{x}}``, ``***``) is left alone; ``$`` or ``*`` inside a real
+    # one is not.
+    (
+        r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]{0,30}://"
+        + _URL_USER
+        + r"{0,256}:"
+        + r"(?!(?:<"
+        + _URL_PASS
+        + r"{0,256}>|\$\{"
+        + _URL_PASS
+        + r"{0,256}\}"
+        + r"|\$[A-Za-z_][A-Za-z0-9_]{0,256}|\{\{"
+        + _URL_PASS
+        + r"{0,256}\}\}|\*{1,256})@)"
+        + r"(?="
+        + _URL_PASS
+        + r"{0,255}[0-9])"
+        + _URL_PASS
+        + r"{8,256}@"
+    ),
+    # OAuth and API-key labels the older rules do not name, quoted or not.
+    r"(?i)(?<![A-Za-z0-9_.-])[\"']?(?:x-api-key|client[_-]?secret|refresh[_-]?token|auth[_-]?token)"
+    r"[\"']?[ \t\r\n]*[:=][ \t\r\n]*[\"']?(?![A-Za-z0-9._~+/=-]{0,256}\()"
+    r"(?=[A-Za-z0-9._~+/=-]{0,255}[0-9])[A-Za-z0-9._~+/=-]{8,256}",
+    # Environment-style assignments: ``GITHUB_TOKEN=…``, ``WEBHOOK_SECRET=…``.
+    r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{0,256}_(?:TOKEN|SECRET)[ \t]*=[ \t]*[\"']?"
+    r"(?![A-Za-z0-9._~+/=-]{0,256}\()(?=[A-Za-z0-9._~+/=-]{0,255}[0-9])[A-Za-z0-9._~+/=-]{8,256}",
+    # An AWS secret access key written after its label with no ``:`` or ``=``.
+    r"(?i)(?<![A-Za-z0-9_.-])aws[_-]?secret[_-]?access[_-]?key[ \t]+"
+    r"(?=[A-Za-z0-9/+]{0,39}[0-9])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])",
+    # Slack app-level (``xapp-``) and refresh-capable (``xoxe-``) tokens.
+    r"(?<![A-Za-z0-9_])(?:xapp-[0-9]-[A-Za-z0-9-]{10,}|xoxe(?:\.xox[bp])?-[0-9]-[A-Za-z0-9-]{10,})",
+    # An opaque bearer token in an Authorization header, quoted or not.
+    r"(?i)(?<![A-Za-z0-9_-])[\"']?authorization[\"']?[ \t\r\n]*:[ \t\r\n]*[\"']?bearer[ \t]+"
+    r"(?![A-Za-z0-9._~+/=-]{0,256}\()(?=[A-Za-z0-9._~+/=-]{0,255}[0-9])[A-Za-z0-9._~+/=-]{20,256}",
+)
+
+#: Indexes of the rules that read a value for at most 256 characters, so a hit
+#: may stop inside a longer token. A consumer that masks hit spans (session
+#: tracing) extends these over the rest of the token run.
+BOUNDED_VALUE_RULES: frozenset[int] = frozenset(
+    i for i, p in enumerate(DEFAULT_PATTERNS) if p.endswith("{8,256}") or p.endswith("{20,256}")
 )
 
 
