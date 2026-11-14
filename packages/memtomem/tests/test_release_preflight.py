@@ -57,6 +57,7 @@ def _repo(
         '  "idna>=3.15",\n'
         '  "pyjwt>=2.13.0",\n'
         '  "python-multipart>=0.0.27",\n'
+        '  "opentelemetry-api>=1.45.2",\n'
         "]\n\n"
         "[project.optional-dependencies]\n"
         f'onnx = ["fastembed>=0.9.1,<0.10", "urllib3{urllib3}"]\n'
@@ -105,6 +106,7 @@ def _metadata(
         "idna>=3.15",
         "pyjwt>=2.13.0",
         "python-multipart>=0.0.27",
+        "opentelemetry-api>=1.45.2",
         f'urllib3{urllib3}; extra == "all"',
         f'urllib3{urllib3}; extra == "onnx"',
         f'urllib3{urllib3}; extra == "langfuse"',
@@ -1235,6 +1237,44 @@ def test_artifacts_reject_missing_floor(tmp_path: Path) -> None:
     body = _metadata().replace(b"Requires-Dist: starlette>=1.3.1\n", b"")
     with pytest.raises(rp.ReleaseCheckError, match="direct floors"):
         rp.validate_artifacts(_dist(tmp_path, metadata=body), "0.3.6", repo)
+
+
+@pytest.mark.parametrize("name", sorted(rp._SECURITY_DIRECT_NAMES))
+def test_every_security_floor_is_required_of_the_project_and_the_artifacts(
+    tmp_path: Path, name: str
+) -> None:
+    """Each name in the set is a floor memtomem declares for a dependency it
+    could otherwise get transitively, so dropping one from ``pyproject.toml``
+    or from the built metadata must stop a release, whichever name it is."""
+    repo = _repo(tmp_path)
+    pyproject = repo / "packages" / "memtomem" / "pyproject.toml"
+    declared = pyproject.read_text(encoding="utf-8")
+    lines = [line for line in declared.splitlines(keepends=True) if f'"{name}>' in line]
+    assert len(lines) == 1, lines
+
+    built = _metadata()
+    requires = [
+        line
+        for line in built.splitlines(keepends=True)
+        if line.startswith(f"Requires-Dist: {name}>".encode())
+    ]
+    assert len(requires) == 1, requires
+    with pytest.raises(rp.ReleaseCheckError, match="direct floors"):
+        rp.validate_artifacts(
+            _dist(tmp_path, metadata=built.replace(requires[0], b"")), "0.3.6", repo
+        )
+
+    pyproject.write_text(declared.replace(lines[0], ""), encoding="utf-8")
+    with pytest.raises(rp.ReleaseCheckError, match="security-sensitive direct dependencies"):
+        rp.security_metadata_contract(repo)
+
+
+def test_the_real_project_is_held_to_the_opentelemetry_api_floor() -> None:
+    """The contract is derived from the checkout's own ``pyproject.toml`` and
+    the registered names. The floor dropped or lowered there, or the name
+    taken out of the set, fails here and not first at release time."""
+    direct, _ = rp.security_metadata_contract(_ROOT)
+    assert "opentelemetry-api>=1.45.2" in direct
 
 
 def test_artifacts_reject_missing_extra_marker(tmp_path: Path) -> None:
