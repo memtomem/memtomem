@@ -704,7 +704,12 @@ class StorageBackend(Protocol):
     # Namespace metadata
     async def get_namespace_meta(self, namespace: str) -> dict | None: ...
     async def set_namespace_meta(
-        self, namespace: str, description: str | None = None, color: str | None = None
+        self,
+        namespace: str,
+        description: str | None = None,
+        color: str | None = None,
+        *,
+        surface: str = "storage",
     ) -> None: ...
     async def list_namespace_meta(self) -> list[dict]: ...
     async def assign_namespace(

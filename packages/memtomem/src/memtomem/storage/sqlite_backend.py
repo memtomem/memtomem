@@ -4094,9 +4094,11 @@ class SqliteBackend(
         namespace: str,
         description: str | None = None,
         color: str | None = None,
+        *,
+        surface: str = "storage",
     ) -> None:
         assert self._ns is not None
-        return await self._ns.set_namespace_meta(namespace, description, color)
+        return await self._ns.set_namespace_meta(namespace, description, color, surface=surface)
 
     async def list_namespace_meta(self) -> list[dict]:
         assert self._ns is not None

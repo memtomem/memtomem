@@ -19,7 +19,13 @@ from typing import (
 from uuid import UUID
 
 from memtomem.constants import validate_namespace_color
-from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError, StorageError
+from memtomem.errors import (
+    NamespaceConflictError,
+    NamespaceMutationBusyError,
+    RedactionBlockedError,
+    StorageError,
+)
+from memtomem.privacy import enforce_write_guard
 from memtomem.storage.base import (
     NamespaceAssignResult,
     NamespaceChunkCandidate,
@@ -936,11 +942,23 @@ class NamespaceOps:
         namespace: str,
         description: str | None = None,
         color: str | None = None,
+        *,
+        surface: str = "storage",
     ) -> None:
         _ensure_valid_namespace(namespace)
-        # Every color writer (Web PATCH, ``mem_ns_update``, ``mem_agent_register``,
-        # ``mm agent register``) lands here; refuse before any DB work.
+        # Every metadata writer (Web PATCH, ``mem_ns_update``, ``mem_agent_register``,
+        # ``mm agent register``) lands here; refuse before any DB work, and
+        # outside the try below so the refusal keeps its type.
         validate_namespace_color(color)
+        if description:
+            # A description is a label, so there is no bypass valve (#3352),
+            # and without one the guard writes no audit line: ``surface`` only
+            # attributes the pass/blocked counter to the caller.
+            guard = enforce_write_guard(description, surface=surface)
+            if guard.decision != "pass":
+                raise RedactionBlockedError(
+                    "Namespace description", hits=len(guard.hits), surface=surface
+                )
         db = self._get_db()
         now = now_iso()
         updates = []

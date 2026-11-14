@@ -35,6 +35,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mem_ns_update`, `mem_agent_register`, `mm agent register --color` and the Web UI's
   namespace API now return an error for such a value and store nothing. A 5- or 7-digit color
   stored earlier stays in the database and shows as the default color until you set a new one.
+- **A namespace description is scanned by the write guard (#3352).** `mem_ns_update`,
+  `mem_agent_register`, `mm agent register --description` and the Web UI's namespace edit
+  form stored the description without a scan, so a credential pasted there was kept in the
+  database and shown back by the Web UI and `mm agent list`. A description that matches a
+  secret pattern is now refused and nothing is stored: MCP returns an error,
+  `mm agent register` exits non-zero without registering, and the Web UI's namespace API
+  answers 403 `redaction_blocked`. There is no `force_unsafe` valve, since a description is a
+  label. Descriptions stored earlier are not re-scanned.
 
 ### Fixed
 

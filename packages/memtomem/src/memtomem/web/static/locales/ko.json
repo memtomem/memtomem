@@ -1495,6 +1495,7 @@
   "toast.settings_saved": "설정이 저장되었습니다",
   "toast.settings_reset": "설정이 기본값으로 복원되었습니다",
   "toast.ns_updated": "네임스페이스가 업데이트되었습니다",
+  "toast.ns_description_redaction_blocked": "설명이 저장되지 않았습니다: 비밀값으로 보이는 패턴 {hits}개와 일치합니다. 비밀값을 지우고 다시 저장하세요.",
   "toast.search_removed": "저장된 검색에서 제거되었습니다",
   "toast.config_saved": "설정이 저장되었습니다",
   "toast.fts_rebuilt": "FTS 인덱스가 재구축되었습니다 ({count}개 청크).",
