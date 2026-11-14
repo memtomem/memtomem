@@ -1,4 +1,4 @@
-"""AST-walking registry for web write-boundary invariants.
+"""Registry for web write-boundary invariants.
 
 Pins two cross-cutting invariants per RFC #787 stage 1:
 
@@ -7,9 +7,9 @@ Pins two cross-cutting invariants per RFC #787 stage 1:
    classified into ``_CSRF_PROTECTED`` (the middleware-covered surface,
    which is the default for new routes) or ``_CSRF_EXEMPT`` (with a
    one-line justification). Unclassified routes fail. The registry is
-   the AST contract — adding a new unsafe-method handler without
-   updating this file fails the test, which forces the reviewer to
-   acknowledge the new surface.
+   the contract — adding a new unsafe-method handler without updating
+   this file fails the test, which forces the reviewer to acknowledge
+   the new surface.
 
 2. **Redaction guard coverage.** Every web-route handler that writes
    user-supplied content to LTM must scan it (``enforce_write_guard``
@@ -23,8 +23,8 @@ Pins two cross-cutting invariants per RFC #787 stage 1:
    added but not classified for redaction either.
 
 Pattern lineage: ``feedback_ast_architectural_guard_pattern.md``
-(unclassified-fails registry). The test mirrors the
-``tests/test_web_csp_vendor.py`` shape — small, AST-only, no app boot.
+(unclassified-fails registry). The test combines route table discovery
+with AST inspection of handler bodies.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from fastapi.routing import APIRoute
+from starlette.routing import Route
 
 from memtomem.web.app import create_app
 
@@ -45,8 +45,8 @@ from .helpers import CTX_GATEWAY_JS_FILES
 ROUTES_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / "routes"
 STATIC_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / "static"
 
-_UNSAFE_DECORATOR_METHODS = frozenset({"post", "patch", "put", "delete"})
 _UNSAFE_HTTP_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
+_EXPECTED_NON_ROUTE_MODULE_HANDLERS: frozenset[str] = frozenset({"memtomem.web.app.api_not_found"})
 
 
 # --- CSRF registry ---------------------------------------------------------
@@ -404,8 +404,8 @@ _REDACTION_EXEMPT: dict[str, str] = {
 
 
 @functools.cache
-def _iter_unsafe_route_handlers() -> list[tuple[str, str, str]]:
-    """Return ``(module, function, http_method)`` for every unsafe handler.
+def _iter_unsafe_route_handlers() -> tuple[list[tuple[str, str, str]], frozenset[str]]:
+    """Return ``(handlers, excluded_handlers)`` across both prod and dev modes.
 
     "Unsafe" here is the CSRF / RFC sense: ``POST``/``PATCH``/``PUT``/
     ``DELETE``. Handlers are discovered from the route table registered on
@@ -415,16 +415,20 @@ def _iter_unsafe_route_handlers() -> list[tuple[str, str, str]]:
     non-standard router variable (e.g. ``@admin_router``), or
     ``router.add_api_route(...)`` (#3303).
 
+    Routes outside ``web/routes/`` (such as the catch-all in ``web/app.py``)
+    are returned in ``excluded_handlers`` so their exclusion can be pinned.
+
     A function is reported once even if it is registered on multiple paths
     or with multiple HTTP methods, since the registry classifies the
     *handler*, not the URL.
     """
     handlers: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str]] = set()
+    excluded: set[str] = set()
 
     def _walk_routes(routes):
         for r in routes:
-            if isinstance(r, APIRoute):
+            if isinstance(r, Route):
                 yield r
             elif hasattr(r, "original_router"):
                 yield from _walk_routes(r.original_router.routes)
@@ -434,21 +438,25 @@ def _iter_unsafe_route_handlers() -> list[tuple[str, str, str]]:
     for mode in ("prod", "dev"):
         app = create_app(lifespan=None, mode=mode)
         for route in _walk_routes(app.routes):
-            unsafe_methods = route.methods & _UNSAFE_HTTP_METHODS
+            if route.methods is None:
+                unsafe_methods = _UNSAFE_HTTP_METHODS
+            else:
+                unsafe_methods = route.methods & _UNSAFE_HTTP_METHODS
             if not unsafe_methods:
                 continue
             mod = getattr(route.endpoint, "__module__", "")
-            if not mod.startswith("memtomem.web.routes."):
-                continue
-            module_name = mod.removeprefix("memtomem.web.routes.")
-            func_name = route.endpoint.__name__
-            key = (module_name, func_name)
-            if key in seen:
-                continue
-            seen.add(key)
-            handlers.append((module_name, func_name, sorted(unsafe_methods)[0]))
+            func_name = getattr(route.endpoint, "__name__", str(route.endpoint))
+            full_name = f"{mod}.{func_name}"
+            if mod.startswith("memtomem.web.routes."):
+                module_name = mod.removeprefix("memtomem.web.routes.")
+                key = (module_name, func_name)
+                if key not in seen:
+                    seen.add(key)
+                    handlers.append((module_name, func_name, sorted(unsafe_methods)[0]))
+            else:
+                excluded.add(full_name)
 
-    return handlers
+    return handlers, frozenset(excluded)
 
 
 _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
@@ -789,7 +797,7 @@ def _source_scans_and_refuses(
 
 def test_csrf_classification_covers_every_unsafe_route() -> None:
     """Every unsafe-method route under ``web/routes/`` is classified."""
-    handlers = _iter_unsafe_route_handlers()
+    handlers, _ = _iter_unsafe_route_handlers()
     assert handlers, "Found no unsafe-method route handlers"
 
     seen = {f"{m}.{f}" for m, f, _ in handlers}
@@ -815,7 +823,7 @@ def test_csrf_classification_covers_every_unsafe_route() -> None:
 
 def test_unsafe_route_discovery_sees_non_standard_router_and_add_api_route() -> None:
     """Discovery sees handlers registered via non-standard routers and add_api_route (#3303)."""
-    handlers = _iter_unsafe_route_handlers()
+    handlers, _ = _iter_unsafe_route_handlers()
     seen = {f"{m}.{f}": method for m, f, method in handlers}
 
     # Registered with router.add_api_route(..., methods=["PATCH"]) in namespaces_read.py
@@ -829,6 +837,12 @@ def test_unsafe_route_discovery_sees_non_standard_router_and_add_api_route() -> 
     # Registered with @admin_router.delete in namespaces.py
     assert "namespaces.delete_namespace" in seen
     assert seen["namespaces.delete_namespace"] == "DELETE"
+
+
+def test_unsafe_route_discovery_exclusions_are_pinned() -> None:
+    """Non-route module unsafe handlers filtered out during discovery are pinned (#3303)."""
+    _, excluded = _iter_unsafe_route_handlers()
+    assert excluded == _EXPECTED_NON_ROUTE_MODULE_HANDLERS
 
 
 def test_preview_namespace_spa_uses_csrf_protected_post() -> None:
@@ -1283,7 +1297,7 @@ def test_detector_rejects_write_before_awaited_delegate() -> None:
 
 def test_redaction_classification_covers_every_unsafe_route() -> None:
     """Every unsafe-method route is classified for redaction too."""
-    handlers = _iter_unsafe_route_handlers()
+    handlers, _ = _iter_unsafe_route_handlers()
     seen = {f"{m}.{f}" for m, f, _ in handlers}
     classified = _REDACTION_PROTECTED | _REDACTION_EXEMPT.keys()
     unclassified = sorted(seen - classified)
