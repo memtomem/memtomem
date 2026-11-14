@@ -56,6 +56,7 @@ _MUST_GATE = {
     ("web/routes/system_indexing.py", "add_memory"),
     ("web/routes/scratch.py", "promote_scratch"),
     ("server/tools/hermes_mirror.py", "mem_hermes_mirror_apply"),
+    ("server/tools/session.py", "_write_summary_archive"),
 }
 
 #: Acquires that are deliberately ungated, each with the reason.
