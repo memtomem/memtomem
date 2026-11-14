@@ -13,6 +13,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   pin on the SDK, which requires the API at exactly its own version:
   `opentelemetry-sdk==1.45.1` needs `opentelemetry-api==1.45.1`.
 
+### Fixed
+
+- **A session summary is filed in its archive namespace even when another indexer reaches
+  the file first (#3340).** `mem_session_end` wrote the summary file and then indexed it
+  under `archive:session:<id>`, with no lock between the two. Another server's watcher or
+  `mm index` could index the file in that gap under its own namespace (`default` in a default
+  config). The session's own index then left those rows where they were, so the summary showed
+  up in a default `mem_search`, got no summary chunk id, and got no `summarizes` links. The
+  session now holds the file's lock from the write through its own index, so those indexers
+  wait. The index reads only the file the write placed: a path replaced by a link in between
+  is held rather than indexed through. A cancelled session end waits for its write to finish
+  before releasing the lock. An index call that finds the summary's directory missing still
+  skips the lock (#3345).
+
 ### Security
 
 - **Upgrading memtomem now upgrades opentelemetry-api to the fix for
