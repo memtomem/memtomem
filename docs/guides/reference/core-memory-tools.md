@@ -163,8 +163,8 @@ declaration should describe why the file needs it, and only files that really
 document the patterns should carry one.
 
 A namespace description has neither the declaration nor `--force-unsafe`: a
-description that trips a label rule is refused, and the refusal names the label
-wording so it can be reworded (see
+description that trips a label rule is refused. When every match is one of
+those two rules, the refusal names the label wording so it can be reworded (see
 [Namespace metadata](organization-maintenance.md#namespace-metadata)).
 
 See [ADR-0006](../../adr/0006-web-ui-folder-upload-redaction.md) (Axis E,

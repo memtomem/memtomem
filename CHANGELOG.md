@@ -45,8 +45,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   label. Descriptions stored earlier are not re-scanned. Two of the guard's rules match a
   credential label before `:` or `=` whatever follows, so a description such as
   `set password: rotate monthly` or `api_key: see the vault` is refused although it holds no
-  credential (#3354). That refusal names the label wording and suggests a reword such as
-  `password rotation`; the Web UI's edit form shows the same.
+  credential (#3354). When every match is one of those two rules, the refusal names the
+  label wording and suggests a reword such as `password rotation`, and the Web UI's edit
+  form shows the same; any other match gets the refusal without it.
 
 ### Fixed
 

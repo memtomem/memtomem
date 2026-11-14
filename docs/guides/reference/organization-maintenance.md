@@ -50,8 +50,10 @@ match a credential label before `:` or `=` whatever follows, so
 `description="set password: rotate monthly"` is refused although it holds no
 credential. Spaces before the separator (`password = …`), a label inside a
 longer word (`mypassword:`) and a JSON-style escape (`password\t=`) match too.
-The refusal names the label wording; reword the description, for example
-`password rotation`. The rules are described under
+When every match is one of those two rules, the refusal names the label
+wording; reword the description, for example `password rotation`. A
+description that matches any other rule, such as a provider token or a
+quoted-JSON credential, gets the plain refusal. The rules are described under
 [Documenting the patterns in a note](core-memory-tools.md#documenting-the-patterns-in-a-note).
 
 ### Rename and delete
