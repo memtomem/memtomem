@@ -12,6 +12,7 @@ from memtomem.context._runtime_targets import KNOWN_RUNTIMES
 from memtomem.context.agents import ON_DROP_LEVELS
 from memtomem.context.parser import CONTEXT_FILENAME
 from memtomem.context.projects import ProjectScope
+from memtomem.memory_scope import ProjectEntryRelinked
 
 
 @click.command("sync")
@@ -163,6 +164,7 @@ def sync_cmd(
         # it — this used to just skip `Synced.` and still exit 0. Mirrors
         # generate_cmd; batch mode never reaches the False leg.
         raise SystemExit(1)
+    _ctx._exit_if_relinked()
     click.secho("Pushed.", fg="green")
 
 
@@ -229,6 +231,8 @@ def _run_sync_legs(
                 for agent_name in sorted(agents_to_sync):
                     gen = _ctx.GENERATORS.get(agent_name)
                     if not gen:
+                        continue
+                    if _ctx._generated_file_refused(root, agent_name, gen.output_path):
                         continue
 
                     content = gen.generate(sections)
@@ -364,6 +368,8 @@ def _run_sync_all_projects(
     for s in runnable:
         assert s.root is not None  # sync_skip_reason() filtered missing roots
         click.secho(f"\n→ {s.label} ({s.root})", fg="cyan")
+        # A count left by an earlier project must not fail this one.
+        _ctx._take_relinked()
         try:
             _ctx._run_sync_legs(
                 s.root,
@@ -389,11 +395,20 @@ def _run_sync_all_projects(
             # clean siblings; the _run_update_all precedent).
             click.secho(f"  ✗ {s.root}: {exc.message}", fg="red")
             failures += 1
+        except ProjectEntryRelinked as exc:
+            click.secho(f"  ✗ {s.root}: {exc}", fg="red")
+            failures += 1
         except OSError as exc:
             click.secho(f"  ✗ {s.root}: {exc}", fg="red")
             failures += 1
         else:
-            successes += 1
+            if _ctx._take_relinked():
+                # The other runtimes and files of this project were pushed; the
+                # project still counts as failed (see the refusals above).
+                click.secho(f"  ✗ {s.root}: a path inside the project is a link", fg="red")
+                failures += 1
+            else:
+                successes += 1
 
     click.echo(
         f"\nSummary: {successes} pushed, {failures} failed, {len(rows) - len(runnable)} skipped."

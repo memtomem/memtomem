@@ -1763,6 +1763,10 @@ mem_config(key="search.default_top_k", value="20")  # Change for this server pro
 mem_config(key="search.default_top_k", value="20", persist=True)  # Persist to config.json
 ```
 
+`mem_config` reads `session_trace.*` but does not change it, and its `persist=True` saves do not
+change what the `session_trace` section of `config.json` sets: whether session traces are
+recorded, and where they go, is set with `mm config set session_trace.<field> <value>`.
+
 ### CPU ONNX profiles
 
 New ONNX configurations default to `multilingual-e5-small` (384 dimensions,

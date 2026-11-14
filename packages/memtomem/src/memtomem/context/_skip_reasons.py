@@ -23,6 +23,13 @@ PARSE_ERROR: Final = "parse_error"
 # ADR §3, or ``(commands, codex, project_*)`` since Codex CLI prompts live
 # user-only). Loud emit, not silent — feedback_defensive_noise.md.
 NO_PROJECT_FANOUT_FOR_RUNTIME: Final = "no_project_fanout_for_runtime"
+# A directory between the project root and this runtime's project fan-out
+# root (``.claude``, ``.claude/skills``, ...) is a symbolic link or junction.
+# Nothing is written through it and nothing is copied from it into the
+# canonical store, whatever it points at; the other runtimes go on. The human
+# reason names the project-relative entry only. A surface that reports this
+# code treats the run as failed.
+PROJECT_ENTRY_RELINKED: Final = "project_entry_relinked"
 
 # Another process held a destination sidecar lock past the engine's whole-call
 # acquisition budget (``skills._SKILLS_LOCK_BUDGET_S``). Emitted instead of
@@ -206,6 +213,7 @@ SkipCode = Literal[
     "unknown_runtime",
     "parse_error",
     "no_project_fanout_for_runtime",
+    "project_entry_relinked",
     "lock_timeout",
     "abandoned",
     "target_conflict",

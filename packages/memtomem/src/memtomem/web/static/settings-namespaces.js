@@ -288,6 +288,10 @@ function editNamespaceMeta(ns, card) {
     </div>
   `;
 
+  // A color input only holds #rrggbb, so this is the stored color as the
+  // browser normalized it. Save sends `color` only when it moved off this.
+  const initialColor = form.querySelector('.ns-edit-color').value;
+
   form.querySelector('.ns-edit-cancel').addEventListener('click', () => form.remove());
   form.querySelector('.ns-edit-reset-color').addEventListener('click', () => {
     form.querySelector('.ns-edit-color').value = '#808080';
@@ -296,8 +300,8 @@ function editNamespaceMeta(ns, card) {
     const desc = form.querySelector('.ns-edit-desc').value.trim();
     const colorVal = form.querySelector('.ns-edit-color').value;
     const body = { description: desc };
-    // Only send color if not default gray
-    body.color = colorVal === '#808080' ? '' : colorVal;
+    // Only send color if the user changed it; default gray clears it
+    if (colorVal !== initialColor) body.color = colorVal === '#808080' ? '' : colorVal;
     try {
       await api('PATCH', `/api/namespaces/${encodeURIComponent(ns.namespace)}`, body);
       showToast(t('toast.ns_updated'), 'success');

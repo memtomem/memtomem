@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from memtomem.context._abandon import abandon_sync_on_exit, sync_is_abandoned
 from memtomem.context._host_homes import pinned_host_homes
 from memtomem.context._atomic import atomic_write_text
+from memtomem.context._runtime_targets import linked_runtime_reads
 from memtomem.context._canonical_txn import canonical_sidecar_lock, new_lock_budget
 from memtomem.context._dir_swap import (
     SwapRecoveryError,
@@ -757,7 +758,9 @@ async def diff_skill(
         # always probed project_shared paths and the detail panel
         # contradicted the list view on user/project_local tiers (#1229).
         # NO_FANOUT tiers (e.g. project_local) return None and are skipped.
-        target = gen.target_dir(project_root, name, scope=target_scope)
+        # A display read: a linked runtime directory is shown, not refused.
+        with linked_runtime_reads():
+            target = gen.target_dir(project_root, name, scope=target_scope)
         if target is None:
             continue
         target_manifest = target / SKILL_MANIFEST

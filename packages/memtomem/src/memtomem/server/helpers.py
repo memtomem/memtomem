@@ -176,6 +176,35 @@ async def _announce_dim_mismatch_once(app: object) -> str | None:
     return _dim_mismatch_hint(app)
 
 
+# Sections MCP may read but neither change nor persist, though ``mm config set``
+# and ``PATCH /api/config`` still change them through ``MUTABLE_FIELDS``.
+# ``session_trace`` decides whether the session CLI records traces, how much of
+# each payload goes in them and where they are sent or written, with the user's
+# Langfuse keys presented to that host. Together they decide what is recorded
+# about the user's sessions and who receives it, a local file or a remote host;
+# an agent following instructions found in its input must not decide that.
+_MCP_REFUSED_SECTIONS: frozenset[str] = frozenset({"session_trace"})
+
+
+def mcp_saved_fields() -> dict[str, set[str]]:
+    """The ``MUTABLE_FIELDS`` table an MCP ``persist=True`` save writes.
+
+    ``save_config_overrides`` writes every field it is given from the live
+    config, and the server's copy can be older than the file: a section the
+    user changed with ``mm config set`` after the server started would be
+    written back to its startup value by the next unrelated MCP save. Leaving
+    the refused sections out of the table leaves their settings as the file
+    has them; a path under HOME is still respelled ``~/...``, as on every save.
+    """
+    from memtomem.config import MUTABLE_FIELDS
+
+    return {
+        section: set(fields)
+        for section, fields in MUTABLE_FIELDS.items()
+        if section not in _MCP_REFUSED_SECTIONS
+    }
+
+
 def _set_config_key(config: Mem2MemConfig, key: str, value: str) -> str:
     """Set a dot-notation config key to a new string value.
 
@@ -204,6 +233,15 @@ def _set_config_key(config: Mem2MemConfig, key: str, value: str) -> str:
 
     if not hasattr(section, field_name):
         return f"Field '{field_name}' not found in section '{section_name}'."
+
+    # Before coercion and validation, so no message built from the value (which
+    # may be a key) is returned for these fields.
+    if section_name in _MCP_REFUSED_SECTIONS:
+        return (
+            f"'{key}' cannot be changed through MCP: whether session traces are "
+            f"recorded, and where they go, is set by the user. Run "
+            f"`mm config set {key} <value>` in a terminal."
+        )
 
     allowed = MUTABLE_FIELDS.get(section_name, set())
     if field_name not in allowed:

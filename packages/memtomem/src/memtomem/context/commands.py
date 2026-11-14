@@ -57,7 +57,12 @@ from memtomem.context._canonical_txn import (
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import InvalidNameError, Layout, validate_name
-from memtomem.context._runtime_targets import resolve_import_runtimes, runtime_fanout_root
+from memtomem.memory_scope import ProjectEntryRelinked
+from memtomem.context._runtime_targets import (
+    relinked_skip,
+    resolve_import_runtimes,
+    runtime_fanout_root,
+)
 from memtomem.context._sync_atomic import (
     ON_DROP_LEVELS,
     AtomicSyncAdapter,
@@ -654,11 +659,19 @@ def extract_commands_to_canonical(
         )
 
     # ── Gemini branch — TOML → canonical Markdown conversion ──
-    try:
-        gemini_dir = runtime_fanout_root("commands", "gemini", scope, project_root)
-    except KeyError:
-        gemini_dir = None
-    if "gemini" in runtimes and gemini_dir is not None and gemini_dir.is_dir():
+    gemini_dir = None
+    if "gemini" in runtimes:
+        # Resolved only when Gemini was asked for: a linked ``.gemini`` must
+        # not fail a Claude-only pull.
+        try:
+            gemini_dir = runtime_fanout_root("commands", "gemini", scope, project_root)
+        except KeyError:
+            gemini_dir = None
+        except ProjectEntryRelinked as exc:
+            # Nothing is copied from behind a link into the canonical store.
+            skipped.append(relinked_skip("gemini", "gemini", exc))
+            gemini_dir = None
+    if gemini_dir is not None and gemini_dir.is_dir():
         gemini_label = f"gemini ({gemini_dir})"
         for toml_file in sorted(gemini_dir.glob("*.toml")):
             cmd_name = toml_file.stem

@@ -34,6 +34,8 @@ from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes
 from memtomem.context._names import GENERATOR_VENDOR, Layout
+from memtomem.context._runtime_targets import relinked_skip
+from memtomem.memory_scope import ProjectEntryRelinked
 from memtomem.context.privacy_scan import raise_or_collect, scan_text_content
 from memtomem.context.versioning import (
     LabelNotFoundError,
@@ -361,7 +363,11 @@ def sync_atomic_artifact(
             # without invoking ``render`` so a strict caller doesn't raise
             # ``StrictDropError`` for a runtime that has no fan-out by
             # design (the fail-quiet contract).
-            out_path = gen.target_file(project_root, name, scope=scope)
+            try:
+                out_path = gen.target_file(project_root, name, scope=scope)
+            except ProjectEntryRelinked as exc:
+                skipped.append(relinked_skip(name, target, exc))
+                continue
             if out_path is None:
                 skipped.append(
                     (
