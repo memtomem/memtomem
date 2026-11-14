@@ -677,6 +677,35 @@ _JWT_SEGMENT_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv
 _WORD_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
 
 
+def value_scan_parts(value: object) -> list[str]:
+    """Every dict key and string inside a JSON value, raw, in a fixed order.
+
+    A guard that scans only ``json.dumps(value)`` sees each string with
+    ``"`` as ``\\"`` and a newline as ``\\n``, so a rule that needs a literal
+    quote or whitespace misses a secret the store will persist and return
+    verbatim. Scan these parts alongside the serialized form, which still
+    carries the key/value pairing the quoted-label rule matches.
+
+    ``value`` is the decoded form that is persisted (``json.loads`` of the
+    serialized value). Order: a dict's keys in sorted order, each followed by
+    its value; a list's items in order. Join the parts with a non-whitespace
+    separator so a label in one part cannot pair with the next one.
+    """
+    parts: list[str] = []
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            parts.append(node)
+        elif isinstance(node, dict):
+            for key in sorted(node, key=str, reverse=True):
+                stack.append(node[key])
+                stack.append(key)
+        elif isinstance(node, list):
+            stack.extend(reversed(node))
+    return parts
+
+
 def _jwt_old_start(text: str, start: int, floor: int) -> int:
     """Where ``_JWT_RULE_OLD`` began the match ``_JWT_RULE`` began at ``start``.
 

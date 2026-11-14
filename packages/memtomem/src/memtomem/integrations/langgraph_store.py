@@ -614,7 +614,8 @@ class MemtomemBaseStore(BaseStore):
         """Write the record for ``(namespace, key)`` and return what was written.
 
         Runs the same privacy guard and ``project_shared`` refusal as ``put``,
-        over the serialized value, the namespace, the key and the selectors.
+        over the serialized value and every key and string inside it, the
+        namespace, the key and the selectors.
         ``generation`` is a caller-owned non-negative integer persisted beside
         the value; this store never reads it. An overwrite that omits it drops
         the key, because the caller owns it. ``created_at`` is preserved across
@@ -669,8 +670,17 @@ class MemtomemBaseStore(BaseStore):
             and not (isinstance(index, list) and all(isinstance(x, str) for x in index))
         ):
             raise ValueError("index must be a boolean, None, or string selectors")
-        scan_text = "\n".join(
-            [serialized, *namespace, key, *(index if isinstance(index, list) else [])]
+        # Raw strings beside the serialized value: JSON escaping hides a quoted
+        # credential inside a value string or an identifier. The separator is
+        # not whitespace, so a label in one part cannot pair with the next.
+        scan_text = "\n---\n".join(
+            [
+                serialized,
+                *privacy.value_scan_parts(value),
+                *namespace,
+                key,
+                *(index if isinstance(index, list) else []),
+            ]
         )
         guard = privacy.enforce_write_guard(
             scan_text,
