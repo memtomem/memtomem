@@ -60,11 +60,13 @@ from memtomem.context import override as _override
 from memtomem.context._atomic import _validate_payload_relpath
 from memtomem.context._gate_a import GateStatus, classify_gate_status
 from memtomem.context._runtime_targets import (
+    linked_runtime_reads,
     IMPORT_SOURCE_RUNTIMES,
     KNOWN_RUNTIMES,
     runtime_fanout_root,
 )
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
+from memtomem.memory_scope import ProjectEntryRelinked
 from memtomem.context.skill_payload import (
     is_payload_relpath,
     iter_skill_payload_files,
@@ -441,11 +443,32 @@ def _collect(
 
     working: list[_Cand] = []
     for runtime in KNOWN_RUNTIMES:
-        path = _runtime_candidate_path(kind, runtime, name, scope, project_root)
+        importable = runtime in eligible
+        try:
+            path = _runtime_candidate_path(kind, runtime, name, scope, project_root)
+        except ProjectEntryRelinked as exc:
+            # This runtime's project directory is a link (outside the preview's
+            # ``linked_runtime_reads`` block). Its copy is not computable, so an
+            # importable runtime becomes a ``landing_error`` row: the §5 rules
+            # then refuse an unselected pull and a ``--from`` naming it, and
+            # still let ``--from`` another runtime go ahead.
+            if importable:
+                working.append(
+                    _Cand(
+                        runtime=runtime,
+                        importable=True,
+                        content_status="landing_error",
+                        gate_status=None,
+                        override_warning=False,
+                        reason=str(exc),
+                        landing_full=None,
+                        landing_payload=None,
+                    )
+                )
+            continue
         if path is None:
             continue  # no fan-out for this (kind, runtime, scope) — nothing to pull
         present, probe_err = _probe_present(path)
-        importable = runtime in eligible
 
         if not importable:
             # Display-only export-only row — only when definitively present.
@@ -529,6 +552,7 @@ def _collect(
     )
 
 
+@linked_runtime_reads()
 def preview_pull(
     kind: ArtifactKind,
     name: str,

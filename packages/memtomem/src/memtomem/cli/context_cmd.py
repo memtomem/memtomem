@@ -185,6 +185,7 @@ from memtomem.context._runtime_targets import (  # noqa: F401
 )
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import remediation
+from memtomem.memory_scope import ProjectEntryRelinked, relinked_project_entry
 from memtomem.wiki.store import WikiNotFoundError, WikiStore, WikiUnbornHeadError  # noqa: F401
 from typing import Any, Literal, cast, get_args
 
@@ -274,11 +275,66 @@ _INCLUDE_OPTION = click.option(
 
 
 def _skip_color(code: skip_codes.SkipCode) -> str:
-    """Privacy-refusal skips (Gate A hard refusals) render red; every
-    other skip reason is informational yellow."""
-    if code in (skip_codes.PRIVACY_BLOCKED, skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED):
+    """Refusal skips (Gate A hard refusals, a linked project entry) render
+    red; every other skip reason is informational yellow."""
+    if code in (
+        skip_codes.PRIVACY_BLOCKED,
+        skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
+        skip_codes.PROJECT_ENTRY_RELINKED,
+    ):
         return "red"
     return "yellow"
+
+
+# A linked project entry refuses one runtime, one file, or the .gitignore
+# marker, and the command goes on with the rest. Each refusal is counted on
+# the click context so the command can still end with exit 1; ``meta`` is
+# shared by every context of one invocation.
+_RELINKED_META = "memtomem.project_entry_relinked"
+
+
+def _note_relinked() -> None:
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        ctx.meta[_RELINKED_META] = ctx.meta.get(_RELINKED_META, 0) + 1
+
+
+def _take_relinked() -> int:
+    """How many refusals were noted since the last call, and reset the count."""
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return 0
+    return int(ctx.meta.pop(_RELINKED_META, 0))
+
+
+def _exit_if_relinked() -> None:
+    if _take_relinked():
+        click.secho(
+            "Refused: a path inside the project is a link (see above); nothing was "
+            "written through it.",
+            fg="red",
+        )
+        raise SystemExit(1)
+
+
+def _note_skip(code: skip_codes.SkipCode) -> None:
+    if code == skip_codes.PROJECT_ENTRY_RELINKED:
+        _note_relinked()
+
+
+def _generated_file_refused(root: Path, name: str, output_path: str) -> bool:
+    """Whether a generated file's directory is, or sits under, a link.
+
+    The file itself is written by atomic replace, so a link at the leaf is
+    replaced, not followed; a linked parent (``.github``) would carry the
+    write outside the project.
+    """
+    entry = relinked_project_entry(root, Path(output_path), judge_leaf=False)
+    if entry is None:
+        return False
+    click.secho(f"  {name:10s}  refused: {ProjectEntryRelinked(entry)}", fg="red")
+    _note_relinked()
+    return True
 
 
 @dataclass(frozen=True)
@@ -402,6 +458,7 @@ def _print_artifact_init(
         # of the remediation (#1869). Codes with no CLI action render unchanged.
         shown = remediation.append_hint(reason, code, "cli")
         click.secho(f"    skipped {name}: {shown}", fg=_skip_color(code))
+        _note_skip(code)
     return result
 
 
@@ -444,6 +501,7 @@ def _print_artifact_generate(
             click.echo(f"    {runtime:{spec.width}s}  {rel}")
     for runtime, reason, code in result.skipped:
         click.secho(f"  skipped {runtime}: {reason}", fg=_skip_color(code))
+        _note_skip(code)
     # Skills results carry no ``dropped`` (field-drop is an atomic-sync
     # concept — agents/commands only).
     for runtime, item_name, dropped in getattr(result, "dropped", ()):
@@ -696,6 +754,7 @@ def _resolve_artifact_cli_scope(scope_flag: str | None) -> TargetScope:
 
 _GITIGNORE_MARKER = "# memtomem local artifacts (ADR-0011 project_local tier)"
 _GITIGNORE_PATTERNS: tuple[str, ...] = (".memtomem/*.local/", ".memtomem/.staging/")
+GITIGNORE_IS_LINK = "gitignore_is_link"
 
 
 def _append_gitignore_marker(project_root: Path) -> tuple[bool, str]:
@@ -713,6 +772,8 @@ def _append_gitignore_marker(project_root: Path) -> tuple[bool, str]:
         specific warning so the user knows to ``git init`` first.
       - ``(False, "no_project_signal")`` — neither ``.git`` nor
         ``pyproject.toml`` present.
+      - ``(False, "gitignore_is_link")`` — ``.gitignore`` is a symbolic link
+        or junction; nothing is read or written through it.
       - ``(False, "already_present")`` — marker comment already on disk.
       - ``(True, "appended")`` — newly written.
     """
@@ -723,6 +784,10 @@ def _append_gitignore_marker(project_root: Path) -> tuple[bool, str]:
             False,
             "no_git_repo_pyproject_only" if has_pyproject else "no_project_signal",
         )
+    # The file is read and appended in place, so a link at ``.gitignore``
+    # itself would carry the block into whatever it points at.
+    if relinked_project_entry(project_root, Path(".gitignore"), judge_leaf=True) is not None:
+        return False, GITIGNORE_IS_LINK
     gi = project_root / ".gitignore"
     existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
     if _GITIGNORE_MARKER in existing:
@@ -767,6 +832,8 @@ def _ensure_local_tier_gitignored(project_root: Path, *, required: bool = False)
         )
     elif msg == "no_project_signal":
         detail = "no .git and no pyproject.toml in project root."
+    elif msg == GITIGNORE_IS_LINK:
+        detail = str(ProjectEntryRelinked(".gitignore"))
     else:
         return
     if required:
@@ -899,6 +966,8 @@ def _print_mcp_servers_generate(root: Path, *, surface: str = "cli_context_sync"
     except McpServerPrivacyError as exc:
         raise click.ClickException(str(exc)) from exc
     except McpServerParseError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except ProjectEntryRelinked as exc:
         raise click.ClickException(str(exc)) from exc
     if result.generated:
         click.secho(f"  MCP servers fan-out: {len(result.generated)}", fg="green")
@@ -1169,6 +1238,18 @@ def init_cmd(
 
     if write_context_md:
         files = detect_agent_files(root)
+        # A detected file under a linked directory (``.github`` -> elsewhere)
+        # is not read into the canonical context.md.
+        kept = []
+        for f in files:
+            rel = f.path.relative_to(root) if f.path.is_relative_to(root) else None
+            entry = relinked_project_entry(root, rel, judge_leaf=False) if rel is not None else None
+            if entry is not None:
+                click.secho(f"  skipped {f.agent}: {ProjectEntryRelinked(entry)}", fg="red")
+                _note_relinked()
+                continue
+            kept.append(f)
+        files = kept
         if not files:
             click.secho("No agent files found. Creating empty context template.", fg="yellow")
             sections: dict[str, str] = {
@@ -1240,6 +1321,9 @@ def init_cmd(
                 ".gitignore append skipped.",
                 fg="yellow",
             )
+        elif msg == GITIGNORE_IS_LINK:
+            click.secho(f"  refused: {ProjectEntryRelinked('.gitignore')}", fg="red")
+            _note_relinked()
 
     # --include runtime-import path. Gate A is applied inside each
     # extract_*_to_canonical helper (per-file for agents/commands;
@@ -1262,6 +1346,8 @@ def init_cmd(
                 raise click.ClickException(
                     f"No runtime {spec.kind} entry named {only_name!r} to pull at scope='{scope}'"
                 )
+
+    _exit_if_relinked()
 
 
 def _read_agent_file(path: Path) -> str:
@@ -1330,6 +1416,8 @@ def generate_cmd(
 
             for name in targets:
                 gen = GENERATORS[name]
+                if _generated_file_refused(root, name, gen.output_path):
+                    continue
                 content = gen.generate(sections)
                 out_path = root / gen.output_path
                 out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1374,6 +1462,7 @@ def generate_cmd(
         else:
             click.secho("  Skipped settings push (declined).", fg="yellow")
 
+    _exit_if_relinked()
     click.secho("Done.", fg="green")
 
 
@@ -1614,15 +1703,18 @@ def pull_cmd(
             "--yes alone is not sufficient: project_shared writes go "
             "to the git-tracked tier and require explicit opt-in."
         )
-    outcome = prepare_pull(
-        artifact_kind,
-        name,
-        scope=scope,
-        project_root=root,
-        source_runtime=from_runtime,
-        overwrite=overwrite,
-        force_unsafe_import=force_unsafe_import,
-    )
+    # A runtime directory that is a link inside the project is not pulled
+    # from: through it the link target's files would land in the canonical.
+    with _translate_to_click(ProjectEntryRelinked):
+        outcome = prepare_pull(
+            artifact_kind,
+            name,
+            scope=scope,
+            project_root=root,
+            source_runtime=from_runtime,
+            overwrite=overwrite,
+            force_unsafe_import=force_unsafe_import,
+        )
     if isinstance(outcome, PullApplyResult):
         # A refusal, or the byte-identical no-op (status == "applied").
         if outcome.status == "applied":
@@ -1667,7 +1759,8 @@ def pull_cmd(
                 "runtime": plan.selected_runtime,
             },
         )
-    result = commit_pull(plan)
+    with _translate_to_click(ProjectEntryRelinked):
+        result = commit_pull(plan)
     if result.status != "applied":
         raise _pull_refusal(result)
     _print_pull_applied(result)
@@ -3123,6 +3216,8 @@ def seed_validation_cmd(directory: Path, force: bool, as_json: bool) -> None:
 
     try:
         manifest = seed_adr0026_validation_states(directory)
+    except ProjectEntryRelinked as exc:
+        raise click.ClickException(f"cannot seed: {exc}") from exc
     except SwapRecoveryError as exc:
         # ADR-0030 §10 at the CLI boundary, not inside the seeder: a library
         # caller (the harness test) should still see the typed error. A dev tool

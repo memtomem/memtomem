@@ -28,6 +28,7 @@ from memtomem.context._abandon import sync_is_abandoned
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context._runtime_targets import DiffRow
+from memtomem.memory_scope import refuse_relinked_project_entry
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +349,11 @@ def generate_all_mcp_servers(
         parsed = parse_mcp_server_text(text, name=path.stem, source=path)
         definitions[parsed.name] = parsed.definition
 
+    # ``.mcp.json`` is read, merged and rewritten at its resolved path, so a
+    # link at it (or the sidecar lock beside its target) would carry the merge
+    # outside the project. Refused before the lock is taken. The diff reads
+    # it as it is: a display read.
+    refuse_relinked_project_entry(project_root, Path(PROJECT_MCP_CONFIG), judge_leaf=True)
     target = _project_mcp_path(project_root)
     # Cross-process guard (the settings #1123 twin): ``.mcp.json`` is a SHARED
     # file merged read-modify-write with foreign ``mcpServers`` entries

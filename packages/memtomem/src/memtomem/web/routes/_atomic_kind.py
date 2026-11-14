@@ -47,6 +47,7 @@ from memtomem.context._abandon import abandon_sync_on_exit, sync_is_abandoned
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._canonical_txn import canonical_sidecar_lock, new_lock_budget
 from memtomem.context._names import InvalidNameError, validate_name
+from memtomem.context._runtime_targets import linked_runtime_reads
 from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
 from memtomem.web.routes._artifact_common import (
@@ -760,7 +761,9 @@ async def diff_artifact(
     for gen_name, gen in spec.generators().items():
         # Match the canonical side's tier — see context_skills.py diff_skill
         # for the rationale (#1229). NO_FANOUT tiers return None → skipped.
-        target = gen.target_file(project_root, name, scope=target_scope)
+        # A display read: a linked runtime directory is shown, not refused.
+        with linked_runtime_reads():
+            target = gen.target_file(project_root, name, scope=target_scope)
         if target is None:
             continue
         if parse_error_reason is not None:
