@@ -4,8 +4,9 @@
 Runs from ``issue_comment`` on the default branch's copy. When someone who is not a
 maintainer has commented on an issue that an open pull request will close, it posts
 one notice on the issue naming that pull request, so a contributor does not start a
-second fix for work that is already under review. It never reads a comment's body and
-never checks out pull request code.
+second fix for work that is already under review. It reads a comment's body only in
+comments by github-actions[bot], to find its own marker, never puts comment text into
+the notice or a command, and never checks out pull request code.
 """
 
 from __future__ import annotations
