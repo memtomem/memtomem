@@ -147,7 +147,9 @@ def test_cli_agent_register_reports_the_storage_refusal(monkeypatch) -> None:
 
     storage = SimpleNamespace(
         set_namespace_meta=AsyncMock(
-            side_effect=lambda ns, description=None, color=None: validate_namespace_color(color)
+            side_effect=lambda ns, description=None, color=None, *, surface="storage": (
+                validate_namespace_color(color)
+            )
         ),
         get_namespace_meta=AsyncMock(return_value=None),
     )

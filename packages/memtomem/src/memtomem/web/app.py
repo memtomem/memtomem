@@ -300,6 +300,27 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
             },
         )
 
+    # A storage-level write-guard refusal (#3352): the same 403 payload the
+    # in-route guards return, so the SPA's ``api()`` raises its
+    # ``RedactionBlockedError``. Without this handler the ``ValueError`` one
+    # above would still refuse, as a 400 the SPA cannot tell apart.
+    from memtomem.errors import RedactionBlockedError
+
+    @app.exception_handler(RedactionBlockedError)
+    async def redaction_blocked_handler(
+        request: Request, exc: RedactionBlockedError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": {
+                    "detail": "redaction_blocked",
+                    "hits": exc.hits,
+                    "surface": exc.surface,
+                }
+            },
+        )
+
     # An unusable-but-loadable configuration (e.g. empty
     # ``indexing.memory_dirs``, #1768) is an operational conflict, not an
     # internal defect — surface the field-naming message with 409, matching

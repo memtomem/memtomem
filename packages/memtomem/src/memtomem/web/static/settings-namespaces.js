@@ -314,6 +314,12 @@ function editNamespaceMeta(ns, card) {
       loadNamespacesTab();
       loadNamespaceDropdowns();
     } catch (err) {
+      // The server scans the description and has no bypass for it (#3352),
+      // so this is a plain refusal: no confirm-and-retry, unlike /api/add.
+      if (err instanceof RedactionBlockedError) {
+        showToast(t('toast.ns_description_redaction_blocked', { hits: err.hits }), 'error');
+        return;
+      }
       showToast(t('toast.error', { error: err.message }), 'error');
     }
   });

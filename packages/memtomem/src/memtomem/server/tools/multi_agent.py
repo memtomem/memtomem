@@ -178,13 +178,17 @@ async def mem_agent_register(
     app = await _get_app_initialized(ctx)
     namespace = f"{AGENT_NAMESPACE_PREFIX}{agent_id}"
 
-    await app.storage.set_namespace_meta(namespace, description=description, color=color)
+    await app.storage.set_namespace_meta(
+        namespace, description=description, color=color, surface="mem_agent_register"
+    )
 
     # Ensure shared namespace exists
     shared_meta = await app.storage.get_namespace_meta(SHARED_NAMESPACE)
     if shared_meta is None:
         await app.storage.set_namespace_meta(
-            SHARED_NAMESPACE, description="Shared knowledge base for all agents"
+            SHARED_NAMESPACE,
+            description="Shared knowledge base for all agents",
+            surface="mem_agent_register",
         )
 
     return (

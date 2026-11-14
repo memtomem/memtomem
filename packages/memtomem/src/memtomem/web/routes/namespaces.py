@@ -100,7 +100,12 @@ async def update_metadata(
     another task's (#3182), so the receipt reads this write on the writer.
     """
     async with writer_transaction(storage):
-        await storage.set_namespace_meta(namespace, description=body.description, color=body.color)
+        await storage.set_namespace_meta(
+            namespace,
+            description=body.description,
+            color=body.color,
+            surface="web_api_namespace_update",
+        )
         meta = await storage.get_namespace_meta(namespace)
         ns_list = await storage.list_namespaces()
     count = dict(ns_list).get(namespace, 0)

@@ -349,14 +349,15 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "tags.delete_tag": "tags are short labels; rewrites existing chunk metadata only",
     "tags.merge_tags": "tags are short labels; rewrites existing chunk metadata only",
     # Namespace admin / cosmetic metadata (ADR-0005 / ADR-0007 / #3303).
-    # Rename moves existing chunks without introducing new user prose; metadata
-    # update stores description/color in the namespace metadata table without
-    # writing to LTM chunks.
+    # Rename moves existing chunks without introducing new user prose. The
+    # metadata update's description IS scanned, but below the route: storage
+    # ``set_namespace_meta`` guards every writer, which this in-handler
+    # detector cannot see (#3352; pinned by test_namespace_description_guard.py).
     "namespaces.rename_namespace": (
         "namespace rename moves existing chunks; no new prose content persisted"
     ),
     "namespaces.update_metadata": (
-        "namespace metadata (description/color) stored in metadata table, not written to LTM chunks"
+        "description scanned in storage set_namespace_meta for every writer (#3352)"
     ),
     # Maintenance / control plane: no user-supplied content.
     "decay.expire_old_chunks": "control plane; operates on existing chunks",

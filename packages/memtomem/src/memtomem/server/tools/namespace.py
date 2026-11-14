@@ -260,7 +260,9 @@ async def mem_ns_update(
     """
     validate_namespace(namespace)
     app = await _get_app_initialized(ctx)
-    await app.storage.set_namespace_meta(namespace, description=description, color=color)
+    await app.storage.set_namespace_meta(
+        namespace, description=description, color=color, surface="mem_ns_update"
+    )
     return f"Updated metadata for namespace '{namespace}'"
 
 

@@ -242,10 +242,14 @@ async def _run_register(agent_id: str, description: str | None, color: str | Non
 
     namespace = f"{_CURRENT_PREFIX}{agent_id}"
     async with cli_components() as comp:
-        await comp.storage.set_namespace_meta(namespace, description=description, color=color)
+        await comp.storage.set_namespace_meta(
+            namespace, description=description, color=color, surface="cli_agent_register"
+        )
         if await comp.storage.get_namespace_meta(SHARED_NAMESPACE) is None:
             await comp.storage.set_namespace_meta(
-                SHARED_NAMESPACE, description="Shared knowledge base for all agents"
+                SHARED_NAMESPACE,
+                description="Shared knowledge base for all agents",
+                surface="cli_agent_register",
             )
     click.echo(f"Agent registered: {agent_id}")
     click.echo(f"- Namespace: {namespace}")

@@ -241,6 +241,27 @@ class ProjectSharedConfirmationRequiredError(ValueError):
     """
 
 
+class RedactionBlockedError(ValueError):
+    """The write guard refused text a storage method was asked to persist.
+
+    Raised where the scan sits below every surface, so no single caller owns
+    the refusal: ``set_namespace_meta`` scans a namespace description for
+    every writer (web, MCP, CLI). Subclasses :class:`ValueError` for the same
+    reason :class:`FeedbackConflictError` does: the MCP ``tool_handler`` and
+    ``raise_cli_error`` already render it as a plain error, and the web app
+    maps this type to the 403 ``redaction_blocked`` payload the SPA parses.
+
+    ``hits`` is the pattern-match count and ``surface`` the surface the guard
+    counted the refusal under. The message carries the count only, never the
+    matched text.
+    """
+
+    def __init__(self, what: str, *, hits: int, surface: str) -> None:
+        self.hits = hits
+        self.surface = surface
+        super().__init__(f"{what} matches {hits} privacy pattern(s); not saved")
+
+
 class RetryableError(Exception):
     """Error that can be resolved by retrying (e.g., network timeout, rate limit)."""
 
