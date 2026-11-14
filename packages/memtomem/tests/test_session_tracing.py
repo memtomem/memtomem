@@ -220,6 +220,43 @@ class TestPayloadSanitization:
             "*** KEEP"
         )
 
+    @pytest.mark.parametrize(
+        "secret",
+        [
+            "Authorization: Bearer " + "a1" * 150,
+            "client_secret=" + "a1" * 200,
+            "GITHUB_TOKEN=" + "a1" * 200,
+        ],
+        ids=["bearer", "label", "env"],
+    )
+    def test_a_long_value_a_bounded_rule_reads_in_part_is_masked_to_its_end(self, secret):
+        # These rules read at most 256 characters of a value; the mask still
+        # covers all of it, not only the part the rule matched.
+        assert session_tracing._redact_value(f"pre {secret}, post") == "pre ***, post"
+
+    @pytest.mark.parametrize("ch", list("-.~+/=_"))
+    def test_the_rest_of_a_long_value_is_masked_whatever_its_256th_character(self, ch):
+        value = "a1" + "a" * 253 + ch + "TAIL9"
+        assert session_tracing._redact_value(f"client_secret={value} end") == "*** end"
+
+    def test_a_complete_match_of_an_older_rule_is_not_extended(self):
+        text = "https://example.invalid/ghp_" + "a" * 36 + "/repos/owner/repo"
+        assert session_tracing._redact_value(text) == "https://example.invalid/***/repos/owner/repo"
+
+    def test_many_nested_hits_are_masked_in_linear_time(self):
+        import time
+
+        def best(n: int) -> float:
+            text = "xoxb-" + ("AKIA" + "A" * 16 + "-") * n
+            times = []
+            for _ in range(3):
+                start = time.perf_counter()
+                session_tracing._redact_value(text)
+                times.append(time.perf_counter() - start)
+            return min(times)
+
+        assert best(8_000) / best(1_000) < 30
+
     def test_jwt_after_a_hyphenated_prefix_is_masked_from_its_first_eyj(self):
         # The JWT rule may match from the second ``eyJ``; scan() moves the
         # start back, so the first segment is not left in the clear.
