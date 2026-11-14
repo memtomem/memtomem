@@ -695,8 +695,8 @@ What refuses, and what does not:
 - **`mm memory doctor --fix`** skips a protected root and exits non-zero,
   since repairing a provider index means rewriting it. The root is still
   *inspected* and reported.
-- **Not covered**, deliberately: anything where you name the destination
-  yourself, such as the path you hand `mem_export`; the canonical artifact
+- **Not covered**, deliberately: memtomem's own export directory
+  (`~/.memtomem/exports/`, where `mem_export` writes); the canonical artifact
   Store that `mm context` manages; and the host-global wiki
   (`~/.memtomem-wiki`). Those are separate stores with their own roots and
   their own commands — read-only governs memtomem's *memory* writes, not
