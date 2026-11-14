@@ -609,9 +609,12 @@ class MemtomemStore:
                 audit_context={"namespace": effective_namespace},
             )
 
-        # ADR-0011 §5 Gate A, now told which tier it is scanning for.
+        # ADR-0011 §5 Gate A, now told which tier it is scanning for. It reads
+        # the entry as it is written, title and tags included.
+        from memtomem.tools.memory_writer import entry_guard_text
+
         guard = privacy.enforce_write_guard(
-            content,
+            entry_guard_text(content, title, tags),
             surface="langgraph_add",
             force_unsafe=force_unsafe,
             scope=effective_scope,

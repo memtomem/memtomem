@@ -803,8 +803,11 @@ async def add_memory(
     # on project_shared writes fire on the Web path too (ADR-0011 PR-D
     # round 7 parity — same fix as the chunks PATCH path at
     # ``chunks.py:73-86``).
+    from memtomem.tools.memory_writer import entry_guard_text
+
+    # The entry as it is written: the title and tags go into the file too.
     guard = privacy.enforce_write_guard(
-        req.content,
+        entry_guard_text(req.content, req.title, req.tags),
         surface="web_api_add",
         force_unsafe=req.force_unsafe,
         scope=req.scope,

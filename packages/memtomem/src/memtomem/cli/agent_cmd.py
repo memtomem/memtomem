@@ -420,10 +420,18 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
             tags = list(chunk.metadata.tags) + [f"shared-from={chunk_id}"]
 
         from memtomem import privacy
-        from memtomem.tools.memory_writer import append_entry
+        from memtomem.tools.memory_writer import append_entry, entry_guard_text
 
+        title = (
+            "Shared: " + " > ".join(chunk.metadata.heading_hierarchy)
+            if chunk.metadata.heading_hierarchy
+            else "Shared: memory"
+        )
+
+        # The copy as it is written: the heading path becomes its title and
+        # the source's tags go with it.
         guard = privacy.enforce_write_guard(
-            chunk.content,
+            entry_guard_text(chunk.content, title, tags),
             surface="cli_agent_share",
             force_unsafe=force_unsafe,
             audit_context={"chunk_id": chunk_id, "target": target},
@@ -433,12 +441,6 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 f"Chunk content matches {len(guard.hits)} privacy pattern(s); share rejected. "
                 "Retry with --force-unsafe to bypass (audit-logged)."
             )
-
-        title = (
-            "Shared: " + " > ".join(chunk.metadata.heading_hierarchy)
-            if chunk.metadata.heading_hierarchy
-            else "Shared: memory"
-        )
 
         from datetime import datetime, timezone
 

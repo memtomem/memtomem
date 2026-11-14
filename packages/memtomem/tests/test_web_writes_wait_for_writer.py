@@ -43,10 +43,12 @@ from memtomem.web.app import create_app
 from memtomem.web.deps import require_configured
 
 from .helpers import isolate_config_paths
+from .test_mutation_reindex_gate import _intruder_after_the_append
 
 _NOTE = "# Note\n\n## Plans\n\nalpha falcon body\n"
 _SHORT_WAIT_S = 1.0  # long enough that a slow CI loop still sees the waiter
-# The ingress guard scans the entry, not its title, so the index refuses this one.
+# Written into the file right after the append, where the write guard never
+# looked, so the re-index refuses the file.
 _SECRET_TITLE = "aws " + "AKIA" + "IOSFODNN7EXAMPLE"
 
 
@@ -218,6 +220,7 @@ async def test_a_timed_out_mark_after_a_privacy_refusal_keeps_its_diagnosis(
     """The privacy arm marks too; when that times out, the refusal says both things."""
     storage = components.storage
     key = await _scratch(storage)
+    _intruder_after_the_append(monkeypatch, _SECRET_TITLE)
     monkeypatch.setattr(scratch_mod, "WRITER_WAIT_S", _SHORT_WAIT_S)
     owner = _Owner(storage)
     _start_owner_after(monkeypatch, components.index_engine, "index_file", owner)
@@ -225,7 +228,7 @@ async def test_a_timed_out_mark_after_a_privacy_refusal_keeps_its_diagnosis(
         resp = await _timed_out(
             storage,
             owner,
-            client.post(f"/api/scratch/{key}/promote", json={"title": _SECRET_TITLE}),
+            client.post(f"/api/scratch/{key}/promote", json={"title": "clean title"}),
         )
 
     assert resp.status_code == 503, resp.text
@@ -239,6 +242,7 @@ async def test_a_privacy_refusal_still_marks_once_the_owner_finishes(components,
     """The privacy arm's mark waits too, and the caller still gets the privacy 409."""
     storage = components.storage
     key = await _scratch(storage)
+    _intruder_after_the_append(monkeypatch, _SECRET_TITLE)
     owner = _Owner(storage)
     _start_owner_after(monkeypatch, components.index_engine, "index_file", owner)
 
@@ -246,7 +250,7 @@ async def test_a_privacy_refusal_still_marks_once_the_owner_finishes(components,
         resp, _ = await _overlap(
             storage,
             owner,
-            client.post(f"/api/scratch/{key}/promote", json={"title": _SECRET_TITLE}),
+            client.post(f"/api/scratch/{key}/promote", json={"title": "clean title"}),
         )
 
     assert resp.status_code == 409, resp.text
