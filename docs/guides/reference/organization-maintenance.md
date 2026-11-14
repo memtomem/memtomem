@@ -21,9 +21,11 @@ Namespaces organize memories into scoped groups.
 mem_ns_set(namespace="work")          # set session default
 mem_ns_get()                          # check current namespace
 mem_ns_list()                         # list all namespaces with counts
-→ default: 200 chunks
-  work: 150 chunks
-  personal: 94 chunks
+→ Namespaces (3 total):
+
+    default: 200 chunks
+    personal: 94 chunks
+    work: 150 chunks
 ```
 
 After `mem_ns_set`, search and add default to that namespace. `mem_index` is
