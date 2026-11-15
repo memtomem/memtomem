@@ -642,3 +642,207 @@ async def test_recover_from_degraded_serializes_concurrent_callers(
     assert consolidation.call_count == 1
     assert policy.call_count == 1
     assert watchdog.call_count == 1
+
+
+# ── initialization is not visible before it commits (#3375) ───────────
+
+
+class _GatedWatcher:
+    """A watcher whose ``start`` parks until released, holding the caller
+    inside ``ensure_initialized``'s startup window."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.stop = AsyncMock()
+
+    async def start(self) -> None:
+        self.entered.set()
+        await self.release.wait()
+
+
+def _components_like(template: Components) -> Components:
+    return Components(
+        config=template.config,
+        storage=object(),  # type: ignore[arg-type]
+        embedder=object(),  # type: ignore[arg-type]
+        index_engine=object(),  # type: ignore[arg-type]
+        search_pipeline=object(),  # type: ignore[arg-type]
+    )
+
+
+# A bound on waits that only end when the code under test cooperates. Never
+# reached on a passing run; it turns a stall into a failure.
+_COORDINATION_TIMEOUT_S = 30
+
+
+async def _settle() -> None:
+    """Let every task that can run without the gate do so."""
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
+async def _open_and_reap(tasks: list[asyncio.Task[Components]], *gates: asyncio.Event) -> None:
+    """Open every gate and wait the tasks out, whatever they end with.
+
+    For a ``finally``: when an assertion fails mid-test, a task still parked
+    on a gate would be cancelled by the event loop's teardown and then park
+    again inside its rollback, and the teardown waits for it without limit.
+    """
+    for gate in gates:
+        gate.set()
+    async with asyncio.timeout(_COORDINATION_TIMEOUT_S):
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_caller_does_not_get_components_a_cancelled_initializer_closes(
+    fake_components: Components,
+) -> None:
+    """The first caller publishes the components before the background
+    starts finish, because those starts read them through the context. A
+    second caller arriving in that window must not be handed them: if the
+    first is then cancelled, its rollback closes them. The second waits, and
+    on finding nothing committed runs the initialization itself. So does a
+    third that arrives while the rollback is still closing them."""
+    from memtomem.indexing import watcher as watcher_mod
+
+    gated = _GatedWatcher()
+    plain = MagicMock()
+    plain.start = AsyncMock()
+    plain.stop = AsyncMock()
+    watchers = iter([gated, plain])
+
+    built: list[Components] = []
+    closed: list[Components] = []
+    closing = asyncio.Event()
+    finish_close = asyncio.Event()
+
+    async def fake_create(_config: Mem2MemConfig, **_kwargs: object) -> Components:
+        built.append(_components_like(fake_components))
+        return built[-1]
+
+    async def fake_close(comp: Components) -> TeardownResult:
+        closing.set()
+        await finish_close.wait()
+        closed.append(comp)
+        return TeardownResult(storage_closed=True)
+
+    ctx = AppContext(config=fake_components.config)
+    with (
+        patch("memtomem.server.component_factory.create_components", side_effect=fake_create),
+        patch("memtomem.server.component_factory.close_components", side_effect=fake_close),
+        patch.object(watcher_mod, "FileWatcher", lambda *a, **k: next(watchers)),
+    ):
+        tasks: list[asyncio.Task[Components]] = []
+        try:
+            async with asyncio.timeout(_COORDINATION_TIMEOUT_S):
+                first = asyncio.create_task(ctx.ensure_initialized())
+                tasks.append(first)
+                await gated.entered.wait()
+
+                second = asyncio.create_task(ctx.ensure_initialized())
+                tasks.append(second)
+                await _settle()
+                assert not second.done()
+
+                first.cancel()
+                await closing.wait()
+                third = asyncio.create_task(ctx.ensure_initialized())
+                tasks.append(third)
+                await _settle()
+                assert not second.done()
+                assert not third.done()
+
+                finish_close.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await first
+                comp = await second
+                assert await third is comp
+        finally:
+            await _open_and_reap(tasks, gated.release, finish_close)
+
+    assert len(built) == 2
+    assert closed == [built[0]]
+    assert comp is built[1]
+    assert ctx._components is built[1]
+    assert ctx._owns_components is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_caller_waits_for_an_in_flight_initialization_to_commit(
+    fake_components: Components,
+) -> None:
+    from memtomem.indexing import watcher as watcher_mod
+
+    gated = _GatedWatcher()
+    create = AsyncMock(return_value=fake_components)
+
+    ctx = AppContext(config=fake_components.config)
+    with (
+        patch("memtomem.server.component_factory.create_components", create),
+        patch.object(watcher_mod, "FileWatcher", lambda *a, **k: gated),
+    ):
+        tasks: list[asyncio.Task[Components]] = []
+        try:
+            async with asyncio.timeout(_COORDINATION_TIMEOUT_S):
+                first = asyncio.create_task(ctx.ensure_initialized())
+                tasks.append(first)
+                await gated.entered.wait()
+
+                second = asyncio.create_task(ctx.ensure_initialized())
+                tasks.append(second)
+                await _settle()
+                assert not second.done()
+
+                gated.release.set()
+                assert await first is fake_components
+                assert await second is fake_components
+        finally:
+            await _open_and_reap(tasks, gated.release)
+
+    create.assert_awaited_once()
+    # Committed: a later caller is back on the lock-free path, which is the
+    # one that checks the index roots on the way in.
+    with patch.object(ctx, "reconcile_watched_roots", AsyncMock()) as reconcile:
+        assert await ctx.ensure_initialized() is fake_components
+    reconcile.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_facade_caller_waits_for_the_owners_in_flight_initialization(
+    fake_components: Components,
+) -> None:
+    """Over SSE the second caller is another connection: its facade
+    delegates to the runtime owner, so it reaches the same window."""
+    from memtomem.indexing import watcher as watcher_mod
+
+    gated = _GatedWatcher()
+    create = AsyncMock(return_value=fake_components)
+
+    owner = AppContext(config=fake_components.config)
+    facade = AppContext.from_runtime_owner(owner)
+    with (
+        patch("memtomem.server.component_factory.create_components", create),
+        patch.object(watcher_mod, "FileWatcher", lambda *a, **k: gated),
+    ):
+        tasks: list[asyncio.Task[Components]] = []
+        try:
+            async with asyncio.timeout(_COORDINATION_TIMEOUT_S):
+                first = asyncio.create_task(owner.ensure_initialized())
+                tasks.append(first)
+                await gated.entered.wait()
+
+                second = asyncio.create_task(facade.ensure_initialized())
+                tasks.append(second)
+                await _settle()
+                assert not second.done()
+
+                gated.release.set()
+                assert await first is fake_components
+                assert await second is fake_components
+        finally:
+            await _open_and_reap(tasks, gated.release)
+
+    create.assert_awaited_once()
+    assert facade._components is fake_components

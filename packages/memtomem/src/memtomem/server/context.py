@@ -169,6 +169,11 @@ class AppContext:
     # the MCP server don't run background loops.
     _components: Components | None = field(default=None, init=False, repr=False)
     _owns_components: bool = field(default=False, init=False, repr=False)
+    # True while ``ensure_initialized`` has published ``_components`` but not
+    # yet committed: the background starts read them through this context, so
+    # they are visible before it is known they will survive. Only
+    # ``ensure_initialized`` reads or writes it.
+    _init_in_flight: bool = field(default=False, init=False, repr=False)
     # SSE enters the SDK lifespan once per connection.  Secondary connection
     # contexts keep their session/namespace state here but delegate the
     # process-wide component graph and background services to the first
@@ -545,6 +550,10 @@ class AppContext:
 
         Concurrent first-callers serialize on ``_init_lock``; the first
         completes the init, later ones return the cached ``Components``.
+        A caller that arrives while the first is still starting background
+        loops waits on the lock too, rather than returning components the
+        first caller's rollback may yet close; if that initialization is
+        rolled back, the waiting caller runs it again itself.
         On failure the lock is released and ``_components`` stays ``None``,
         so a retry can succeed (transient failures like a race on DB file
         creation should not poison the context for the rest of the
@@ -584,7 +593,7 @@ class AppContext:
             self._components = comp
             self._watcher = self._runtime_owner._watcher
             return comp
-        if self._components is not None:
+        if self._components is not None and not self._init_in_flight:
             # Already initialized: this call is a handler entering, which is
             # the moment to notice that another process changed the index roots
             # (#2186). Kept here rather than in ``_get_app_initialized`` so it
@@ -635,124 +644,131 @@ class AppContext:
             # and ``_require_initialized`` would raise without this. The
             # except-block below rolls the flag back on failure so a retry
             # isn't blocked by half-built state.
-            self._components = comp
-            self._owns_components = True
-
-            dedup: DedupScanner | None = None
-            watcher: FileWatcher | None = None
-            watcher_started = False
-            scheduler: object | None = None
-            policy_scheduler: object | None = None
-            watchdog: object | None = None
+            # In flight from here until the ``finally`` below: the fast path
+            # at the top refuses these components while this is set, because
+            # the rollback further down may still close them (#3375).
+            self._init_in_flight = True
             try:
-                # #1935: advertise this server in the instance registry once
-                # storage is provably open (the DB file exists and this is
-                # the finalized config). Registration itself never raises;
-                # settlement re-raises a caught cancellation so the rollback
-                # below runs with the published sentinel recoverable.
-                if self.register_server_instance:
-                    await self._acquire_instance_registration(comp)
+                self._components = comp
+                self._owns_components = True
 
-                dedup = DedupScanner(storage=comp.storage)
+                dedup: DedupScanner | None = None
+                watcher: FileWatcher | None = None
+                watcher_started = False
+                scheduler: object | None = None
+                policy_scheduler: object | None = None
+                watchdog: object | None = None
+                try:
+                    # #1935: advertise this server in the instance registry once
+                    # storage is provably open (the DB file exists and this is
+                    # the finalized config). Registration itself never raises;
+                    # settlement re-raises a caught cancellation so the rollback
+                    # below runs with the published sentinel recoverable.
+                    if self.register_server_instance:
+                        await self._acquire_instance_registration(comp)
 
-                # Skip background loops in degraded mode (issue #349) — the
-                # watcher/schedulers/watchdog walk the index or re-embed
-                # chunks and would crash on the missing ``chunks_vec`` table.
-                # Recovery happens via ``mem_embedding_reset``, which calls
-                # :meth:`recover_from_degraded` to start what was skipped here
-                # without waiting for a restart (#2181).
-                watcher = FileWatcher(
-                    comp.index_engine,
-                    self.config.indexing,
-                    search_pipeline=comp.search_pipeline,
-                )
-                if comp.embedding_broken is None:
-                    await watcher.start()
-                    watcher_started = True
+                    dedup = DedupScanner(storage=comp.storage)
 
-                degraded = comp.embedding_broken is not None
-
-                if self.config.consolidation_schedule.enabled and not degraded:
-                    from memtomem.server.scheduler import ConsolidationScheduler
-
-                    scheduler = ConsolidationScheduler(self, self.config.consolidation_schedule)
-                    await scheduler.start()
-
-                if self.config.policy.enabled and not degraded:
-                    from memtomem.server.scheduler import PolicyScheduler
-
-                    policy_scheduler = PolicyScheduler(self, self.config.policy)
-                    await policy_scheduler.start()
-
-                if self.config.health_watchdog.enabled and not degraded:
-                    from memtomem.server.health_watchdog import HealthWatchdog
-
-                    watchdog = HealthWatchdog(
-                        self,
-                        self.config.health_watchdog,
-                        self.config.scheduler,
+                    # Skip background loops in degraded mode (issue #349) — the
+                    # watcher/schedulers/watchdog walk the index or re-embed
+                    # chunks and would crash on the missing ``chunks_vec`` table.
+                    # Recovery happens via ``mem_embedding_reset``, which calls
+                    # :meth:`recover_from_degraded` to start what was skipped here
+                    # without waiting for a restart (#2181).
+                    watcher = FileWatcher(
+                        comp.index_engine,
+                        self.config.indexing,
+                        search_pipeline=comp.search_pipeline,
                     )
-                    await watchdog.start()
+                    if comp.embedding_broken is None:
+                        await watcher.start()
+                        watcher_started = True
 
-                # P2 cron Phase A footgun: scheduler enabled without watchdog
-                # means schedules will silently never fire. Loud at startup
-                # (warning, not debug) per feedback_silent_except_log_level.
-                if self.config.scheduler.enabled and not self.config.health_watchdog.enabled:
-                    logger.warning(
-                        "scheduler.enabled=True but health_watchdog.enabled=False — "
-                        "schedules will not dispatch (scheduler rides the watchdog tick)"
-                    )
-                if (
-                    self.config.scheduler.enabled
-                    and self.config.scheduler.default_timezone.lower() != "utc"
-                ):
-                    logger.warning(
-                        "scheduler.default_timezone=%r — Phase A only honors 'utc'; "
-                        "falling back to UTC",
-                        self.config.scheduler.default_timezone,
-                    )
-            except BaseException:
-                # Same accumulate-and-defer discipline as ``close()``: a
-                # cancellation arriving during one of these stops must not
-                # skip the component close and sentinel settlement below.
-                # The original exception re-raises regardless (when the
-                # trigger *was* a cancellation, it is that same instance).
-                for resource, stage in (
-                    (watchdog, "health_watchdog"),
-                    (policy_scheduler, "policy_scheduler"),
-                    (scheduler, "scheduler"),
-                    (watcher, "watcher"),
-                ):
-                    try:
-                        await _stop_quietly(resource, stage)
-                    except asyncio.CancelledError:
-                        logger.warning("rollback stop '%s' cancelled — continuing", stage)
-                teardown = await close_components(comp)
-                # Release the sentinel only when storage provably closed —
-                # a failed close leaves a possibly-open store, which must
-                # stay advertised (#1935).
-                await self._release_instance_registration(teardown.storage_closed)
-                self._release_lifecycle_barrier(teardown.storage_closed)
-                self._components = None
-                self._owns_components = False
-                raise
+                    degraded = comp.embedding_broken is not None
 
-            self._dedup_scanner = dedup
-            self._config_signature = signature_at_load
-            # Cleared here, where initialization commits, and not next to the
-            # rebuild above. Everything between the two can raise — the webhook
-            # close is a cancellation point, and so is every component start —
-            # and clearing it eagerly made that abort permanent: the retry
-            # skipped the rebuild, kept the config from the aborted attempt,
-            # and then banked *this* signature over it. A config edit made in
-            # between was recorded as applied while never being read.
-            self.defer_config_migration = False
-            self._watcher = watcher
-            self._watcher_started = watcher_started
-            self._scheduler = scheduler
-            self._policy_scheduler = policy_scheduler
-            self._health_watchdog = watchdog
-            return comp
+                    if self.config.consolidation_schedule.enabled and not degraded:
+                        from memtomem.server.scheduler import ConsolidationScheduler
+
+                        scheduler = ConsolidationScheduler(self, self.config.consolidation_schedule)
+                        await scheduler.start()
+
+                    if self.config.policy.enabled and not degraded:
+                        from memtomem.server.scheduler import PolicyScheduler
+
+                        policy_scheduler = PolicyScheduler(self, self.config.policy)
+                        await policy_scheduler.start()
+
+                    if self.config.health_watchdog.enabled and not degraded:
+                        from memtomem.server.health_watchdog import HealthWatchdog
+
+                        watchdog = HealthWatchdog(
+                            self,
+                            self.config.health_watchdog,
+                            self.config.scheduler,
+                        )
+                        await watchdog.start()
+
+                    # P2 cron Phase A footgun: scheduler enabled without watchdog
+                    # means schedules will silently never fire. Loud at startup
+                    # (warning, not debug) per feedback_silent_except_log_level.
+                    if self.config.scheduler.enabled and not self.config.health_watchdog.enabled:
+                        logger.warning(
+                            "scheduler.enabled=True but health_watchdog.enabled=False — "
+                            "schedules will not dispatch (scheduler rides the watchdog tick)"
+                        )
+                    if (
+                        self.config.scheduler.enabled
+                        and self.config.scheduler.default_timezone.lower() != "utc"
+                    ):
+                        logger.warning(
+                            "scheduler.default_timezone=%r — Phase A only honors 'utc'; "
+                            "falling back to UTC",
+                            self.config.scheduler.default_timezone,
+                        )
+                except BaseException:
+                    # Same accumulate-and-defer discipline as ``close()``: a
+                    # cancellation arriving during one of these stops must not
+                    # skip the component close and sentinel settlement below.
+                    # The original exception re-raises regardless (when the
+                    # trigger *was* a cancellation, it is that same instance).
+                    for resource, stage in (
+                        (watchdog, "health_watchdog"),
+                        (policy_scheduler, "policy_scheduler"),
+                        (scheduler, "scheduler"),
+                        (watcher, "watcher"),
+                    ):
+                        try:
+                            await _stop_quietly(resource, stage)
+                        except asyncio.CancelledError:
+                            logger.warning("rollback stop '%s' cancelled — continuing", stage)
+                    teardown = await close_components(comp)
+                    # Release the sentinel only when storage provably closed —
+                    # a failed close leaves a possibly-open store, which must
+                    # stay advertised (#1935).
+                    await self._release_instance_registration(teardown.storage_closed)
+                    self._release_lifecycle_barrier(teardown.storage_closed)
+                    self._components = None
+                    self._owns_components = False
+                    raise
+
+                self._dedup_scanner = dedup
+                self._config_signature = signature_at_load
+                # Cleared here, where initialization commits, and not next to the
+                # rebuild above. Everything between the two can raise — the webhook
+                # close is a cancellation point, and so is every component start —
+                # and clearing it eagerly made that abort permanent: the retry
+                # skipped the rebuild, kept the config from the aborted attempt,
+                # and then banked *this* signature over it. A config edit made in
+                # between was recorded as applied while never being read.
+                self.defer_config_migration = False
+                self._watcher = watcher
+                self._watcher_started = watcher_started
+                self._scheduler = scheduler
+                self._policy_scheduler = policy_scheduler
+                self._health_watchdog = watchdog
+                return comp
+            finally:
+                self._init_in_flight = False
 
     async def recover_from_degraded(self) -> None:
         """Start the background loops a degraded startup skipped (#2181).

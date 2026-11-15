@@ -51,6 +51,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   every MCP tool, CLI command, and storage call consistently reports
   `Error: Invalid namespace description: expected a string` and stores nothing.
 
+- **A request that arrives while the server is still starting waits for the start to finish
+  (#3375).** The first request that touches the store opens it and then starts the file
+  watcher and the schedulers. A second request arriving during those starts was handed the
+  store at once; if the first request was then cancelled, its cleanup closed the store, and
+  the second request's next call failed with `Database is closing`. A request that arrives
+  in that window now waits, and if the first start was rolled back it starts the server
+  again itself. Reaching this took two callers inside the startup window, with the first
+  one cancelled or failing there: two requests in flight on one connection, two SSE
+  connections, or one request and the startup warmup (`warmup.enabled`). It was reproduced
+  with a script and not seen in use.
+
 ## [0.7.10] — 2026-11-15
 
 ### Upgrading
