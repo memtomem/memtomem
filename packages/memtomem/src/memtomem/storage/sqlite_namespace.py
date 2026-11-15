@@ -18,7 +18,10 @@ from typing import (
 )
 from uuid import UUID
 
-from memtomem.constants import validate_namespace_color
+from memtomem.constants import (
+    validate_namespace_color,
+    validate_namespace_description,
+)
 from memtomem.errors import (
     NamespaceConflictError,
     NamespaceMutationBusyError,
@@ -949,6 +952,7 @@ class NamespaceOps:
         # Every metadata writer (Web PATCH, ``mem_ns_update``, ``mem_agent_register``,
         # ``mm agent register``) lands here; refuse before any DB work, and
         # outside the try below so the refusal keeps its type.
+        validate_namespace_description(description)
         validate_namespace_color(color)
         if description:
             # A description is a label, so there is no bypass valve (#3352),
