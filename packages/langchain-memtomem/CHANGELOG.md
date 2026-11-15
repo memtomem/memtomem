@@ -5,6 +5,8 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-11-15
+
 ### Changed
 
 - **Requires `memtomem>=0.7.9,<0.8`** (was `>=0.7.4,<0.8`). The store passes the
