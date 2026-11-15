@@ -298,6 +298,14 @@ def _pinned_python_args(contract: dict) -> list[str]:
     ]
 
 
+def _hermes_args(contract: dict) -> list[str]:
+    # The shared launch plus a floor on huggingface-hub, placed before the command. The
+    # flag in the env below stops the library opening a saved login only from that
+    # release on (see `hub_floor` in the contract).
+    *options, command = _pinned_python_args(contract)
+    return [*options, "--with", contract["hermes"]["hub_floor"], command]
+
+
 def _hermes_mcp_config(contract: dict) -> str:
     payload = {
         "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
@@ -305,11 +313,17 @@ def _hermes_mcp_config(contract: dict) -> str:
             "memtomem": {
                 "type": "stdio",
                 "command": "uvx",
-                "args": _pinned_python_args(contract),
+                "args": _hermes_args(contract),
                 # Hermes's plugin catalog does not list a plugin that reads `.env` files
-                # itself (rule 11), and the server otherwise parses the nearest one,
-                # normally ~/.env. Hermes passes an entry's own `env` through its filter.
-                "env": {**_launch_env(contract["core"]), "PYTHON_DOTENV_DISABLED": "1"},
+                # or another tool's login itself (rule 11). The server otherwise parses the
+                # nearest `.env`, normally ~/.env, and its Hugging Face downloads send the
+                # login `hf auth login` saved. Hermes passes an entry's own `env` through
+                # its filter.
+                "env": {
+                    **_launch_env(contract["core"]),
+                    "PYTHON_DOTENV_DISABLED": "1",
+                    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+                },
             }
         },
     }
