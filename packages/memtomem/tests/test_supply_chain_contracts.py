@@ -310,6 +310,15 @@ def test_hermes_plugin_matches_contract() -> None:
     hub_floor = "huggingface-hub>=1.20"
     assert contract["hermes"]["hub_floor"] == hub_floor
     requirement = f"memtomem[{','.join(core['mcp_extras'])}]=={core['version']}"
+    launch_args = [
+        "--python",
+        "3.12",
+        "--from",
+        requirement,
+        "--with",
+        hub_floor,
+        "memtomem-server",
+    ]
 
     manifest = _json("packages/memtomem-hermes-plugin/plugin.json")
     assert manifest["$schema"] == "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
@@ -321,15 +330,7 @@ def test_hermes_plugin_matches_contract() -> None:
             "memtomem": {
                 "type": "stdio",
                 "command": "uvx",
-                "args": [
-                    "--python",
-                    "3.12",
-                    "--from",
-                    requirement,
-                    "--with",
-                    hub_floor,
-                    "memtomem-server",
-                ],
+                "args": launch_args,
                 "env": {
                     "MEMTOMEM_TOOL_MODE": core["tool_mode"],
                     "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage",
@@ -344,32 +345,32 @@ def test_hermes_plugin_matches_contract() -> None:
     }
 
     # Per launch line, not per file: a stale pin or a dropped --python beside a correct
-    # one elsewhere passes a whole-file `in`. Tokens run to the next quote, space or
-    # bracket, so `0.6.5rc1` is captured whole rather than matching `0.6.5`.
+    # one elsewhere passes a whole-file `in`. Each line is compared whole with the line
+    # the argument list spells, so the order, the shell quoting and anything else on the
+    # line are part of the comparison: uvx passes an option written after
+    # `memtomem-server` to the server, and a POSIX shell reads an unquoted `>=1.20` as a
+    # redirection. Either way the huggingface-hub floor would not apply.
     readme = (root / "README.md").read_text(encoding="utf-8")
     launches = [line for line in readme.splitlines() if "memtomem[" in line]
-    assert len(launches) == 2, launches  # requirements line + manual config.yaml args
-    for line in launches:
-        assert re.findall(r"memtomem\[[^\]]*\]==[^\s'\"\],]*", line) == [requirement], line
-        assert re.findall(r"""--python["']?,?\s*["']?([^\s'",\]]+)""", line) == ["3.12"], line
-        # The floor rides in the same launch: without it uv may resolve a huggingface-hub
-        # that opens the saved login although the flag is set.
-        assert re.findall(r"""--with["']?,?\s*["']?([^\s'",\]]+)""", line) == [hub_floor], line
-    # Both launch examples run uvx: the requirements line spells it, the manual entry
-    # sets it as `command:` right above its `args:` line.
-    assert launches[0].lstrip(" -`").startswith("uvx --python"), launches[0]
-    assert re.findall(r"^ *command: *(\S+)\n *args: \[\"--python\"", readme, re.M) == ["uvx"]
+    assert launches == [
+        f"  `{shlex.join(['uvx', *launch_args])}`.",  # under Requirements
+        f"    args: {json.dumps(launch_args)}",  # the manual config.yaml entry
+    ]
 
-    # The manual entry replaces this package's, so it must carry the whole launch env:
-    # without PYTHON_DOTENV_DISABLED the server reads ~/.env again, and Hermes refuses
-    # a non-string value (an unquoted `1` is an int once parsed).
+    # The manual entry replaces this package's, so it must carry the whole launch: the
+    # same command and arguments, and the env. Without PYTHON_DOTENV_DISABLED the server
+    # reads ~/.env again, and Hermes refuses a non-string value (an unquoted `1` is an
+    # int once parsed).
     blocks = [
         block
         for block in re.findall(r"^```yaml\n(.*?)^```", readme, re.M | re.S)
         if "mcp_servers:" in block
     ]
     assert len(blocks) == 1, blocks
-    example_env = yaml.safe_load(blocks[0])["mcp_servers"]["memtomem"]["env"]
+    example = yaml.safe_load(blocks[0])["mcp_servers"]["memtomem"]
+    assert example["command"] == "uvx"
+    assert example["args"] == launch_args
+    example_env = example["env"]
     rendered = _json("packages/memtomem-hermes-plugin/mcp.json")
     rendered_env = rendered["mcpServers"]["memtomem"]["env"]
     for key, value in rendered_env.items():

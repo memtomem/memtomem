@@ -101,8 +101,9 @@ files directly. An entry of your own without that variable restores the search, 
 example below sets it. Before this package's 0.1.15, the nearest `.env` was read and its
 `MEMTOMEM_*` keys were applied.
 
-**A saved Hugging Face login is not used.** memtomem downloads models from Hugging Face
-only when ONNX embedding or the local reranker is configured. This package's server entry
+**A saved Hugging Face login is not used.** memtomem downloads a model or a tokenizer from
+Hugging Face when its configuration uses one hosted there, as ONNX embedding and the local
+reranker do. This package's server entry
 sets `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` and holds `huggingface-hub` at 1.20 or later
 (`--with` in its launch line), so those downloads do not open the login that
 `hf auth login` saved (normally `~/.cache/huggingface/token`) and use neither it nor an
