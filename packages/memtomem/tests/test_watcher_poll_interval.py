@@ -23,10 +23,10 @@ def test_polling_observer_polls_at_the_configured_interval() -> None:
     assert observer.timeout == 0.25
 
 
-def test_default_interval_is_five_seconds() -> None:
+def test_default_interval_is_ten_seconds() -> None:
     observer = watcher_mod._create_observer(IndexingConfig(watcher_backend="polling"))
 
-    assert observer.timeout == 5.0
+    assert observer.timeout == 10.0
 
 
 @pytest.mark.parametrize("interval_ms", [100, 60000])

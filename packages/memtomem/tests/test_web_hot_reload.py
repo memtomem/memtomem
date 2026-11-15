@@ -262,6 +262,46 @@ async def test_external_watcher_backend_edit_replaces_live_observer(
     old_observer.join.assert_called_once_with()
 
 
+async def test_external_poll_interval_edit_waits_for_the_next_observer_build(
+    home: Path, app, client: AsyncClient
+):
+    from memtomem.indexing import watcher as watcher_module
+    from memtomem.indexing.watcher import FileWatcher
+
+    _write_config(home, {"indexing": {"watcher_backend": "native"}})
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+
+    watcher = FileWatcher(app.state.index_engine, app.state.config.indexing)
+    old_observer = MagicMock(name="native_observer")
+    watcher._observer = old_observer
+    watcher._observer_backend = "native"
+    watcher._handler = MagicMock()
+    app.state.file_watcher = watcher
+
+    replacement = MagicMock(name="polling_observer")
+    with patch.object(watcher_module, "_create_observer", return_value=replacement) as create:
+        _write_config(
+            home, {"indexing": {"watcher_backend": "native", "watcher_poll_interval_ms": 2000}}
+        )
+        response = await client.get("/api/config")
+
+        assert response.status_code == 200
+        assert response.json()["config_reload_error"] is None
+        create.assert_not_called()
+        assert watcher._observer is old_observer
+
+        _write_config(
+            home, {"indexing": {"watcher_backend": "polling", "watcher_poll_interval_ms": 2000}}
+        )
+        response = await client.get("/api/config")
+
+    assert response.status_code == 200
+    (built_from,) = create.call_args.args
+    assert built_from.watcher_poll_interval_ms == 2000
+    assert watcher._observer is replacement
+
+
 async def test_mem_init_tier_reaches_running_web_on_config_read(
     home: Path, app, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

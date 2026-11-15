@@ -7,16 +7,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
-- **The polling file watcher rescans every 5 s instead of every 1 s, and
+- **The polling file watcher rescans every 10 s instead of every 1 s, and
   `indexing.watcher_poll_interval_ms` sets the interval (part of #2838).** Polling is the
   default watcher on macOS (`watcher_backend: "auto"`) and what `"polling"` selects on every
   platform. Each scan walks every watched directory, in every server process that runs a
-  watcher. Measured on an idle tree of 96 directories holding 8,538 entries, one process
-  used 10.2 % of a core at 1 s and 2.5 % at 5 s. An edit now waits up to one interval for
-  the next scan and then the 5 s quiet period: measured from write to index, 7.4 to 9.9 s
-  where it was 5.4 to 6.0 s. Set the interval between 100 and 60000 ms in `config.json` or
-  with `MEMTOMEM_INDEXING__WATCHER_POLL_INTERVAL_MS`, and restart the server to apply a
-  change. The native backend ignores it.
+  watcher. Measured on an idle tree of about 100 directories holding about 8,500 entries,
+  one process used 10.2 % of a core at 1 s and 1.1 to 1.2 % at 10 s. An edit made outside
+  memtomem now waits up to one interval for the next scan and then the 5 s quiet period:
+  measured from write to index, 9.9 to 15.0 s where it was 5.4 to 6.0 s. `mem_add` indexes
+  what it writes and does not wait for the watcher. Set the interval between 100 and
+  60000 ms in `config.json` or with `MEMTOMEM_INDEXING__WATCHER_POLL_INTERVAL_MS`, and
+  restart the server to apply a change. The native backend ignores it.
 
 ## [0.7.10] — 2026-11-15
 

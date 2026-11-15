@@ -468,13 +468,14 @@ class IndexingConfig(ConfigModel):
     watcher_backend: Literal["auto", "native", "polling"] = "auto"
     # How often the polling backend rescans the watched roots; the native
     # backend ignores it.  Every pass walks and stats each root's whole tree,
-    # in every server process that runs a watcher, so the idle cost falls in
-    # proportion as this grows.  The default equals ``watcher_debounce_ms``:
-    # an edit waits out that quiet period before it is indexed anyway, so
-    # polling faster than it bought little.  A change that is undone again
-    # between two passes is never seen, at any interval.  Read when an
-    # observer is built, so a running server keeps the value it started with.
-    watcher_poll_interval_ms: int = Field(default=5000, ge=100, le=60000)
+    # in every server process that runs a watcher, so a longer interval
+    # means fewer of those passes.  It also delays an edit made outside
+    # memtomem: one that lands right after a pass waits the whole interval,
+    # then ``watcher_debounce_ms``.  A file created and deleted between two
+    # passes is never seen.  Read when an observer is built: a running MCP
+    # server keeps the value it started with, and ``mm web`` stores an
+    # edited value and uses it for the next observer it builds.
+    watcher_poll_interval_ms: int = Field(default=10000, ge=100, le=60000)
     watcher_debounce_ms: int = Field(default=5000, ge=1, le=30000)
     watcher_max_wait_ms: int = Field(default=30000, ge=1, le=30000)
 
