@@ -22,8 +22,8 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
   `bm25` mode) every item came back, scored as a real match at its rank would be. memtomem 0.7.9
   narrows that fallback to the file's name (#3208), which for the store is the item's encoded
   key. A key can encode to a word (`V` to `sky`), so the store also turns the fallback off, and
-  such a query returns `[]` there. Dense retrieval is unchanged: in `hybrid` or `dense` mode with
-  an embedder, any query still returns the nearest items. Needs
+  such a query returns `[]` there. Turning the fallback off leaves dense retrieval alone: in
+  `hybrid` or `dense` mode with an embedder, any query still returns the nearest items. Needs
   memtomem 0.7.9, which adds the `create_components` keyword the store passes; the dependency
   floor rises with that release.
 - With bounded chunking (on for an E5 embedding model), the words `md`, `file` and `fragment` and
@@ -31,8 +31,9 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
   memtomem's chunker wrote `File: <encoded key>.md` and `Fragment <i>/<n>` lines into each row's
   embedded and BM25-indexed text, so in BM25 the first three matched every item and the encoded
   key matched its item. The store now opens its components with `chunk_source_labels=False`,
-  which leaves both lines out. Rows indexed before the upgrade keep them until their item is
-  written again. Needs memtomem 0.7.9 as well.
+  which leaves both lines out. The embedded text of those rows changes with it, so dense
+  rankings under bounded chunking can differ from 0.2.0's. Rows indexed before the upgrade keep
+  both lines until their item is written again. Needs memtomem 0.7.9 as well.
 
 ### Security
 
