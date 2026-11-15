@@ -13,7 +13,7 @@ codex_version = "0.3.35"
 automation_version = "0.3.24"
 opencode_version = "0.3.33"
 kimi_version = "0.2.25"
-hermes_version = "0.1.22"
+hermes_version = "0.1.23"
 hermes_memory_version = "0.2.1"
 antigravity_version = "0.2.14"
 cursor_version = "0.1.0"
@@ -28,6 +28,12 @@ mcp_timeout_ms = 60000
 # uvx run-environment interpreter. A pinned minor, not ">=3.12": the open range picked a
 # Python newer than memtomem's classifiers and source-built a dependency.
 python = "3.12"
+# Floor on huggingface-hub in the launched environment, added to the launch line with
+# `--with`. 1.20.0 is the first release that checks HF_HUB_DISABLE_IMPLICIT_TOKEN before it
+# looks a token up: 1.19.0 and older open a saved Hugging Face login even with the flag
+# set, and releases before 1.0 send requests through `requests`, which honours ~/.netrc.
+# No upper bound here: memtomem[onnx] declares `<2` and one resolution applies both.
+hub_floor = "huggingface-hub>=1.20"
 # Oldest memtomem release whose structured `mem_search` echoes `recorded` (and so also
 # carries `record=False` without an exhaustive scan). The memory provider refuses anything
 # older at run time; its README names this release.
