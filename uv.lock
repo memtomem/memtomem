@@ -1159,7 +1159,7 @@ wheels = [
 
 [[package]]
 name = "memtomem"
-version = "0.7.9"
+version = "0.7.10"
 source = { editable = "packages/memtomem" }
 dependencies = [
     { name = "anyio" },
