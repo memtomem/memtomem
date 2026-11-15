@@ -1720,6 +1720,9 @@ async def test_recovered_watcher_indexes_a_new_file_without_a_restart(tmp_path, 
     )
 
     config = _degraded_config(tmp_path, monkeypatch)
+    # macOS resolves ``auto`` to polling and builds that observer directly,
+    # past the ``Observer`` patch above.
+    config.indexing.watcher_poll_interval_ms = 100
     mem_dir = Path(config.indexing.memory_dirs[0])
     app = AppContext(config=config)
     await app.ensure_initialized()

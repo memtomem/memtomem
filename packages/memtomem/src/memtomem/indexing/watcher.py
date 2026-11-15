@@ -174,7 +174,7 @@ def _stop_observer(observer: BaseObserver) -> None:
 
 def _create_observer(config: IndexingConfig) -> BaseObserver:
     if effective_watcher_backend(config) == "polling":
-        return PollingObserver()
+        return PollingObserver(timeout=config.watcher_poll_interval_ms / 1000.0)
     return Observer()
 
 
