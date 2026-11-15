@@ -51,9 +51,9 @@ def test_config_file_sets_the_interval(tmp_path: Path, monkeypatch: pytest.Monke
     config_dir = tmp_path / ".memtomem"
     config_dir.mkdir()
     (config_dir / "config.json").write_text(
-        json.dumps({"indexing": {"watcher_poll_interval_ms": 10000}}), encoding="utf-8"
+        json.dumps({"indexing": {"watcher_poll_interval_ms": 12000}}), encoding="utf-8"
     )
 
     config = build_fresh_config(migrate=False)
 
-    assert config.indexing.watcher_poll_interval_ms == 10000
+    assert config.indexing.watcher_poll_interval_ms == 12000

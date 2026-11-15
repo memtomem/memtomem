@@ -290,6 +290,7 @@ async def test_external_poll_interval_edit_waits_for_the_next_observer_build(
         assert response.json()["config_reload_error"] is None
         create.assert_not_called()
         assert watcher._observer is old_observer
+        assert watcher._config.watcher_poll_interval_ms == 2000
 
         _write_config(
             home, {"indexing": {"watcher_backend": "polling", "watcher_poll_interval_ms": 2000}}
