@@ -33,7 +33,6 @@ def _serve(monkeypatch, comp) -> AppContext:
     """Point both resource handlers at ``comp`` without a running lifespan."""
     app = AppContext.from_components(comp)
     monkeypatch.setattr(resources, "_get_active_app_initialized", AsyncMock(return_value=app))
-    monkeypatch.setattr(resources, "_get_app_initialized", AsyncMock(return_value=app))
     return app
 
 

@@ -51,6 +51,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   every MCP tool, CLI command, and storage call consistently reports
   `Error: Invalid namespace description: expected a string` and stores nothing.
 
+- **Resources answer over stdio (#3374).** Reading any of the six resources from a stdio
+  server failed, while tools on the same connection worked. Two causes, one per kind:
+  - The four static ones (`memtomem://sources`, `memtomem://namespaces`, `memtomem://tags`,
+    `memtomem://stats`) failed with `Error reading resource <uri>`, while `resources/list`
+    still listed all four. Their handlers receive no request context and looked the server's
+    state up through a value the server set while starting; over stdio the MCP SDK runs a
+    handler in the context of the task reading stdin, which starts first and never sees that
+    value.
+  - The two templated ones (`memtomem://sources{?cursor,limit,namespace}` and
+    `memtomem://chunks/{chunk_id}`) failed with `Error creating resource from template <uri>`.
+    Their handlers did declare the request context, but the SDK validates a template
+    function's arguments, and with the annotation these handlers used that validation
+    rebuilt the context object without the request inside it.
+
+  The server now binds its state from the request itself for the length of each resource
+  read, and all six handlers read it from there. The first cause needs a transport that
+  hands the server a message from a task older than the server's own startup, as stdio does;
+  the second does not involve the transport. Only stdio was measured, before and after.
+
 ## [0.7.10] — 2026-11-15
 
 ### Upgrading
