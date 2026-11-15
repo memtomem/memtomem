@@ -16,12 +16,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from memtomem.config_signature import build_fresh_config
-from memtomem.server.context import (
-    AppContext,
-    _reset_active_app,
-    _set_active_app,
-    _stop_quietly,
-)
+from memtomem.server.context import AppContext, _stop_quietly
 
 logger = logging.getLogger(__name__)
 
@@ -279,16 +274,9 @@ async def app_lifespan(_server: MCPServer[AppContext]) -> AsyncIterator[AppConte
 
     state, ctx = await _acquire_server_runtime(_server)
 
-    # Static resource handlers get no ``ctx`` from the 2.0 SDK; publish this
-    # one for them (see ``context._get_active_app_initialized``). Scoped to
-    # this lifespan's task, so overlapping SSE connections — which each enter
-    # their own lifespan — don't share the handle. Published before the
-    # ``try`` so the token always exists by the time ``finally`` retracts it.
-    active_app_token = _set_active_app(ctx)
     try:
         yield ctx
     finally:
-        _reset_active_app(active_app_token)
         # Accumulate-and-defer (#1935): a cancellation during the webhook
         # stop must not skip ``ctx.close()`` — the context owns the
         # instance-registry settlement, which has to run. The first caught

@@ -10,9 +10,9 @@ import contextlib
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from memtomem.server.component_factory import (
     Components as Components,
@@ -22,6 +22,7 @@ from memtomem.server.component_factory import (
 from memtomem.server.context import (
     AppContext as AppContext,
     CtxType as CtxType,
+    _bind_active_app,
     _get_app as _get_app,
     _get_app_initialized as _get_app_initialized,
 )
@@ -39,6 +40,13 @@ from memtomem.server.helpers import (
 )
 from memtomem.server.instructions import build_instructions
 from memtomem.server.lifespan import app_lifespan
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from mcp.server.lowlevel.helper_types import ReadResourceContents
+    from mcp_types import InputRequiredResult
+    from pydantic.networks import AnyUrl
 
 # Tool mode must be resolved BEFORE the MCPServer instance exists: the
 # instructions text has to describe the tool surface this mode actually
@@ -81,7 +89,34 @@ _CORE_TOOLS = {
 # on") get something other than ``mm --version``.
 from memtomem import __version__ as _memtomem_version
 
-mcp = MCPServer(
+
+class _MemtomemServer(MCPServer[AppContext]):
+    """``MCPServer`` whose resource reads carry the request's ``AppContext``."""
+
+    async def read_resource(
+        self, uri: AnyUrl | str, context: Context[AppContext, Any] | None = None
+    ) -> Iterable[ReadResourceContents] | InputRequiredResult:
+        """Bind the request's ``AppContext`` for the resource handlers.
+
+        They take no ``ctx`` (``server/resources.py`` says why), so this is
+        the last point on the read path that still holds the request. A read
+        that carries none (a direct call with no ``context``) passes through
+        with nothing bound.
+        """
+        app: AppContext | None = None
+        if context is not None:
+            try:
+                app = context.request_context.lifespan_context
+            except ValueError:
+                # ``Context.request_context`` refuses outside a request.
+                app = None
+        if app is None:
+            return await super().read_resource(uri, context)
+        with _bind_active_app(app):
+            return await super().read_resource(uri, context)
+
+
+mcp = _MemtomemServer(
     "memtomem",
     instructions=build_instructions(_TOOL_MODE, core_count=len(_CORE_TOOLS)),
     version=_memtomem_version,

@@ -304,7 +304,7 @@ async def test_mcp_resource_happy_path(storage, tmp_path, monkeypatch):
     from memtomem.server import resources
 
     c = Chunk("full", ChunkMetadata(source_file=tmp_path / "n.md"))
-    monkeypatch.setattr(resources, "_get_app_initialized", AsyncMock(return_value=object()))
+    monkeypatch.setattr(resources, "_get_active_app_initialized", AsyncMock(return_value=object()))
     monkeypatch.setattr(resources, "resolve_chunk", AsyncMock(return_value=c))
     out = json.loads(await resources.chunk_resource(str(c.id)))
     assert out["content"] == "full" and out["created_at"] == c.created_at.isoformat()
