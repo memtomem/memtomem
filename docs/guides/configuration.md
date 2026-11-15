@@ -27,6 +27,8 @@ logged once at INFO, so the unprefixed variables above have no effect in
 ([MCP client setup](mcp-clients.md#11-environment-variable-overrides)).
 `PYTHON_DOTENV_DISABLED=1` turns the file off; the Hermes plugin's bundled
 server entry sets it, so under Hermes a `.env` does not configure that server.
+The same entry sets `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` and holds `huggingface-hub` at 1.20 or
+later, so under Hermes model downloads use neither a saved Hugging Face login nor `HF_TOKEN`.
 
 ```bash
 # Example: switch from Ollama to OpenAI

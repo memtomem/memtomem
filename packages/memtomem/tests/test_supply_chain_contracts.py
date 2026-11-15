@@ -303,6 +303,12 @@ def test_hermes_plugin_matches_contract() -> None:
     # Decision pinned here independently of the renderer: a pinned minor that uv can
     # download, not ">=3.12" (which picked a Python newer than the classifiers list).
     assert contract["hermes"]["python"] == "3.12"
+    # Also pinned here: huggingface-hub 1.20.0 is the first release that checks
+    # HF_HUB_DISABLE_IMPLICIT_TOKEN before it opens a saved login (with the flag set and
+    # an unreadable token file, 1.19.0 raised PermissionError and 1.20.0 did not). A
+    # lower floor brings back the read the flag is there to prevent.
+    hub_floor = "huggingface-hub>=1.20"
+    assert contract["hermes"]["hub_floor"] == hub_floor
     requirement = f"memtomem[{','.join(core['mcp_extras'])}]=={core['version']}"
 
     manifest = _json("packages/memtomem-hermes-plugin/plugin.json")
@@ -315,13 +321,23 @@ def test_hermes_plugin_matches_contract() -> None:
             "memtomem": {
                 "type": "stdio",
                 "command": "uvx",
-                "args": ["--python", "3.12", "--from", requirement, "memtomem-server"],
+                "args": [
+                    "--python",
+                    "3.12",
+                    "--from",
+                    requirement,
+                    "--with",
+                    hub_floor,
+                    "memtomem-server",
+                ],
                 "env": {
                     "MEMTOMEM_TOOL_MODE": core["tool_mode"],
                     "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage",
                     "ORT_DISABLE_TELEMETRY": "1",
-                    # Hermes only: its catalog rules forbid a plugin reading `.env` files.
+                    # Hermes only: its catalog rules forbid a plugin reading `.env` files
+                    # or another tool's login (here, the saved Hugging Face one).
                     "PYTHON_DOTENV_DISABLED": "1",
+                    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
                 },
             }
         },
@@ -336,6 +352,9 @@ def test_hermes_plugin_matches_contract() -> None:
     for line in launches:
         assert re.findall(r"memtomem\[[^\]]*\]==[^\s'\"\],]*", line) == [requirement], line
         assert re.findall(r"""--python["']?,?\s*["']?([^\s'",\]]+)""", line) == ["3.12"], line
+        # The floor rides in the same launch: without it uv may resolve a huggingface-hub
+        # that opens the saved login although the flag is set.
+        assert re.findall(r"""--with["']?,?\s*["']?([^\s'",\]]+)""", line) == [hub_floor], line
     # Both launch examples run uvx: the requirements line spells it, the manual entry
     # sets it as `command:` right above its `args:` line.
     assert launches[0].lstrip(" -`").startswith("uvx --python"), launches[0]
@@ -491,14 +510,21 @@ def test_openclaw_bundle_matches_contract() -> None:
         "id": "memtomem",
         "categories": ["memory"],
     }
-    # The Hermes launch, without the Agent Plugins `type` key: both hosts start the
-    # server in the plugin directory, where it would otherwise read ~/.env.
+    # Both hosts start the server in the plugin directory, where it would otherwise read
+    # ~/.env, so the bundle shares the Hermes launch env except for the one key that
+    # answers a Hermes catalog rule (no saved Hugging Face login), and its launch line
+    # carries no huggingface-hub floor. No Agent Plugins `type` key either.
     hermes_server = _json("packages/memtomem-hermes-plugin/mcp.json")["mcpServers"]["memtomem"]
-    expected_server = {key: value for key, value in hermes_server.items() if key != "type"}
+    hermes_only = {"HF_HUB_DISABLE_IMPLICIT_TOKEN"}
+    assert hermes_only <= set(hermes_server["env"])
+    expected_server = {
+        "command": "uvx",
+        "args": ["--python", "3.12", "--from", requirement, "memtomem-server"],
+        "env": {k: v for k, v in hermes_server["env"].items() if k not in hermes_only},
+    }
     assert _json("packages/memtomem-openclaw-bundle/.mcp.json") == {
         "mcpServers": {"memtomem": expected_server}
     }
-    assert expected_server["args"] == ["--python", "3.12", "--from", requirement, "memtomem-server"]
     assert expected_server["env"]["PYTHON_DOTENV_DISABLED"] == "1"
 
     # Bundled files .gitignore would otherwise drop (*.png, .mcp.json). check-ignore

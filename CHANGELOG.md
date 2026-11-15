@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Hermes plugin 0.1.23: a gated or private Hugging Face model needs your own server
+  entry.** The plugin's bundled server entry no longer uses a saved Hugging Face login or an
+  `HF_TOKEN` variable (see Changed). The default models are public and download as before.
+  If your configuration names a gated or private model, add your own `mcp_servers.memtomem`
+  entry without `HF_HUB_DISABLE_IMPLICIT_TOKEN` and with `HF_TOKEN` under `env:`; the plugin
+  README's example for that entry is the starting point. The launch line also gains
+  `--with 'huggingface-hub>=1.20'`, so a uv configuration that cannot resolve
+  `huggingface-hub` 1.20 or later now stops the server from starting.
+
 ### Changed
 
 - **The polling file watcher rescans every 10 s instead of every 1 s, and
@@ -18,6 +29,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   what it writes and does not wait for the watcher. Set the interval between 100 and
   60000 ms in `config.json` or with `MEMTOMEM_INDEXING__WATCHER_POLL_INTERVAL_MS`, and
   restart the server to apply a change. The native backend ignores it.
+- **The Hermes plugin's server no longer uses a saved Hugging Face login.** With ONNX
+  embedding or the local reranker configured, the server's model downloads sent the login
+  that `hf auth login` saved (normally `~/.cache/huggingface/token`): the download libraries
+  use it unless told not to. Hermes's plugin catalog rules say a plugin never reads another
+  tool's login. The plugin's bundled server entry (package 0.1.23) now sets
+  `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` and holds `huggingface-hub` at 1.20 or later, the first
+  release that checks the variable before it opens the saved login; `HF_TOKEN` is not used
+  either. A fresh BM25-only configuration never contacted Hugging Face. The launch entries
+  of the other clients are unchanged.
 
 ## [0.7.10] — 2026-11-15
 
