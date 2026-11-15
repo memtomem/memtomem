@@ -90,8 +90,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   own `## ` heading drops the title, and a dropped title is not read), on `mem_add`,
   `mem_batch_add` and the MCP tools that write through `mem_add` (`mem_scratch_promote`,
   `mem_agent_share` and `mem_reflect_save` among them, which take no `force_unsafe`), `mm add`,
-  the web UI's add and scratch promote, the LangGraph store,
-  `mm agent share`, `mm review approve` and the interactive shell's add. Two of the guard's rules
+  the web UI's add and its scratch promote (served only by `mm web --mode dev`), the LangGraph
+  store, `mm agent share`, `mm review approve` and the interactive shell's add. Two of the
+  guard's rules
   match a credential label before `:` or `=` whatever follows, so a title such as
   `password: rotation policy` is refused although it holds no credential, while
   `password rotation policy` passes. Where a surface has `force_unsafe`, it works as it does for
@@ -105,8 +106,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   search also runs outside the result cache and the query-expansion cache, so a repeated
   query is computed again, and expanded again by the model when LLM query expansion is on.
   See Security.
-- **`POST /api/scratch/{key}/promote` refuses a `file` in a project tier.** A direct API
-  call that names a file inside a `project_shared` or `project_local` tier registered under a
+- **`POST /api/scratch/{key}/promote` refuses a `file` in a project tier.** The scratch
+  routes are served only by `mm web --mode dev`; the default mode does not have them. A direct
+  API call that names a file inside a `project_shared` or `project_local` tier registered under a
   memory directory now gets 422 and the entry is not marked promoted. `POST /api/add` writes
   to such a tier: give it the tier's `scope`, plus `confirm_project_shared=true` for
   `project_shared`, and a `file` relative to the tier's memory directory (it refuses an
@@ -164,7 +166,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   one; Reset still clears it, including a color the picker already shows as gray.
 
 - **A session summary is filed in its archive namespace even when another indexer reaches
-  the file first (#3340).** `mem_session_end` wrote the summary file and then indexed it
+  the file first (#3340; one case remains, #3345).** `mem_session_end` wrote the summary file
+  and then indexed it
   under `archive:session:<id>`, with no lock between the two. Another server's watcher or
   `mm index` could index the file in that gap under its own namespace (`default` in a default
   config). The session's own index then left those rows where they were, so the summary showed
@@ -260,9 +263,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   file. MCP `mem_add` also rendered a template after the guard, and a template puts the
   title into its own heading. The guard now reads the block that is written, title and tags
   included, and each tag as given, on `mem_add` (the template renders first) and the MCP tools
-  that write through it, `mem_batch_add`, `POST /api/add`, scratch promote, `mm add`, the
-  LangGraph store,
-  `mm agent share`, `mm review approve` and the interactive shell's add. Not changed, and
+  that write through it, `mem_batch_add`, `POST /api/add`, the web scratch promote (served
+  only by `mm web --mode dev`), `mm add`, the LangGraph store, `mm agent share`,
+  `mm review approve` and the interactive shell's add. Not changed, and
   not scanned: the Hermes mirror header's `target` (a lowercase identifier of at most 32
   characters) and Pinned Context's `block_id` and `agent_id` (letters, digits, `.`, `_` and
   `-`), which writers of their own persist; the tags that the Notion and Obsidian importers
@@ -271,7 +274,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **Scratch promote with an explicit `file` is judged for the tier that file is in
   ([GHSA-5xgm-6q9x-vj9w](https://github.com/memtomem/memtomem/security/advisories/GHSA-5xgm-6q9x-vj9w), low; #2333).**
   From 0.2.0, the web UI's `POST /api/scratch/{key}/promote` with `file` ran the write guard
-  for the user tier and then accepted any Markdown file under a memory directory. A
+  for the user tier and then accepted any Markdown file under a memory directory. The route
+  is served only by `mm web --mode dev`. A
   `project_shared` tier registered inside one is another tier: its files are tracked by git,
   the guard refuses `force_unsafe` for it, and its writes ask for a confirmation. So
   `force_unsafe` let a value the guard had flagged into a git-tracked file, and the

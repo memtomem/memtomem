@@ -160,7 +160,8 @@ runs as your user, and some of its `mem_do` actions read and write files whereve
   run from the `mm context` CLI and are not on MCP; 0.7.8 and earlier also offered them as
   `mem_do` actions.
 - Actions that take a path from the caller, such as indexing, `ingest` (which imports other
-  agents' instruction files and native memory), export and import, read or write that path.
+  agents' instruction files and native memory) and import, read that path. Export takes a
+  file name, not a path, and writes it to `~/.memtomem/exports/`.
 - While the server runs, a file watcher watches memtomem's configured index roots (its
   memory directories and registered project memory directories) and re-indexes files that
   change there, and an existing configuration can enable scheduled maintenance jobs.
