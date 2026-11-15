@@ -359,6 +359,19 @@ def validate_namespace_color(color: object) -> str | None:
     return color
 
 
+def validate_namespace_description(description: object) -> str | None:
+    """Return *description* if it may be stored as a namespace description.
+
+    ``None`` (leave unchanged) and any string pass through. Anything else
+    raises :class:`ValueError`.
+    """
+    if description is None:
+        return None
+    if not isinstance(description, str):
+        raise ValueError("Invalid namespace description: expected a string")
+    return description
+
+
 # Read-side selector for "every namespace except the system prefixes". It is
 # an explicit value, so ``namespace or current_namespace`` keeps it over an
 # active session or agent namespace, and :meth:`NamespaceFilter.parse` turns

@@ -39,6 +39,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   either. A fresh BM25-only configuration never contacted Hugging Face. The launch entries
   of the other clients are unchanged.
 
+### Fixed
+
+- **A non-string namespace description is rejected with a clear parameter error (#3355).**
+  `mem_do(action="ns_update", params=...)` forwarded parameters without type-checking
+  `description`. `storage.set_namespace_meta` treated falsy non-strings (`0`, `False`, `[]`)
+  as empty, skipping the write guard scan and storing `0` and `False` as the string `"0"`, while
+  `[]` triggered a database rollback error. Truthy non-strings (`5`, `["sk-..."]`, `{"k": 1}`)
+  failed deep inside the write guard with internal type errors. `set_namespace_meta` now
+  validates that any non-`None` description is a string, matching `validate_namespace_color`, so
+  every MCP tool, CLI command, and storage call consistently reports
+  `Error: Invalid namespace description: expected a string` and stores nothing.
+
 ## [0.7.10] — 2026-11-15
 
 ### Upgrading
