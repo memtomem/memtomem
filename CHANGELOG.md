@@ -5,8 +5,116 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.10] — 2026-11-15
+
 ### Upgrading
 
+- **This release carries eight security fixes; upgrade every copy that serves MCP or the web
+  UI, and the `mm` CLI.** Seven close new advisories and the eighth closes the CLI and web
+  part of GHSA-ffh4-rj5x-2q25, which 0.7.9 left open. See Security for what each closes. The
+  plugins move their pin to 0.7.10 in the same release; a plugin that is not updated keeps
+  launching 0.7.9.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.24 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.10;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.10`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.10`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.10.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.9" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.9` to
+  `==0.7.10` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.10 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.10`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+- **`mem_export` takes a file name and writes it to `~/.memtomem/exports/`.** `output_file`
+  was a path. A client, prompt or workflow that passes one, `~/backup.json` or
+  `~/.memtomem/exports/backup.json` included, now gets `Export refused: output_file must be a
+  file name, not a path` and nothing is exported. Pass a name made of ASCII letters, digits,
+  `.`, `_` and `-` (at most 64 characters, no leading hyphen, no trailing dot, no Windows
+  device name), such as `backup.json`; the result names the full path. To keep a bundle
+  somewhere else, copy it out of that directory yourself. An `exports` directory that is a
+  symbolic link or a junction is refused; a link above it, such as `~/.memtomem` on another
+  disk, is followed. `mem_import` still takes a path, and the web UI's export and import are
+  unchanged. See Security.
+- **`mem_config` no longer changes `session_trace` settings.** Setting any of the ten
+  `session_trace.*` fields through `mem_config` or `mem_do(action="config")` returns
+  `'session_trace.<field>' cannot be changed through MCP` and names the terminal command,
+  `mm config set session_trace.<field> <value>`. `mm config set` and the web UI's
+  `PATCH /api/config` still change them, and `mem_config` still reads them. A `persist=true`
+  save of any other key no longer writes the `session_trace` section, so `config.json` keeps
+  what it had there. See Security.
+- **Outside settings, `mm context`, `mm mem init` and the web UI's sync refuse a project path that
+  is a link.** 0.7.9 said these still wrote through a linked runtime directory. Skills, agents,
+  commands, generated files, MCP servers and the `.gitignore` marker no longer do; settings sync
+  still follows a linked `.claude` and asks before a write whose destination is outside the
+  project, as before. When `.claude`, `.claude/skills` (or `agents`, `commands`), `.gemini`,
+  `.agents`, `.codex` or `.kimi` in a project is a symbolic link or a junction, wherever it
+  points, a project-scope sync skips that runtime, finishes the others and exits 1 after printing
+  `<entry> is a symbolic link or junction inside the project`; `sync --all-projects` counts the
+  project as failed. A pull from a linked runtime directory is refused, though
+  `mm context pull --from` another runtime proceeds; a linked `.github` skips the generated
+  `copilot-instructions.md`; a linked `.mcp.json` refuses the MCP server sync; and a linked
+  `.gitignore` stops `mm mem init` before it registers the tier. The web UI's routes refuse the
+  same writes; how a refusal appears in the response depends on the route. A project that links
+  one of these on purpose, a shared `.claude` for example, has to replace the link with a regular
+  directory or file. Diffs and the pull preview still read through a link, and
+  user-tier paths are not judged. See Security.
+- **The write guard has six more rules.** A write, index or sync that passed before can now
+  be refused when its text holds a password in a URL (`postgresql://user:<password>@host`),
+  a value after `x-api-key`, `client_secret`, `refresh_token` or `auth_token`, a `*_TOKEN=`
+  or `*_SECRET=` assignment, an AWS secret access key after its label with only whitespace
+  between, a Slack `xapp-` or `xoxe-` token, or an `Authorization: Bearer` header. Each
+  needs a value of 8 or more characters with a digit (20 or more for a bearer token, exactly
+  40 for the AWS key), so `client_secret=changeme` and a URL whose password is a placeholder
+  such as `<pw>` or `${DB_PASSWORD}` still pass. The `force_unsafe` valve outside
+  `project_shared` and what happens to a file the indexer accepted before are as in the
+  escape entry below (#3300). Content stored before this release is not re-scanned until
+  you run `mm mem rescan --scope <tier>` or `mm context rescan --scope <tier>`, once for each
+  tier to audit. See Security.
+- **The write guard reads the title and tags an entry is written with.** An add that passed before
+  is refused when a title or tag it writes matches a secret pattern (content that starts with its
+  own `## ` heading drops the title, and a dropped title is not read), on `mem_add`,
+  `mem_batch_add` and the MCP tools that write through `mem_add` (`mem_scratch_promote`,
+  `mem_agent_share` and `mem_reflect_save` among them, which take no `force_unsafe`), `mm add`,
+  the web UI's add and its scratch promote (served only by `mm web --mode dev`), the LangGraph
+  store, `mm agent share`, `mm review approve` and the interactive shell's add. Two of the
+  guard's rules
+  match a credential label before `:` or `=` whatever follows, so a title such as
+  `password: rotation policy` is refused although it holds no credential, while
+  `password rotation policy` passes. Where a surface has `force_unsafe`, it works as it does for
+  a match in the body. See Security.
+- **A web search is recorded only when the request carries the CSRF token.** The web UI
+  sends it on its searches, so nothing changes there. A script that calls `GET /api/search`
+  without the `X-Memtomem-CSRF` header still gets its results, but the search no longer
+  counts as an access, is not added to the search history, and returns a null
+  `query_run_id`, so no feedback can be attached to it. To have a script's searches
+  recorded, read the token from `GET /api/session` and send it in that header. An unrecorded
+  search also runs outside the result cache and the query-expansion cache, so a repeated
+  query is computed again, and expanded again by the model when LLM query expansion is on.
+  See Security.
+- **`POST /api/scratch/{key}/promote` refuses a `file` in a project tier.** The scratch
+  routes are served only by `mm web --mode dev`; the default mode does not have them. A direct
+  API call that names a file inside a `project_shared` or `project_local` tier registered under a
+  memory directory now gets 422 and the entry is not marked promoted. `POST /api/add` writes
+  to such a tier: give it the tier's `scope`, plus `confirm_project_shared=true` for
+  `project_shared`, and a `file` relative to the tier's memory directory (it refuses an
+  absolute path). It writes to the project the web server runs in, so a tier of another
+  project is not reached this way. The web UI's promote button sends no `file` and is
+  unchanged. See Security.
 - **memtomem now requires `opentelemetry-api>=1.45.2`.** The package was already installed
   with `mcp`; the floor is new (see Security). An environment that holds OpenTelemetry at
   an older version no longer resolves with memtomem until that pin moves. That includes a
@@ -58,7 +166,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   one; Reset still clears it, including a color the picker already shows as gray.
 
 - **A session summary is filed in its archive namespace even when another indexer reaches
-  the file first (#3340).** `mem_session_end` wrote the summary file and then indexed it
+  the file first (#3340; one case remains, #3345).** `mem_session_end` wrote the summary file
+  and then indexed it
   under `archive:session:<id>`, with no lock between the two. Another server's watcher or
   `mm index` could index the file in that gap under its own namespace (`default` in a default
   config). The session's own index then left those rows where they were, so the summary showed
@@ -81,6 +190,119 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **The unprompted `mm context` and web UI writes no longer go through a link in the project:
+  the rest of [GHSA-ffh4-rj5x-2q25](https://github.com/memtomem/memtomem/security/advisories/GHSA-ffh4-rj5x-2q25) (high).**
+  0.7.9 removed the MCP routes and noted that the CLI and the web UI still wrote through a link.
+  In a cloned project, with no confirmation asked, `mm context sync` wrote skills, agents and
+  commands through a linked `.claude`, `.claude/skills` (or `agents`, `commands`), `.gemini`,
+  `.agents`, `.codex` or `.kimi`; `mm context generate` wrote `copilot-instructions.md` through a
+  linked `.github`; `mm mem init` and `mm context init --scope project_local` appended their
+  marker block to the file a linked `.gitignore` points at; and
+  `mm context sync --include mcp-servers` merged the project's MCP servers into the JSON file a
+  linked `.mcp.json` points at, which with `~/.claude.json` is a user-level registration.
+  These writes are now refused when an entry on the way is a link: every entry from the
+  project root down to a runtime's fan-out directory or a generated file's directory is judged
+  (symbolic links, junctions, and entries that cannot be inspected), wherever the link points,
+  and `.gitignore` and `.mcp.json`, which are written in place, are judged themselves. A link
+  at a generated file itself is replaced by a regular file rather than followed, as before.
+  Pull, import and extract from a linked runtime directory are refused too, so nothing is
+  copied from it into the canonical store. See Upgrading for what each command reports. Not
+  changed: the canonical `.memtomem` side; settings sync, which still follows a linked
+  `.claude` and whose host-write confirmation already covers every destination outside the
+  project; diffs and the pull preview, which still read through a link; a link planted at a
+  lock file's name; user-tier paths. Each check is made when the path is chosen.
+- **`mem_export` writes only into memtomem's export directory
+  ([GHSA-cvjr-876j-6h24](https://github.com/memtomem/memtomem/security/advisories/GHSA-cvjr-876j-6h24), medium).**
+  Since the first release, `mem_export(output_file=…)` and `mem_do(action="export")` wrote
+  the JSON bundle to any path and replaced a regular file already there. The bundle is
+  indented JSON that holds note text, and a shell that sources it runs a `$(…)` inside a
+  double-quoted line. So an agent following instructions found in its input could add a note
+  containing `$(command)`, export over `~/.zshrc`, `~/.bashrc`, `~/.zshenv` or `~/.profile`,
+  and have the command run at the next shell start. `output_file` is now a file name in one
+  portable grammar on every platform, and the bundle is written to `~/.memtomem/exports/`;
+  a path is refused before anything is exported, and so is an export directory that is a
+  link or a junction. The check is made when the path is chosen. Not changed: `mem_import`
+  reads from any path, since its boundary is the import redaction gate, and the web UI's
+  export is a download. ADR-0006 Axis G, which had accepted the path as a residual, is
+  amended. See Upgrading.
+- **`mem_config` can no longer switch session tracing on or choose where traces go
+  ([GHSA-h5h2-q8r9-qm43](https://github.com/memtomem/memtomem/security/advisories/GHSA-h5h2-q8r9-qm43), medium).**
+  From 0.2.4, `mem_config` and `mem_do(action="config")` set all ten `session_trace` fields
+  and saved them with `persist=true`, with neither the host nor the path checked. The traced
+  session commands (`mm session start`, `end`, `list`, `events`, `wrap` and
+  `mm activity log`) read the saved config, so an agent following instructions found in its
+  input could switch tracing on, raise `payload_mode` to `full`, send traces to a host it
+  runs, with the user's Langfuse keys presented to that host, or append trace rows to a file
+  it chose. The MCP setter now refuses every `session_trace` key before it reads the value.
+  A `persist=true` save of any other key also wrote the server's own copy of the section
+  over the file, which switched tracing back on for a user who had turned it off with
+  `mm config set` while the server ran; MCP saves now leave the section as the file has it.
+  Not changed: `mm config set` and `PATCH /api/config` set all ten fields, and `jsonl_path`
+  is not confined to a directory. Only the user chooses it now.
+- **The write guard catches a credential in a URL and under more labels
+  ([GHSA-h6g8-pjgf-2j99](https://github.com/memtomem/memtomem/security/advisories/GHSA-h6g8-pjgf-2j99), medium).**
+  None of these matched a rule: a password in a URL's userinfo
+  (`postgresql://admin:<password>@host`, `redis://:<password>@host`), a value after
+  `client_secret`, `x-api-key`, `refresh_token` or `auth_token`, `GITHUB_TOKEN=…`, an AWS
+  secret access key after its label with no `:` or `=`, Slack `xapp-` and bare `xoxe-`
+  tokens, and `Authorization: Bearer …`. Such content was stored, chunked and embedded on
+  every surface the guard protects, accepted into git-tracked `project_shared` files, and
+  sent to a hosted embedder or model when one is configured. The web UI's compose warning,
+  which uses the same list, missed them too. Six rules are added, 26 in all. Unlike the
+  older label rules, which match on the label alone, each needs a value: 8 or more token
+  characters with a digit, 20 or more for a bearer token, exactly 40 for an AWS key.
+  Accepted misses: a secret made of letters only, and a value whose first digit comes after
+  its 256th character. A value that runs straight into a parenthesis
+  (`refresh_token=uuid.uuid4().hex`) is read as a function call and skipped. In a session
+  trace, a long token matched by one of these rules is masked to its end. See Upgrading.
+- **The write guard reads the title and tags an entry is written with
+  ([GHSA-hf8j-8wfp-hwj2](https://github.com/memtomem/memtomem/security/advisories/GHSA-hf8j-8wfp-hwj2), low).**
+  From 0.1.33, every writer of a memory entry ran the guard on the entry's body and then
+  wrote the title into the `## ` heading and the tags into a `> tags:` line of the same
+  file, so a credential in the title or a tag passed the guard and landed in the memory
+  file. MCP `mem_add` also rendered a template after the guard, and a template puts the
+  title into its own heading. The guard now reads the block that is written, title and tags
+  included, and each tag as given, on `mem_add` (the template renders first) and the MCP tools
+  that write through it, `mem_batch_add`, `POST /api/add`, the web scratch promote (served
+  only by `mm web --mode dev`), `mm add`, the LangGraph store, `mm agent share`,
+  `mm review approve` and the interactive shell's add. Not changed, and
+  not scanned: the Hermes mirror header's `target` (a lowercase identifier of at most 32
+  characters) and Pinned Context's `block_id` and `agent_id` (letters, digits, `.`, `_` and
+  `-`), which writers of their own persist; the tags that the Notion and Obsidian importers
+  or `mem_fetch` merge into chunk metadata after their gate; and a `file=` name, which
+  becomes the chunk's `source_file`. See Upgrading.
+- **Scratch promote with an explicit `file` is judged for the tier that file is in
+  ([GHSA-5xgm-6q9x-vj9w](https://github.com/memtomem/memtomem/security/advisories/GHSA-5xgm-6q9x-vj9w), low; #2333).**
+  From 0.2.0, the web UI's `POST /api/scratch/{key}/promote` with `file` ran the write guard
+  for the user tier and then accepted any Markdown file under a memory directory. The route
+  is served only by `mm web --mode dev`. A
+  `project_shared` tier registered inside one is another tier: its files are tracked by git,
+  the guard refuses `force_unsafe` for it, and its writes ask for a confirmation. So
+  `force_unsafe` let a value the guard had flagged into a git-tracked file, and the
+  confirmation was never asked for. The indexer then refused the file, but the value was on
+  disk. The route now refuses any tier other than user with 422, before a lock or the file
+  is created and before the entry is marked promoted. Only a direct API call reached this:
+  the web UI's promote button sends no `file`. Not changed: the tier is still decided by the
+  path's spelling (#3268).
+- **A web search writes its records only when the request carries the CSRF token
+  ([GHSA-24vc-gwmh-77j9](https://github.com/memtomem/memtomem/security/advisories/GHSA-24vc-gwmh-77j9), low).**
+  `GET /api/search` raised the returned chunks' access counts, stored the query in the
+  search history and minted a run id. The CSRF guard, added in 0.1.36, asks for the token on
+  unsafe methods only, and its origin check passes a request that carries neither `Origin`
+  nor `Referer`. So a page elsewhere could make the user's browser write those records,
+  skewing the access-frequency boost and filling the history with its queries. The same
+  search now runs with or without the token, and only the recording needs it. The web UI
+  sends the token on its searches; when the server has restarted since the page loaded, it
+  fetches the current token and searches once more, so the search is recorded once. Not
+  changed: the origin check still passes a request with neither header. See Upgrading.
+- **The wiki's URL credential redaction no longer takes quadratic time
+  ([GHSA-fp6g-ch3g-p6g2](https://github.com/memtomem/memtomem/security/advisories/GHSA-fp6g-ch3g-p6g2), low).**
+  From 0.3.0, the expression that removes `user:password@` from a URL in the wiki's git
+  errors and its push and pull results tried a scheme at every position of a long run of
+  scheme characters and scanned to the run's end each time: 0.83 s for 40,000 letters. A
+  match may now start only where such a run starts, which takes 0.3 ms for the same input.
+  What is redacted is unchanged: on 300,000 random strings over URL characters the result
+  equals the old expression's.
 - **Upgrading memtomem now upgrades opentelemetry-api to the fix for
   [GHSA-mf5v-w3w3-f6cg](https://osv.dev/vulnerability/GHSA-mf5v-w3w3-f6cg).** 0.7.9 moved the
   lockfile to 1.45.2, but memtomem did not declare the package (it comes with `mcp`, which
@@ -103,8 +325,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   applies to every surface that calls the guard: memory writes and edits, indexing, context
   sync, copy, migrate, install, bundles and pull, wiki promote, the Hermes mirror and the
   LangGraph and LangChain stores. Stored content is unchanged; the copies are only scanned.
-  Content stored before this release is not re-scanned until you run `mm mem rescan` or
-  `mm context rescan`. YAML `\x` and TOML `\U` escapes are not resolved.
+  Content stored before this release is not re-scanned until you run
+  `mm mem rescan --scope <tier>` or `mm context rescan --scope <tier>`. YAML `\x` and TOML
+  `\U` escapes are not resolved.
 
 ## [0.7.9] — 2026-11-14
 

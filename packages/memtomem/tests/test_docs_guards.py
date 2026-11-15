@@ -1644,6 +1644,23 @@ _PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
         "`memtomem>=0.7.9,<0.8`",
         "langchain-memtomem's floor: first release whose create_components takes its options",
     ),
+    # The langchain package's own release log, on the same floor.
+    *(
+        ("packages/langchain-memtomem/CHANGELOG.md", fragment, reason)
+        for fragment, reason in (
+            ("`memtomem>=0.7.9,<0.8`", "the floor its next release declares"),
+            ("memtomem 0.7.9 adds; against", "first release with the create_components options"),
+            (
+                "would be. memtomem 0.7.9",
+                "release that narrowed the BM25 path fallback (#3208)",
+            ),
+            (
+                "memtomem 0.7.9, which adds the `create_components` keyword",
+                "first release with bm25_path_fallback",
+            ),
+            ("Needs memtomem 0.7.9 as well", "first release with chunk_source_labels"),
+        )
+    ),
     (
         "packages/memtomem-hermes-memory/README.md",
         "memtomem 0.7.8 or newer",
