@@ -165,11 +165,11 @@ class TestChunkResource:
         _pin_context(monkeypatch, MINE)
         monkeypatch.setattr(
             resources,
-            "_get_app_initialized",
+            "_get_active_app_initialized",
             AsyncMock(return_value=_app_returning(foreign, context=MINE)),
         )
 
-        payload = json.loads(await resources.chunk_resource(chunk_id=str(foreign.id), ctx=None))
+        payload = json.loads(await resources.chunk_resource(chunk_id=str(foreign.id)))
 
         assert payload == {"error": f"Chunk {foreign.id} not found"}
 

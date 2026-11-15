@@ -7,7 +7,8 @@ import contextlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from contextvars import ContextVar, Token
+from collections.abc import Iterator
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import Context
@@ -1402,23 +1403,31 @@ async def _get_app_initialized(ctx: CtxType) -> AppContext:
     return app
 
 
-# ── Lifespan-scoped AppContext, for handlers the SDK cannot inject ─────
-# The 2.0 SDK refuses to inject ``Context`` into a *static* resource handler
-# (only templated ones, which carry a request), and it removed the 1.x
-# ambient ``get_context()``. Static resources therefore reach the AppContext
-# through this handle, which ``app_lifespan`` owns.
+# ── Request-scoped AppContext, for handlers the SDK cannot inject ──────
+# The 2.0 SDK refuses to inject ``Context`` into a *static* resource handler,
+# the ``Context`` it injects into a templated one arrives without its request
+# when the parameter is annotated ``CtxType`` (see ``server/resources.py``),
+# and the 1.x ambient ``get_context()`` is gone. Resource handlers therefore
+# reach the AppContext through this handle.
 #
-# A ContextVar, not a module global: over SSE the SDK runs the whole lowlevel
-# server — lifespan included — once per *connection* (``MCPServer.sse_app``'s
-# ``handle_sse``), so two overlapping clients each enter their own lifespan.
-# A single global slot would let the second connection's context overwrite the
-# first's, and the first disconnect would then blank the handle out from under
-# a live second connection. Each connection runs in its own task, so a
-# ContextVar set inside the lifespan is visible to that connection's request
-# handlers (spawned beneath it) and to no one else's. stdio and
-# streamable-HTTP enter the lifespan once per process and are unaffected
-# either way.
-_ACTIVE_APP: ContextVar[AppContext | None] = ContextVar("memtomem_active_app", default=None)
+# The server's ``read_resource`` binds it for the length of one read, from
+# that request's own lifespan context (``server/__init__.py``). The lifespan
+# cannot publish it: the SDK starts a handler in a copy of the context of the
+# task that delivered the message, and over stdio that task (the stdin
+# reader) starts before the lifespan is entered, so a value set inside the
+# lifespan never reaches a handler (#3374).
+#
+# A ContextVar, not a module global: reads overlap — several on one
+# connection, and over SSE across connections that each have their own
+# AppContext. The SDK starts each request's handler in a task of its own,
+# so a binding made inside one read is not visible to another read.
+#
+# The variable holds a binding, not the AppContext itself, because resetting
+# a ContextVar does not reach copies: a task started during the read (the
+# watcher and schedulers, when the read is what first opens the store) copied
+# the variable and keeps its value for as long as it runs. What such a task
+# keeps is the binding, which the read empties on its way out.
+_ACTIVE_APP: ContextVar[_ActiveAppBinding | None] = ContextVar("memtomem_active_app", default=None)
 
 # The transport ``main()`` started this process with, or ``None`` when the
 # server was not started through ``main()`` (tests, embedders). Process-wide
@@ -1438,29 +1447,39 @@ def _get_server_transport() -> str | None:
     return _server_transport
 
 
-def _set_active_app(app: AppContext) -> Token[AppContext | None]:
-    """Publish the lifespan's ``AppContext``; returns the reset token."""
-    return _ACTIVE_APP.set(app)
+@dataclass
+class _ActiveAppBinding:
+    """What ``_ACTIVE_APP`` holds: the AppContext until the read ends, then ``None``."""
+
+    app: AppContext | None
 
 
-def _reset_active_app(token: Token[AppContext | None]) -> None:
-    """Retract what ``_set_active_app`` published. Lifespan only."""
+@contextlib.contextmanager
+def _bind_active_app(app: AppContext) -> Iterator[None]:
+    """Make ``app`` the active context for the enclosed resource read."""
+    binding = _ActiveAppBinding(app)
+    token = _ACTIVE_APP.set(binding)
     try:
+        yield
+    finally:
+        # Emptied as well as retracted: the reset below only reaches this
+        # task's context, and a task started during the read holds a copy.
+        binding.app = None
         _ACTIVE_APP.reset(token)
-    except ValueError:
-        # The token belongs to another Context — only reachable if a future
-        # refactor moves lifespan exit off the task that entered it. Blanking
-        # the value here is still better than leaving a torn-down context
-        # readable.
-        _ACTIVE_APP.set(None)
+
+
+def _active_app() -> AppContext | None:
+    """The AppContext of the resource read this task is inside, if any."""
+    binding = _ACTIVE_APP.get()
+    return None if binding is None else binding.app
 
 
 async def _get_active_app_initialized() -> AppContext:
-    """``_get_app_initialized`` for handlers that get no ``ctx``."""
-    app = _ACTIVE_APP.get()
+    """``_get_app_initialized`` for resource handlers, which take no ``ctx``."""
+    app = _active_app()
     if app is None:
         raise RuntimeError(
-            "No active AppContext: the MCP server lifespan is not running. "
+            "No active AppContext: a resource handler ran outside a request. "
             "Handlers that receive a ctx must use _get_app_initialized(ctx)."
         )
     await app.ensure_initialized()
