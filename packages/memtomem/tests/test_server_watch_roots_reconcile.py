@@ -325,6 +325,9 @@ async def test_file_in_a_newly_added_root_is_indexed_without_a_restart(
         _write_config(_isolated_config_home, [first])
         config = Mem2MemConfig()
         config.indexing.memory_dirs = [first]
+        # macOS resolves ``auto`` to polling and builds that observer directly,
+        # past the ``Observer`` patch above.
+        config.indexing.watcher_poll_interval_ms = 100
         components = Components(
             config=config,
             storage=object(),  # type: ignore[arg-type]
@@ -800,6 +803,38 @@ async def test_a_watcher_backend_change_alone_is_installed(
     with patch("memtomem.server.context.build_fresh_config") as rebuild:
         await ctx.reconcile_watched_roots()
     rebuild.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_poll_interval_change_waits_for_a_restart(
+    _isolated_config_home: Path, tmp_path: Path
+) -> None:
+    """The interval is read when an observer is built; a running server keeps its own."""
+    root = tmp_path / "one"
+    root.mkdir()
+    ctx, watcher = await _make_app(_isolated_config_home, [root])
+    indexing = ctx.config.indexing
+    started_with = indexing.watcher_poll_interval_ms
+    path = _isolated_config_home / ".memtomem" / "config.json"
+
+    def _edit(**fields: object) -> None:
+        path.write_text(
+            json.dumps({"indexing": {"memory_dirs": [str(root)], **fields}}), encoding="utf-8"
+        )
+
+    _edit(watcher_poll_interval_ms=started_with * 2)
+    await ctx.reconcile_watched_roots()
+
+    watcher.reconfigure.assert_not_awaited()
+    assert indexing.watcher_poll_interval_ms == started_with
+
+    # A backend swap builds its observer from the same live config.
+    _edit(watcher_poll_interval_ms=started_with * 2, watcher_backend="native")
+    await ctx.reconcile_watched_roots()
+
+    (handed,) = watcher.reconfigure.await_args.args
+    assert handed.watcher_backend == "native"
+    assert handed.watcher_poll_interval_ms == started_with
 
 
 @pytest.mark.asyncio

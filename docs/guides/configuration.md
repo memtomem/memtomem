@@ -765,6 +765,7 @@ is no in-place retarget.
 | `MEMTOMEM_INDEXING__RETAIN_MISSING_DIRS` | `[]` | Directories whose files, once missing on disk, stay searchable instead of being held; see below |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
 | `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override. A running MCP server applies a change on its next memory operation |
+| `MEMTOMEM_INDEXING__WATCHER_POLL_INTERVAL_MS` | `5000` | How often the polling backend rescans the watched directories, 100–60000 ms; the native backend ignores it. A shorter interval picks an edit up sooner and costs more CPU while idle, in every server process that watches. A change that is undone again between two scans (a file created and deleted, or edited in place and restored with the same size and modification time) is not seen. Read when the watcher starts: restart the server to apply a change |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Approximate packing preference; use the hard limit for an exact ceiling |
 | `MEMTOMEM_INDEXING__HARD_MAX_CHUNK_TOKENS` | `0` | Exact body ceiling (`0` disables); requires a matching local tokenizer |
 | `MEMTOMEM_INDEXING__CHUNK_TOKENIZER_PATH` | empty | Local embedding-model `tokenizer.json`; no model download |
