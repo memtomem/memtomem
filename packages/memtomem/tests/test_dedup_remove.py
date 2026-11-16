@@ -511,16 +511,21 @@ async def test_one_file_under_two_stored_spellings_gets_the_twin_remedy(bm25_onl
     db.execute("UPDATE chunks SET source_file=? WHERE source_file=?", (twin, str(source)))
     db.commit()
     await _index(comp, source, force=True)
-    original = await _alarm_chunk(comp, source)
-    (other,) = [
-        c
-        for c in await comp.storage.list_chunks_by_source(Path(twin))
-        if c.metadata.heading_hierarchy[-1:] == ("## Alarm",)
-    ]
-    assert original.id != other.id
+
+    def alarm_id(key: str) -> str:
+        # By the exact stored key: a lookup by path folds the two spellings on Windows.
+        row = db.execute(
+            "SELECT id FROM chunks WHERE source_file=? AND content LIKE ?",
+            (key, "Alarm is enabled%"),
+        ).fetchone()
+        assert row is not None, key
+        return row[0]
+
+    original_id, other_id = alarm_id(str(source)), alarm_id(twin)
+    assert original_id != other_id
     before = _snapshot(comp, source)
 
-    result = await _remove(comp, original.id, other.id)
+    result = await _remove(comp, original_id, other_id)
 
     assert result.startswith("Error: mem_dedup_remove refused: the store holds note.md"), result
     assert _snapshot(comp, source) == before
