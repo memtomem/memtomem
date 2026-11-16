@@ -67,6 +67,8 @@ TABLE: dict[str, dict[str, str]] = {
     "memory-roots": {
         "mem_add": "file",
         "mem_batch_add": "file",
+        # A relative value is looked up under the first user root, then validated.
+        "mem_delete": "source_file",
         # Rendered to ``hermes-mirror/<owner>/<target>.md`` under the first user root.
         "mem_hermes_mirror_apply": "owner target",
         "mem_scratch_promote": "file",
@@ -79,7 +81,6 @@ TABLE: dict[str, dict[str, str]] = {
         "mem_consolidate": "source_filter",
         "mem_decay_expire": "source_filter",
         "mem_decay_scan": "source_filter",
-        "mem_delete": "source_file",
         "mem_entity_scan": "source_filter",
         "mem_export": "source_filter",
         "mem_list": "source_filter",

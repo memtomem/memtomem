@@ -14,9 +14,15 @@ signals fail it:
 - **``os.getcwd``.** A call with memtomem code on its stack, from a site that
   is not registered below as owned by the process.
 
-The sentinel is the main signal. It does not depend on how a platform
-implements ``abspath``; the ``os.getcwd`` signal does, since ``abspath`` on
-Windows does not go through ``os.getcwd``.
+The sentinel is the main signal, and it is asserted on every platform. The
+``os.getcwd`` signal is not asserted on Windows. ``ntpath.realpath`` reads the
+working directory before it looks at its argument, so there every
+``resolve()`` calls ``os.getcwd``, of an absolute path too, and the call says
+nothing about whose directory was used (first seen on this change's Windows
+CI: 661 such calls, no sentinel finding). What that leaves unseen on Windows
+is a relative path with no sentinel in it, such as a default ``"."``, made
+absolute; an explicit ``os.getcwd()`` or ``Path.cwd()`` is still refused by
+source location in ``test_client_cwd_table.py``.
 
 The tools are the union of the two registries, since neither holds all of
 them: the action registry, which has every ``@register``-ed tool whatever the
@@ -78,6 +84,11 @@ _HOME_GUARD_FILE = _home_guard.__file__
 # working directory only when it is unset are not reached and are not here;
 # ``test_client_cwd_table.py`` registers those by source location.
 PROCESS_OWNED_GETCWD: dict[tuple[str, str], str] = {}
+
+# Whether a call of ``os.getcwd`` tells anything. Not on Windows, where
+# resolving an absolute path makes one too; see the module docstring and
+# ``test_resolving_an_absolute_path_reads_the_working_directory_only_on_windows``.
+GETCWD_IS_A_SIGNAL = os.name != "nt"
 
 
 @dataclass(frozen=True)
@@ -305,11 +316,12 @@ class Observer:
 
         monkeypatch.setattr(os, "getcwd", getcwd)
 
-    def violations(self) -> list[Observation]:
+    def violations(self, getcwd_is_a_signal: bool = GETCWD_IS_A_SIGNAL) -> list[Observation]:
         return [
             record
             for record in self.records
-            if record.kind != "getcwd" or record.site not in PROCESS_OWNED_GETCWD
+            if record.kind != "getcwd"
+            or (getcwd_is_a_signal and record.site not in PROCESS_OWNED_GETCWD)
         ]
 
 
@@ -710,4 +722,29 @@ def test_getcwd_is_attributed_to_the_memtomem_frame_that_asked(
     assert [(r.kind, r.site) for r in observer.records] == [
         ("getcwd", ("context/scope_resolver.py", "find_project_root"))
     ]
-    assert observer.violations() == observer.records
+    assert observer.violations(getcwd_is_a_signal=True) == observer.records
+    # Where the call says nothing it is recorded all the same, and not judged.
+    assert observer.violations(getcwd_is_a_signal=False) == []
+
+
+def test_resolving_an_absolute_path_reads_the_working_directory_only_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Why ``GETCWD_IS_A_SIGNAL`` is what it is, on the platform this runs on.
+
+    If a platform changes sides, this fails and the flag follows it.
+    """
+    from memtomem.storage.sqlite_helpers import resolve_path
+
+    absolute = tmp_path.resolve() / "somewhere"
+    monkeypatch.chdir(tmp_path)
+    observer = Observer(tmp_path)
+    with monkeypatch.context() as patches, observer.during("witness"):
+        observer.install(patches)
+        resolve_path(absolute)
+
+    read_it = [r.site for r in observer.records if r.kind == "getcwd"]
+    if GETCWD_IS_A_SIGNAL:
+        assert read_it == []
+    else:
+        assert set(read_it) == {("storage/sqlite_helpers.py", "resolve_path")}
