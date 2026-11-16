@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from memtomem.errors import LLMError
+
 if TYPE_CHECKING:
     from memtomem.llm.base import LLMProvider
 
@@ -368,8 +370,16 @@ async def extract_entities_llm(
         entity_types: Restrict to these entity types (default: all).
 
     Returns:
-        List of :class:`ExtractedEntity` parsed from the LLM response.
+        List of :class:`ExtractedEntity` parsed from the LLM response. Empty
+        when the model answers ``NONE``, the prompt's answer for "no entities".
+
+    Raises:
+        LLMError: The answer was empty. The prompt asks for ``NONE`` when there
+            is nothing to extract, so an empty answer is the model failing to
+            answer.
     """
+    from memtomem.llm.utils import strip_llm_response
+
     type_hint = ""
     if entity_types:
         type_hint = f"\nOnly extract these types: {', '.join(entity_types)}\n"
@@ -377,6 +387,8 @@ async def extract_entities_llm(
     prompt = f"Extract entities from the following text.{type_hint}\n---\n{text[:3000]}\n---"
 
     raw = await llm_provider.generate(prompt, system=_ENTITY_SYSTEM_PROMPT, max_tokens=256)
+    if not strip_llm_response(raw):
+        raise LLMError("LLM returned an empty answer to the entity extraction prompt")
     types_set = set(entity_types) if entity_types else None
     return _parse_entity_response(raw, types_set)
 
@@ -389,7 +401,8 @@ async def extract_entities_with_llm(
     """Extract entities, preferring LLM when available.
 
     Falls back to the regex heuristic when *llm_provider* is ``None`` or
-    when the LLM call fails.
+    when the LLM call fails. An empty LLM answer is a failure
+    (``extract_entities_llm`` raises on it); ``NONE`` is not.
     """
     if llm_provider is not None:
         try:

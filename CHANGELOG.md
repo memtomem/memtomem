@@ -81,6 +81,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   connections, or one request and the startup warmup (`warmup.enabled`). It was reproduced
   with a script and not seen in use.
 
+- **The Ollama provider turns thinking off, and an empty LLM answer no longer passes as "no
+  tags" or "no entities" (#3382).** With `llm.enabled` on and no model set, the Ollama model
+  is `gemma4:e2b`, which thinks before it answers. Ollama counts that thinking against the
+  token limit of the call, and the provider did not turn it off, so the model could use the
+  whole limit and return an empty answer. LLM auto-tagging and `mem_entity_scan` kept the
+  empty answer as their result, and the keyword and regex fallbacks did not run because the
+  call had not failed. Measured with `gemma4:e2b` on Ollama 0.40.13 over a five-line note,
+  five runs each: tagging came back empty in 2 and entity extraction in 5 before, and in 0
+  and 0 after. Two changes:
+  - Every request the Ollama provider sends now carries `think: false`, for all LLM
+    features. At a 256-token limit this took the empty answers to the tagging and entity
+    prompts from 5 of 5 to 0 of 5 on `gemma4:e2b` and from 3 of 3 to 0 of 3 on
+    `qwen3.5:2b`, and a tagging call on `gemma4:e2b` from 1.7 s to 0.1 s. `gemma3:270m`,
+    which has no thinking, accepted the field and answered. A model that used to think now
+    answers without it, so what it writes can differ.
+  - An empty answer to the tagging or entity prompt is now a failed call, on every provider,
+    so the fallback runs. `NONE` from the model still means "no entities".
+
+  Not changed: `mem_entity_scan` with `overwrite` still treats the regex fallback's result
+  as the new extraction when the LLM call fails, which can remove entities an earlier scan
+  wrote (#3383).
+
 ## [0.7.10] — 2026-11-15
 
 ### Upgrading

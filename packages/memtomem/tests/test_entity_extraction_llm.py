@@ -124,10 +124,20 @@ class TestExtractEntitiesLlm:
         assert len(entities) == 1
 
     @pytest.mark.anyio
-    async def test_empty_llm_response(self):
+    async def test_none_answer_is_no_entities(self):
         llm = FakeLLM(response="NONE")
         entities = await extract_entities_llm("text", llm)
         assert entities == []
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("answer", ["", "  \n", "```\n```"])
+    async def test_empty_answer_raises(self, answer):
+        # A thinking model that spends its token budget before answering
+        # returns an empty string (#3382). The prompt's answer for "no
+        # entities" is NONE, so an empty string is no answer.
+        llm = FakeLLM(response=answer)
+        with pytest.raises(LLMError, match="empty answer"):
+            await extract_entities_llm("text", llm)
 
     @pytest.mark.anyio
     async def test_type_hint_in_prompt(self):
@@ -163,3 +173,24 @@ class TestExtractEntitiesWithLlm:
         entities = await extract_entities_with_llm(text, llm_provider=FailingLLM())
         expected = extract_entities(text)
         assert entities == expected
+
+    @pytest.mark.anyio
+    async def test_falls_back_on_empty_answer(self):
+        text = "Decision: use Python for the backend"
+        expected = extract_entities(text)
+        assert expected  # an empty heuristic result would not show the fallback ran
+        llm = FakeLLM(response="")
+        entities = await extract_entities_with_llm(text, llm_provider=llm)
+        assert len(llm.calls) == 1
+        assert entities == expected
+
+    @pytest.mark.anyio
+    async def test_none_answer_does_not_fall_back(self):
+        # Passes before and after #3382: it keeps the empty-answer rule from
+        # widening to "the parse produced nothing", which would overrule the
+        # model's NONE with the heuristic.
+        text = "Decision: use Python for the backend"
+        assert extract_entities(text)
+        llm = FakeLLM(response="NONE")
+        entities = await extract_entities_with_llm(text, llm_provider=llm)
+        assert entities == []
