@@ -164,9 +164,10 @@ Then repair the index, in this order:
    and the tokenizer the server uses:
    `mem_do(action="config", params={"key": "search.tokenizer", "value": "kiwipiepy"})`.
    It rebuilds even when the value is already `kiwipiepy`, and its reply includes
-   `FTS index rebuilt (N chunks).` The reply does not name the tokenizer, and a server
-   without Kiwi rebuilds every note as `unicode61`, so do this only once step 1 shows no
-   warning.
+   `FTS index rebuilt with <tokenizer> (N chunks).` The tokenizer it names is the one
+   the rows were built with: a server without Kiwi reports `unicode61` there, plus a
+   warning that the rebuild fell back. That fallback still rewrites every note as
+   `unicode61`, so do this only once step 1 shows no warning.
 
 ## Scope
 
