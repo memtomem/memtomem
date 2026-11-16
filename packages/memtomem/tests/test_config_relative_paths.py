@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import typing
 from pathlib import Path
 
@@ -169,9 +170,28 @@ def test_the_classification_has_no_stale_entries() -> None:
     assert EXEMPT <= present
 
 
-def test_an_uncheckable_path_is_refused_and_rolled_back(refusing: None) -> None:
+@pytest.mark.skipif(
+    os.name == "nt", reason="ntpath expands an unknown ~user to a sibling of the home directory"
+)
+def test_an_unknown_user_home_is_refused_and_rolled_back(refusing: None) -> None:
     section = Mem2MemConfig().session_trace
     before = section.jsonl_path
     with pytest.raises(ValueError, match="cannot be checked"):
         assign_section_fields(section, {"jsonl_path": Path("~mmd-no-such-user-72ac/t.jsonl")})
+    assert section.jsonl_path == before
+
+
+def test_a_check_that_raises_is_refused_and_rolled_back(
+    refusing: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The platform-neutral half of the case above: whatever the check raises,
+    # the section keeps its values and the caller sees the refusal.
+    def raising(section: object) -> list[str]:
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(config_module, "relative_section_paths", raising)
+    section = Mem2MemConfig().session_trace
+    before = section.jsonl_path
+    with pytest.raises(ValueError, match="cannot be checked: injected"):
+        assign_section_fields(section, {"jsonl_path": Path("/abs/t.jsonl")})
     assert section.jsonl_path == before

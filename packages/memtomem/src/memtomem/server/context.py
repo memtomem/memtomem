@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Iterator
@@ -34,6 +35,23 @@ logger = logging.getLogger(__name__)
 
 class DaemonStoreChanged(RuntimeError):
     """A shared daemon's rebuilt config no longer selects the store it started on."""
+
+
+def resolve_store_path(configured: str | Path) -> Path:
+    """The store a shared daemon names, or raise when it cannot be named.
+
+    Raises ``OSError``, ``RuntimeError`` or ``ValueError``. ``Path.resolve``
+    raises on a symlink loop on Python 3.12 but returns the unresolved path on
+    3.13 and later, so the result is also ``stat``-ed: a loop or an unreadable
+    ancestor raises on every supported version, while a store file that does
+    not exist yet is a new store, not a failure.
+    """
+    resolved = Path(configured).expanduser().resolve()
+    try:
+        os.stat(resolved)
+    except FileNotFoundError:
+        pass
+    return resolved
 
 
 async def _stop_quietly(resource: object | None, stage: str) -> bool:
@@ -1166,7 +1184,7 @@ class AppContext:
         assert frozen is not None  # the caller checked
         configured = self.config.storage.sqlite_path
         try:
-            current = Path(configured).expanduser().resolve()
+            current = resolve_store_path(configured)
         except (OSError, RuntimeError, ValueError) as exc:
             reason = f"the configured store {str(configured)!r} cannot be resolved: {exc}"
         else:

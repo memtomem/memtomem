@@ -707,9 +707,11 @@ def _resolve_frozen_store() -> tuple[Path, Path]:
         raise DaemonStartError(
             f"the store {str(configured)!r} cannot be named, so it cannot be shared"
         )
+    from memtomem.server.context import resolve_store_path
+
     try:
-        frozen = Path(configured).expanduser().resolve()
-        named = Path(db_path).expanduser().resolve()
+        frozen = resolve_store_path(configured)
+        named = resolve_store_path(db_path)
     except (OSError, RuntimeError, ValueError) as exc:
         raise DaemonStartError(f"the store {str(configured)!r} cannot be resolved: {exc}") from exc
     if frozen != named:
