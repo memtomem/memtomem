@@ -32,7 +32,9 @@ What this does not see, and ``test_client_cwd_table.py`` does not either:
   (``mem_import`` needs a real bundle before it reads ``project_root_map``,
   and has one; another tool could need one that is not here);
 - a branch these inputs do not reach. ``mem_project_bind`` refuses every call
-  at its transport gate, and the background health report does not run.
+  at its transport gate, and the background health report does not run;
+- a filesystem call that is not among those wrapped below (``os.symlink``,
+  ``os.chmod``), unless it goes on to one that is.
 """
 
 from __future__ import annotations
@@ -200,10 +202,21 @@ class Observer:
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def wrap_function(module: object, name: str) -> None:
             real = getattr(module, name)
+            two_paths = name in ("rename", "replace")
 
             def wrapper(*args: Any, **kwargs: Any) -> Any:
-                if args and kwargs.get("dir_fd") is None:
-                    self.note(name, args[0])
+                # Every argument, by position or by keyword: ``note`` keeps
+                # only a path that carries a sentinel. A path that comes with
+                # its own directory descriptor is relative to that directory.
+                for key, value in (*enumerate(args), *kwargs.items()):
+                    if not two_paths:
+                        descriptor = "dir_fd"
+                    elif key in (1, "dst"):
+                        descriptor = "dst_dir_fd"
+                    else:
+                        descriptor = "src_dir_fd"
+                    if kwargs.get(descriptor) is None:
+                        self.note(name, value)
                 return real(*args, **kwargs)
 
             monkeypatch.setattr(module, name, wrapper)
@@ -479,6 +492,60 @@ def test_a_dir_fd_call_is_not_a_finding(tmp_path: Path, monkeypatch: pytest.Monk
     assert [(r.kind, r.path) for r in observer.records] == [
         ("relative", os.path.join("d", f"{MARK}-leaf"))
     ]
+
+
+def test_a_path_passed_by_keyword_or_as_a_destination_is_seen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process_cwd = tmp_path / "process"
+    process_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
+    Path("plain-source").write_text("x", encoding="utf-8")
+    Path(f"{MARK}-keyword").write_text("x", encoding="utf-8")
+    observer = Observer(process_cwd)
+    with monkeypatch.context() as patches, observer.during("witness"):
+        observer.install(patches)
+        os.stat(path=f"{MARK}-keyword")
+        os.rename("plain-source", f"{MARK}-renamed")
+        os.replace(src=f"{MARK}-renamed", dst=f"{MARK}-replaced")
+        with open(file=f"{MARK}-keyword", encoding="utf-8") as handle:
+            handle.read()
+
+    assert [(r.op, r.path) for r in observer.records] == [
+        ("stat", f"{MARK}-keyword"),
+        ("rename", f"{MARK}-renamed"),
+        ("replace", f"{MARK}-renamed"),
+        ("replace", f"{MARK}-replaced"),
+        ("open", f"{MARK}-keyword"),
+    ]
+    assert {r.kind for r in observer.records} == {"relative"}
+
+
+def test_each_end_of_a_rename_has_its_own_directory_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process_cwd = tmp_path / "process"
+    (process_cwd / "d").mkdir(parents=True)
+    monkeypatch.chdir(process_cwd)
+    if os.rename not in os.supports_dir_fd:
+        pytest.skip("os.rename has no dir_fd on this platform")
+    (process_cwd / "d" / f"{MARK}-inside").write_text("x", encoding="utf-8")
+    observer = Observer(process_cwd)
+    fd = os.open("d", os.O_RDONLY)
+    try:
+        with monkeypatch.context() as patches, observer.during("witness"):
+            observer.install(patches)
+            # Both ends under the descriptor: neither is the working directory's.
+            os.rename(f"{MARK}-inside", f"{MARK}-moved", src_dir_fd=fd, dst_dir_fd=fd)
+            # Only the source is under it: the destination lands in the working directory.
+            os.rename(f"{MARK}-moved", f"{MARK}-outside", src_dir_fd=fd)
+    finally:
+        os.close(fd)
+
+    assert [(r.kind, r.op, r.path) for r in observer.records] == [
+        ("relative", "rename", f"{MARK}-outside")
+    ]
+    assert (process_cwd / f"{MARK}-outside").is_file()
 
 
 def test_getcwd_is_attributed_to_the_memtomem_frame_that_asked(

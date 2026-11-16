@@ -157,6 +157,9 @@ def test_windows_shapes_through_the_helper(client: Path) -> None:
     other = "Z:" if client.drive.upper() != "Z:" else "Y:"
     with pytest.raises(ValueError, match="relative to the working directory of drive"):
         anchor_client_path(app, f"{other}foo")  # type: ignore[arg-type]
+    with pytest.raises(BundleValidationError) as refused:
+        validate_root_map({"C:/old": f"{other}private"}, client)
+    assert "private" not in str(refused.value)
 
 
 def test_two_connections_of_one_owner_resolve_the_same_argument_apart(tmp_path: Path) -> None:
@@ -359,6 +362,45 @@ def test_root_map_errors_do_not_depend_on_the_base(value: object, client: Path) 
     with pytest.raises(BundleValidationError) as with_base:
         validate_root_map(value, client)
     assert str(with_base.value) == str(without_base.value)
+
+
+def test_a_refused_join_does_not_put_the_value_in_the_error(
+    client: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The join quotes what it refuses; the bundle validator's errors carry no value.
+
+    The refusal itself needs a Windows drive, so the join is replaced here by
+    one that always refuses, in the words of the real one.
+    """
+    import memtomem.tools.bundle_format as bundle_format
+
+    def refuse(base, path, raw):
+        raise ValueError(f"{raw!r} is relative to the working directory of drive Z:")
+
+    monkeypatch.setattr(bundle_format, "join_path_base", refuse)
+    key = PurePosixPath("/old") if os.name != "nt" else PureWindowsPath("C:/old")
+
+    with pytest.raises(BundleValidationError) as from_map:
+        validate_root_map({str(key): "private-destination"}, client)
+    assert str(from_map.value) == (
+        "Invalid memory bundle: options field project_root_map value. No records imported."
+    )
+
+    chunk = Chunk("text", ChunkMetadata(source_file=Path("private-source.md")))
+    with pytest.raises(BundleValidationError) as from_record:
+        bundle_format.map_chunk(
+            chunk,
+            "3",
+            {},
+            None,
+            record_index=4,
+            source_file="private-source.md",
+            project_root=None,
+            path_base=client,
+        )
+    assert str(from_record.value) == (
+        "Invalid memory bundle: record 4 field source_file. No records imported."
+    )
 
 
 def test_root_map_destination_with_and_without_a_base(process_cwd: Path, client: Path) -> None:

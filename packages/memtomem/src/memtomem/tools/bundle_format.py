@@ -264,7 +264,11 @@ def validate_root_map(value: object, path_base: Path | None = None) -> dict:
             raise invalid("options", "project_root_map key")
         destination = Path(new).expanduser()
         if path_base is not None and not destination.is_absolute():
-            destination = Path(join_path_base(path_base, destination, new))
+            try:
+                destination = Path(join_path_base(path_base, destination, new))
+            except ValueError:
+                # The join's message quotes the value; this validator's do not.
+                raise invalid("options", "project_root_map value") from None
         result[key] = destination.resolve()
     return result
 
@@ -308,7 +312,10 @@ def map_chunk(
             )
         source_path = Path(source)
         if path_base is not None and not source_path.is_absolute():
-            source_path = Path(join_path_base(path_base, source_path, source))
+            try:
+                source_path = Path(join_path_base(path_base, source_path, source))
+            except ValueError:
+                raise invalid(where, "source_file") from None
         resolved = Path(norm_path(source_path))
         project_dirs = config.project_memory_dirs if config is not None else []
         registered_scope, _ = classify_scope(resolved, project_dirs)
