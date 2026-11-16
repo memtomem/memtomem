@@ -153,12 +153,13 @@ in "Scope" below apply here too.
 
 Then repair the index, in this order:
 
-1. Give the `korean` extra to every memtomem process that writes to this store. That means
-   this entry, your other agents' memtomem plugins, which leave the `korean` extra out as
-   well, and any `mm` install you add or index notes with. Then restart the servers,
-   Hermes included. Ask for memtomem status: the
-   `tokenizer_fallback` warning should be gone. It does not report notes that were indexed
-   during the fallback, which is why the next step is needed.
+1. Give the `korean` extra to every memtomem process that opens this store, including the
+   ones you only search from: a search tokenizes the query the same way, and every server
+   and `mm web` re-indexes the files it sees change. That means this entry, your other
+   agents' memtomem plugins, which leave the `korean` extra out as well, and any `mm`
+   install you use with this store. Then restart the servers, Hermes included. Ask for
+   memtomem status: the `tokenizer_fallback` warning should be gone. It does not report
+   notes that were indexed during the fallback, which is why the next step is needed.
 2. Ask Hermes to rebuild the keyword index through the server, so that it is the store
    and the tokenizer the server uses:
    `mem_do(action="config", params={"key": "search.tokenizer", "value": "kiwipiepy"})`.
