@@ -162,6 +162,13 @@ class AppContext:
     # used in place of the cwd by ``_resolve_project_context_root`` (#2920).
     # Set at most once and never cleared, so no operation can see two roots.
     bound_project_root: Path | None = field(default=None, init=False)
+    # The working directory of the client on this connection, for a server
+    # whose own working directory is not that client's. An absolute directory
+    # with symlinks already resolved: whoever sets it resolves it, and no
+    # reader resolves it again. ``None`` on every shipped transport, where the
+    # process working directory is the client's. Per connection, so
+    # ``from_runtime_owner`` does not copy it.
+    client_cwd: Path | None = field(default=None, init=False)
     # Internal state — not part of the public ``__init__`` surface; populated
     # by ``ensure_initialized`` / ``from_components``. The watcher /
     # scheduler / policy_scheduler / health_watchdog handles are populated

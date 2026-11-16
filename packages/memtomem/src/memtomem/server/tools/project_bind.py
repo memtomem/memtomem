@@ -29,6 +29,7 @@ from pathlib import Path
 
 from memtomem.runtime.project_context import _resolve_project_context_from_dirs
 from memtomem.server import mcp
+from memtomem.server.client_paths import client_cwd_of
 from memtomem.server.context import CtxType, _get_app_initialized, _get_server_transport
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
@@ -89,7 +90,9 @@ async def mem_project_bind(project_root: str, ctx: CtxType = None) -> str:
             f"Error: no registered project tier covers {resolved}. Register one with: "
             f"cd {resolved} && mm mem init --scope project_local"
         )
-    cwd_root = _resolve_project_context_from_dirs(app.config.indexing.project_memory_dirs)
+    cwd_root = _resolve_project_context_from_dirs(
+        app.config.indexing.project_memory_dirs, anchor=client_cwd_of(app)
+    )
     if cwd_root is not None and cwd_root != root:
         return (
             f"Error: this server's working directory is already in project {cwd_root}; "

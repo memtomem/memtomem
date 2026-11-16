@@ -508,6 +508,7 @@ async def import_chunks(
     indexing_config: IndexingConfig | None = None,
     project_root_map: dict[str, str] | None = None,
     confirm_project_shared: bool = False,
+    path_base: Path | None = None,
 ) -> ImportStats:
     """Restore a validated bundle atomically, retaining project and temporal boundaries.
 
@@ -516,6 +517,11 @@ async def import_chunks(
     exact source project roots, never arbitrary source prefixes. Shared restores
     require explicit consent and a full privacy scan even for a signed self-export.
     Malformed records reject the whole import before embedding or writing.
+
+    ``path_base`` is the directory a relative ``project_root_map`` destination
+    or a relative ``source_file`` in the bundle starts at. ``None`` is the
+    process working directory, which is right for a caller that owns its
+    process (``mm import``); a server passes its client's directory.
     """
     if not isinstance(on_conflict, str) or on_conflict not in _VALID_ON_CONFLICT:
         raise ValueError("Invalid on_conflict. Use skip, update, or duplicate.")
@@ -535,7 +541,7 @@ async def import_chunks(
                 raise ValueError()
         except (ValueError, UnicodeError) as exc:
             raise invalid("options", "namespace") from exc
-    root_map = validate_root_map(project_root_map)
+    root_map = validate_root_map(project_root_map, path_base)
     with input_path.open("rb") as stream:
         raw = stream.read(MAX_BUNDLE_BYTES + 1)
     if len(raw) > MAX_BUNDLE_BYTES:
@@ -578,6 +584,7 @@ async def import_chunks(
                 source_file=record["source_file"],
                 project_root=record.get("project_root"),
                 self_export=is_self_export,
+                path_base=path_base,
             )
             _destination_key(chunk)
         except BundleValidationError:

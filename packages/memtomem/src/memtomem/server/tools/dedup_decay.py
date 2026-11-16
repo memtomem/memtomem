@@ -10,6 +10,7 @@ from uuid import UUID
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
 from memtomem.search.dedup import DIFFERING_FIELDS, differing_fields
 from memtomem.server import mcp
+from memtomem.server.client_paths import anchor_client_path, client_cwd_of
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
@@ -419,6 +420,10 @@ async def mem_cleanup_orphans(
     """
     under_dirs = _under_dirs(under)
     app = await _get_app_initialized(ctx)
+    if client_cwd_of(app) is not None:
+        # Anchored, not resolved: ``group_orphans`` resolves each entry once,
+        # in its own way, and resolving twice is not always resolving once.
+        under_dirs = [str(anchor_client_path(app, d)) for d in under_dirs]
     # Two-pass scan keeps transient absence out of the explicit purge list.
     # A mass ratio cannot prove deletion or availability (#2498).
     result = await scan_orphans(app.storage)
