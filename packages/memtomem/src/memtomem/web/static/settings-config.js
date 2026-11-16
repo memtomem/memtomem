@@ -1653,7 +1653,12 @@ function _showReindexWarning(applied) {
       btnLoading(btn, true);
       try {
         const res = await api('POST', '/api/fts-rebuild', undefined, { timeout: 120_000 });
-        showToast(res.message || t('toast.fts_rebuilt', { count: res.rebuilt_rows }), 'success');
+        // ``warning`` is set when the rebuild fell back to another tokenizer;
+        // ``message`` already says so (#3395).
+        showToast(
+          res.message || t('toast.fts_rebuilt', { count: res.rebuilt_rows }),
+          res.warning ? 'warning' : 'success',
+        );
         btn.textContent = t('common.done');
         btn.disabled = true;
       } catch (err) {
