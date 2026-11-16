@@ -12,14 +12,14 @@ no automatic indexing.
 
 ## Install
 
-The npm release for this core version is `opencode-memtomem@0.3.33`, bundling
+The npm release for this core version is `opencode-memtomem@0.3.34`, bundling
 core `0.7.10`.
 
 Do not use an `opencode plugin add` command; OpenCode loads npm plugins from
 the singular `plugin` array in `opencode.json`:
 
 ```json
-{"plugin": ["opencode-memtomem@0.3.33"]}
+{"plugin": ["opencode-memtomem@0.3.34"]}
 ```
 
 Upgrade if your pin is still `0.1.3` or older: those bundle pre-`0.3.14`

@@ -59,6 +59,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The `update` workflow no longer holds an item to 600 characters because it quotes a few
+  Korean, Japanese, or Chinese characters.** An item was capped at 1,000 characters, or at 600
+  as soon as any of its text was in one of those languages. An English item quoting five
+  Hangul characters was therefore held to 600 and reported as over the limit, although the
+  store kept it in one chunk of 223 tokens (the ceiling under `multilingual-e5-small` is 384).
+  Now there is one cap of 1,000 characters, citations included, and each Korean, Japanese, or
+  Chinese character counts as two. Measured on 504 saved update items, no item within the new
+  cap was stored as more than one chunk, and CJK items flagged though stored whole fell from
+  60 of 116 to 20. The cap is still a target, not a guarantee. An item reported as over the
+  limit now comes with its weighted count. The delivery versions move with that text: Claude
+  `0.5.38`, Codex `0.3.36`, OpenCode `0.3.34`, Kimi `0.2.26`, Antigravity `0.2.15`. Cursor
+  stays `0.1.0` while its first marketplace review is open, but its rendered skill changes too.
+
 - **A delete or edit no longer removes lines from a file the store holds under two spellings
   of its path (#3408).** On a case-insensitive volume, a directory indexed once as `Notes` and
   once as `notes` stores each file in it twice, and a duplicate scan lists the two copies as a
