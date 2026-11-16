@@ -1,27 +1,35 @@
-"""Tools: mem_dedup_scan, mem_dedup_merge, mem_decay_scan, mem_decay_expire, mem_cleanup_orphans."""
+"""Tools: mem_dedup_scan, mem_dedup_merge, mem_dedup_remove, mem_decay_scan, mem_decay_expire,
+mem_cleanup_orphans."""
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
+from memtomem.errors import RetryableError, StorageError
+from memtomem.indexing.engine import StoredSourceRead, read_stored_source
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
 from memtomem.search.dedup import DIFFERING_FIELDS, differing_fields
 from memtomem.server import mcp
 from memtomem.server.client_paths import anchor_client_path, client_cwd_of
-from memtomem.server.context import CtxType, _get_app_initialized
+from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import caller_boundary, in_boundary
 from memtomem.server.tools._provenance import (
     capture_session_for_untracked_write,
     flag_untracked_write,
 )
 from memtomem.storage.orphan_detect import RetainRule, group_orphans, scan_orphans, source_state
+from memtomem.storage.sqlite_backend import SqliteBackend
+from memtomem.storage.sqlite_errors import is_writer_busy
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from memtomem.models import Chunk, ChunkTopology
     from memtomem.search.dedup import DedupCandidate
@@ -321,6 +329,210 @@ async def mem_dedup_merge(
     if would_or_did:
         await flag_untracked_write(app, provenance_session_id)
     return f"Merge complete: {would_or_did} chunks deleted, keep_id={keep_id}"
+
+
+_REINDEX_REMEDY = (
+    "Run `mm index <file>` on it (plain, not `--force`, which records no receipt), "
+    "then mem_dedup_scan again."
+)
+_JUDGE_REMEDY = "Read the file(s) and remove the copy with mem_delete."
+_HELD_REMEDY = (
+    "Clear the hold first: a file whose project tier is no longer registered needs that tier "
+    "restored, or the file moved where it belongs; otherwise a plain `mm index <file>` checks "
+    "it again. Then mem_dedup_scan again."
+)
+_WRITER_BUSY = "the store's writer is busy; no lines were removed. Retry."
+
+
+@asynccontextmanager
+async def _busy_is_retryable() -> AsyncIterator[None]:
+    """A busy writer refuses retryably, worded for this tool rather than ``mem_delete``."""
+    try:
+        yield
+    except StorageError as exc:
+        if not is_writer_busy(exc):
+            raise
+        raise RetryableError(_WRITER_BUSY) from exc
+
+
+def _refusal(role: str, key: str, problem: str, remedy: str) -> str:
+    return f"Error: the {role} member's file {key} {problem}; no lines were removed. {remedy}"
+
+
+def _read_members(keys: list[tuple[str, str]]) -> list[StoredSourceRead] | str:
+    """Read each member's file as the indexer would, or return the first refusal."""
+    from memtomem.storage.sqlite_helpers import stored_key_moved
+
+    reads: list[StoredSourceRead] = []
+    for role, key in keys:
+        if stored_key_moved(key):
+            return _refusal(role, key, "now resolves to another file", _JUDGE_REMEDY)
+        read = read_stored_source(key)
+        if isinstance(read, str):
+            return _refusal(role, key, read, _REINDEX_REMEDY)
+        if read["inode"] == 0:
+            return _refusal(
+                role,
+                key,
+                "is on a filesystem that reports no file identity, so it cannot be checked",
+                _JUDGE_REMEDY,
+            )
+        if read["links"] > 1:
+            return _refusal(
+                role,
+                key,
+                "has another hard-linked name, through which it can change unchecked",
+                _JUDGE_REMEDY,
+            )
+        reads.append(read)
+    return reads
+
+
+async def _check_pair(app: AppContext, keep_uuid: UUID, keep_id: str, removed: Chunk) -> str | None:
+    """Refuse unless both members' files and rows still match their index receipts.
+
+    Runs under the removed file's locks (``_delete_chunk``'s precheck). The kept
+    file is read, not locked: a change to it after this check is not seen. The
+    files, holds, receipts and rows are all read inside one writer transaction,
+    so no commit lands between them and the check describes one moment. The
+    file reads run in a thread, as other awaits inside a transaction do.
+    """
+    from memtomem.indexing.source_receipt import receipt_as_stored, state_as_stored
+    from memtomem.storage.base import WRITER_WAIT_S
+
+    boundary = caller_boundary(app)
+    async with _busy_is_retryable():
+        keeper = await app.storage.get_chunk(keep_uuid, exclude_withheld=True, read_writer=True)
+    if keeper is None or not in_boundary(keeper, boundary):
+        return f"Error: chunk {keep_id} not found."
+    if await asyncio.to_thread(_one_file, removed, keeper):
+        return _same_file_refusal(removed, keeper)
+    keys = [
+        ("removed", str(removed.metadata.source_file)),
+        ("kept", str(keeper.metadata.source_file)),
+    ]
+    indexing = app.config.indexing
+    # Under either setting an index pass records no receipt, so reindexing
+    # cannot clear any refusal that compares against one.
+    receipt_remedy = (
+        "Index passes with indexing.enrich_chunk_context or indexing.auto_summarize on "
+        "record no receipt, so this file cannot be checked here. " + _JUDGE_REMEDY
+        if indexing.enrich_chunk_context or indexing.auto_summarize
+        else _REINDEX_REMEDY
+    )
+    storage = cast("SqliteBackend", app.storage)
+    dimension = app.embedder.dimension
+    async with _busy_is_retryable(), app.storage.transaction(wait=WRITER_WAIT_S):
+        current = await app.storage.get_chunk(keep_uuid, exclude_withheld=True, read_writer=True)
+        if current is None or not in_boundary(current, boundary):
+            return f"Error: chunk {keep_id} not found."
+        if str(current.metadata.source_file) != keys[1][1]:
+            raise RetryableError(
+                "the kept member moved while it was checked; no lines were removed. Retry."
+            )
+        reads = await asyncio.to_thread(_read_members, keys)
+        if isinstance(reads, str):
+            return reads
+        if (reads[0]["device"], reads[0]["inode"]) == (reads[1]["device"], reads[1]["inode"]):
+            return _same_file_refusal(removed, keeper)
+        db = storage._get_db()
+        for (role, key), read in zip(keys, reads, strict=True):
+            if await app.storage.is_source_held(Path(key)):
+                return _refusal(role, key, "is held by the index", _HELD_REMEDY)
+            receipt = receipt_as_stored(db, key)
+            if receipt is None:
+                return _refusal(role, key, "has no index receipt", receipt_remedy)
+            if read["content_hash"] != receipt[0]:
+                return _refusal(role, key, "changed since it was indexed", receipt_remedy)
+            rows = state_as_stored(db, key, dimension)
+            if rows is None or rows[0] != receipt[1]:
+                return _refusal(
+                    role, key, "has stored rows that differ from its last index", receipt_remedy
+                )
+    return None
+
+
+def _one_file(a: Chunk, b: Chunk) -> bool:
+    """One stored key, or two spellings of one file judged by its identity (#3408).
+
+    Not by the lock key: that folds case unconditionally, and on a case-sensitive
+    volume ``A.md`` and ``a.md`` are two files. Stats files; run it in a thread.
+    """
+    from memtomem.storage.sqlite_helpers import source_twins
+
+    a_key, b_key = str(a.metadata.source_file), str(b.metadata.source_file)
+    return a_key == b_key or bool(source_twins(a_key, [b_key]))
+
+
+def _same_file_refusal(removed: Chunk, keeper: Chunk) -> str:
+    """Two members in one file; under two stored keys, the twin remedy of #3408."""
+    removed_key, kept_key = str(removed.metadata.source_file), str(keeper.metadata.source_file)
+    if removed_key != kept_key:
+        from memtomem.indexing.scope_guard import twin_detail
+
+        return "Error: " + twin_detail(removed_key, kept_key, op="mem_dedup_remove", surface="mcp")
+    return (
+        f"Error: both members are in one file ({kept_key}); no lines were removed. {_JUDGE_REMEDY}"
+    )
+
+
+@mcp.tool()
+@tool_handler
+@register("maintenance")
+async def mem_dedup_remove(
+    remove_id: str,
+    keep_id: str,
+    confirm_project_shared: bool = False,
+    ctx: CtxType = None,
+) -> str:
+    """Remove one member of a duplicate pair from its file, after checking both.
+
+    Removes remove_id's lines from its file and re-indexes it, as mem_delete does,
+    only when both members' files and rows still match what was last indexed, the
+    two are in different files, and neither file has another hard-linked name.
+    It does not judge whether the two say the same thing: read both first. A change
+    to the kept file after the check is not seen.
+
+    Args:
+        remove_id: UUID of the chunk whose lines are removed
+        keep_id: UUID of the duplicate that stays
+        confirm_project_shared: Required when remove_id is a project_shared chunk
+    """
+    from memtomem.server.tools.memory_crud import _delete_chunk
+
+    app = await _get_app_initialized(ctx)
+    try:
+        remove_uuid = UUID(remove_id)
+        keep_uuid = UUID(keep_id)
+    except ValueError as exc:
+        return f"Error: invalid chunk ID format: {exc}"
+    if remove_uuid == keep_uuid:
+        return "Error: remove_id and keep_id are the same chunk; no lines were removed."
+    if not isinstance(app.storage, SqliteBackend):
+        return "Error: mem_dedup_remove needs the SQLite storage backend."
+    boundary = caller_boundary(app)
+    keeper = await app.storage.get_chunk(keep_uuid, exclude_withheld=True)
+    if keeper is None or not in_boundary(keeper, boundary):
+        return f"Error: chunk {keep_id} not found."
+    removed = await app.storage.get_chunk(remove_uuid, exclude_withheld=True)
+    if (
+        removed is not None
+        and in_boundary(removed, boundary)
+        and await asyncio.to_thread(_one_file, removed, keeper)
+    ):
+        return _same_file_refusal(removed, keeper)
+
+    async def precheck(chunk: Chunk) -> str | None:
+        return await _check_pair(app, keep_uuid, keep_id, chunk)
+
+    return await _delete_chunk(
+        app,
+        remove_uuid,
+        remove_id,
+        confirm_project_shared,
+        surface="mem_dedup_remove",
+        precheck=precheck,
+    )
 
 
 @mcp.tool()
