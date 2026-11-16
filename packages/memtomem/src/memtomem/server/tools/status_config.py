@@ -323,15 +323,27 @@ def _tokenizer_fallback_warning(configured: str, storage: SqliteBackend) -> dict
         "detail": f"search.tokenizer=kiwipiepy but {state}. Rows it indexes are "
         "tokenized differently from kiwipiepy rows, so Korean keyword search misses "
         "notes across the two.",
-        # The rebuild runs under the CLI's own tokenizer and config, so it has to
-        # run where the server does: a bare ``mm`` may lack the extra (and rebuild
-        # as unicode61), be absent on a uvx-only install, or resolve another
-        # store. Naming the launcher, not a pinned command, covers all three.
+        # The rebuild goes through the server: it rebuilds the store that server
+        # has open, with that server's tokenizer. A shell ``mm`` may lack the
+        # extra (and rebuild as unicode61), be absent on a uvx-only install, or
+        # open another store — a plugin launcher passes the server only some
+        # environment variables, and a relative store path resolves against the
+        # shell's working directory, not the server's. Any process still running
+        # without the extra writes unicode61 rows into the rebuilt index, so the
+        # restart is stated as a rule; the writers named are examples, not a list.
+        # The warning-gone check comes before the rebuild because the rebuild's
+        # reply alone does not show that it ran with kiwipiepy.
         "fix": "install the korean extra wherever memtomem runs (launch "
-        "memtomem[onnx,korean] instead of memtomem[onnx]), restart every memtomem "
-        "server on this store, then rebuild its keyword index with the server's own "
-        "launcher and environment, running `mm config set search.tokenizer "
-        "kiwipiepy` in place of `memtomem-server`",
+        "memtomem[onnx,korean] instead of memtomem[onnx]). Let running indexing "
+        "commands finish, then restart every process that uses this store — MCP "
+        "servers, `mm web`, `mm shell` and applications embedding memtomem, for "
+        "example. Check `mem_status()` on each MCP server and continue only once this "
+        "warning is gone there. Then rebuild the keyword index once, from one of those "
+        "servers through an MCP client connected to it: "
+        '`mem_do(action="config", params={"key": "search.tokenizer", "value": '
+        '"kiwipiepy"})`. `mm config set search.tokenizer kiwipiepy` does the same only '
+        "where that `mm` has the korean extra and opens the same store (same config, "
+        "environment and working directory)",
     }
 
 

@@ -121,6 +121,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   as the new extraction when the LLM call fails, which can remove entities an earlier scan
   wrote (#3383).
 
+- **The `tokenizer_fallback` warning's recovery rebuilds the store the server has open
+  (#3386).** Its `fix` told you to rebuild by running `mm config set search.tokenizer
+  kiwipiepy` with the server's launcher and environment. From a shell, that `mm` can open
+  another store than a plugin-launched server: a launcher can pass the server only some
+  environment variables, so a `MEMTOMEM_STORAGE__SQLITE_PATH` exported in the shell reaches
+  `mm` but not the server, and a relative `storage.sqlite_path` resolves against the shell's
+  working directory instead of the server's. The `fix` now rebuilds from inside the server,
+  with `mem_do(action="config", params={"key": "search.tokenizer", "value": "kiwipiepy"})`
+  through an MCP client connected to it. Before that it says to restart every process that
+  uses the store, `mm web` and `mm shell` among them, since a process still without the
+  korean extra writes `unicode61` rows into the rebuilt index, and to rebuild only once
+  `mem_status()` shows the warning gone on each MCP server. `mm config set` stays as the
+  alternative where that `mm` has the extra and opens the same store.
+
 ## [0.7.10] — 2026-11-15
 
 ### Upgrading

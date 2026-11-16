@@ -177,18 +177,36 @@ class TestFallbackWarning:
         fix = self._warning(backend)["fix"]
 
         assert "memtomem[onnx,korean]" in fix
-        assert "restart" in fix
-        # A bare ``mm`` can lack the extra (it would rebuild as unicode61), be
-        # absent on a uvx-only install, or open another store — so the rebuild
-        # runs through the server's own launcher rather than a pinned command
-        # (a pinned version also fails for an unpublished dev build).
-        rebuild = "mm config set search.tokenizer kiwipiepy"
-        assert rebuild in fix
-        assert "launcher and environment" in fix
+        # Every writer still without the extra puts unicode61 rows into the
+        # rebuilt index, and writers are not only MCP servers, so the restart is
+        # a rule over the store with examples, not a list to complete.
+        restart = "restart every process that uses this store"
+        assert restart in fix
+        assert "`mm web`" in fix and "`mm shell`" in fix and "for example" in fix
+        # The rebuild reply alone does not show which tokenizer it ran with, so
+        # the server's own status has to be clean first.
+        check = "continue only once this warning is gone"
+        assert check in fix
+        # The in-server rebuild uses the store and tokenizer the server has; a
+        # shell ``mm`` can lack the extra or open another store, so it is only
+        # the qualified alternative (and no pinned version: a dev build is not
+        # published).
+        in_server = (
+            'mem_do(action="config", params={"key": "search.tokenizer", "value": "kiwipiepy"})'
+        )
+        assert in_server in fix
+        shell = "mm config set search.tokenizer kiwipiepy"
+        assert shell in fix
+        alternative = fix[fix.index(shell) :]
+        assert "korean extra" in alternative
+        assert "same store" in alternative
+        assert "environment and working directory" in alternative
         assert "uvx --from" not in fix and __version__ not in fix
-        assert fix.index("restart") < fix.index(rebuild), (
-            "rebuilding before every writer restarts lets a live fallback "
-            "server write unicode61 rows into the rebuilt index"
+        positions = [fix.index(step) for step in (restart, check, in_server, shell)]
+        assert positions == sorted(positions), (
+            "rebuilding before every writer restarts lets a live fallback writer put "
+            "unicode61 rows into the rebuilt index, and rebuilding before the warning "
+            "clears can rebuild as unicode61"
         )
 
     def test_mm_status_reports_it(self, monkeypatch, backend):
