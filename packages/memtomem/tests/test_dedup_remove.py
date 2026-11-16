@@ -334,7 +334,14 @@ async def test_a_kept_path_that_is_no_longer_a_regular_file_is_refused(pair, kin
 
     result = await _remove(comp, removed.id, kept.id)
 
-    assert result.startswith(f"Error: the kept member's file {kept_file} is not a regular file")
+    # Windows refuses ``os.open`` on a directory itself, before ``fstat`` can say what it is.
+    reasons = ["is not a regular file"]
+    if kind == "directory" and os.name == "nt":
+        reasons.append("cannot be opened (PermissionError)")
+    assert any(
+        result.startswith(f"Error: the kept member's file {kept_file} {reason}")
+        for reason in reasons
+    ), result
     assert removed_file.read_bytes() == removed_before
 
 
@@ -494,11 +501,12 @@ async def test_a_busy_writer_is_a_retryable_refusal_worded_for_this_tool(pair, m
 async def test_one_file_under_two_stored_spellings_gets_the_twin_remedy(bm25_only_components):
     comp, mem_dir = bm25_only_components
     source = mem_dir / "note.md"
+    # The parent directory respelled, as test_source_twin_rewrite.py builds its twins.
+    twin = str(mem_dir.parent / mem_dir.name.upper() / source.name)
     source.write_text(_note("Router-X"), encoding="utf-8")
-    await _index(comp, source)
-    twin = str(source.with_name("NOTE.md"))
     if not Path(twin).exists():
         pytest.skip("a case-sensitive filesystem: the two spellings are two files")
+    await _index(comp, source)
     db = comp.storage._get_db()
     db.execute("UPDATE chunks SET source_file=? WHERE source_file=?", (twin, str(source)))
     db.commit()
@@ -509,6 +517,7 @@ async def test_one_file_under_two_stored_spellings_gets_the_twin_remedy(bm25_onl
         for c in await comp.storage.list_chunks_by_source(Path(twin))
         if c.metadata.heading_hierarchy[-1:] == ("## Alarm",)
     ]
+    assert original.id != other.id
     before = _snapshot(comp, source)
 
     result = await _remove(comp, original.id, other.id)
