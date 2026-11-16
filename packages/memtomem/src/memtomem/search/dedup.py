@@ -15,8 +15,30 @@ if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
     from pathlib import Path
 
-    from memtomem.models import NamespaceFilter
+    from memtomem.models import ChunkMetadata, ChunkTopology, NamespaceFilter
     from memtomem.storage.base import StorageBackend
+
+
+#: Stored metadata two chunks with the same body can still differ on, in the
+#: order ``differing_fields`` reports them.
+DIFFERING_FIELDS = ("heading", "namespace", "scope", "project_root", "tags", "validity")
+
+
+def differing_fields(a: ChunkMetadata, b: ChunkMetadata) -> tuple[str, ...]:
+    """Names from ``DIFFERING_FIELDS`` whose stored values differ between *a* and *b*.
+
+    A comparison, not a verdict: an empty result says the two records carry the
+    same metadata, not that either may be removed.
+    """
+    same = {
+        "heading": a.heading_hierarchy == b.heading_hierarchy,
+        "namespace": a.namespace == b.namespace,
+        "scope": a.scope == b.scope,
+        "project_root": a.project_root == b.project_root,
+        "tags": set(a.tags) == set(b.tags),
+        "validity": (a.valid_from_unix, a.valid_to_unix) == (b.valid_from_unix, b.valid_to_unix),
+    }
+    return tuple(name for name in DIFFERING_FIELDS if not same[name])
 
 
 @dataclass(frozen=True)
@@ -105,6 +127,19 @@ class DedupScanner:
         candidates.sort(key=lambda c: (not c.exact, -c.score))
 
         return candidates[:limit], coverage
+
+    async def member_evidence(
+        self, candidates: Sequence[DedupCandidate]
+    ) -> dict[UUID, tuple[Chunk, ChunkTopology]]:
+        """The current row and topology of every member of *candidates*.
+
+        One storage read for all pairs. A member absent from the result was
+        deleted, or its source became hidden, after the scan read it. Render a
+        member from the chunk returned here, not from the candidate's: the id
+        survives a re-index that changes the heading or the line range.
+        """
+        ids = dict.fromkeys(c.id for pair in candidates for c in (pair.chunk_a, pair.chunk_b))
+        return await self._storage.get_chunks_with_topology(list(ids))
 
     async def merge(self, keep_id: UUID, delete_ids: list[UUID], dry_run: bool = False) -> int:
         """Merge duplicate chunks: keep *keep_id*, delete *delete_ids*.

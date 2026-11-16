@@ -416,6 +416,8 @@ class TestMcpScanCoverage:
         from memtomem.server.tools import dedup_decay
 
         app = MagicMock()
+        # A bare mock attribute is truthy; the brief has its own tests.
+        app.config.maintenance.experimental_duplicate_brief = False
         app.dedup_scanner.scan_with_coverage = AsyncMock(
             return_value=(candidates, DedupCoverage(**coverage))
         )
