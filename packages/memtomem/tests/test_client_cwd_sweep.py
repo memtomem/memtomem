@@ -35,7 +35,14 @@ What this does not see, and ``test_client_cwd_table.py`` does not either:
 - a branch these inputs do not reach. ``mem_project_bind`` refuses every call
   at its transport gate, and the background health report does not run;
 - a filesystem call that is not among those wrapped below (``os.symlink``,
-  ``os.chmod``), unless it goes on to one that is.
+  ``os.chmod``), unless it goes on to one that is;
+- two spellings that no code here writes: a relative path whose ``dir_fd`` is
+  the platform's ``AT_FDCWD`` number instead of ``None``, and the process
+  working directory behind a doubled leading slash.
+
+A path is placed by its text. One written through the process working
+directory (``<cwd>/../elsewhere``) is therefore reported wherever it ends up,
+which is the right answer: it was built from that directory.
 """
 
 from __future__ import annotations
@@ -650,6 +657,40 @@ def test_the_table_names_each_calls_real_parameters() -> None:
         checked += 1
     # The ``os`` calls and ``open`` publish a signature everywhere.
     assert checked >= 16, checked
+    # A row taken out is a call no longer observed; a row added moves this number.
+    assert len(WRAPPED_CALLS) == 23
+
+
+# What a wrapped call needs besides its paths before it will run at all.
+_OTHER_ARGUMENTS: dict[tuple[str, str], tuple[object, ...]] = {
+    ("os", "open"): (os.O_RDONLY,),
+    ("os", "access"): (os.F_OK,),
+}
+
+
+@pytest.mark.parametrize("call", sorted(WRAPPED_CALLS), ids=".".join)
+def test_every_wrapped_call_is_observed(
+    call: tuple[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each row of the table on its own: the call is wrapped and its paths are read."""
+    module_name, name = call
+    process_cwd = tmp_path / "process"
+    process_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
+    # Paths that do not exist: most of these calls then refuse, which is all
+    # this needs, and ``os.chdir`` leaves the test where it is.
+    paths = [f"{MARK}-{name}-{index}" for index, _ in enumerate(WRAPPED_CALLS[call])]
+    observer = Observer(process_cwd)
+    with monkeypatch.context() as patches, observer.during("witness"):
+        observer.install(patches)
+        wrapped = getattr(_MODULES[module_name], name)
+        with contextlib.suppress(OSError):
+            wrapped(*paths, *_OTHER_ARGUMENTS.get(call, ()))
+
+    # Some calls reach others that are wrapped too (``exists`` may ``stat``);
+    # only this call's own observations are counted.
+    own = [(r.kind, r.path) for r in observer.records if r.op == name]
+    assert own == [("relative", path) for path in paths], observer.records
 
 
 def test_getcwd_is_attributed_to_the_memtomem_frame_that_asked(
