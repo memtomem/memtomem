@@ -329,16 +329,25 @@ def _tokenizer_fallback_warning(configured: str, storage: SqliteBackend) -> dict
         # open another store — a plugin launcher passes the server only some
         # environment variables, and a relative store path resolves against the
         # shell's working directory, not the server's. Any process still running
-        # without the extra writes unicode61 rows into the rebuilt index, so the
-        # restart is stated as a rule; the writers named are examples, not a list.
-        # The warning-gone check comes before the rebuild because the rebuild's
-        # reply alone does not show that it ran with kiwipiepy.
+        # without the extra, or configured with another tokenizer, writes
+        # unicode61 rows into the rebuilt index, so the restart is stated as a
+        # rule; the writers named are examples, not a list. Only MCP servers can
+        # be checked from here: the store does not record which tokenizer built
+        # its keyword index.
+        # The status check comes before the rebuild because the rebuild's reply
+        # alone does not show that it ran with kiwipiepy. It asks for the
+        # tokenizer as well as a clean warning: a kiwipiepy setting made at
+        # runtime and never saved is gone after the restart, which clears the
+        # warning too, and a rebuild from that state would switch one server
+        # while the others keep writing unicode61.
         "fix": "install the korean extra wherever memtomem runs (launch "
         "memtomem[onnx,korean] instead of memtomem[onnx]). Let running indexing "
-        "commands finish, then restart every process that uses this store — MCP "
-        "servers, `mm web`, `mm shell` and applications embedding memtomem, for "
-        "example. Check `mem_status()` on each MCP server and continue only once this "
-        "warning is gone there. Then rebuild the keyword index once, from one of those "
+        "commands finish, then restart every process that uses this store, each with "
+        "`search.tokenizer` set to kiwipiepy — MCP servers, `mm web`, `mm shell` and "
+        "applications embedding memtomem, for example. Check `mem_status()` on each MCP server and continue only once it "
+        "shows `search.tokenizer` as kiwipiepy and this warning is gone there (a "
+        "kiwipiepy setting that was never saved is lost on restart, and the warning "
+        "with it). Then rebuild the keyword index once, from one of those "
         "servers through an MCP client connected to it: "
         '`mem_do(action="config", params={"key": "search.tokenizer", "value": '
         '"kiwipiepy"})`. `mm config set search.tokenizer kiwipiepy` does the same only '

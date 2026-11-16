@@ -130,9 +130,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   working directory instead of the server's. The `fix` now rebuilds from inside the server,
   with `mem_do(action="config", params={"key": "search.tokenizer", "value": "kiwipiepy"})`
   through an MCP client connected to it. Before that it says to restart every process that
-  uses the store, `mm web` and `mm shell` among them, since a process still without the
-  korean extra writes `unicode61` rows into the rebuilt index, and to rebuild only once
-  `mem_status()` shows the warning gone on each MCP server. `mm config set` stays as the
+  uses the store, `mm web` and `mm shell` among them, each with `search.tokenizer` set to
+  `kiwipiepy`, since a process still without the korean extra or configured with another
+  tokenizer writes `unicode61` rows into the rebuilt index, and to rebuild only once
+  `mem_status()` on each MCP server shows `search.tokenizer` as `kiwipiepy` and the warning
+  gone. A `kiwipiepy` setting made at runtime and never saved is lost on restart, which also
+  clears the warning, so the warning alone is not enough. `mm config set` stays as the
   alternative where that `mm` has the extra and opens the same store.
 
 ## [0.7.10] — 2026-11-15
