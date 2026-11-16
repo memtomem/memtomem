@@ -93,7 +93,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `[]` triggered a database rollback error. Truthy non-strings (`5`, `["sk-..."]`, `{"k": 1}`)
   failed deep inside the write guard with internal type errors. `set_namespace_meta` now
   validates that any non-`None` description is a string, matching `validate_namespace_color`, so
-  every MCP tool, CLI command, and storage call consistently reports
+  every MCP tool and storage call consistently reports
   `Error: Invalid namespace description: expected a string` and stores nothing.
 
 - **Resources answer over stdio (#3374).** Reading any of the six resources from a stdio
