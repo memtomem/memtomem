@@ -173,6 +173,78 @@ def stored_key_moved(key: str) -> bool:
     return norm_path(Path(key)) != fold_path_form(key)
 
 
+def _caseless(key: str) -> str:
+    """``key`` in Unicode canonical caseless form (D145), separators as ``/`` on Windows.
+
+    Broader than any filesystem's own folding on purpose: it only picks the
+    keys :func:`source_twins` then checks on disk, so a false match costs two
+    ``lstat`` calls and nothing else.
+    """
+    if os.name == "nt":
+        key = key.replace("\\", "/")
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", key).casefold())
+
+
+def _uppercased(key: str) -> str:
+    """``key`` upper-cased, the way NTFS compares names (its upcase table).
+
+    Case folding and upper-casing disagree on some letters: dotless ``ı``
+    upper-cases to ``I`` but folds to itself, so the two spellings match here
+    and not in :func:`_caseless`.
+    """
+    if os.name == "nt":
+        key = key.replace("\\", "/")
+    return unicodedata.normalize("NFD", key).upper()
+
+
+def twin_candidates(key: str, stored: Iterable[str]) -> list[str]:
+    """The stored keys other than ``key`` that may name its file under another spelling.
+
+    A string comparison only, no filesystem access: keys equal to ``key`` in
+    canonical caseless form or upper-cased. Sorted, so a caller naming one of
+    them names the same one every time.
+    """
+    folded, upper = _caseless(key), _uppercased(key)
+    return sorted(
+        {k for k in stored if k != key and (_caseless(k) == folded or _uppercased(k) == upper)}
+    )
+
+
+def _source_identity(key: str) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of the entry at ``key``, not following a leaf symlink.
+
+    ``None`` when there is no entry, or the filesystem reports no inode
+    (``st_ino == 0``), which is no identity rather than a shared one.
+    """
+    try:
+        info = os.lstat(key)
+    except (OSError, ValueError):
+        return None
+    return None if info.st_ino == 0 else (info.st_dev, info.st_ino)
+
+
+def source_twins(key: str, stored: Iterable[str]) -> list[str]:
+    """The stored keys that name the same file as ``key`` under another spelling (#3408).
+
+    On a case-insensitive volume ``Notes/a.md`` and ``notes/a.md`` are one
+    file, and indexing both spellings stores its lines twice. A twin is a
+    :func:`twin_candidates` key whose entry has ``key``'s device and inode.
+    ``lstat``, so a key whose leaf has become a symlink to the file is a link,
+    not the file (#2835). No identity on either side, no twin. On a
+    case-sensitive volume two case spellings are two inodes, so nothing there
+    is a twin; a hard link under a caseless-equal name is, and rewrites through
+    it are then refused for the same reason. Stats files, so async callers run
+    it in a thread.
+    """
+    candidates = twin_candidates(key, stored)
+    if not candidates:
+        return []
+    own = _source_identity(key)
+    if own is None:
+        return []
+    return [k for k in candidates if _source_identity(k) == own]
+
+
 def stored_key_spellings(spelling: str) -> list[str]:
     """The stored-key spellings a caller's path string may stand for, in order.
 
