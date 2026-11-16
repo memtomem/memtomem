@@ -45,8 +45,8 @@ from memtomem.server.tools.dedup_decay import (
 )
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
 
-_FOOTER = "Scanned 2 chunks; near-duplicate search probed 2."
-_COVERAGE = DedupCoverage(pool=2, near_search_enabled=True, probed=2, without_vector=0)
+_FOOTER = "Scanned all 2 scannable chunks; near-duplicate search probed 2."
+_COVERAGE = DedupCoverage(pool=2, eligible=2, near_search_enabled=True, probed=2, without_vector=0)
 _OMITTED = (
     "omitted: a member is not stored now, its source is unavailable, or the bodies of an "
     "exact pair do not match."
@@ -622,7 +622,7 @@ class TestTheToolSurfaceDidNotMove:
         assert info.param_docs == {
             "threshold": "Dense score 1/(1+L2) threshold (0-1, default 0.92)",
             "limit": "Maximum number of candidate pairs to return",
-            "max_scan": "Maximum chunks to inspect for near-duplicate search",
+            "max_scan": "Maximum chunks to scan, taken in chunk-id order",
         }
 
     def test_the_function_s_signature_and_docstring(self):
@@ -635,7 +635,7 @@ class TestTheToolSurfaceDidNotMove:
             "Args:\n"
             "    threshold: Dense score 1/(1+L2) threshold (0-1, default 0.92)\n"
             "    limit: Maximum number of candidate pairs to return\n"
-            "    max_scan: Maximum chunks to inspect for near-duplicate search"
+            "    max_scan: Maximum chunks to scan, taken in chunk-id order"
         )
 
 

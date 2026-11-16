@@ -71,6 +71,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   limit now comes with its weighted count. The delivery versions move with that text: Claude
   `0.5.38`, Codex `0.3.36`, OpenCode `0.3.34`, Kimi `0.2.26`, Antigravity `0.2.15`. Cursor
   stays `0.1.0` while its first marketplace review is open, but its rendered skill changes too.
+
+- **A bounded duplicate scan selects the same chunks in every process (#3390).**
+  `mem_dedup_scan`, the web `GET /dedup/candidates` route and the scheduled `dedup_scan` job
+  scan at most `max_scan` chunks (default 500). They filled that pool source by source in the
+  iteration order of a Python `set`, which changes with the per-process hash seed, so the MCP
+  server and `mm web` on one store, or one job on either side of a restart, scanned different
+  samples and reported different candidates. On a store with 39,458 scannable chunks, two
+  processes found 15 and 10 candidate pairs at the default. The pool is now the first
+  `max_scan` scannable chunks in chunk-id order, read in one statement: the same chunks on
+  every run while the scannable chunks and `max_scan` stay the same (32 pairs on that store).
+  "Scannable" leaves out held and pending sources and any file holding a consolidation summary
+  of one, the scan's existing rule.
+  - The coverage line says how much of the store that was and how it was chosen:
+    `Scanned all 412 scannable chunks; ...` when the pool is every scannable chunk, and
+    `Scanned 500 of 39458 scannable chunks (the first 500 in chunk-id order: ...); ...`
+    otherwise. The job's result gains `eligible` and the web response `eligible_chunks`,
+    the number of scannable chunks the pool was taken from.
+  - The pool's order also decided ties: which member of an exact group with equal timestamps
+    is listed first, which side of a near pair with equal timestamps is `chunk_a`, and which
+    of several equal pairs survive `limit`. Those now depend on the stored chunks only: a
+    small store can list a tied pair the other way round from before, and every process lists
+    it the same way.
+  - The `max_scan` parameter description now reads "Maximum chunks to scan, taken in
+    chunk-id order".
+  - A pool smaller than the store is still a subset: chunks outside it are reached only as
+    near neighbours of chunks inside it. Continuing a scan past the first `max_scan` chunks
+    is #3397; exact copies outside the pool are #3398.
+
 - **A non-string namespace description is rejected with a clear parameter error (#3355).**
   `mem_do(action="ns_update", params=...)` forwarded parameters without type-checking
   `description`. `storage.set_namespace_meta` treated falsy non-strings (`0`, `False`, `[]`)
