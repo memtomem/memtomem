@@ -60,6 +60,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **The duplicate scan leaves out pairs of read-only chunks from the same file, and says how
+  many (#3418).** A large JSON file is sliced into chunks that are all stored read-only, and
+  when it is minified every slice sits on line 1 and pairs with its siblings: on one real
+  store such pairs were 306 of 412 at `max_scan=5000`. Neither member of such a pair can be
+  removed (`mem_delete` and `mem_dedup_remove` refuse a read-only chunk), so they no longer
+  take `limit` slots. Read-only pairs across two files and pairs with a writable member are
+  still listed. `mem_dedup_scan`'s coverage line ends with `left out N pairs of read-only
+  chunks from the same file` when there are any, `GET /api/dedup/candidates` adds
+  `same_source_read_only_pairs`, the Maintenance panel shows the count under the results
+  (including "No duplicates found"), and a scheduled `dedup_scan` result adds the same key.
+  Such pairs no longer reach the panel's Keep A / Keep B merge.
+
 - **`mm upgrade` signals each process once, however many lock files it holds.** It used to
   signal once per lock file. A shared daemon holds two, its name's and its store's, so its pid
   was signalled a second time after it had exited. Both files are still removed. A pid whose

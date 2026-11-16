@@ -33,6 +33,9 @@ class DedupScanResponse(BaseModel):
     near_search_enabled: bool = True
     probed_chunks: int = 0
     chunks_without_vector: int = 0
+    # Pairs left out because both members are read-only chunks of one source
+    # file (#3418); not in ``candidates`` and not counted in ``total``.
+    same_source_read_only_pairs: int = 0
 
 
 class MergeRequest(BaseModel):

@@ -670,9 +670,32 @@ class TestDedup:
         assert data["probed_chunks"] == 30
         assert data["chunks_without_vector"] == 7
         assert data["near_search_enabled"] is True
+        assert data["same_source_read_only_pairs"] == 0
         app.state.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
             threshold=0.85, limit=50, max_scan=200
         )
+
+    async def test_dedup_scan_reports_left_out_read_only_pairs(self, app, client: AsyncClient):
+        # #3418: pairs of read-only chunks from one file are not candidates; the
+        # count is the panel's only sign that the scan hid any.
+        app.state.dedup_scanner.scan_with_coverage = AsyncMock(
+            return_value=(
+                [],
+                DedupCoverage(
+                    pool=5,
+                    eligible=5,
+                    near_search_enabled=True,
+                    probed=5,
+                    without_vector=0,
+                    same_source_read_only=3,
+                ),
+            )
+        )
+        resp = await client.get("/api/dedup/candidates")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 0
+        assert data["same_source_read_only_pairs"] == 3
 
     @pytest.mark.parametrize("max_scan", [0, -1])
     async def test_dedup_scan_rejects_non_positive_max_scan(

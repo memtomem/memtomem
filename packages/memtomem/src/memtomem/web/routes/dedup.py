@@ -57,6 +57,7 @@ async def scan_duplicates(
         near_search_enabled=coverage.near_search_enabled,
         probed_chunks=coverage.probed,
         chunks_without_vector=coverage.without_vector,
+        same_source_read_only_pairs=coverage.same_source_read_only,
     )
 
 

@@ -463,6 +463,128 @@ class TestStoredVectorsAndCoverage:
         assert await scanner.scan() == (await scanner.scan_with_coverage())[0]
 
 
+def _ro(content: str, source: str = "/data.json", **kwargs) -> Chunk:
+    """A chunk stored read-only, as ``chunk_json`` stamps every slice."""
+    chunk = _mk(content, **kwargs)
+    chunk.metadata = replace(chunk.metadata, source_file=Path(source), source_read_only=True)
+    return chunk
+
+
+def _rw(content: str, source: str = "/data.json", **kwargs) -> Chunk:
+    chunk = _mk(content, **kwargs)
+    chunk.metadata = replace(chunk.metadata, source_file=Path(source))
+    return chunk
+
+
+def _both_ways(a: str, b: str, score: float) -> dict[tuple[str, str], float]:
+    return {(a, b): score, (b, a): score}
+
+
+class TestSameSourceReadOnlyPairs:
+    """#3418: two read-only chunks of one source are not a candidate."""
+
+    @pytest.mark.asyncio
+    async def test_exact_pair_is_left_out_and_counted(self, scanner_factory):
+        scanner, _ = scanner_factory([_ro("{slice}"), _ro("{slice}")])
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert candidates == []
+        assert coverage.same_source_read_only == 1
+
+    @pytest.mark.asyncio
+    async def test_near_pair_is_left_out_and_counted(self, scanner_factory):
+        scanner, _ = scanner_factory(
+            [_ro('{"a": 1'), _ro('{"a": 2')], _both_ways('{"a": 1', '{"a": 2', 0.97)
+        )
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert candidates == []
+        assert coverage.same_source_read_only == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("make_a", "make_b"),
+        [
+            # Both orders: the older chunk is chunk_a in either phase.
+            pytest.param(lambda c: _ro(c), lambda c: _rw(c), id="same-file-older-read-only"),
+            pytest.param(lambda c: _rw(c), lambda c: _ro(c), id="same-file-older-writable"),
+            pytest.param(lambda c: _ro(c), lambda c: _ro(c, source="/other.json"), id="two-files"),
+            pytest.param(lambda c: _rw(c), lambda c: _rw(c), id="same-file-writable"),
+        ],
+    )
+    @pytest.mark.parametrize("exact", [True, False], ids=["exact", "near"])
+    async def test_other_pairs_are_kept(self, scanner_factory, make_a, make_b, exact):
+        a = make_a("one text")
+        b = make_b("one text" if exact else "one txt")
+        sims = {} if exact else _both_ways("one text", "one txt", 0.97)
+        scanner, _ = scanner_factory([a, b], sims)
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert [(c.chunk_a.id, c.chunk_b.id, c.exact) for c in candidates] == [(a.id, b.id, exact)]
+        assert coverage.same_source_read_only == 0
+
+    @pytest.mark.asyncio
+    async def test_a_pair_both_phases_and_both_probes_reach_is_counted_once(self, scanner_factory):
+        # Exact (one hash) and near (each probes the other at 0.99): the exact
+        # phase, then each member's near probe, all reach the one pair.
+        scanner, storage = scanner_factory(
+            [_ro("{slice}"), _ro("{slice}")], {("{slice}", "{slice}"): 0.99}
+        )
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert candidates == []
+        assert len(storage.probes) == 2
+        assert coverage.same_source_read_only == 1
+
+    @pytest.mark.asyncio
+    async def test_bm25_only_store_counts_exact_pairs(self, scanner_factory):
+        scanner, _ = scanner_factory([_ro("{slice}"), _ro("{slice}")], dense_enabled=False)
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert candidates == []
+        assert coverage.near_search_enabled is False
+        assert coverage.same_source_read_only == 1
+
+    @pytest.mark.asyncio
+    async def test_left_out_pairs_take_no_limit_slot_and_are_all_counted(self, scanner_factory):
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        kept_a = _rw("note", source="/a.md", created_at=t0)
+        kept_b = _rw("note", source="/b.md", created_at=t0 + timedelta(hours=1))
+        # All three pairs are exact (score 1.0), so they keep pool order, and
+        # these lower ids would take the one slot first.
+        left = [_ro("{x}"), _ro("{x}"), _ro("{y}"), _ro("{y}")]
+        scanner, _ = scanner_factory([*left, kept_a, kept_b])
+
+        candidates, coverage = await scanner.scan_with_coverage(limit=1)
+
+        assert [(c.chunk_a.id, c.chunk_b.id) for c in candidates] == [(kept_a.id, kept_b.id)]
+        assert coverage.same_source_read_only == 2
+
+    @pytest.mark.asyncio
+    async def test_siblings_still_fill_a_probes_neighbour_slots(self, scanner_factory):
+        # Stated limit: the filter runs after each probe's top 6, so a probe
+        # whose slots are all left-out siblings does not reach a writable
+        # neighbour past them. Not widened: on a real store copy (2026-11-17,
+        # max_scan=5000) 2,502 probes had a left-out sibling in a full top 6, and
+        # widening those probes found no additional pair at the threshold.
+        siblings = [_ro(f"s{i}") for i in range(7)]
+        writable = _rw("w", source="/w.md")  # highest id: outside a 7-chunk pool
+        sims = {(a.content, b.content): 0.99 for a in siblings for b in siblings if a is not b}
+        sims.update(_both_ways("s0", "w", 0.95))
+        scanner, _ = scanner_factory([*siblings, writable], sims)
+
+        candidates, coverage = await scanner.scan_with_coverage(max_scan=7)
+
+        assert coverage.pool == 7
+        assert candidates == []
+        assert coverage.same_source_read_only > 0
+
+
 class TestMcpScanCoverage:
     """``mem_dedup_scan`` says what it covered on both branches."""
 
@@ -594,6 +716,33 @@ class TestMcpScanCoverage:
                 {"pool": 0, "eligible": 0, "probed": 0, "without_vector": 0},
                 "Scanned all 0 scannable chunks; near-duplicate search probed 0.",
                 id="nothing-scannable",
+            ),
+            pytest.param(
+                {
+                    "pool": 4,
+                    "eligible": 4,
+                    "probed": 3,
+                    "without_vector": 1,
+                    "same_source_read_only": 2,
+                },
+                "Scanned all 4 scannable chunks; near-duplicate search probed 3, "
+                "1 had no usable stored vector and were not probed; left out 2 pairs of "
+                "read-only chunks from the same file (neither member can be removed).",
+                id="left-out-pairs",
+            ),
+            pytest.param(
+                {
+                    "pool": 2,
+                    "eligible": 2,
+                    "probed": 0,
+                    "without_vector": 0,
+                    "near": False,
+                    "same_source_read_only": 1,
+                },
+                "Scanned all 2 scannable chunks; near-duplicate search is off (BM25-only "
+                "store); left out 1 pair of read-only chunks from the same file "
+                "(neither member can be removed).",
+                id="left-out-pair-bm25-only",
             ),
         ],
     )

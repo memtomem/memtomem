@@ -125,7 +125,12 @@ class TestStoredUnknownKeyStillRuns:
 
     def test_cli_run_now_ignores_the_stored_key(self, runner, components, monkeypatch):
         coverage = SimpleNamespace(
-            pool=0, eligible=0, probed=0, without_vector=0, near_search_enabled=False
+            pool=0,
+            eligible=0,
+            probed=0,
+            without_vector=0,
+            near_search_enabled=False,
+            same_source_read_only=0,
         )
         scan = AsyncMock(return_value=([], coverage))
         monkeypatch.setattr(DedupScanner, "scan_with_coverage", scan)

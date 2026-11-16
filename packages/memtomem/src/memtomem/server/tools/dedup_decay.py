@@ -109,10 +109,18 @@ def _dedup_coverage_line(coverage) -> str:
         noun = "chunk" if coverage.pool == 1 else "chunks"
         line = f"Scanned all {coverage.pool} scannable {noun}"
     if not coverage.near_search_enabled:
-        return f"{line}; near-duplicate search is off (BM25-only store)."
-    line += f"; near-duplicate search probed {coverage.probed}"
-    if coverage.without_vector:
-        line += f", {coverage.without_vector} had no usable stored vector and were not probed"
+        line += "; near-duplicate search is off (BM25-only store)"
+    else:
+        line += f"; near-duplicate search probed {coverage.probed}"
+        if coverage.without_vector:
+            line += f", {coverage.without_vector} had no usable stored vector and were not probed"
+    if coverage.same_source_read_only:
+        n = coverage.same_source_read_only
+        noun = "pair" if n == 1 else "pairs"
+        line += (
+            f"; left out {n} {noun} of read-only chunks from the same file "
+            "(neither member can be removed)"
+        )
     return f"{line}."
 
 
