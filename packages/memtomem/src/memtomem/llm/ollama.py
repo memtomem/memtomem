@@ -42,6 +42,11 @@ class OllamaLLM:
             "model": self._config.model,
             "prompt": prompt,
             "stream": False,
+            # Ollama counts a thinking model's reasoning against ``num_predict``
+            # and returns it in a separate ``thinking`` field this provider does
+            # not read. Left on, it can use the whole budget and leave
+            # ``response`` empty.
+            "think": False,
             "options": {"num_predict": max_tokens},
         }
         if system:

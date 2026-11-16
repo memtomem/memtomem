@@ -27,7 +27,7 @@ export MEMTOMEM_LLM__PROVIDER=ollama
 > change without a deprecation window. The heuristic modes beside it are
 > supported. See [Stability](../../README.md#stability).
 
-Enabling an LLM upgrades four features. Each degrades gracefully — if a call fails, the heuristic fallback (the "disabled" column) runs automatically:
+Enabling an LLM upgrades four features. Each degrades gracefully — if a call fails, the heuristic fallback (the "disabled" column) runs automatically. For entity extraction and auto-tagging an empty answer from the model is a failed call:
 
 | Feature | LLM enabled | LLM disabled (default) |
 |---------|-------------|------------------------|
@@ -56,6 +56,11 @@ export MEMTOMEM_LLM__PROVIDER=ollama
 export MEMTOMEM_LLM__MODEL=gemma4:e2b      # default when empty
 export MEMTOMEM_LLM__BASE_URL=http://localhost:11434
 ```
+
+Every request to Ollama carries `think: false`. Ollama counts a thinking model's reasoning
+against the token limit of the call, and `gemma4:e2b` is a thinking model, so with thinking
+on it could use the whole limit and answer with nothing. There is no setting to turn it
+back on.
 
 ### OpenAI (cloud)
 

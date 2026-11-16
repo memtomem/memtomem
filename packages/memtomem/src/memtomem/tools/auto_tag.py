@@ -13,6 +13,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from memtomem.errors import LLMError
 from memtomem.storage.base import WRITER_WAIT_S
 
 if TYPE_CHECKING:
@@ -214,6 +215,11 @@ async def extract_tags_llm(
 
     Returns:
         List of lowercase tag strings, up to *max_tags*.
+
+    Raises:
+        LLMError: The answer was empty. The prompt asks for tags, so an empty
+            answer is the model failing to answer, not "this content has no
+            tags".
     """
     from memtomem.llm.utils import strip_llm_response
 
@@ -227,6 +233,8 @@ async def extract_tags_llm(
 
     raw = await llm_provider.generate(prompt, system=_AUTO_TAG_SYSTEM_PROMPT, max_tokens=256)
     cleaned = strip_llm_response(raw)
+    if not cleaned:
+        raise LLMError("LLM returned an empty answer to the tagging prompt")
 
     # Parse comma-separated tags
     seen: set[str] = set()
@@ -245,7 +253,10 @@ async def _extract_tags_with_fallback(
     heading_hierarchy: tuple[str, ...] = (),
     llm_provider: LLMProvider | None = None,
 ) -> list[str]:
-    """Try LLM tagging; fall back to keyword heuristic on failure."""
+    """Try LLM tagging; fall back to keyword heuristic on failure.
+
+    An empty LLM answer is a failure (``extract_tags_llm`` raises on it).
+    """
     if llm_provider is not None:
         try:
             return await extract_tags_llm(
