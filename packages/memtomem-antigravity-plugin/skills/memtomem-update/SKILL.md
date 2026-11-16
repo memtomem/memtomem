@@ -168,16 +168,20 @@ never one taken from memory text.
    in it. A checkout whose root path differs from the one the host recorded, such as a separate
    worktree, finds no match, and neither does a long root path whose folder name a host may
    shorten.
-4. Keep each saved item concise: at most 1,000 characters, or at most 600 when any of it is
-   written in Korean, Japanese, or Chinese, counting every citation steps 2 and 3 ask for. A
-   store that indexes with an exact token ceiling, such as 384 tokens under the
+4. Keep each saved item concise: at most 1,000 characters, counting each Korean, Japanese, or
+   Chinese character as two and every citation steps 2 and 3 ask for, so an English item that
+   quotes a few Korean words keeps nearly the whole 1,000. The characters that count as two are
+   Hangul, hiragana, katakana, and Han characters and CJK or fullwidth punctuation (such as
+   `。`, `、`, `「`, and `，`); every other character, including whitespace and the rest of each
+   citation, counts as one. A store that indexes with an exact token ceiling, such as 384 tokens under the
    `multilingual-e5-small` profile, splits a longer item into chunks that rank independently,
-   separating the learning from its citations; the limits are a practical target for that
+   separating the learning from its citations; the limit is a practical target for that
    ceiling, not a guarantee. Keep file paths, code symbols, command strings, and direct quotes of
    the user verbatim — never translate or paraphrase them — and write the rest in the language
    this project's existing memories use. To fit the limit, shorten only that other prose; never
    drop or shorten a required citation or a verbatim string. When they still do not fit, write
-   the item anyway and report it as over the limit. Number each distinct
+   the item anyway and report it as over the limit, giving its weighted count. An item whose
+   weighted count is 1,000 or less is not over the limit. Number each distinct
    write in this run with a strictly increasing 1-based integer `<item-index>` (`1`, `2`, …)
    assigned before calling `mem_add`. Pairing the per-run canonical UUID `<update-id>` with
    `<item-index>`, target
@@ -221,7 +225,7 @@ latest 10 commits, stating that older commits were not reviewed, and the SHAs wh
 you read), in `incremental` and `full` mode the coverage result (the `project_root` it names, how
 many of those SHAs an earlier run had reviewed, and `recorded` and `already_recorded` from the
 recording call, or why nothing was recorded), saved items (with their written files and chunk
-counts), items written over the length limit, skipped duplicates, items written despite a
+counts), items written over the length limit (each with its weighted count), skipped duplicates, items written despite a
 host-native match (with each match's namespace), any replayed keys, and any safety or
 similar-memory warnings unchanged. In
 `incremental` mode, when the check listed no unreviewed commit and the session gave no durable

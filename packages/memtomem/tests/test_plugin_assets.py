@@ -1263,17 +1263,28 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         # Item size is set by the exact token ceiling, not by paragraph layout: a
         # multilingual-e5-small store (384 tokens) cut items of 1,000-1,200 characters at a
         # line boundary, so a trailing citation became its own chunk (#3002).
-        "at most 1,000 characters, or at most 600 when any of it is written in Korean, "
-        "Japanese, or Chinese, counting every citation steps 2 and 3 ask for",
-        "the limits are a practical target for that ceiling, not a guarantee",
+        # One limit with CJK characters weighted, not a lower limit for any CJK at all: an
+        # English item quoting five Hangul characters was held to 600 and reported over it
+        # while the store kept it in one chunk of 223 tokens.
+        "at most 1,000 characters, counting each Korean, Japanese, or Chinese character as two "
+        "and every citation steps 2 and 3 ask for",
+        # The weight names its scripts: an agent left to guess whether `。` counts as two
+        # reaches a different verdict near the cap.
+        "The characters that count as two are Hangul, hiragana, katakana, and Han characters "
+        "and CJK or fullwidth punctuation",
+        "every other character, including whitespace and the rest of each citation, counts as one",
+        "the limit is a practical target for that ceiling, not a guarantee",
         "To fit the limit, shorten only that other prose; never drop or shorten a required "
         "citation or a verbatim string",
-        "When they still do not fit, write the item anyway and report it as over the limit",
-        "items written over the length limit",
+        "When they still do not fit, write the item anyway and report it as over the limit, "
+        "giving its weighted count",
+        "An item whose weighted count is 1,000 or less is not over the limit",
+        "items written over the length limit (each with its weighted count)",
     )
     for marker in required:
         assert marker in flat, marker
     assert "at most 1,200 characters" not in flat
+    assert "or at most 600 when any of it" not in flat
     assert "mem_do" not in body
     # No mode-ambiguity refusal: the one remaining question is a `topic` without a focus.
     assert "insufficient_input: mode" not in flat
@@ -1903,15 +1914,17 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
     assert "`incremental`" in source_rows[0][0]
     assert _mode_rows(guide) == source_rows
 
-    # update's item size limits: the guide states the two numbers the workflow sets.
+    # update's item size limit: the guide states the cap and the CJK weight the workflow sets.
     limits = re.search(
-        r"at most ([\d,]+) characters, or at most ([\d,]+) when any of it is written in",
+        r"at most ([\d,]+) characters, counting each Korean, Japanese, or Chinese character "
+        r"as (\w+) ",
         " ".join(_UPDATE_WORKFLOW.read_text(encoding="utf-8").split()),
     )
     assert limits is not None
     flat_guide = " ".join(guide.split())
     assert (
-        f"is at most {limits[1]} characters, or {limits[2]} when any of it is in" in flat_guide
+        f"is at most {limits[1]} characters, with each Korean, Japanese, or Chinese "
+        f"character counted as {limits[2]}," in flat_guide
     ), limits.groups()
 
     # Host table: one row per surface, shipped hosts carry the invocation, the rest say so.
