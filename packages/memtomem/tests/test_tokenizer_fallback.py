@@ -222,3 +222,47 @@ class TestFallbackWarning:
         text = runner.invoke(cli, ["status"])
         assert text.exit_code == 0, text.output
         assert "- kind:       tokenizer_fallback" in text.output
+
+
+class TestConfigRebuildMessage:
+    """``mem_config`` names the tokenizer the rebuilt rows actually used (#3385)."""
+
+    @pytest.fixture(autouse=True)
+    def _restore(self, restore_tokenizer):
+        pass
+
+    @pytest.fixture
+    async def config_app(self, tmp_path, monkeypatch):
+        storage = SqliteBackend(StorageConfig(sqlite_path=tmp_path / "config.db"))
+        await storage.initialize()
+        await storage.upsert_chunks([make_chunk(_ROW_A, source="a.md", embedding=[0.1] * 768)])
+        config = Mem2MemConfig()
+        app = SimpleNamespace(
+            config=config,
+            search_pipeline=SimpleNamespace(invalidate_cache=lambda: None, config=config.search),
+            storage=storage,
+            embedder=SimpleNamespace(config=config.embedding),
+        )
+        monkeypatch.setattr(status_config, "_get_app_initialized", AsyncMock(return_value=app))
+        yield app
+        await storage.close()
+
+    async def test_the_reply_names_kiwipiepy_when_the_rebuild_used_it(
+        self, config_app, monkeypatch
+    ):
+        pytest.importorskip("kiwipiepy", reason="the korean extra is not installed")
+        _use_kiwi(monkeypatch, config_app.storage)
+
+        reply = await status_config.mem_config("search.tokenizer", "kiwipiepy")
+
+        assert "FTS index rebuilt with kiwipiepy (1 chunks)." in reply
+        assert "warning:" not in reply
+
+    async def test_the_reply_names_the_fallback_and_warns_about_it(self, config_app, monkeypatch):
+        _fall_back(monkeypatch, config_app.storage)
+
+        reply = await status_config.mem_config("search.tokenizer", "kiwipiepy")
+
+        assert "FTS index rebuilt with unicode61 (1 chunks)." in reply
+        assert "kiwipiepy is unavailable" in reply
+        assert "fall back to unicode61" in reply
