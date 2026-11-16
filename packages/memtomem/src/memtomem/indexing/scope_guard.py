@@ -124,16 +124,16 @@ def twin_detail(
     *,
     op: str,
     surface: RemedySurface = "neutral",
-    local_tier: bool = False,
+    unlisted: bool = False,
 ) -> str:
     """The refusal for a rewrite through a key whose file is also stored as ``twin`` (#3408).
 
     Removing lines through one spelling would leave the other spelling's rows
     serving them, which is how deleting "the duplicate" removed the only copy.
     The remedy is the Sources tab's delete, which removes one stored key's rows
-    and does not touch the file. That tab does not list a path it classifies as
-    ``project_local``; when it classifies both spellings so (``local_tier``),
-    no remedy is named. As in
+    and does not touch the file. That tab does not list a held or pending path,
+    or one it classifies as ``project_local``; when it lists neither spelling
+    (``unlisted``), no remedy is named. As in
     :func:`scope_change_detail`, only ``mcp`` names host paths and commands.
     """
     name = Path(key).name
@@ -148,10 +148,10 @@ def twin_detail(
         f"{what}; removing lines through one would leave the other's rows serving them, "
         "and nothing was written."
     )
-    if local_tier:
+    if unlisted:
         return (
-            f"{lead} The web UI does not list this file's tier, so the stale spelling's rows "
-            "cannot be removed there; edit the file directly instead."
+            f"{lead} The web UI's Sources tab does not list either spelling now, so the stale "
+            "spelling's rows cannot be removed there; edit the file directly instead."
         )
     if surface == "mcp":
         return (

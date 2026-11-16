@@ -193,11 +193,24 @@ def test_identity_does_not_follow_a_leaf_symlink(tmp_path: Path) -> None:
     assert _source_identity(str(link)) != _source_identity(str(target))
 
 
-def test_a_missing_path_has_no_twin(tmp_path: Path) -> None:
+def test_a_path_that_cannot_be_stat_ed_has_no_twin(tmp_path: Path, monkeypatch) -> None:
     present = tmp_path / "a.md"
     present.write_text("x", encoding="utf-8")
-    assert source_twins(str(present), [str(tmp_path / "A.MD.gone")]) == []
-    assert source_twins(str(tmp_path / "gone.md"), [str(tmp_path / "GONE.md")]) == []
+    candidate = str(tmp_path / "A.MD")
+    assert twin_candidates(str(present), [candidate]) == [candidate]
+    real_lstat = os.lstat
+
+    def lstat(path):
+        if str(path) == candidate:
+            raise FileNotFoundError(path)
+        return real_lstat(path)
+
+    monkeypatch.setattr(sqlite_helpers.os, "lstat", lstat)
+    assert source_twins(str(present), [candidate]) == []
+    # The key's own side: a key whose file is gone has no identity to share.
+    gone = str(tmp_path / "gone.md")
+    assert twin_candidates(gone, [str(tmp_path / "GONE.md")]) == [str(tmp_path / "GONE.md")]
+    assert source_twins(gone, [str(tmp_path / "GONE.md")]) == []
 
 
 def test_a_zero_inode_is_no_identity(tmp_path: Path, monkeypatch, case_insensitive) -> None:
@@ -333,12 +346,36 @@ async def test_a_project_local_twin_below_the_tier_root_names_no_remedy(
     result = await mem_delete(chunk_id=_chunk_id(comp, str(target)), ctx=ctx)
 
     assert "under two spellings of its path" in result
-    assert "does not list this file's tier" in result
+    assert "does not list either spelling now" in result
     assert "Sources tab of the web UI" not in result
     # Why that wording exists: both spellings sit under the registered tier, so
     # the tab hides both. A change that lists them makes this fail.
     paths = await _listed(comp)
     assert str(target) not in paths and second not in paths
+
+
+@pytest.mark.asyncio
+async def test_a_held_twin_is_not_offered_as_the_remedy(
+    bm25_only_components, tmp_path: Path, monkeypatch, case_insensitive
+) -> None:
+    """The tab hides a held spelling too, so a refusal must not send the user there."""
+    comp, _ = bm25_only_components
+    target, second = await _local_twin(
+        comp,
+        tmp_path,
+        monkeypatch,
+        lambda local, t: str(local.parent.parent / ".MEMTOMEM" / local.name / t.name),
+    )
+    assert await comp.storage.hold_source(Path(second), "external_test", as_stored=True)
+    ctx = StubCtx(AppContext.from_components(comp))
+
+    result = await mem_delete(chunk_id=_chunk_id(comp, str(target)), ctx=ctx)
+
+    assert "under two spellings of its path" in result
+    paths = await _listed(comp)
+    assert str(target) not in paths and second not in paths
+    assert "Sources tab of the web UI" not in result
+    assert "does not list either spelling now" in result
 
 
 @pytest.mark.asyncio

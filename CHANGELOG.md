@@ -67,8 +67,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   web UI's chunk edit and delete, now refuse when the file is also stored under another
   spelling (same file on disk, path equal ignoring case and Unicode form), and say to remove
   the stale spelling's rows from the web UI's Sources tab first, which removes index rows only.
-  Where that tab cannot list either spelling (both inside a project's `memories.local` tier),
-  the refusal says so. Nothing else changes: indexing a second spelling still adds its rows,
+  Where that tab lists neither spelling (each is inside a project's `memories.local` tier, or
+  held), the refusal says so. Nothing else changes: indexing a second spelling still adds its rows,
   and existing duplicates stay until removed (#3409).
 - **A bounded duplicate scan selects the same chunks in every process (#3390).**
   `mem_dedup_scan`, the web `GET /dedup/candidates` route and the scheduled `dedup_scan` job
