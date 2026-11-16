@@ -124,7 +124,9 @@ class TestStoredUnknownKeyStillRuns:
     """A row stored before registration refused unknown keys keeps running."""
 
     def test_cli_run_now_ignores_the_stored_key(self, runner, components, monkeypatch):
-        coverage = SimpleNamespace(pool=0, probed=0, without_vector=0, near_search_enabled=False)
+        coverage = SimpleNamespace(
+            pool=0, eligible=0, probed=0, without_vector=0, near_search_enabled=False
+        )
         scan = AsyncMock(return_value=([], coverage))
         monkeypatch.setattr(DedupScanner, "scan_with_coverage", scan)
         monkeypatch.setattr(
