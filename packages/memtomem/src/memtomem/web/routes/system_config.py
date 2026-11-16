@@ -674,11 +674,17 @@ async def patch_config(
                 if tokenizer_changed:
                     storage.set_fts_tokenizer(config.search.tokenizer)
                     count = await storage.rebuild_fts()
-                    logger.info(
-                        "FTS index rebuilt with tokenizer=%s (%d chunks)",
-                        config.search.tokenizer,
-                        count,
-                    )
+                    built = storage.fts_tokenizer_effective
+                    fallback = hr.fts_rebuild_fallback_warning(storage)
+                    if fallback is None:
+                        logger.info("FTS index rebuilt with tokenizer=%s (%d chunks)", built, count)
+                    else:
+                        logger.warning(
+                            "FTS index rebuilt with tokenizer=%s (%d chunks): %s",
+                            built,
+                            count,
+                            fallback,
+                        )
 
                 if onnx_batch_changed:
                     embedder = getattr(request.app.state, "embedder", None)
