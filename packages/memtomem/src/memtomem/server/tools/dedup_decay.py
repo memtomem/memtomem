@@ -393,9 +393,9 @@ async def _check_pair(app: AppContext, keep_uuid: UUID, keep_id: str, removed: C
 
     Runs under the removed file's locks (``_delete_chunk``'s precheck). The kept
     file is read, not locked: a change to it after this check is not seen. The
-    files are read first, in a thread; the store is then read on the writer in
-    one transaction, so holds, receipts and rows are one committed state. A
-    change landing between the two reads makes them disagree, which refuses.
+    files, holds, receipts and rows are all read inside one writer transaction,
+    so no commit lands between them and the check describes one moment. The
+    file reads run in a thread, as other awaits inside a transaction do.
     """
     from memtomem.indexing.source_receipt import receipt_as_stored, state_as_stored
     from memtomem.storage.base import WRITER_WAIT_S
@@ -406,19 +406,15 @@ async def _check_pair(app: AppContext, keep_uuid: UUID, keep_id: str, removed: C
     if keeper is None or not in_boundary(keeper, boundary):
         return f"Error: chunk {keep_id} not found."
     if _one_file(removed, keeper):
-        return _same_file_refusal(keeper)
+        return _same_file_refusal(removed, keeper)
     keys = [
         ("removed", str(removed.metadata.source_file)),
         ("kept", str(keeper.metadata.source_file)),
     ]
-    reads = await asyncio.to_thread(_read_members, keys)
-    if isinstance(reads, str):
-        return reads
-    if (reads[0]["device"], reads[0]["inode"]) == (reads[1]["device"], reads[1]["inode"]):
-        return _same_file_refusal(keeper)
-
     indexing = app.config.indexing
-    no_receipt_remedy = (
+    # Under either setting an index pass records no receipt, so reindexing
+    # cannot clear any refusal that compares against one.
+    receipt_remedy = (
         "Index passes with indexing.enrich_chunk_context or indexing.auto_summarize on "
         "record no receipt, so this file cannot be checked here. " + _JUDGE_REMEDY
         if indexing.enrich_chunk_context or indexing.auto_summarize
@@ -434,19 +430,24 @@ async def _check_pair(app: AppContext, keep_uuid: UUID, keep_id: str, removed: C
             raise RetryableError(
                 "the kept member moved while it was checked; no lines were removed. Retry."
             )
+        reads = await asyncio.to_thread(_read_members, keys)
+        if isinstance(reads, str):
+            return reads
+        if (reads[0]["device"], reads[0]["inode"]) == (reads[1]["device"], reads[1]["inode"]):
+            return _same_file_refusal(removed, keeper)
         db = storage._get_db()
         for (role, key), read in zip(keys, reads, strict=True):
             if await app.storage.is_source_held(Path(key)):
                 return _refusal(role, key, "is held by the index", _HELD_REMEDY)
             receipt = receipt_as_stored(db, key)
             if receipt is None:
-                return _refusal(role, key, "has no index receipt", no_receipt_remedy)
+                return _refusal(role, key, "has no index receipt", receipt_remedy)
             if read["content_hash"] != receipt[0]:
-                return _refusal(role, key, "changed since it was indexed", _REINDEX_REMEDY)
+                return _refusal(role, key, "changed since it was indexed", receipt_remedy)
             rows = state_as_stored(db, key, dimension)
             if rows is None or rows[0] != receipt[1]:
                 return _refusal(
-                    role, key, "has stored rows that differ from its last index", _REINDEX_REMEDY
+                    role, key, "has stored rows that differ from its last index", receipt_remedy
                 )
     return None
 
@@ -457,10 +458,15 @@ def _one_file(a: Chunk, b: Chunk) -> bool:
     )
 
 
-def _same_file_refusal(keeper: Chunk) -> str:
+def _same_file_refusal(removed: Chunk, keeper: Chunk) -> str:
+    """Two members in one file; under two stored keys, the twin remedy of #3408."""
+    removed_key, kept_key = str(removed.metadata.source_file), str(keeper.metadata.source_file)
+    if removed_key != kept_key:
+        from memtomem.indexing.scope_guard import twin_detail
+
+        return "Error: " + twin_detail(removed_key, kept_key, op="mem_dedup_remove", surface="mcp")
     return (
-        f"Error: both members are in one file ({keeper.metadata.source_file}); no lines "
-        f"were removed. {_JUDGE_REMEDY}"
+        f"Error: both members are in one file ({kept_key}); no lines were removed. {_JUDGE_REMEDY}"
     )
 
 
@@ -504,7 +510,7 @@ async def mem_dedup_remove(
         return f"Error: chunk {keep_id} not found."
     removed = await app.storage.get_chunk(remove_uuid, exclude_withheld=True)
     if removed is not None and in_boundary(removed, boundary) and _one_file(removed, keeper):
-        return _same_file_refusal(keeper)
+        return _same_file_refusal(removed, keeper)
 
     async def precheck(chunk: Chunk) -> str | None:
         return await _check_pair(app, keep_uuid, keep_id, chunk)

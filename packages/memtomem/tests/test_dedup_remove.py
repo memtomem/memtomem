@@ -408,7 +408,8 @@ async def test_two_names_with_one_identity_are_one_file(pair, monkeypatch):
 
     result = await _remove(comp, removed.id, kept.id)
 
-    assert result.startswith(f"Error: both members are in one file ({kept_file})"), result
+    assert result.startswith("Error: mem_dedup_remove refused: the store holds"), result
+    assert "under two spellings of its path" in result
     assert _snapshot(comp, removed_file, kept_file) == before
 
 
@@ -426,6 +427,8 @@ async def test_a_legacy_nfd_key_does_not_find_its_nfc_receipt(bm25_only_componen
     nfc_key = str(kept.metadata.source_file)
     nfd_key = unicodedata.normalize("NFD", nfc_key)
     assert nfd_key != nfc_key
+    if not Path(nfd_key).exists():  # a filesystem that does not fold Unicode forms
+        Path(nfd_key).write_bytes(kept_file.read_bytes())
     db = comp.storage._get_db()
     db.execute("UPDATE chunks SET source_file=? WHERE source_file=?", (nfd_key, nfc_key))
     db.commit()
@@ -483,5 +486,46 @@ async def test_a_busy_writer_is_a_retryable_refusal_worded_for_this_tool(pair, m
 
     result = await _remove(comp, removed.id, kept.id)
 
+    assert result.startswith("Error (retryable): "), result
     assert "writer is busy; no lines were removed" in result, result
     assert _snapshot(comp, removed_file, kept_file) == before
+
+
+async def test_one_file_under_two_stored_spellings_gets_the_twin_remedy(bm25_only_components):
+    comp, mem_dir = bm25_only_components
+    source = mem_dir / "note.md"
+    source.write_text(_note("Router-X"), encoding="utf-8")
+    await _index(comp, source)
+    twin = str(source.with_name("NOTE.md"))
+    db = comp.storage._get_db()
+    db.execute("UPDATE chunks SET source_file=? WHERE source_file=?", (twin, str(source)))
+    db.commit()
+    await _index(comp, source, force=True)
+    original = await _alarm_chunk(comp, source)
+    (other,) = [
+        c
+        for c in await comp.storage.list_chunks_by_source(Path(twin))
+        if c.metadata.heading_hierarchy[-1:] == ("## Alarm",)
+    ]
+    before = _snapshot(comp, source)
+
+    result = await _remove(comp, original.id, other.id)
+
+    assert result.startswith("Error: mem_dedup_remove refused: the store holds note.md"), result
+    assert _snapshot(comp, source) == before
+
+
+async def test_the_files_are_read_inside_the_writer_transaction(pair, monkeypatch):
+    """One moment: no commit can land between the file reads and the row reads."""
+    comp, _removed_file, _kept_file, removed, kept = pair
+    real = dedup_decay._read_members
+    owners = []
+
+    def recording(keys):
+        owners.append(comp.storage._transaction_owner)
+        return real(keys)
+
+    monkeypatch.setattr(dedup_decay, "_read_members", recording)
+
+    assert (await _remove(comp, removed.id, kept.id)).startswith("Memory deleted from")
+    assert owners and owners[0] is not None
