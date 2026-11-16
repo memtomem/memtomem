@@ -28,7 +28,12 @@ _SIBLING = "SELECT 1 FROM chunks o WHERE o.source_file = c.source_file"
 
 def _listed(endpoint: str) -> str:
     # The other end of an edge counts only while a scan would list it.
-    return f"EXISTS (SELECT 1 FROM chunks WHERE chunks.id = {endpoint} AND {VISIBLE_SOURCE_PATH})"
+    # ``endpoint`` is one of the column spellings written out in this module
+    # (``r.target_id``, ``l.source_id``, ...), never a value.
+    return (
+        f"EXISTS (SELECT 1 FROM chunks WHERE chunks.id = {endpoint} "  # nosec B608
+        f"AND {VISIBLE_SOURCE_PATH})"
+    )
 
 
 def _edges(end: str, other_end: str, type_test: str) -> str:
