@@ -24,6 +24,7 @@ from memtomem.context.error_redact import (
 )
 from memtomem.context.scope_resolver import find_project_root
 from memtomem.server import mcp
+from memtomem.server.client_paths import connection_client_cwd
 from memtomem.server.context import CtxType
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
@@ -40,6 +41,20 @@ def _find_project_root() -> Path:
     MCP context tools, the CLI, and the web app share one definition.
     """
     return find_project_root()
+
+
+def _tool_project_root(ctx: CtxType) -> Path:
+    """The project root for one tool call: the client's, when the connection names it.
+
+    Read off the connection without initializing its context. These tools
+    read the filesystem only, and a call must not open the store. With no
+    context, or no ``client_cwd`` on it, this is :func:`_find_project_root`,
+    called with no argument as before.
+    """
+    client_cwd = connection_client_cwd(ctx)
+    if client_cwd is None:
+        return _find_project_root()
+    return find_project_root(start=client_cwd)
 
 
 def _redact_reason_unescaped(reason: str | None, *roots: Path) -> str:
@@ -258,7 +273,7 @@ async def mem_context_detect(
     )
 
     inc = _parse_include(include)
-    root = _find_project_root()
+    root = _tool_project_root(ctx)
     files = detect_agent_files(root)
 
     lines: list[str] = []
@@ -377,7 +392,7 @@ async def mem_context_diff(
     from memtomem.context.skills import diff_skills
 
     inc = _parse_include(include)
-    root = _find_project_root()
+    root = _tool_project_root(ctx)
     artifact_scope = _resolve_artifact_mcp_scope(scope)
     ctx_path = root / CONTEXT_FILENAME
 

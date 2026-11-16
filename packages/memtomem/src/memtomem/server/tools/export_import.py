@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from memtomem.constants import writable_namespace_arg
 from memtomem.generation import hold_app_generation
 from memtomem.server import mcp
+from memtomem.server.client_paths import client_cwd_of, resolve_client_path
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
@@ -158,7 +157,7 @@ async def mem_import(
 
     # Resolved, intentionally unrestricted (ADR-0006 Axis F/G): the import trust
     # boundary is the F.3 redaction gate below, not this path.
-    source = Path(input_file).expanduser().resolve()
+    source = resolve_client_path(app, input_file)
 
     if not source.exists():
         return f"File not found: {source}"
@@ -181,6 +180,7 @@ async def mem_import(
                 indexing_config=app.config.indexing,
                 project_root_map=project_root_map,
                 confirm_project_shared=confirm_project_shared,
+                path_base=client_cwd_of(app),
             )
     except ImportPrivacyError as exc:
         if exc.shared_blocked:

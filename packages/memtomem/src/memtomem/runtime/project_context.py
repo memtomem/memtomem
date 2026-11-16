@@ -110,4 +110,6 @@ def _resolve_project_context_root(app) -> Path | None:
     bound = getattr(app, "bound_project_root", None)
     if bound is not None:
         return bound
-    return _resolve_project_context_from_dirs(app.config.indexing.project_memory_dirs)
+    return _resolve_project_context_from_dirs(
+        app.config.indexing.project_memory_dirs, anchor=getattr(app, "client_cwd", None)
+    )
