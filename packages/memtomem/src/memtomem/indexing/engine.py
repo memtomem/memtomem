@@ -307,11 +307,72 @@ def _opened_text(opened: IO[bytes], name: str) -> str:
     """
     with opened:
         data = opened.read()
+    return _decoded_source(data, name)
+
+
+def _decoded_source(data: bytes, name: str) -> str:
+    """Decode a source's bytes as ``index_file`` reads its text, for a content hash to match."""
     try:
         return indexer_text(data)
     except UnicodeDecodeError:
         logger.warning("Non-UTF-8 content in %s, replacing invalid bytes", name)
         return indexer_text(data, errors="replace")
+
+
+class StoredSourceRead(TypedDict):
+    """What :func:`read_stored_source` found at a stored key."""
+
+    content_hash: str
+    device: int
+    inode: int
+    links: int
+
+
+def read_stored_source(source_key: str) -> StoredSourceRead | str:
+    """Hash the text ``index_file`` would read at ``source_key``, or say why it cannot.
+
+    For checking a source against its index receipt: the hash is the one the
+    receipt's ``source_hash`` was computed with. Opened ``O_NONBLOCK`` so a
+    FIFO at the key cannot block the open; ``fstat`` on the same descriptor
+    refuses anything but a regular file, and the read is bounded by the size
+    ``index_file`` skips above, so nothing larger is read into memory. The
+    identity and link count come from that descriptor too. Blocking; async
+    callers run it in a thread. A string return is the reason for a refusal.
+    """
+    from memtomem.indexing.source_receipt import content_hash
+
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(source_key, flags)
+    except (OSError, ValueError) as exc:
+        return f"cannot be opened ({type(exc).__name__})"
+    try:
+        info = os.fstat(descriptor)
+        if not stat_module.S_ISREG(info.st_mode):
+            return "is not a regular file"
+        if info.st_size > _MAX_INDEX_FILE_BYTES:
+            return "is larger than the indexer reads"
+        chunks: list[bytes] = []
+        remaining = _MAX_INDEX_FILE_BYTES + 1
+        while remaining > 0:
+            block = os.read(descriptor, min(remaining, 1 << 20))
+            if not block:
+                break
+            chunks.append(block)
+            remaining -= len(block)
+    except OSError as exc:
+        return f"cannot be read ({type(exc).__name__})"
+    finally:
+        os.close(descriptor)
+    data = b"".join(chunks)
+    if len(data) > _MAX_INDEX_FILE_BYTES:
+        return "is larger than the indexer reads"
+    return {
+        "content_hash": content_hash(_decoded_source(data, Path(source_key).name)),
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "links": info.st_nlink,
+    }
 
 
 def _leaf_relinked(own_key: str, work_path: Path) -> bool:

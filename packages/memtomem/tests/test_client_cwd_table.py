@@ -111,6 +111,7 @@ TABLE: dict[str, dict[str, str]] = {
         "mem_context_detect": "include",
         "mem_context_diff": "include scope",
         "mem_dedup_merge": "keep_id delete_ids",
+        "mem_dedup_remove": "remove_id keep_id",
         "mem_delete": "chunk_id namespace",
         "mem_do": "action",
         "mem_edit": "chunk_id new_content base_hash",

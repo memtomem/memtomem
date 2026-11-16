@@ -231,7 +231,7 @@ def nested():
 #: the table, delete from it, or create it.
 _KNOWN_MENTIONS = Counter(
     {
-        ("indexing/source_receipt.py", "state"): 1,
+        ("indexing/source_receipt.py", "state_as_stored"): 1,
         ("storage/mixins/eval_cases.py", "read_fts_fingerprint_rows"): 1,
         ("storage/orphan_gc.py", "sweep_orphan_project_root"): 1,
         ("storage/sqlite_backend.py", "_carry_policy_summary"): 1,

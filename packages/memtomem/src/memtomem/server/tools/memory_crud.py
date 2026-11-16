@@ -70,7 +70,7 @@ def edit_base_mismatch_message(exc: EditBaseMismatchError) -> str:
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from memtomem.models import Chunk, ChunkMetadata, IndexingStats
     from memtomem.tools.memory_writer import Appended, JudgedSource, PreImage, Rewrite
@@ -1758,6 +1758,90 @@ async def mem_edit(
         ) + _rewrite_notices("edit", stats, meta.source_file)
 
 
+async def _delete_chunk(
+    app: AppContext,
+    uid: UUID,
+    chunk_id: str,
+    confirm_project_shared: bool,
+    *,
+    surface: str = "mem_delete",
+    precheck: Callable[[Chunk], Awaitable[str | None]] | None = None,
+) -> str:
+    """Remove one chunk's lines from its file and re-index it: ``mem_delete``'s chunk branch.
+
+    ``precheck`` runs under the file's locks, after every gate and before the
+    pre-image read, on the fresh chunk; a string it returns is the refusal and
+    nothing past it runs. ``mem_dedup_remove`` uses it to check the member it
+    keeps. ``surface`` names the tool in the consent audit and its log line.
+    """
+    from memtomem import privacy
+    from memtomem.tools.memory_writer import remove_lines
+
+    # Serialize the read → rewrite → re-index → rollback span on the
+    # chunk's source file; re-fetch fresh under the lock (issue #1570).
+    async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err, cross_process_held):
+        if lock_err:
+            return lock_err
+        if not cross_process_held:
+            # See ``mem_edit``: this branch removes the chunk's lines from
+            # the file, so it may not run on a span that took no
+            # cross-process lock (#2346).
+            return _degraded_source_error(chunk_id)
+        assert chunk is not None
+        meta = chunk.metadata
+        if meta.source_read_only or meta.redaction_count:
+            return f"Error: {SOURCE_READ_ONLY_DETAIL}"
+        # Confirm gate on the fresh chunk: a migrate could have re-scoped
+        # it while we waited for the lock (see mem_edit for the rationale).
+        inferred_scope = meta.scope or "user"
+        if inferred_scope == "project_shared" and not confirm_project_shared:
+            logger.info(
+                f"{surface} rejected project_shared chunk without confirmation",
+                extra={"chunk_id": chunk_id, "scope": inferred_scope},
+            )
+            return (
+                "Error: deleting scope='project_shared' chunks requires "
+                "confirm_project_shared=True."
+            )
+        # Mirrors the gate's scope predicate: falling through also covers
+        # an ordinary user-tier delete, which asked for no consent and
+        # must not be recorded as having given one.
+        if inferred_scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface=surface,
+                mechanism="param",
+                action="delete",
+                audit_context={"chunk_id": chunk_id},
+            )
+        if precheck is not None:
+            refusal = await precheck(chunk)
+            if refusal is not None:
+                return refusal
+        stats, mutate_err = await _mutate_file_and_reindex(
+            app,
+            meta.source_file,
+            # See ``mem_edit``: the pre-image's identity is what keeps this
+            # from recreating a source somebody else already removed (#2367).
+            lambda pre: remove_lines(
+                meta.source_file,
+                meta.start_line,
+                meta.end_line,
+                expected_source_span_hash=meta.source_span_hash,
+                expected_identity=pre.identity,
+            ),
+            op="delete",
+            stored=meta,
+        )
+        if mutate_err:
+            return mutate_err
+        assert stats is not None
+        return (
+            f"Memory deleted from {meta.source_file}\n"
+            f"- Lines {meta.start_line}-{meta.end_line} removed\n"
+            f"- Re-indexed: {stats.indexed_chunks} chunks"
+        ) + _rewrite_notices("delete", stats, meta.source_file)
+
+
 @mcp.tool()
 @tool_handler
 @register("crud")
@@ -1786,7 +1870,6 @@ async def mem_delete(
         confirm_project_shared: Required for project_shared chunks
     """
     from memtomem import privacy
-    from memtomem.tools.memory_writer import remove_lines
 
     app = await _get_app_initialized(ctx)
     # Captured before the branches below rather than inside them: each
@@ -1801,65 +1884,7 @@ async def mem_delete(
         except (ValueError, TypeError):
             return f"Error: invalid chunk ID format: {chunk_id}"
 
-        # Serialize the read → rewrite → re-index → rollback span on the
-        # chunk's source file; re-fetch fresh under the lock (issue #1570).
-        async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err, cross_process_held):
-            if lock_err:
-                return lock_err
-            if not cross_process_held:
-                # See ``mem_edit``: this branch removes the chunk's lines from
-                # the file, so it may not run on a span that took no
-                # cross-process lock (#2346).
-                return _degraded_source_error(chunk_id)
-            assert chunk is not None
-            meta = chunk.metadata
-            if meta.source_read_only or meta.redaction_count:
-                return f"Error: {SOURCE_READ_ONLY_DETAIL}"
-            # Confirm gate on the fresh chunk: a migrate could have re-scoped
-            # it while we waited for the lock (see mem_edit for the rationale).
-            inferred_scope = meta.scope or "user"
-            if inferred_scope == "project_shared" and not confirm_project_shared:
-                logger.info(
-                    "mem_delete rejected project_shared chunk without confirmation",
-                    extra={"chunk_id": chunk_id, "scope": inferred_scope},
-                )
-                return (
-                    "Error: deleting scope='project_shared' chunks requires "
-                    "confirm_project_shared=True."
-                )
-            # Mirrors the gate's scope predicate: falling through also covers
-            # an ordinary user-tier delete, which asked for no consent and
-            # must not be recorded as having given one.
-            if inferred_scope == "project_shared":
-                privacy.emit_project_shared_confirmation(
-                    surface="mem_delete",
-                    mechanism="param",
-                    action="delete",
-                    audit_context={"chunk_id": chunk_id},
-                )
-            stats, mutate_err = await _mutate_file_and_reindex(
-                app,
-                meta.source_file,
-                # See ``mem_edit``: the pre-image's identity is what keeps this
-                # from recreating a source somebody else already removed (#2367).
-                lambda pre: remove_lines(
-                    meta.source_file,
-                    meta.start_line,
-                    meta.end_line,
-                    expected_source_span_hash=meta.source_span_hash,
-                    expected_identity=pre.identity,
-                ),
-                op="delete",
-                stored=meta,
-            )
-            if mutate_err:
-                return mutate_err
-            assert stats is not None
-            return (
-                f"Memory deleted from {meta.source_file}\n"
-                f"- Lines {meta.start_line}-{meta.end_line} removed\n"
-                f"- Re-indexed: {stats.indexed_chunks} chunks"
-            ) + _rewrite_notices("delete", stats, meta.source_file)
+        return await _delete_chunk(app, uid, chunk_id, confirm_project_shared)
 
     if source_file:
         # ``source_file`` usually names a stored key, as ``mem_list`` prints it

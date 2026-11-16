@@ -132,6 +132,17 @@ def content_hash(text: str) -> str:
 
 
 def state(db: Any, source: Path, dimension: int) -> tuple[str, int] | None:
+    """Digest and row count of ``source``'s stored chunks, keyed by its normalized path."""
+    return state_as_stored(db, norm_path(source), dimension)
+
+
+def state_as_stored(db: Any, source_key: str, dimension: int) -> tuple[str, int] | None:
+    """:func:`state` for a key read back from the store, matched as stored.
+
+    For a caller that must not resolve the key again: ``norm_path`` would
+    follow a key that became a symlink to another source's rows (#2835).
+    ``None`` when the key has no rows or any row is incomplete.
+    """
     # One statement, not two point lookups per chunk row: a large source has
     # hundreds of chunks, and this runs on both the reuse check and the record.
     # ``incomplete`` is non-zero when a row is missing its FTS shadow, or its
@@ -154,7 +165,7 @@ def state(db: Any, source: Path, dimension: int) -> tuple[str, int] | None:
         (NOT EXISTS (SELECT 1 FROM chunks_fts f WHERE f.rowid=c.rowid){vector_term})
         AS incomplete
         FROM chunks c WHERE c.source_file=? ORDER BY c.id""",  # nosec B608 - see above
-        (norm_path(source),),
+        (source_key,),
     ).fetchall()
     if not rows:
         return None
@@ -163,6 +174,15 @@ def state(db: Any, source: Path, dimension: int) -> tuple[str, int] | None:
     # Drop the completeness column before hashing: it is a validity check, not
     # part of the stored state the receipt pins.
     return digest([list(row[:-1]) for row in rows]), len(rows)
+
+
+def receipt_as_stored(db: Any, source_key: str) -> tuple[str, str] | None:
+    """``(source_hash, state_hash)`` recorded for ``source_key``, matched as stored."""
+    row = db.execute(
+        "SELECT source_hash, state_hash FROM source_index_receipts WHERE source_file=?",
+        (source_key,),
+    ).fetchone()
+    return None if row is None else (row[0], row[1])
 
 
 def reusable(db: Any, source: Path, source_hash: str, policy: str, dimension: int) -> int | None:
