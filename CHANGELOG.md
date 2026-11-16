@@ -135,8 +135,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   tokenizer writes `unicode61` rows into the rebuilt index, and to rebuild only once
   `mem_status()` on each MCP server shows `search.tokenizer` as `kiwipiepy` and the warning
   gone. A `kiwipiepy` setting made at runtime and never saved is lost on restart, which also
-  clears the warning, so the warning alone is not enough. `mm config set` stays as the
-  alternative where that `mm` has the extra and opens the same store.
+  clears the warning, so the warning alone is not enough. Since #3385, the rebuild's reply
+  names the tokenizer it used, and the `fix` says to look for `kiwipiepy` there. `mm config
+  set` stays as the alternative where that `mm` has the extra and opens the same store.
 
 ## [0.7.10] — 2026-11-15
 

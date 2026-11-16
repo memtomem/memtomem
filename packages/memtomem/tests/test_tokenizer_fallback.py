@@ -185,11 +185,13 @@ class TestFallbackWarning:
           mixes the index even with the extra installed.
         - ``mem_status()`` on each MCP server must show the tokenizer as
           kiwipiepy and the warning gone before the rebuild: the rebuild's reply
-          alone does not show that it ran with kiwipiepy, a kiwipiepy setting
-          never saved is lost on restart (clearing the warning with it), and
-          ``mm status`` builds its own components and can open another store.
+          names its tokenizer only after rewriting the whole index with it, a
+          kiwipiepy setting never saved is lost on restart (clearing the warning
+          with it), and ``mm status`` builds its own components and can open
+          another store.
         - The rebuild runs inside one of those servers, so it rebuilds the store
-          that server has open with that server's tokenizer.
+          that server has open with that server's tokenizer, and its reply
+          confirms the tokenizer it used.
         - A shell ``mm`` is the alternative only with the extra and the same
           store: it can lack the extra, and a plugin launcher can give the
           server other environment variables and another working directory.
@@ -205,15 +207,16 @@ class TestFallbackWarning:
             "memtomem[onnx,korean] instead of memtomem[onnx]). Let running indexing "
             "commands finish, then restart every process that uses this store, each with "
             "`search.tokenizer` set to kiwipiepy — MCP servers, `mm web`, `mm shell` and "
-            "applications embedding memtomem, for example. Check `mem_status()` on each MCP server and continue only once it "
-            "shows `search.tokenizer` as kiwipiepy and this warning is gone there (a "
-            "kiwipiepy setting that was never saved is lost on restart, and the warning "
-            "with it). Then rebuild the keyword index once, from one "
-            "of those servers through an MCP client connected to it: "
+            "applications embedding memtomem, for example. Check `mem_status()` on each "
+            "MCP server and continue only once it shows `search.tokenizer` as kiwipiepy "
+            "and this warning is gone there (a kiwipiepy setting that was never saved is "
+            "lost on restart, and the warning with it). Then rebuild the keyword index "
+            "once, from one of those servers through an MCP client connected to it: "
             '`mem_do(action="config", params={"key": "search.tokenizer", "value": '
-            '"kiwipiepy"})`. `mm config set search.tokenizer kiwipiepy` does the same '
-            "only where that `mm` has the korean extra and opens the same store (same "
-            "config, environment and working directory)"
+            '"kiwipiepy"})`; its reply should say `FTS index rebuilt with kiwipiepy`. '
+            "`mm config set search.tokenizer kiwipiepy` does the same only where that "
+            "`mm` has the korean extra and opens the same store (same config, environment "
+            "and working directory)"
         )
 
     def test_mm_status_reports_it(self, monkeypatch, backend):
