@@ -152,7 +152,7 @@ all = ["memtomem[onnx,ollama,openai,korean,code,web,langfuse,langgraph]"]
 [project.scripts]
 memtomem = "memtomem.cli:cli"
 mm = "memtomem.cli:cli"
-memtomem-server = "memtomem.server:main"
+memtomem-server = "memtomem._server_entry:main"
 memtomem-web = "memtomem.web.app:main"
 
 [project.urls]

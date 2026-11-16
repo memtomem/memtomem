@@ -511,68 +511,10 @@ def _print_direct_stdio_help() -> None:
 
 
 def _parse_server_args(argv: list[str] | None = None):
-    """Parse ``memtomem-server`` transport options."""
-    import argparse
+    """Parse ``memtomem-server`` transport options (:mod:`memtomem._server_entry`)."""
+    from memtomem._server_entry import parse_server_args
 
-    parser = argparse.ArgumentParser(
-        prog="memtomem-server",
-        description="Run the memtomem MCP server.",
-        epilog=(
-            "Security: sse/http transports have no first-party authentication; "
-            "treat them as trusted-network only and place an authenticated reverse "
-            "proxy in front before exposing publicly."
-        ),
-    )
-    parser.add_argument(
-        "--transport",
-        choices=("stdio", "sse", "streamable-http", "http"),
-        default="stdio",
-        help="MCP transport to use. 'http' is an alias for 'streamable-http'.",
-    )
-    parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help=(
-            "Local host/interface to listen on for sse/http transports, usually "
-            "127.0.0.1 behind nginx or 0.0.0.0 for trusted direct network access."
-        ),
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="Port for sse/http transports.",
-    )
-    parser.add_argument(
-        "--url",
-        default=None,
-        help=(
-            "Full MCP endpoint URL clients connect to, e.g. https://example.com/mcp. "
-            "The URL path is also used as this server's endpoint path; reverse "
-            "proxies should forward that path unchanged."
-        ),
-    )
-    parser.add_argument(
-        "--allowed-host",
-        action="append",
-        default=[],
-        help="Advanced: extra allowed Host header for sse/http transports. Repeatable.",
-    )
-    parser.add_argument(
-        "--allowed-origin",
-        action="append",
-        default=[],
-        help="Advanced: extra allowed Origin header for sse/http transports. Repeatable.",
-    )
-    parser.add_argument(
-        "--disable-dns-rebinding-protection",
-        action="store_true",
-        help=(
-            "Advanced/dangerous: disables DNS rebinding protection; only safe "
-            "behind an authenticated reverse proxy."
-        ),
-    )
-    return parser.parse_args(argv)
+    return parse_server_args(argv)
 
 
 def _normalize_transport(transport: str) -> str:
@@ -756,32 +698,22 @@ def _print_network_server_info(
 def _resolve_store_db_path() -> Path | None:
     """Best-effort store resolution for pid-file naming (#1990).
 
-    Mirrors the effective config the lazy context will later open: dotenv
-    first (the lifespan loads it before building ``Mem2MemConfig``, so the
-    pid digest must see the same ``MEMTOMEM_STORAGE__SQLITE_PATH``), then
-    the same env → config.d → overrides layering as the component factory —
-    but with ``migrate=False``: pid naming is a read-only concern and must
-    not rewrite ``config.json``. If a pending migration would change
-    ``storage.sqlite_path``, the digest is stale for exactly one server run
-    (equivalent to today's store-blind name), after which the persisted
-    config converges. The same bound applies when ``config.json`` /
-    ``config.d`` are edited after startup: the lazy context re-reads them
-    at first tool call, so the pid name can lag the opened store for this
-    run only — destructive CLI paths stay protected by the DB-lock probe
-    and the instance registry regardless. Any failure returns ``None``
-    and the caller falls back to the transitional bare ``server.pid``.
+    Dotenv first, through the lifespan's seam: the lifespan loads it before
+    building ``Mem2MemConfig``, so the pid digest must see the same
+    ``MEMTOMEM_STORAGE__SQLITE_PATH``. The layering itself is
+    :func:`memtomem._store_identity.configured_store_path`, which a process
+    that cannot import this package shares. Any failure returns ``None`` and
+    the caller falls back to the transitional bare ``server.pid``.
     """
     try:
-        from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
         from memtomem.server.lifespan import _load_dotenv
 
         _load_dotenv()
-        cfg = Mem2MemConfig()
-        load_config_d(cfg, quiet=True)
-        load_config_overrides(cfg, migrate=False)
-        return Path(cfg.storage.sqlite_path)
     except Exception:
         return None
+    from memtomem._store_identity import configured_store_path
+
+    return configured_store_path()
 
 
 def _claim_store_pid_file(
@@ -905,7 +837,14 @@ def _claim_store_pid_file(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Run the MCP server."""
+    """Run the MCP server: the entry dispatcher, then :func:`run_standalone`."""
+    from memtomem._server_entry import main as entry_main
+
+    entry_main(argv)
+
+
+def run_standalone(args) -> None:
+    """Run one standalone MCP server with already-parsed ``args``."""
     import atexit
 
     from memtomem._runtime_paths import ensure_runtime_dir, server_pid_path
@@ -915,7 +854,6 @@ def main(argv: list[str] | None = None) -> None:
     # began before the package swap from one launched after it completed.
     process_started = datetime.now(UTC).isoformat()
 
-    args = _parse_server_args(argv)
     transport = _normalize_transport(args.transport)
     # These informational banners are safe on stdout: the stdio TTY guard exits
     # before mcp.run(), and network transports do not use stdout as the MCP stream.
