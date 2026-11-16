@@ -126,6 +126,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   connections, or one request and the startup warmup (`warmup.enabled`). It was reproduced
   with a script and not seen in use.
 
+- **`mem_config` names the tokenizer an FTS rebuild used (#3385).** Setting
+  `search.tokenizer` through `mem_config`, or `mem_do(action="config", ...)`, rebuilds the
+  keyword index, and the reply said `FTS index rebuilt (N chunks).` whichever tokenizer the
+  rows were built with. In a process where `kiwipiepy` cannot be imported, a `kiwipiepy`
+  rebuild falls back to `unicode61`, so a fallback rebuild read the same as a real Kiwi one.
+  The reply now reads `FTS index rebuilt with <tokenizer> (N chunks).`, and when that is not
+  the tokenizer you asked for, it adds a warning that this rebuild and every query in the
+  process fall back to it. `mm config set` already worded its message this way; the web's
+  rebuild paths still do not (#3395).
+
 - **The Ollama provider turns thinking off, and an empty LLM answer no longer passes as "no
   tags" or "no entities" (#3382).** With `llm.enabled` on and no model set, the Ollama model
   is `gemma4:e2b`, which thinks before it answers. Ollama counts that thinking against the
