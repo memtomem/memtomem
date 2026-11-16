@@ -947,8 +947,10 @@ def test_lifetime_lock_cleanup_is_enrolled_before_its_payload(
 
 
 def _mm(denv: DaemonEnv, monkeypatch: pytest.MonkeyPatch, *args: str):
-    """Run ``mm`` in this process against the daemon's home and runtime directory."""
-    """Read-only commands only: a destructive one goes through :func:`_mm_isolated`."""
+    """Run a read-only ``mm`` command in this process, with the daemon's HOME.
+
+    A destructive one goes through :func:`_mm_isolated`.
+    """
     from click.testing import CliRunner
 
     from memtomem.cli import cli

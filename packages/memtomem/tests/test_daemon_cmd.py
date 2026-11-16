@@ -92,3 +92,20 @@ def test_doctor_shows_a_daemon_listing_warning_in_its_text(
     odd.write_text("999999\n")
     result = CliRunner().invoke(cli, ["doctor"])
     assert f"{odd}: not a daemon name this version knows" in result.output
+
+
+def test_doctor_marks_an_unverifiable_daemon_and_says_why(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    daemon = liveness.DaemonState(
+        name="t",
+        state=liveness.ServerState(
+            alive=True, pid=None, pid_file=tmp_path / "server-daemon-t.pid", probe_error="denied"
+        ),
+        socket_path=tmp_path / "daemon-t.sock",
+    )
+    monkeypatch.setattr(liveness, "enumerate_daemons", lambda: liveness.DaemonInventory([daemon]))
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+    (check,) = [c for c in json.loads(result.stdout)["checks"] if c["name"] == "shared-daemons"]
+    assert check["data"]["daemons"][0]["unverified"] is True
+    assert "t: unverified (denied)" in check["detail"]

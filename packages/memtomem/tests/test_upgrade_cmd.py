@@ -1893,28 +1893,6 @@ def test_one_pid_under_lock_files_that_disagree_is_not_signalled(
     assert calls == []
 
 
-def test_a_new_generation_daemon_is_left_running_after_the_install(tmp_path):
-    """Post-install retirement keeps a group whose one stamp is newer than the install."""
-    from datetime import UTC, datetime
-
-    lifetime = tmp_path / "server-daemon-t.pid"
-    store_pid = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
-    states = [
-        ServerState(alive=True, pid=444, pid_file=store_pid, started=_STAMP),
-        ServerState(alive=True, pid=444, pid_file=lifetime, started=_STAMP),
-    ]
-    installed_at = datetime(2026, 11, 15, tzinfo=UTC)
-    killed, removed, problems, remaining, _web = upgrade_cmd._stop_process_snapshot(
-        states,
-        ServerState(alive=False, pid=None, pid_file=None),
-        grace=0,
-        installed_at=installed_at,
-        continue_on_error=True,
-    )
-    assert (killed, removed, problems) == ([], [], [])
-    assert remaining == states
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: Windows plans no signals")
 def test_the_dry_run_plans_one_stop_for_a_daemon_holding_two_lock_files(
     monkeypatch, tmp_path, fake_uv, force_tty

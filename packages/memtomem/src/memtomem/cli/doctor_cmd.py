@@ -468,7 +468,16 @@ def _check_shared_daemons() -> CheckResult:
     live = [d for d in inventory.daemons if d.state.alive]
     stale = len(inventory.daemons) - len(live)
     data: dict[str, object] = {
-        "daemons": [{"name": d.name, "pid": d.state.pid, "started": d.state.started} for d in live],
+        "daemons": [
+            {
+                "name": d.name,
+                "pid": d.state.pid,
+                "started": d.state.started,
+                # A failed probe counts as alive (fail closed); say it is unverified.
+                "unverified": d.state.probe_error is not None,
+            }
+            for d in live
+        ],
         "stale": stale,
         "warnings": list(inventory.warnings),
     }
@@ -480,6 +489,11 @@ def _check_shared_daemons() -> CheckResult:
         )
         message = f"{len(live)} shared daemon(s) running: {listed}"
     notes = [f"{stale} stale lifetime lock file(s) left by daemons that exited"] if stale else []
+    notes.extend(
+        f"{d.name}: unverified ({scrub_text(d.state.probe_error)})"
+        for d in live
+        if d.state.probe_error is not None
+    )
     notes.extend(scrub_text(warning) for warning in inventory.warnings)
     detail = "; ".join(notes) or None
     return CheckResult(
