@@ -288,7 +288,7 @@ def app(_isolated_config_paths: Path):
     dedup_scanner.scan_with_coverage = AsyncMock(
         return_value=(
             [],
-            DedupCoverage(pool=0, near_search_enabled=True, probed=0, without_vector=0),
+            DedupCoverage(pool=0, eligible=0, near_search_enabled=True, probed=0, without_vector=0),
         )
     )
 
@@ -654,7 +654,9 @@ class TestDedup:
         app.state.dedup_scanner.scan_with_coverage = AsyncMock(
             return_value=(
                 [],
-                DedupCoverage(pool=37, near_search_enabled=True, probed=30, without_vector=7),
+                DedupCoverage(
+                    pool=37, eligible=412, near_search_enabled=True, probed=30, without_vector=7
+                ),
             )
         )
         resp = await client.get(
@@ -664,6 +666,7 @@ class TestDedup:
         assert resp.status_code == 200
         data = resp.json()
         assert data["scanned_chunks"] == 37
+        assert data["eligible_chunks"] == 412
         assert data["probed_chunks"] == 30
         assert data["chunks_without_vector"] == 7
         assert data["near_search_enabled"] is True
@@ -687,7 +690,9 @@ class TestDedup:
     ):
         async def slow_scan(**_kwargs):
             await asyncio.sleep(0.05)
-            return [], DedupCoverage(pool=0, near_search_enabled=True, probed=0, without_vector=0)
+            return [], DedupCoverage(
+                pool=0, eligible=0, near_search_enabled=True, probed=0, without_vector=0
+            )
 
         app.state.dedup_scanner.scan_with_coverage = AsyncMock(side_effect=slow_scan)
         monkeypatch.setattr("memtomem.web.routes.dedup._DEDUP_SCAN_TIMEOUT", 0.001)

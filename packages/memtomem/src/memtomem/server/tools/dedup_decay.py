@@ -40,7 +40,7 @@ async def mem_dedup_scan(
     Args:
         threshold: Dense score 1/(1+L2) threshold (0-1, default 0.92)
         limit: Maximum number of candidate pairs to return
-        max_scan: Maximum chunks to inspect for near-duplicate search
+        max_scan: Maximum chunks to scan, taken in chunk-id order
     """
     if not 0.0 <= threshold <= 1.0:
         return f"Error: threshold must be between 0 and 1, got {threshold}."
@@ -82,8 +82,23 @@ async def mem_dedup_scan(
 
 
 def _dedup_coverage_line(coverage) -> str:
-    """Say what the scan looked at, so an empty result is not read as a clean store."""
-    line = f"Scanned {coverage.pool} chunks"
+    """Say what the scan looked at, so an empty result is not read as a clean store.
+
+    The first clause is about pool selection only: "all" means no scannable
+    chunk was left out of the pool, not that every duplicate was looked for.
+    """
+    if coverage.pool < coverage.eligible:
+        # The rule and when it repeats, not what the subset is like: id order
+        # promises neither a spread over files nor anything about age.
+        line = (
+            f"Scanned {coverage.pool} of {coverage.eligible} scannable chunks "
+            f"(the first {coverage.pool} in chunk-id order: the same chunks on every run "
+            "while the scannable chunks and max_scan stay the same; "
+            "raise max_scan to cover more)"
+        )
+    else:
+        noun = "chunk" if coverage.pool == 1 else "chunks"
+        line = f"Scanned all {coverage.pool} scannable {noun}"
     if not coverage.near_search_enabled:
         return f"{line}; near-duplicate search is off (BM25-only store)."
     line += f"; near-duplicate search probed {coverage.probed}"

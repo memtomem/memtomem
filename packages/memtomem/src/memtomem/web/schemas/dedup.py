@@ -26,6 +26,10 @@ class DedupScanResponse(BaseModel):
     total: int
     # Chunks the scan actually selected (at most the requested ``max_scan``).
     scanned_chunks: int
+    # Chunks the pool was selected from. When it is larger than
+    # ``scanned_chunks`` the scan covered the first ``scanned_chunks`` of them
+    # in chunk-id order.
+    eligible_chunks: int = 0
     near_search_enabled: bool = True
     probed_chunks: int = 0
     chunks_without_vector: int = 0
