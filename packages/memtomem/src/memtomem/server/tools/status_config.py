@@ -31,6 +31,7 @@ from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.generation import ComponentGeneration
 from memtomem.runtime.components import prune_settled_generations
 from memtomem.server import mcp
+from memtomem.server.client_paths import client_cwd_of
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.background import track_task
 from memtomem.server.error_handler import tool_handler
@@ -371,7 +372,8 @@ async def collect_status_report(app: AppContext) -> dict:
     stats = await app.storage.get_stats()
     config = app.config
     try:
-        cwd = Path(os.getcwd()).resolve()
+        client_cwd = client_cwd_of(app)
+        cwd = (client_cwd if client_cwd is not None else Path(os.getcwd())).resolve()
     except OSError:
         cwd = None
     from memtomem.server.tools.search import (
