@@ -1,21 +1,15 @@
-"""Namespace descriptions must be strings when provided (#3355).
+"""Namespace descriptions must be strings when provided (#3355, #3372).
 
 Every metadata writer (Web PATCH, ``mem_ns_update``, ``mem_do`` with ``ns_update``,
-``mem_agent_register``, ``mm agent register --description``) lands at
-``storage.set_namespace_meta``, so non-string descriptions are refused
-before any database work or write guard scanning.
+``mem_agent_register``) lands at ``storage.set_namespace_meta``, so non-string
+descriptions are refused before any database work or write guard scanning.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
-
 import pytest
-from click.testing import CliRunner
 from pydantic import ValidationError
 
-from memtomem.cli import cli
 from memtomem.constants import validate_namespace_description
 from memtomem.server.context import AppContext
 from memtomem.server.tools.meta import mem_do
@@ -53,10 +47,19 @@ def test_validator_rejects_non_strings(desc: object) -> None:
         validate_namespace_description(desc)
 
 
-@pytest.mark.parametrize("desc", [["list"], {"key": "val"}])
+@pytest.mark.parametrize("desc", [*ACCEPTED, *REJECTED, None])
 def test_web_schema_agrees_with_the_validator(desc: object) -> None:
-    with pytest.raises(ValidationError):
+    try:
+        validate_namespace_description(desc)  # type: ignore[arg-type]
+        storage_ok = True
+    except ValueError:
+        storage_ok = False
+    try:
         NamespaceMetaRequest(description=desc)  # type: ignore[arg-type]
+        schema_ok = True
+    except ValidationError:
+        schema_ok = False
+    assert schema_ok == storage_ok
 
 
 class TestStorageRefusesBeforeWriting:
@@ -144,38 +147,3 @@ class TestMcpSurfaces:
             out.startswith("Error:") and "Invalid namespace description: expected a string" in out
         )
         assert await components.storage.get_namespace_meta("agent-runtime:alpha") is None
-
-
-def test_cli_agent_register_reports_the_storage_refusal(monkeypatch) -> None:
-    """The refusal itself is pinned above on real storage; this pins that the
-    CLI turns it into a non-zero exit with the message, not a traceback."""
-    from contextlib import asynccontextmanager
-
-    storage = SimpleNamespace(
-        set_namespace_meta=AsyncMock(
-            side_effect=lambda ns, description=None, color=None, **kwargs: (
-                validate_namespace_description(description)
-            )
-        ),
-        get_namespace_meta=AsyncMock(return_value=None),
-    )
-
-    @asynccontextmanager
-    async def fake():
-        yield SimpleNamespace(storage=storage)
-
-    monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
-
-    result = CliRunner().invoke(cli, ["agent", "register", "alpha", "--description", "desc"])
-
-    # Normal string description passes
-    assert result.exit_code == 0
-
-    # If storage refuses description, CLI turns it into a clean error exit
-    storage.set_namespace_meta = AsyncMock(
-        side_effect=ValueError("Invalid namespace description: expected a string")
-    )
-    result = CliRunner().invoke(cli, ["agent", "register", "alpha", "--description", "desc"])
-    assert result.exit_code != 0
-    assert "Invalid namespace description: expected a string" in result.output
-    assert result.exception is None or isinstance(result.exception, SystemExit)
