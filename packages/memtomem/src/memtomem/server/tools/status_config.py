@@ -1367,9 +1367,25 @@ async def mem_config(
                 publish_onnx_batch_size(app.embedder, app.config.embedding.onnx_batch_size)
             # Rebuild FTS index when tokenizer changes.
             if key == "search.tokenizer":
-                app.storage.set_fts_tokenizer(app.config.search.tokenizer)
+                requested = app.config.search.tokenizer
+                app.storage.set_fts_tokenizer(requested)
                 count = await app.storage.rebuild_fts()
-                result += f"\nFTS index rebuilt ({count} chunks)."
+                # ``set_fts_tokenizer`` is not the last word: a kiwipiepy
+                # rebuild in a process where the extra cannot be imported
+                # silently falls back to unicode61 mid-pass. Name the
+                # tokenizer the rows were actually built with, and say so when
+                # it is not the one that was asked for — otherwise a fallback
+                # rebuild reports success in the same words as a real one
+                # (mirrors ``mm config set``; #3385).
+                built = app.storage.fts_tokenizer_effective
+                result += f"\nFTS index rebuilt with {built} ({count} chunks)."
+                if built != requested:
+                    result += (
+                        f"\nwarning: {requested} is unavailable (not installed), so this "
+                        f"rebuild and every query in this process fall back to {built}. "
+                        f"Install it, restart the server, and rebuild for a {requested} "
+                        f"index."
+                    )
 
             suffix = _persistence_suffix(key, receipt)
             result += suffix
