@@ -26,6 +26,7 @@ EXPECTED_COMMANDS = {
     "agent",
     "config",
     "context",
+    "daemon",
     "doctor",
     "embedding-reset",
     "gc",

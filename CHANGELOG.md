@@ -30,6 +30,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   passes with `indexing.enrich_chunk_context` or `indexing.auto_summarize` on write none. A
   file with no receipt that matches it is refused until a plain `mm index` of it, which
   under those two settings does not help: the refusal says so. In core mode it is reached as `mem_do(action="dedup_remove", ...)`.
+
+- **`mm daemon status` and `mm daemon stop` report and stop shared daemons (POSIX).** A
+  shared daemon serves several client sessions from one engine (#3381). No client can start one
+  yet: the `--shared` option that does so comes in a later release. `status` lists each daemon's
+  name, pid and start time, and exits 0 when one runs, 3 when none does, and 1 when the runtime
+  directory cannot be listed. `--json` prints `{"daemons": [...], "count": N}`. `stop` sends
+  SIGTERM, then SIGKILL after `--grace` seconds only if the process is still alive, and confirms
+  the stop by the daemon's lock being released. Every session connected to the daemon ends with
+  it. `mm reset` and `mm uninstall` already refuse while a daemon runs; their refusal now names
+  the daemon and the `mm daemon stop` command. `mm doctor` adds a `shared-daemons` check, and
+  `mem_status` run inside a daemon shows its name, pid and open connections.
+
 - **`mem_dedup_scan` can show what the store holds about each member of a candidate pair
   (experimental, off by default).** Two chunks with the same body are not always the same
   record: the content hash covers the body only. With
@@ -47,6 +59,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   change the setting.
 
 ### Changed
+
+- **`mm upgrade` signals each process once, however many lock files it holds.** It used to
+  signal once per lock file. A shared daemon holds two, its name's and its store's, so its pid
+  was signalled a second time after it had exited. Both files are still removed. A pid whose
+  lock files record different start times is now reported and left running, because it may be
+  a recycled pid.
+- **When `mm uninstall` deletes state, it also removes what a shared daemon that exited
+  without cleaning up left in the runtime directory**: its lock file and its socket. A daemon
+  that is starting while uninstall runs keeps its lock file. With no state to delete, uninstall
+  leaves these files alone, as it leaves everything else.
 
 - **The polling file watcher rescans every 10 s instead of every 1 s, and
   `indexing.watcher_poll_interval_ms` sets the interval (part of #2838).** Polling is the

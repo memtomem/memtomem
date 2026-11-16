@@ -383,7 +383,7 @@ The complete v0.7.10 top-level command catalog is grouped below. Run `mm
 | Area | Top-level commands |
 |---|---|
 | First use and core memory | `init`, `status`, `add`, `index`, `search`, `recall`, `memory`, `mem`, `pinned`, `review` |
-| Configuration and lifecycle | `config`, `embedding-reset`, `warmup`, `version`, `upgrade`, `reset`, `purge`, `gc`, `uninstall`, `doctor` |
+| Configuration and lifecycle | `config`, `embedding-reset`, `warmup`, `version`, `upgrade`, `daemon`, `reset`, `purge`, `gc`, `uninstall`, `doctor` |
 | Organization and automation | `tags`, `agent`, `session`, `activity`, `schedule`, `watchdog` |
 | Retrieval quality | `quality` |
 | Import and synchronization | `ingest`, `context`, `wiki`, `sync-doctor` |
@@ -463,6 +463,12 @@ mm upgrade --version 0.7.10 --dry-run  # preview an exact uv-tool reinstall (als
 # upgrade --json: dry runs add inventory_complete/warnings; a post-install partial failure adds cleanup_complete:false
 # upgrade refuses while a Web UI started through the memtomem-web entry point runs (it has no pid lock to stop it by); stop it first
 # warnings is additive on Windows, where processes are never killed automatically; db_lock_warning still requests a manual restart
+# upgrade signals each process once: a shared daemon holds two lock files (its name's and its store's) and both are cleaned
+mm daemon status                       # list shared daemons (POSIX): name, pid, start time; exit 0 if one runs, 3 if none, 1 if they cannot be listed
+mm daemon status NAME --json           # one daemon as {"daemons": [...], "count": N}; a listing failure prints {"error": "..."} and exits 1
+mm daemon stop [NAME]                  # SIGTERM, then SIGKILL after --grace (default 5 s); no NAME stops every running daemon and ends their sessions
+# a stopped daemon skips its session drain and WAL checkpoint, as mm upgrade does to a server; SQLite recovers the WAL on the next open
+# mm reset and mm uninstall refuse while a daemon runs and name it with the mm daemon stop command
 
 # Tags — bulk tag maintenance (mutations are dry-run unless --apply; --yes skips the prompt)
 # held sources (missing, pending, or redaction-refused) are left out of the counts and the writes
