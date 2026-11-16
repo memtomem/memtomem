@@ -140,6 +140,26 @@ def test_candidates_are_caseless_equal_keys_in_a_fixed_order() -> None:
     assert twin_candidates(key, list(reversed(stored))) == twin_candidates(key, stored)
 
 
+def test_candidates_include_letters_that_only_upper_casing_matches() -> None:
+    # Dotless i folds to itself but upper-cases to I, as NTFS compares names.
+    assert "ı".casefold() != "i" and "ı".upper() == "I"
+    assert twin_candidates("/m/I.md", ["/m/ı.md"]) == ["/m/ı.md"]
+
+
+def test_a_dotless_i_spelling_is_a_twin_where_the_volume_says_so(tmp_path: Path) -> None:
+    """Measured on the volume, not assumed: NTFS is expected to name one entry here."""
+    target = tmp_path / "I.md"
+    target.write_text("x", encoding="utf-8")
+    other = tmp_path / "ı.md"
+    try:
+        same = other.exists() and os.path.samefile(target, other)
+    except (OSError, ValueError):
+        same = False
+    if not same:
+        pytest.skip("this volume keeps I.md and ı.md apart")
+    assert source_twins(str(target), [str(other)]) == [str(other)]
+
+
 @pytest.mark.skipif(os.name != "nt", reason="separator folding is Windows-only")
 def test_candidates_fold_separators_on_windows() -> None:
     assert twin_candidates("C:\\m\\a.md", ["C:/M/a.md"]) == ["C:/M/a.md"]

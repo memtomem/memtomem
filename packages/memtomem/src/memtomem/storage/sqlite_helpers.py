@@ -185,15 +185,29 @@ def _caseless(key: str) -> str:
     return unicodedata.normalize("NFD", unicodedata.normalize("NFD", key).casefold())
 
 
+def _uppercased(key: str) -> str:
+    """``key`` upper-cased, the way NTFS compares names (its upcase table).
+
+    Case folding and upper-casing disagree on some letters: dotless ``ı``
+    upper-cases to ``I`` but folds to itself, so the two spellings match here
+    and not in :func:`_caseless`.
+    """
+    if os.name == "nt":
+        key = key.replace("\\", "/")
+    return unicodedata.normalize("NFD", key).upper()
+
+
 def twin_candidates(key: str, stored: Iterable[str]) -> list[str]:
     """The stored keys other than ``key`` that may name its file under another spelling.
 
     A string comparison only, no filesystem access: keys equal to ``key`` in
-    canonical caseless form. Sorted, so a caller naming one of them names the
-    same one every time.
+    canonical caseless form or upper-cased. Sorted, so a caller naming one of
+    them names the same one every time.
     """
-    target = _caseless(key)
-    return sorted({k for k in stored if k != key and _caseless(k) == target})
+    folded, upper = _caseless(key), _uppercased(key)
+    return sorted(
+        {k for k in stored if k != key and (_caseless(k) == folded or _uppercased(k) == upper)}
+    )
 
 
 def _source_identity(key: str) -> tuple[int, int] | None:
