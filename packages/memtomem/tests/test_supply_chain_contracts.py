@@ -350,14 +350,20 @@ def test_hermes_plugin_matches_contract() -> None:
     # line are part of the comparison: uvx passes an option written after
     # `memtomem-server` to the server, and a POSIX shell reads an unquoted `>=1.20` as a
     # redirection. Either way the huggingface-hub floor would not apply.
+    # The Korean entry is the same launch with the korean extra added.
+    korean_requirement = f"memtomem[{','.join([*core['mcp_extras'], 'korean'])}]=={core['version']}"
+    korean_args = [korean_requirement if arg == requirement else arg for arg in launch_args]
+    assert korean_args != launch_args
+
     readme = (root / "README.md").read_text(encoding="utf-8")
     launches = [line for line in readme.splitlines() if "memtomem[" in line]
     assert launches == [
         f"  `{shlex.join(['uvx', *launch_args])}`.",  # under Requirements
-        f"    args: {json.dumps(launch_args)}",  # the manual config.yaml entry
+        f"    args: {json.dumps(korean_args)}",  # the Korean config.yaml entry
+        f"    args: {json.dumps(launch_args)}",  # the project-scope config.yaml entry
     ]
 
-    # The manual entry replaces this package's, so it must carry the whole launch: the
+    # A manual entry replaces this package's, so it must carry the whole launch: the
     # same command and arguments, and the env. Without PYTHON_DOTENV_DISABLED the server
     # reads ~/.env again, and Hermes refuses a non-string value (an unquoted `1` is an
     # int once parsed).
@@ -366,16 +372,20 @@ def test_hermes_plugin_matches_contract() -> None:
         for block in re.findall(r"^```yaml\n(.*?)^```", readme, re.M | re.S)
         if "mcp_servers:" in block
     ]
-    assert len(blocks) == 1, blocks
-    example = yaml.safe_load(blocks[0])["mcp_servers"]["memtomem"]
-    assert example["command"] == "uvx"
-    assert example["args"] == launch_args
-    example_env = example["env"]
+    assert len(blocks) == 2, blocks
     rendered = _json("packages/memtomem-hermes-plugin/mcp.json")
     rendered_env = rendered["mcpServers"]["memtomem"]["env"]
-    for key, value in rendered_env.items():
-        assert isinstance(example_env.get(key), str), (key, example_env.get(key))
-        assert example_env[key] == value, (key, example_env[key], value)
+    for block, args in zip(blocks, (korean_args, launch_args), strict=True):
+        example = yaml.safe_load(block)["mcp_servers"]["memtomem"]
+        assert example["command"] == "uvx"
+        assert example["args"] == args
+        # Without cwd, Hermes starts a native entry in its own working directory,
+        # so a project registered there would get project scope.
+        assert isinstance(example.get("cwd"), str), example
+        example_env = example["env"]
+        for key, value in rendered_env.items():
+            assert isinstance(example_env.get(key), str), (key, example_env.get(key))
+            assert example_env[key] == value, (key, example_env[key], value)
 
     _assert_hermes_install_commands(readme, "packages/memtomem-hermes-plugin")
 
