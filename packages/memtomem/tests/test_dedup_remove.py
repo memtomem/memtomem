@@ -497,6 +497,8 @@ async def test_one_file_under_two_stored_spellings_gets_the_twin_remedy(bm25_onl
     source.write_text(_note("Router-X"), encoding="utf-8")
     await _index(comp, source)
     twin = str(source.with_name("NOTE.md"))
+    if not Path(twin).exists():
+        pytest.skip("a case-sensitive filesystem: the two spellings are two files")
     db = comp.storage._get_db()
     db.execute("UPDATE chunks SET source_file=? WHERE source_file=?", (twin, str(source)))
     db.commit()
@@ -529,3 +531,32 @@ async def test_the_files_are_read_inside_the_writer_transaction(pair, monkeypatc
 
     assert (await _remove(comp, removed.id, kept.id)).startswith("Memory deleted from")
     assert owners and owners[0] is not None
+
+
+def test_case_variants_are_one_file_only_when_the_filesystem_says_so(tmp_path):
+    """The lock key folds case; on a case-sensitive volume ``A.md`` and ``a.md`` are two."""
+    from memtomem.models import Chunk, ChunkMetadata
+
+    def chunk(path: Path) -> Chunk:
+        return Chunk(content="x", metadata=ChunkMetadata(source_file=path))
+
+    upper, lower = tmp_path / "A.md", tmp_path / "a.md"  # neither exists: no identity
+    assert not dedup_decay._one_file(chunk(upper), chunk(lower))
+    lower.write_text("x", encoding="utf-8")
+    assert dedup_decay._one_file(chunk(lower), chunk(lower))
+    assert dedup_decay._one_file(chunk(upper), chunk(lower)) is upper.exists()
+
+
+async def test_distinct_case_variant_files_are_not_refused_as_one(bm25_only_components):
+    comp, mem_dir = bm25_only_components
+    removed_file, kept_file = mem_dir / "a.md", mem_dir / "A.md"
+    removed_file.write_text(_note("Router-X"), encoding="utf-8")
+    if kept_file.exists():
+        pytest.skip("a case-insensitive filesystem: the two spellings are one file")
+    kept_file.write_text(_note("Router-X"), encoding="utf-8")
+    for source in (removed_file, kept_file):
+        await _index(comp, source)
+    removed = await _alarm_chunk(comp, removed_file)
+    kept = await _alarm_chunk(comp, kept_file)
+
+    assert (await _remove(comp, removed.id, kept.id)).startswith("Memory deleted from")

@@ -405,7 +405,7 @@ async def _check_pair(app: AppContext, keep_uuid: UUID, keep_id: str, removed: C
         keeper = await app.storage.get_chunk(keep_uuid, exclude_withheld=True, read_writer=True)
     if keeper is None or not in_boundary(keeper, boundary):
         return f"Error: chunk {keep_id} not found."
-    if _one_file(removed, keeper):
+    if await asyncio.to_thread(_one_file, removed, keeper):
         return _same_file_refusal(removed, keeper)
     keys = [
         ("removed", str(removed.metadata.source_file)),
@@ -453,9 +453,15 @@ async def _check_pair(app: AppContext, keep_uuid: UUID, keep_id: str, removed: C
 
 
 def _one_file(a: Chunk, b: Chunk) -> bool:
-    return AppContext.memory_file_lock_key(a.metadata.source_file) == (
-        AppContext.memory_file_lock_key(b.metadata.source_file)
-    )
+    """One stored key, or two spellings of one file judged by its identity (#3408).
+
+    Not by the lock key: that folds case unconditionally, and on a case-sensitive
+    volume ``A.md`` and ``a.md`` are two files. Stats files; run it in a thread.
+    """
+    from memtomem.storage.sqlite_helpers import source_twins
+
+    a_key, b_key = str(a.metadata.source_file), str(b.metadata.source_file)
+    return a_key == b_key or bool(source_twins(a_key, [b_key]))
 
 
 def _same_file_refusal(removed: Chunk, keeper: Chunk) -> str:
@@ -509,7 +515,11 @@ async def mem_dedup_remove(
     if keeper is None or not in_boundary(keeper, boundary):
         return f"Error: chunk {keep_id} not found."
     removed = await app.storage.get_chunk(remove_uuid, exclude_withheld=True)
-    if removed is not None and in_boundary(removed, boundary) and _one_file(removed, keeper):
+    if (
+        removed is not None
+        and in_boundary(removed, boundary)
+        and await asyncio.to_thread(_one_file, removed, keeper)
+    ):
         return _same_file_refusal(removed, keeper)
 
     async def precheck(chunk: Chunk) -> str | None:
