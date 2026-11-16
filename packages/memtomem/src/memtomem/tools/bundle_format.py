@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from memtomem.config import classify_scope
-from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import join_path_base, norm_path
 
 if TYPE_CHECKING:
     from memtomem.config import IndexingConfig
@@ -244,7 +244,13 @@ def _pure(value: str):
     return PureWindowsPath(value) if PureWindowsPath(value).drive else PurePosixPath(value)
 
 
-def validate_root_map(value: object) -> dict:
+def validate_root_map(value: object, path_base: Path | None = None) -> dict:
+    """Check a ``project_root_map`` and resolve its destination roots.
+
+    ``path_base`` is where a relative destination starts, for a caller whose
+    client is not in this process's working directory. ``None`` leaves it to
+    ``resolve()``, which starts at the process working directory.
+    """
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -256,7 +262,14 @@ def validate_root_map(value: object) -> dict:
         key = _pure(old)
         if not key.is_absolute() or ".." in key.parts or key in result:
             raise invalid("options", "project_root_map key")
-        result[key] = Path(new).expanduser().resolve()
+        destination = Path(new).expanduser()
+        if path_base is not None and not destination.is_absolute():
+            try:
+                destination = Path(join_path_base(path_base, destination, new))
+            except ValueError:
+                # The join's message quotes the value; this validator's do not.
+                raise invalid("options", "project_root_map value") from None
+        result[key] = destination.resolve()
     return result
 
 
@@ -270,7 +283,14 @@ def map_chunk(
     source_file: str,
     project_root: str | None,
     self_export: bool = False,
+    path_base: Path | None = None,
 ) -> None:
+    """Give ``chunk`` its destination ``source_file``, or refuse the record.
+
+    ``path_base`` is where a relative ``source_file`` of a user record starts,
+    as in :func:`validate_root_map`. A project record's path is absolute by
+    the checks below and never uses it.
+    """
     where = f"record {record_index}"
     meta = chunk.metadata
     # Use wire strings: a local Windows Path has already replaced POSIX slashes
@@ -290,7 +310,13 @@ def map_chunk(
                 "foreign user source path (on Windows, manually convert source_file "
                 "to a local absolute path; project_root_map only maps project records)",
             )
-        resolved = Path(norm_path(Path(source)))
+        source_path = Path(source)
+        if path_base is not None and not source_path.is_absolute():
+            try:
+                source_path = Path(join_path_base(path_base, source_path, source))
+            except ValueError:
+                raise invalid(where, "source_file") from None
+        resolved = Path(norm_path(source_path))
         project_dirs = config.project_memory_dirs if config is not None else []
         registered_scope, _ = classify_scope(resolved, project_dirs)
         if version != "4":

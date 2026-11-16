@@ -9,6 +9,7 @@ from memtomem.constants import writable_namespace_arg
 from memtomem.errors import ConfigError, EmbeddingPolicyChangedError
 from memtomem.memory_scope import require_user_base
 from memtomem.server import mcp
+from memtomem.server.client_paths import resolve_client_path
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
@@ -267,7 +268,7 @@ async def mem_import_notion(
     # Captured before the import's awaits so a session that ends midway
     # still gets the flag.
     provenance_session_id = await capture_session_for_untracked_write(app)
-    export_path = Path(path).expanduser().resolve()
+    export_path = resolve_client_path(app, path)
 
     if not export_path.exists():
         return f"Error: Path not found: {export_path}"
@@ -388,7 +389,7 @@ async def mem_import_obsidian(
     # Captured before the import's awaits so a session that ends midway
     # still gets the flag.
     provenance_session_id = await capture_session_for_untracked_write(app)
-    vault = Path(vault_path).expanduser().resolve()
+    vault = resolve_client_path(app, vault_path)
 
     if not vault.exists() or not vault.is_dir():
         return f"Error: Obsidian vault not found: {vault}"
