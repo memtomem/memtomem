@@ -23,7 +23,6 @@ import pytest
 from click.testing import CliRunner
 from helpers import make_chunk, set_home
 
-from memtomem import __version__
 from memtomem.cli import cli
 from memtomem.config import Mem2MemConfig, StorageConfig
 from memtomem.server.tools import status_config
@@ -173,24 +172,53 @@ class TestFallbackWarning:
         assert "will fall back" in warning["detail"]
 
     def test_the_fix_names_the_extra_the_restart_and_the_rebuild(self, monkeypatch, backend):
+        """The recovery steps are pinned whole, not by fragments.
+
+        Each clause carries a condition the recovery depends on, and a fragment
+        check passes when one is inverted ("has the extra" → "lacks the extra")
+        or narrowed ("wherever memtomem runs" → "for this server"). Why each
+        step reads as it does, in order:
+
+        - The extra goes wherever memtomem runs: any process still without it
+          writes unicode61 rows into the rebuilt index.
+        - The restart is a rule over every process using the store, each set
+          to kiwipiepy, with examples: writers are not only MCP servers, a list
+          would invite completing it, and a writer configured with unicode61
+          mixes the index even with the extra installed.
+        - ``mem_status()`` on each MCP server must show the tokenizer as
+          kiwipiepy and the warning gone before the rebuild: the rebuild's reply
+          names its tokenizer only after rewriting the whole index with it, a
+          kiwipiepy setting never saved is lost on restart (clearing the warning
+          with it), and ``mm status`` builds its own components and can open
+          another store.
+        - The rebuild runs inside one of those servers, so it rebuilds the store
+          that server has open with that server's tokenizer, and its reply
+          confirms the tokenizer it used.
+        - A shell ``mm`` is the alternative only with the extra and the same
+          store: it can lack the extra, and a plugin launcher can give the
+          server other environment variables and another working directory.
+          No pinned version: a dev build is not published.
+        """
         _fall_back(monkeypatch, backend)
         self._installed(monkeypatch, False)
 
         fix = self._warning(backend)["fix"]
 
-        assert "memtomem[onnx,korean]" in fix
-        assert "restart" in fix
-        # A bare ``mm`` can lack the extra (it would rebuild as unicode61), be
-        # absent on a uvx-only install, or open another store — so the rebuild
-        # runs through the server's own launcher rather than a pinned command
-        # (a pinned version also fails for an unpublished dev build).
-        rebuild = "mm config set search.tokenizer kiwipiepy"
-        assert rebuild in fix
-        assert "launcher and environment" in fix
-        assert "uvx --from" not in fix and __version__ not in fix
-        assert fix.index("restart") < fix.index(rebuild), (
-            "rebuilding before every writer restarts lets a live fallback "
-            "server write unicode61 rows into the rebuilt index"
+        assert fix == (
+            "install the korean extra wherever memtomem runs (launch "
+            "memtomem[onnx,korean] instead of memtomem[onnx]). Let running indexing "
+            "commands finish, then restart every process that uses this store, each with "
+            "`search.tokenizer` set to kiwipiepy — MCP servers, `mm web`, `mm shell` and "
+            "applications embedding memtomem, for example. Check `mem_status()` on each "
+            "MCP server and continue only once it shows `search.tokenizer` as kiwipiepy "
+            "and this warning is gone there (a kiwipiepy setting that was never saved is "
+            "lost on restart, and the warning with it). Then rebuild the keyword index "
+            "once, from one of those servers through an MCP client connected to it: "
+            '`mem_do(action="config", params={"key": "search.tokenizer", "value": '
+            '"kiwipiepy"})`; its reply should say `FTS index rebuilt with kiwipiepy`. '
+            "`mm config set search.tokenizer kiwipiepy` does the same only where that "
+            "`mm` has the korean extra and opens the same store (same config, environment "
+            "and working directory)"
         )
 
     def test_mm_status_reports_it(self, monkeypatch, backend):
