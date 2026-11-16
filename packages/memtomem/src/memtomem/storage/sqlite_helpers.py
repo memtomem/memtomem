@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 from functools import lru_cache
 from collections.abc import Iterable, Sequence
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from memtomem.models import NamespaceFilter, has_namespace_prefix
 
@@ -71,6 +71,29 @@ def resolve_path(p: Path) -> Path:
         return p.resolve()
     except RuntimeError:
         return Path(os.path.realpath(p))
+
+
+def join_path_base(base: PurePath, path: PurePath, raw: str) -> PurePath:
+    """Start ``path``, which is not absolute, at ``base`` instead of the process cwd.
+
+    For a caller that knows which directory a relative path was written
+    against when that is not this process's working directory. Takes pure
+    paths so the Windows shapes can be exercised on any platform.
+
+    ``is_absolute()`` is false on Windows for two shapes that are not plainly
+    relative. A rooted path with no drive (``\\foo``) joins to the root of
+    the base's drive, where a process started in ``base`` would resolve it. A
+    drive-relative path (``C:foo``) joins under ``base`` when it names the
+    base's drive; on another drive it means that drive's own working
+    directory, which only the process that wrote it knows, so it is refused.
+    ``raw`` is the text as given, for that message.
+    """
+    if path.drive and path.drive.casefold() != base.drive.casefold():
+        raise ValueError(
+            f"{raw!r} is relative to the working directory of drive {path.drive}, which "
+            "is not known here; pass an absolute path."
+        )
+    return base / path
 
 
 def own_leaf_key(file_path: Path) -> str:

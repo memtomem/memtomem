@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
 
 from memtomem.constants import writable_namespace_arg
 from memtomem.server import mcp
+from memtomem.server.client_paths import resolve_client_path
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
@@ -63,7 +63,7 @@ async def mem_index(
     if mismatch_msg:
         return mismatch_msg
 
-    target = Path(path).expanduser().resolve()
+    target = resolve_client_path(app, path)
 
     # The gauge spans capture -> index -> provenance event. Indexing a
     # large tree can outlast the session-teardown drain budget, in which

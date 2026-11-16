@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from memtomem.server.client_paths import resolve_connection_path
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
@@ -34,7 +35,9 @@ async def mem_ingest(
     if source_type not in _VALID_SOURCE_TYPES:
         return f"Error: unknown source_type '{source_type}'. Valid: {sorted(_VALID_SOURCE_TYPES)}"
 
-    resolved = Path(source).expanduser().resolve()
+    # Reads only the connection's working directory; the store opens later,
+    # after the missing-path and dry-run exits.
+    resolved = resolve_connection_path(ctx, source)
     if not resolved.exists():
         return f"Error: path not found: {resolved}"
 
