@@ -1739,6 +1739,12 @@ registry and stores local absolute paths.
 |----------|---------|-------------|
 | `MEMTOMEM_HOOKS__TARGET_SCOPE` | `user` | Tier that `mm context` writes memtomem-managed Claude Code hook rules into: `user` (`~/.claude/settings.json`), `project_shared` (`<project>/.claude/settings.json`), or `project_local` (`<project>/.claude/settings.local.json`). See ADR-0010 §3. |
 
+## Maintenance
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_MAINTENANCE__EXPERIMENTAL_DUPLICATE_BRIEF` | `false` | [Experimental](../../README.md#stability). When `true`, `mem_dedup_scan` prints, under each member of a candidate pair, what the store holds about it: heading, namespace, scope, tags, validity window, the stored read-only flag, where it sits in its source, and its relations and links. One more line names the fields the two members differ on. These are facts for whoever judges the pair, not a recommendation: the scan still selects and orders pairs the same way and still changes nothing. Each member is shown as the store holds it when the brief is written, which is a second read after the scan: a heading or line number that changed in between shows its new value, and a near pair keeps the score the scan computed. A pair is left out, and counted in a closing line, when that second read does not return one of its members (it was deleted, or it sits on a path the scan's listing hides: a held source, a pending source check, or the path of a policy summary whose parent is either) or when the two bodies of an exact pair do not match. Stored values (headings, tags, namespaces, scopes, paths, the preview) are printed in double quotes with quotes, backslashes and non-printable characters escaped; in the preview a line feed is shown as a space, as the plain scan shows it. A validity bound is printed to the second in UTC, or as `unix <seconds>` when it lies outside the years 1 to 9999. Output is about three times as long per pair. Set it in `config.json` (`{"maintenance": {"experimental_duplicate_brief": true}}`) or with this variable; `mm config set` and `mem_config` do not change it |
+
 ## Advanced / operator environment variables
 
 These are read directly from the process environment (not the layered

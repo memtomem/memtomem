@@ -515,6 +515,32 @@ class ChunkLink:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkTopology:
+    """Where a chunk sits in its source and what points at it.
+
+    Facts as stored, for a reader deciding whether two chunks with the same
+    body are the same record. None of them is a verdict on what may be removed.
+
+    A line span is *recorded* when ``start_line >= 1`` and ``end_line >=
+    start_line``; the structured chunker stores ``0, 0`` for values it cannot
+    place. The two span fields are ``None`` for a chunk without a recorded
+    span, and a sibling without one takes no part in either.
+    """
+
+    only_in_source: bool  # no other stored chunk has this source_file
+    at_source_start: bool | None  # no sibling starts on an earlier line
+    span_shared: bool | None  # a sibling's line span overlaps this one's
+    consolidated_into: int  # summaries covering this chunk (outgoing edges)
+    consolidates: int  # chunks this one summarises (incoming edges)
+    other_relations: int  # edges of any other type, either direction
+    # ``chunk_links`` rows this chunk is the source of, as (link_type, count)
+    # sorted by type. The source of a ``shared`` row is the chunk a copy was
+    # made from; the source of a ``summarizes`` row is the summary.
+    links_out: tuple[tuple[str, int], ...]
+    links_in: tuple[str, ...]  # link types of rows this chunk is the target of
+
+
+@dataclass(frozen=True, slots=True)
 class IndexingStats:
     total_files: int
     total_chunks: int

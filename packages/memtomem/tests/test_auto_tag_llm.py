@@ -69,10 +69,13 @@ class TestExtractTagsLlm:
         assert tags == ["python", "search"]
 
     @pytest.mark.anyio
-    async def test_empty_response(self):
-        llm = FakeLLM(response="")
-        tags = await extract_tags_llm("text", llm)
-        assert tags == []
+    @pytest.mark.parametrize("answer", ["", "  \n", "```\n```"])
+    async def test_empty_answer_raises(self, answer):
+        # A thinking model that spends its token budget before answering
+        # returns an empty string (#3382). That is no answer, not "no tags".
+        llm = FakeLLM(response=answer)
+        with pytest.raises(LLMError, match="empty answer"):
+            await extract_tags_llm("text", llm)
 
     @pytest.mark.anyio
     async def test_strips_code_fence(self):
@@ -112,4 +115,14 @@ class TestExtractTagsWithFallback:
         text = "python python python memory memory search"
         tags = await _extract_tags_with_fallback(text, llm_provider=FailingLLM())
         expected = extract_tags_keyword(text)
+        assert tags == expected
+
+    @pytest.mark.anyio
+    async def test_falls_back_on_empty_answer(self):
+        text = "python python python memory memory search"
+        expected = extract_tags_keyword(text)
+        assert expected  # an empty heuristic result would not show the fallback ran
+        llm = FakeLLM(response="")
+        tags = await _extract_tags_with_fallback(text, llm_provider=llm)
+        assert len(llm.calls) == 1
         assert tags == expected

@@ -16,6 +16,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `--with 'huggingface-hub>=1.20'`, so a uv configuration that cannot resolve
   `huggingface-hub` 1.20 or later now stops the server from starting.
 
+### Added
+
+- **`mem_dedup_scan` can show what the store holds about each member of a candidate pair
+  (experimental, off by default).** Two chunks with the same body are not always the same
+  record: the content hash covers the body only. With
+  `maintenance.experimental_duplicate_brief` set in `config.json`, or
+  `MEMTOMEM_MAINTENANCE__EXPERIMENTAL_DUPLICATE_BRIEF=true`, each member is followed by its
+  heading, namespace, scope, tags and validity window, the stored read-only flag, where it sits
+  in its source, and its relations and links, and each pair by the fields the two members
+  differ on. These are facts for whoever judges the pair; the scan recommends nothing and
+  still changes nothing. Members are shown as the store holds them in a second read after the
+  scan, so a heading or line number that changed in between shows its new value; a pair is
+  left out, and counted, when that read does not return one of its members (deleted, or on a
+  path the scan's listing hides) or the bodies of an exact pair do not match. With the setting
+  off the output is unchanged. The
+  tool's parameters are the same either way, and `mem_config` and `mm config set` do not
+  change the setting.
+
 ### Changed
 
 - **The polling file watcher rescans every 10 s instead of every 1 s, and
@@ -80,6 +98,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   one cancelled or failing there: two requests in flight on one connection, two SSE
   connections, or one request and the startup warmup (`warmup.enabled`). It was reproduced
   with a script and not seen in use.
+
+- **The Ollama provider turns thinking off, and an empty LLM answer no longer passes as "no
+  tags" or "no entities" (#3382).** With `llm.enabled` on and no model set, the Ollama model
+  is `gemma4:e2b`, which thinks before it answers. Ollama counts that thinking against the
+  token limit of the call, and the provider did not turn it off, so the model could use the
+  whole limit and return an empty answer. LLM auto-tagging and `mem_entity_scan` kept the
+  empty answer as their result, and the keyword and regex fallbacks did not run because the
+  call had not failed. Measured with `gemma4:e2b` on Ollama 0.40.13 over a five-line note,
+  five runs each: tagging came back empty in 2 and entity extraction in 5 before, and in 0
+  and 0 after. Two changes:
+  - Every request the Ollama provider sends now carries `think: false`, for all LLM
+    features. At a 256-token limit this took the empty answers to the tagging and entity
+    prompts from 5 of 5 to 0 of 5 on `gemma4:e2b` and from 3 of 3 to 0 of 3 on
+    `qwen3.5:2b`, and a tagging call on `gemma4:e2b` from 1.7 s to 0.1 s. `gemma3:270m`,
+    which has no thinking, accepted the field and answered. A model that used to think now
+    answers without it, so what it writes can differ.
+  - An empty answer to the tagging or entity prompt is now a failed call, on every provider,
+    so the fallback runs. `NONE` from the model still means "no entities".
+
+  Not changed: `mem_entity_scan` with `overwrite` still treats the regex fallback's result
+  as the new extraction when the LLM call fails, which can remove entities an earlier scan
+  wrote (#3383).
 
 ## [0.7.10] — 2026-11-15
 

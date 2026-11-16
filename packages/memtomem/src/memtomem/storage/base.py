@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import AsyncIterator, Protocol, Sequence
 from uuid import UUID
 
-from memtomem.models import Chunk, ChunkLink, NamespaceFilter, ScopeFilter, SearchResult
+from memtomem.models import (
+    Chunk,
+    ChunkLink,
+    ChunkTopology,
+    NamespaceFilter,
+    ScopeFilter,
+    SearchResult,
+)
 
 
 @dataclass(frozen=True)
@@ -518,6 +525,11 @@ class StorageBackend(Protocol):
     ) -> list[tuple[UUID, UUID, str]]: ...
     async def insert_relations(self, edges: Sequence[tuple[UUID, UUID, str]]) -> int: ...
     async def delete_relation(self, source_id: UUID, target_id: UUID) -> bool: ...
+    # The current row and topology of each id a duplicate scan would list now,
+    # in one statement. A hidden path's chunks are absent, as a missing id is.
+    async def get_chunks_with_topology(
+        self, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, tuple[Chunk, ChunkTopology]]: ...
 
     # Share lineage (chunk_links)
     async def add_chunk_link(

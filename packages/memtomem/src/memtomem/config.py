@@ -1223,6 +1223,19 @@ class ContextGatewayConfig(ConfigModel):
     auto_display_configured_projects: bool = True
 
 
+class MaintenanceConfig(ConfigModel):
+    """Settings for the maintenance scans (``mem_dedup_scan`` and its siblings)."""
+
+    # Off by default and outside ``MUTABLE_FIELDS``: it is set in ``config.json``
+    # or the environment, not by ``mem_config``. When true, ``mem_dedup_scan``
+    # prints the stored evidence for each member of a candidate pair (heading,
+    # namespace, scope, tags, validity, position in the source, relations and
+    # links) and the fields the two members differ on. The scan itself, its
+    # ordering and what it selects are unchanged; the output is about three
+    # times as long.
+    experimental_duplicate_brief: bool = False
+
+
 class SessionTraceConfig(ConfigModel):
     """Configuration for session command execution tracing."""
 
@@ -1311,6 +1324,7 @@ class Mem2MemConfig(BaseSettings):
     session_summary: SessionSummaryConfig = Field(default_factory=SessionSummaryConfig)
     context_gateway: ContextGatewayConfig = Field(default_factory=ContextGatewayConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
     session_trace: SessionTraceConfig = Field(default_factory=SessionTraceConfig)
 
     # Sections the loaders read, rejected and therefore ignored (#2385 item 3).
