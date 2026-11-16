@@ -27,7 +27,9 @@ def install_app(monkeypatch, config):
         config=config,
         search_pipeline=SimpleNamespace(invalidate_cache=MagicMock(), config=config.search),
         storage=SimpleNamespace(
-            rebuild_fts=AsyncMock(return_value=3), set_fts_tokenizer=MagicMock()
+            rebuild_fts=AsyncMock(return_value=3),
+            set_fts_tokenizer=MagicMock(),
+            fts_tokenizer_effective="kiwipiepy",
         ),
         embedder=SimpleNamespace(config=config.embedding),
     )
@@ -226,7 +228,7 @@ async def test_success_preserves_persistence_and_fanout(
     if key == "search.tokenizer":
         app.storage.set_fts_tokenizer.assert_called_once_with(actual)
         app.storage.rebuild_fts.assert_awaited_once_with()
-        assert "FTS index rebuilt (3 chunks)." in response
+        assert "FTS index rebuilt with kiwipiepy (3 chunks)." in response
     else:
         app.storage.set_fts_tokenizer.assert_not_called()
         app.storage.rebuild_fts.assert_not_called()

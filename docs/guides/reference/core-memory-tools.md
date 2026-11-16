@@ -425,7 +425,7 @@ See [Reset Flow](../configuration.md#reset-flow) for the MCP equivalent and reco
   ```
   mm config set search.tokenizer kiwipiepy
   ```
-  This requires `pip install kiwipiepy` and provides morphological analysis for Korean text. The default `unicode61` tokenizer splits Korean text at character boundaries rather than morpheme boundaries.
+  This requires the `korean` extra (`memtomem[korean]`, also in `[all]`) in every process that opens the store, plugin-launched servers included, and provides morphological analysis for Korean text. The default `unicode61` tokenizer splits Korean text at spaces, punctuation and symbols but never inside a word, so a particle or an ending stays attached to its word. A process without the extra falls back to `unicode61` and keeps indexing; `mem_status` then shows a `tokenizer_fallback` warning with the recovery steps.
 
 ### `mem_recall` — Date-range retrieval
 
