@@ -76,8 +76,13 @@ def _verify_file(path: Path, mtime: int, size: int, expected: str) -> None:
             raise ValueError("Pinned E5 artifact checksum mismatch")
 
 
+def is_tokenizer_identifier(value: str) -> bool:
+    """Whether :func:`resolve_tokenizer` reads ``value`` as a model id, not a path."""
+    return value == E5_TOKENIZER
+
+
 def resolve_tokenizer(path: str) -> Path:
-    if path != E5_TOKENIZER:
+    if not is_tokenizer_identifier(path):
         return Path(path).expanduser().resolve()
     try:
         from huggingface_hub import hf_hub_download

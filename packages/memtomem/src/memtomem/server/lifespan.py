@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import logging.config
 import os
 import sys
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -36,9 +38,24 @@ class _ServerRuntimeState:
     owner: AppContext | None = None
     webhook_manager: object | None = None
     references: int = 0
+    # Set when the owner's own close raised, so its sequence did not finish;
+    # read by the shared daemon, which must exit non-zero then. A stage that
+    # close() logs and continues past (webhook, watcher, embedder) is not a
+    # failure here: the process exit releases it, as for a standalone server.
+    close_failed: bool = False
 
 
 _SERVER_RUNTIMES: dict[int, _ServerRuntimeState] = {}
+
+# The working directory of the client on the connection whose lifespan is being
+# entered. Set by the shared daemon in the task that calls ``Server.run`` for
+# that connection, immediately before the call; ``Server.run`` enters the
+# lifespan in the same task, so ``app_lifespan`` sees it and copies it onto the
+# connection's context. Never read by a handler: handlers take their context
+# from the request. Unset on every other transport.
+connection_client_cwd: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "memtomem_connection_client_cwd", default=None
+)
 
 
 def _runtime_state(server: object) -> _ServerRuntimeState:
@@ -51,7 +68,16 @@ def _runtime_state(server: object) -> _ServerRuntimeState:
     return state
 
 
-async def _acquire_server_runtime(server: object) -> tuple[_ServerRuntimeState, AppContext]:
+async def _acquire_server_runtime(
+    server: object,
+    configure_owner: Callable[[AppContext], None] | None = None,
+) -> tuple[_ServerRuntimeState, AppContext]:
+    """Take one reference on ``server``'s runtime, creating its owner if none exists.
+
+    ``configure_owner`` runs on a newly created owner before anything can use
+    it, warmup included. The shared daemon uses it to freeze the store before
+    any initialization can start.
+    """
     state = _runtime_state(server)
     async with state.lock:
         owner = state.owner
@@ -77,6 +103,12 @@ async def _acquire_server_runtime(server: object) -> tuple[_ServerRuntimeState, 
             except BaseException:
                 await _stop_quietly(webhook_mgr, "webhook_manager")
                 raise
+            if configure_owner is not None:
+                try:
+                    configure_owner(owner)
+                except BaseException:
+                    await _stop_quietly(webhook_mgr, "webhook_manager")
+                    raise
             state.owner = owner
             state.webhook_manager = webhook_mgr
             if config.warmup.enabled:
@@ -114,7 +146,8 @@ async def _release_server_runtime(
         except asyncio.CancelledError as exc:
             first_cancel = exc
         try:
-            await _stop_quietly(owner, "app_context")
+            if not await _stop_quietly(owner, "app_context"):
+                state.close_failed = True
         except asyncio.CancelledError as exc:
             if first_cancel is None:
                 first_cancel = exc
@@ -273,6 +306,9 @@ async def app_lifespan(_server: MCPServer[AppContext]) -> AsyncIterator[AppConte
         )
 
     state, ctx = await _acquire_server_runtime(_server)
+    client_cwd = connection_client_cwd.get()
+    if client_cwd is not None:
+        ctx.client_cwd = client_cwd
 
     try:
         yield ctx

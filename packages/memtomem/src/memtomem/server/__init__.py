@@ -377,7 +377,7 @@ def _sigterm_targets(pid_file: Path | None, presence: object) -> tuple[Path, ...
     return tuple(targets)
 
 
-def _install_sigterm_handler(*paths: Path | list[Path]) -> None:
+def _install_sigterm_handler(*paths: Path | list[Any]) -> None:
     """Install a SIGTERM handler that unlinks ``paths`` and hard-exits.
 
     ``mcp.run()`` runs an asyncio event loop, and asyncio swallows
@@ -447,6 +447,15 @@ def _install_sigterm_handler(*paths: Path | list[Path]) -> None:
         # window without ever risking deletion of another process's pid file.
         targets = (path for item in paths for path in (item if isinstance(item, list) else [item]))
         for path in targets:
+            if callable(path):
+                # A conditional cleanup the shared daemon puts first in the list:
+                # its socket is removed only while it is still the daemon's own.
+                # Whatever it raises, the remaining files and the exit still run.
+                try:
+                    path()
+                except Exception:  # nosec B110 - the hard exit below must run
+                    pass
+                continue
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -774,6 +783,126 @@ def _resolve_store_db_path() -> Path | None:
         return None
 
 
+def _claim_store_pid_file(
+    db_path: Path | None,
+    pid_file: Path,
+    process_started: str,
+    _sigterm_cleanup_targets: list[Any],
+) -> tuple[Any, Any]:
+    """Register presence, then take and stamp the store's pid lock.
+
+    The body of ``main()``'s startup span, shared with the shared daemon
+    (``memtomem.server.daemon``), which takes its store's ordinary pid lock the
+    same way. The caller holds :func:`_sigterm_deferred` and has installed
+    :func:`_install_sigterm_handler` on ``_sigterm_cleanup_targets``; this
+    function only appends to that list.
+
+    Returns ``(lock_handle, presence)``: the open pid file, or ``None`` when
+    another server holds the lock, and the presence registration, or ``None``.
+    """
+    import atexit
+
+    # Record this process in the instance registry's startup population
+    # (#2230), before the pid-lock decision because it is independent of it:
+    # the ``server[-<digest>].pid`` file is exclusive per store, so the
+    # contended arm below keeps no pid record at all — yet a second server on
+    # one store is exactly the accumulation this marker exists to make
+    # visible. It is also the only registration a handshake-only session ever
+    # performs, since the store-scoped sentinel's digest is the DB file's
+    # inode identity and no store is open yet.
+    #
+    # Best-effort by contract, and reported: the registry returns ``None``
+    # rather than raising for every ordinary failure (an untrusted directory,
+    # a lock timeout, a contended sentinel), so the warning keys off the
+    # return value, not off an exception. A server that cannot be counted
+    # must still start.
+    import logging
+
+    _presence = None
+    try:
+        from memtomem._instance_registry import register_server_presence
+
+        _presence = register_server_presence(
+            db_path,
+            on_path_reserved=_sigterm_cleanup_targets.append,
+        )
+    except Exception:  # pragma: no cover - defensive; the registry swallows its own
+        # Only an import-time failure reaches here; the traceback is the
+        # single piece of information the warning below cannot carry, so
+        # it is logged rather than dropped.
+        logging.getLogger(__name__).debug(
+            "presence registration could not be attempted", exc_info=True
+        )
+    if _presence is None:
+        logging.getLogger(__name__).warning(
+            "Could not record this server in the instance registry "
+            "(runtime dir: %s); `mm doctor` may under-report running servers.",
+            pid_file.parent,
+        )
+
+    from memtomem._pid_lock import lock_pid_file
+
+    try:
+        _lock_fp = lock_pid_file(pid_file, label="server pid")
+    except OSError:
+        if _presence is not None:
+            _presence.cleanup()
+        raise
+    if _lock_fp is None:
+        # Another server still holds the lock after the retry budget —
+        # proceed anyway (the editor expects the process to stay alive), but
+        # log a warning. Don't register atexit unlink or the SIGTERM handler:
+        # either would yank the primary server's pid file out from under it.
+        logging.getLogger(__name__).warning(
+            "Another memtomem-server is already writing to this store (pid file: %s). "
+            "Concurrent writes may be slow.",
+            pid_file,
+        )
+    else:
+        _sigterm_cleanup_targets.append(pid_file)
+        _lock_fp.seek(0)
+        _lock_fp.truncate()
+        # Keep the pid on the first line for old readers. The blank second
+        # line is the optional Web-UI port slot understood by
+        # ``cli._liveness._parse_pid_payload``; the third line records this
+        # process generation's UTC start time.
+        _lock_fp.write(f"{os.getpid()}\n\n{process_started}\n")
+        _lock_fp.flush()
+
+        # Composite cleanup — single atexit registration, platform-aware order
+        # (#818 review). Splitting close+unlink across two ``atexit.register``
+        # calls relies on LIFO so unlink runs before close, which works on
+        # POSIX (you can unlink an open file and the inode persists until
+        # close) but breaks on Windows: NTFS refuses to delete an open or
+        # locked handle, so a clean shutdown via ``atexit`` would raise
+        # ``PermissionError`` (WinError 32) and leave a stale ``server.pid``
+        # behind — the next start then misreads it as a live holder.
+        def _cleanup() -> None:
+            if os.name == "nt":
+                # Close → unlock → unlink. The close releases both the
+                # file handle and the portalocker lock; the unlink only
+                # then succeeds because no handle is open against the path.
+                try:
+                    _lock_fp.close()
+                finally:
+                    try:
+                        pid_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            else:
+                # POSIX: unlink while still holding the flock so we delete
+                # exactly the inode we own; without that, a window opens
+                # where another process could ``open`` the same path and
+                # we'd close-then-unlink the wrong inode. Closing the fd
+                # afterwards releases the flock.
+                pid_file.unlink(missing_ok=True)
+                _lock_fp.close()
+
+        atexit.register(_cleanup)
+
+    return _lock_fp, _presence
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the MCP server."""
     import atexit
@@ -867,103 +996,7 @@ def main(argv: list[str] | None = None) -> None:
         # added only after the exclusive lock proves ownership.
         _sigterm_cleanup_targets: list[Path] = []
         _install_sigterm_handler(_sigterm_cleanup_targets)
-        # Record this process in the instance registry's startup population
-        # (#2230), before the pid-lock decision because it is independent of it:
-        # the ``server[-<digest>].pid`` file is exclusive per store, so the
-        # contended arm below keeps no pid record at all — yet a second server on
-        # one store is exactly the accumulation this marker exists to make
-        # visible. It is also the only registration a handshake-only session ever
-        # performs, since the store-scoped sentinel's digest is the DB file's
-        # inode identity and no store is open yet.
-        #
-        # Best-effort by contract, and reported: the registry returns ``None``
-        # rather than raising for every ordinary failure (an untrusted directory,
-        # a lock timeout, a contended sentinel), so the warning keys off the
-        # return value, not off an exception. A server that cannot be counted
-        # must still start.
-        import logging
-
-        _presence = None
-        try:
-            from memtomem._instance_registry import register_server_presence
-
-            _presence = register_server_presence(
-                db_path,
-                on_path_reserved=_sigterm_cleanup_targets.append,
-            )
-        except Exception:  # pragma: no cover - defensive; the registry swallows its own
-            # Only an import-time failure reaches here; the traceback is the
-            # single piece of information the warning below cannot carry, so
-            # it is logged rather than dropped.
-            logging.getLogger(__name__).debug(
-                "presence registration could not be attempted", exc_info=True
-            )
-        if _presence is None:
-            logging.getLogger(__name__).warning(
-                "Could not record this server in the instance registry "
-                "(runtime dir: %s); `mm doctor` may under-report running servers.",
-                pid_file.parent,
-            )
-
-        from memtomem._pid_lock import lock_pid_file
-
-        try:
-            _lock_fp = lock_pid_file(pid_file, label="server pid")
-        except OSError:
-            if _presence is not None:
-                _presence.cleanup()
-            raise
-        if _lock_fp is None:
-            # Another server still holds the lock after the retry budget —
-            # proceed anyway (the editor expects the process to stay alive), but
-            # log a warning. Don't register atexit unlink or the SIGTERM handler:
-            # either would yank the primary server's pid file out from under it.
-            logging.getLogger(__name__).warning(
-                "Another memtomem-server is already writing to this store (pid file: %s). "
-                "Concurrent writes may be slow.",
-                pid_file,
-            )
-        else:
-            _sigterm_cleanup_targets.append(pid_file)
-            _lock_fp.seek(0)
-            _lock_fp.truncate()
-            # Keep the pid on the first line for old readers. The blank second
-            # line is the optional Web-UI port slot understood by
-            # ``cli._liveness._parse_pid_payload``; the third line records this
-            # process generation's UTC start time.
-            _lock_fp.write(f"{os.getpid()}\n\n{process_started}\n")
-            _lock_fp.flush()
-
-            # Composite cleanup — single atexit registration, platform-aware order
-            # (#818 review). Splitting close+unlink across two ``atexit.register``
-            # calls relies on LIFO so unlink runs before close, which works on
-            # POSIX (you can unlink an open file and the inode persists until
-            # close) but breaks on Windows: NTFS refuses to delete an open or
-            # locked handle, so a clean shutdown via ``atexit`` would raise
-            # ``PermissionError`` (WinError 32) and leave a stale ``server.pid``
-            # behind — the next start then misreads it as a live holder.
-            def _cleanup() -> None:
-                if os.name == "nt":
-                    # Close → unlock → unlink. The close releases both the
-                    # file handle and the portalocker lock; the unlink only
-                    # then succeeds because no handle is open against the path.
-                    try:
-                        _lock_fp.close()
-                    finally:
-                        try:
-                            pid_file.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-                else:
-                    # POSIX: unlink while still holding the flock so we delete
-                    # exactly the inode we own; without that, a window opens
-                    # where another process could ``open`` the same path and
-                    # we'd close-then-unlink the wrong inode. Closing the fd
-                    # afterwards releases the flock.
-                    pid_file.unlink(missing_ok=True)
-                    _lock_fp.close()
-
-            atexit.register(_cleanup)
+        _claim_store_pid_file(db_path, pid_file, process_started, _sigterm_cleanup_targets)
 
     if transport != "stdio":
         # Banner runs after the lock decision so the warning log (if any)

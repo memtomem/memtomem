@@ -161,14 +161,21 @@ def build_fresh_config(
     ``validate_profile=False`` skips final profile validation after the file
     layers, so diagnostics can display invalid file settings. Construction-time
     environment validation is unchanged. Runtime readers must retain the default.
+
+    In a shared daemon, a relative configured path raises
+    :class:`~memtomem.config.RelativeConfigPathError` here, so every rebuild a
+    running server performs (handshake, first initialization, root
+    reconciliation) refuses it in one place.
     """
-    return _build_config(
+    cfg = _build_config(
         migrate=migrate,
         strict_fragments=strict_fragments,
         strict_overrides=strict_overrides,
         quiet=quiet,
         validate_profile=validate_profile,
     )
+    _config_module.check_relative_config_paths(cfg)
+    return cfg
 
 
 def rebase_embedding(identity: EmbeddingConfig, pins: EmbeddingConfig) -> EmbeddingConfig:
