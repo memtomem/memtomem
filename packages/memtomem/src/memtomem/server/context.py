@@ -7,13 +7,13 @@ import contextlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import Context
 
-from memtomem.config import Mem2MemConfig
+from memtomem.config import Mem2MemConfig, RelativeConfigPathError
 from memtomem.config_signature import Signature, build_fresh_config, current_signature
 from memtomem.constants import validate_namespace
 
@@ -32,7 +32,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def _stop_quietly(resource: object | None, stage: str) -> None:
+class DaemonStoreChanged(RuntimeError):
+    """A shared daemon's rebuilt config no longer selects the store it started on."""
+
+
+async def _stop_quietly(resource: object | None, stage: str) -> bool:
     """Stop ``resource`` and log (don't propagate) ordinary failures.
 
     Used by both :meth:`AppContext.ensure_initialized` failure cleanup and
@@ -42,12 +46,16 @@ async def _stop_quietly(resource: object | None, stage: str) -> None:
     propagates and the caller can decide whether to mask the original
     exception that triggered teardown (matches the lifespan helper from
     PR #404 / #406).
+
+    Returns ``False`` when the stop raised. The shared daemon reads it for the
+    owner's own close only: an exception escaping ``AppContext.close`` means its
+    sequence did not finish. Every other caller ignores it.
     """
     if resource is None:
-        return
+        return True
     stop = getattr(resource, "stop", None) or getattr(resource, "close", None)
     if stop is None:
-        return
+        return True
     try:
         await stop()
     except asyncio.CancelledError:
@@ -55,6 +63,8 @@ async def _stop_quietly(resource: object | None, stage: str) -> None:
         raise
     except Exception:
         logger.warning("Shutdown step '%s' failed", stage, exc_info=True)
+        return False
+    return True
 
 
 def _same_tier(left: object, right: object) -> bool:
@@ -169,6 +179,14 @@ class AppContext:
     # process working directory is the client's. Per connection, so
     # ``from_runtime_owner`` does not copy it.
     client_cwd: Path | None = field(default=None, init=False)
+    # Set only on a shared daemon's owner (``memtomem.server.daemon``). The store
+    # the daemon resolved at start, which first initialization must still select
+    # after rebuilding its config; and the daemon's notification for a failure
+    # that ends it. Tool handlers turn exceptions into error strings and warmup
+    # swallows them, so the daemon learns of the failure through the callback,
+    # not the exception.
+    _frozen_store: Path | None = field(default=None, init=False, repr=False)
+    _on_terminal: Callable[[str], None] | None = field(default=None, init=False, repr=False)
     # Internal state — not part of the public ``__init__`` surface; populated
     # by ``ensure_initialized`` / ``from_components``. The watcher /
     # scheduler / policy_scheduler / health_watchdog handles are populated
@@ -630,9 +648,21 @@ class AppContext:
                 # would bank a changed fragment's signature while retaining
                 # its handshake-era values. Keep startup's tolerant override
                 # behavior so malformed config remains repairable.
-                self.config = build_fresh_config(migrate=True, strict_overrides=False)
+                try:
+                    self.config = build_fresh_config(migrate=True, strict_overrides=False)
+                except RelativeConfigPathError as exc:
+                    # Only a shared daemon refuses relative paths; to it this is
+                    # terminal, like a changed store below.
+                    self._notify_terminal(str(exc))
+                    raise
                 self.ambient_config_loaded = True
                 await self._reconcile_webhook_manager()
+
+            if self._frozen_store is not None:
+                # Before the barrier and before anything that opens storage: a
+                # daemon's store was fixed when it started, and a rebuilt config
+                # that selects another one is refused, not opened.
+                self._check_frozen_store()
 
             # #1936: take the lifecycle barrier BEFORE storage opens, so a
             # concurrent ``mm uninstall`` either has not started staging
@@ -1116,6 +1146,38 @@ class AppContext:
                 exc_info=True,
             )
             self._failed_services.append((service, label))
+
+    def _notify_terminal(self, reason: str) -> None:
+        """Tell a shared daemon that this owner cannot serve; a no-op elsewhere.
+
+        Synchronous on purpose: it runs under ``_init_lock``, so it records and
+        signals only, and the daemon does the teardown in its own task.
+        """
+        if self._on_terminal is not None:
+            self._on_terminal(reason)
+
+    def _check_frozen_store(self) -> None:
+        """Refuse a rebuilt config that no longer selects the daemon's store.
+
+        A normalization that raises is refused too: the identity the daemon
+        holds cannot be shown to be the one the config now names.
+        """
+        frozen = self._frozen_store
+        assert frozen is not None  # the caller checked
+        configured = self.config.storage.sqlite_path
+        try:
+            current = Path(configured).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            reason = f"the configured store {str(configured)!r} cannot be resolved: {exc}"
+        else:
+            if current == frozen:
+                return
+            reason = (
+                f"the configuration now selects the store {str(current)!r}, "
+                f"but this daemon serves {str(frozen)!r}"
+            )
+        self._notify_terminal(reason)
+        raise DaemonStoreChanged(reason)
 
     async def _acquire_lifecycle_barrier(self) -> None:
         """Take the shared lifecycle barrier before storage opens (#1936).
