@@ -388,6 +388,14 @@ class TestTheRowItReturns:
         assert set(await backend.get_chunks_with_topology([present, uuid4()])) == {present}
         assert await backend.get_chunks_with_topology([]) == {}
 
+    async def test_no_ids_makes_no_read(self, backend, monkeypatch):
+        def no_lease():
+            raise AssertionError("an empty call leased a connection")
+
+        monkeypatch.setattr(backend, "_lease_txn_read_db", no_lease)
+
+        assert await backend.get_chunks_with_topology([]) == {}
+
     async def test_a_repeated_id_is_answered_once(self, backend):
         present = _seed(backend, "/m/a.md", 1, 5)
 

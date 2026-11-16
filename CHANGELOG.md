@@ -28,8 +28,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   differ on. These are facts for whoever judges the pair; the scan recommends nothing and
   still changes nothing. Members are shown as the store holds them in a second read after the
   scan, so a heading or line number that changed in between shows its new value; a pair is
-  left out, and counted, when in that interval a member was deleted or its source was held, or
-  the bodies of an exact pair stopped matching. With the setting off the output is unchanged. The
+  left out, and counted, when that read does not return one of its members (deleted, or on a
+  path the scan's listing hides) or the bodies of an exact pair do not match. With the setting
+  off the output is unchanged. The
   tool's parameters are the same either way, and `mem_config` and `mm config set` do not
   change the setting.
 

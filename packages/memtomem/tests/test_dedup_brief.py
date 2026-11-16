@@ -48,8 +48,8 @@ from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
 _FOOTER = "Scanned 2 chunks; near-duplicate search probed 2."
 _COVERAGE = DedupCoverage(pool=2, near_search_enabled=True, probed=2, without_vector=0)
 _OMITTED = (
-    "omitted: since the scan read them, a member was deleted, its source became unavailable, "
-    "or the bodies of an exact pair stopped matching."
+    "omitted: a member is not stored now, its source is unavailable, or the bodies of an "
+    "exact pair do not match."
 )
 _NO_DIFFERENCE = (
     "  differs: none (compared: heading, namespace, scope, project_root, tags, validity)"
@@ -781,7 +781,11 @@ class TestAgainstARealStore:
         assert {pair.chunk_b.id for pair in scanned} == {second.id, third.id}
         assert out.splitlines()[0] == "Duplicate candidates: 1 pairs (threshold=0.92):"
         assert out.splitlines()[-2] == f"1 pair {_OMITTED}"
-        assert str(second.id) not in out and str(second.metadata.source_file) not in out
+        # The path as the brief spells it: quoted, a Windows path has its
+        # backslashes doubled, and the raw spelling would be absent either way.
+        assert str(second.id) not in out
+        assert _quoted(str(second.metadata.source_file)) not in out
+        assert _quoted(str(third.metadata.source_file)) in out
         assert str(third.id) in out
 
     async def test_a_re_index_that_keeps_the_id_is_rendered_as_stored_now(

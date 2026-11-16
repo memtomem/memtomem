@@ -232,8 +232,11 @@ class RelationMixin:
         namespace or scope filter: the scan is a whole-store surface.
 
         The ids travel as one JSON array, so their number is not bounded by
-        the host-parameter limit.
+        the host-parameter limit. No ids, no read: like the batch readers
+        beside it, an empty call does not lease a connection.
         """
+        if not chunk_ids:
+            return {}
         ids = json.dumps([str(cid) for cid in chunk_ids])
         width = len(_TOPOLOGY_COLUMNS)
         async with self._lease_txn_read_db() as db:

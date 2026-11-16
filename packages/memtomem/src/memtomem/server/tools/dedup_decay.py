@@ -107,8 +107,8 @@ def _duplicate_brief(
 
     Every member line is rendered from *evidence*, the read made after the
     scan, so a member's facts describe one moment. A pair is left out when
-    that read no longer returns one of its members, or when an exact pair's
-    members no longer hash the same. The scan supplies the pairing, its order
+    that read does not return one of its members, or when an exact pair's
+    members do not hash the same. The scan supplies the pairing, its order
     and a near pair's score, which is not recomputed.
     """
     pairs = []
@@ -126,9 +126,13 @@ def _duplicate_brief(
     if omitted:
         tail.insert(
             0,
-            f"{omitted} pair{'' if omitted == 1 else 's'} omitted: since the scan read them, "
-            "a member was deleted, its source became unavailable, or the bodies of an exact "
-            "pair stopped matching.",
+            # Present tense, not "since the scan": a pair can be dropped with
+            # nothing having changed. The scan's near phase takes neighbours
+            # under the search's row-level hold rule, and the evidence read
+            # uses the listing's path-level one, which also hides an ordinary
+            # chunk filed on a hidden policy summary's path.
+            f"{omitted} pair{'' if omitted == 1 else 's'} omitted: a member is not stored "
+            "now, its source is unavailable, or the bodies of an exact pair do not match.",
         )
     if not pairs:
         return "\n".join([f"No duplicate chunks found (threshold={threshold}).", *tail])
