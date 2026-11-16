@@ -453,7 +453,7 @@ def _install_sigterm_handler(*paths: Path | list[Any]) -> None:
                 # Whatever it raises, the remaining files and the exit still run.
                 try:
                     path()
-                except Exception:
+                except Exception:  # nosec B110 - the hard exit below must run
                     pass
                 continue
             try:

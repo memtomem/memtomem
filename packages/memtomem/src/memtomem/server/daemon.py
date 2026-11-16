@@ -363,7 +363,7 @@ class Daemon:
 
         handed_over = False
         try:
-            raw = stream.extra(SocketAttribute.raw_socket)
+            raw = stream.extra(SocketAttribute.raw_socket)  # nosec B610 - anyio, not Django
             if peer_uid(raw) != os.geteuid():
                 logger.warning("refused a connection from another user")
                 return
