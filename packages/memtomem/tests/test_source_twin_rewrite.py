@@ -312,96 +312,31 @@ async def test_the_sources_tab_removes_one_spelling_and_then_a_delete_works(
 
 
 @pytest.mark.asyncio
-async def _local_twin(comp, tmp_path: Path, monkeypatch, respell) -> tuple[Path, str]:
+async def test_a_project_local_twin_is_refused_and_told_the_way_out(
+    bm25_only_components, tmp_path: Path, monkeypatch, case_insensitive
+) -> None:
+    """The tab hides a project's local tier, so the text says what to do then too."""
+    comp, _ = bm25_only_components
     root = tmp_path / "proj"
     (root / ".git").mkdir(parents=True)
     local = (root / ".memtomem" / "memories.local").resolve()
     local.mkdir(parents=True)
     comp.config.indexing.project_memory_dirs = [local]
     target = local / "a.md"
-    second = respell(local, target)
+    second = str(local / target.name.upper())
     await _twinned(comp, target, second)
+    before = target.read_bytes()
     # A project_local row is visible by id only inside its project.
     monkeypatch.chdir(root)
-    return target, second
-
-
-async def _listed(comp) -> set[str]:
-    async with _web_client(comp) as client:
-        listed = await client.get("/api/sources", params={"limit": 10000})
-    assert listed.status_code == 200, listed.text
-    return {s["path"] for s in listed.json()["sources"]}
-
-
-@pytest.mark.asyncio
-async def test_a_project_local_twin_below_the_tier_root_names_no_remedy(
-    bm25_only_components, tmp_path: Path, monkeypatch, case_insensitive
-) -> None:
-    comp, _ = bm25_only_components
-    target, second = await _local_twin(
-        comp, tmp_path, monkeypatch, lambda local, t: str(local / t.name.upper())
-    )
     ctx = StubCtx(AppContext.from_components(comp))
 
     result = await mem_delete(chunk_id=_chunk_id(comp, str(target)), ctx=ctx)
 
     assert "under two spellings of its path" in result
-    assert "does not list either spelling now" in result
-    assert "Sources tab of the web UI" not in result
-    # Why that wording exists: both spellings sit under the registered tier, so
-    # the tab hides both. A change that lists them makes this fail.
-    paths = await _listed(comp)
-    assert str(target) not in paths and second not in paths
-
-
-@pytest.mark.asyncio
-async def test_a_held_twin_is_not_offered_as_the_remedy(
-    bm25_only_components, tmp_path: Path, monkeypatch, case_insensitive
-) -> None:
-    """The tab hides a held spelling too, so a refusal must not send the user there."""
-    comp, _ = bm25_only_components
-    target, second = await _local_twin(
-        comp,
-        tmp_path,
-        monkeypatch,
-        lambda local, t: str(local.parent.parent / ".MEMTOMEM" / local.name / t.name),
-    )
-    assert await comp.storage.hold_source(Path(second), "external_test", as_stored=True)
-    ctx = StubCtx(AppContext.from_components(comp))
-
-    result = await mem_delete(chunk_id=_chunk_id(comp, str(target)), ctx=ctx)
-
-    assert "under two spellings of its path" in result
-    paths = await _listed(comp)
-    assert str(target) not in paths and second not in paths
-    assert "Sources tab of the web UI" not in result
-    assert "does not list either spelling now" in result
-
-
-@pytest.mark.asyncio
-async def test_a_project_local_twin_above_the_tier_root_is_listed_and_named(
-    bm25_only_components, tmp_path: Path, monkeypatch, case_insensitive
-) -> None:
-    comp, _ = bm25_only_components
-    target, second = await _local_twin(
-        comp,
-        tmp_path,
-        monkeypatch,
-        lambda local, t: str(local.parent.parent / ".MEMTOMEM" / local.name / t.name),
-    )
-    ctx = StubCtx(AppContext.from_components(comp))
-
-    result = await mem_delete(chunk_id=_chunk_id(comp, str(target)), ctx=ctx)
-
-    # The refusal names the tab exactly when the tab lists one of the spellings:
-    # both decisions classify the path the same way.
-    assert "under two spellings of its path" in result
-    paths = await _listed(comp)
-    assert ("Sources tab of the web UI" in result) == bool({str(target), second} & paths)
-    if sys.platform == "darwin":
-        # There the tab classifies a path by its spelling (#2499), so the spelling
-        # outside the registered tier is listed, and the remedy reaches it.
-        assert second in paths and "Sources tab of the web UI" in result
+    assert "If the Sources tab of the web UI (mm web) lists either spelling" in result
+    assert "if it lists neither, edit the file directly instead" in result
+    assert target.read_bytes() == before
+    assert _counts(comp) == {str(target): 2, second: 2}
 
 
 @pytest.mark.asyncio

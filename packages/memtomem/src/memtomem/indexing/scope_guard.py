@@ -118,22 +118,16 @@ def relinked_detail(name: str, *, op: str) -> str:
     )
 
 
-def twin_detail(
-    key: str,
-    twin: str,
-    *,
-    op: str,
-    surface: RemedySurface = "neutral",
-    unlisted: bool = False,
-) -> str:
+def twin_detail(key: str, twin: str, *, op: str, surface: RemedySurface = "neutral") -> str:
     """The refusal for a rewrite through a key whose file is also stored as ``twin`` (#3408).
 
     Removing lines through one spelling would leave the other spelling's rows
     serving them, which is how deleting "the duplicate" removed the only copy.
-    The remedy is the Sources tab's delete, which removes one stored key's rows
-    and does not touch the file. That tab does not list a held or pending path,
-    or one it classifies as ``project_local``; when it lists neither spelling
-    (``unlisted``), no remedy is named. As in
+    The way out is the Sources tab's delete, which removes one stored key's
+    rows and does not touch the file. That tab does not list every source (it
+    hides held and pending ones and a project's ``memories.local`` tier), so
+    the text names the tab conditionally and says what to do when it lists
+    neither spelling, rather than predicting what the tab shows. As in
     :func:`scope_change_detail`, only ``mcp`` names host paths and commands.
     """
     name = Path(key).name
@@ -142,23 +136,16 @@ def twin_detail(
             f"{op} refused: the store holds {name} under two spellings of its path, "
             f"{key} and {twin}"
         )
+        tab = "the Sources tab of the web UI (mm web)"
     else:
         what = f"{op} refused: {name} is indexed under two spellings of its path"
-    lead = (
+        tab = "the Sources tab"
+    return (
         f"{what}; removing lines through one would leave the other's rows serving them, "
-        "and nothing was written."
+        f"and nothing was written. If {tab} lists either spelling, delete the stale one's "
+        "rows there, which removes index rows only and does not change the file, then retry; "
+        "if it lists neither, edit the file directly instead."
     )
-    if unlisted:
-        return (
-            f"{lead} The web UI's Sources tab does not list either spelling now, so the stale "
-            "spelling's rows cannot be removed there; edit the file directly instead."
-        )
-    if surface == "mcp":
-        return (
-            f"{lead} Delete the stale spelling's rows from the Sources tab of the web UI "
-            "(mm web); that removes index rows only and does not change the file. Then retry."
-        )
-    return f"{lead} Delete the stale spelling's rows from the Sources tab, then retry."
 
 
 def scope_held_notice(op: str) -> str:

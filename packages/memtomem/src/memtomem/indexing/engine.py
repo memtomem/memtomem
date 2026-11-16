@@ -4340,49 +4340,6 @@ class IndexEngine:
         conn = db if db is not None else self._storage._get_db()
         return [row[0] for row in conn.execute("SELECT DISTINCT source_file FROM chunks")]
 
-    def _listing_hidden_keys(
-        self, keys: Iterable[str], *, db: sqlite3.Connection | None = None
-    ) -> set[str]:
-        """Which of ``keys`` the Sources list hides for a hold, read as the list reads it.
-
-        The list hides held and pending sources, and a policy summary whose
-        parent is either (``get_hidden_source_files``). Its tier rule is the
-        caller's to apply.
-        """
-        from memtomem.models import CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY
-        from memtomem.storage.sqlite_backend import SqliteBackend
-
-        if not isinstance(self._storage, SqliteBackend):
-            return set()
-        keys = list(dict.fromkeys(keys))
-        parents = {
-            k: k[: -len(CONSOLIDATED_SUFFIX)] for k in keys if k.endswith(CONSOLIDATED_SUFFIX)
-        }
-        probe = list(dict.fromkeys([*keys, *parents.values()]))
-        marks = ",".join("?" for _ in probe)
-        conn = db if db is not None else self._storage._get_db()
-        held = {
-            row[0]
-            for row in conn.execute(
-                f"SELECT source_file FROM held_sources WHERE source_file IN ({marks}) "  # nosec B608
-                f"UNION SELECT source_file FROM pending_source_checks WHERE source_file IN ({marks})",
-                [*probe, *probe],
-            )
-        }
-        hidden = {k for k in keys if k in held}
-        if parents:
-            summary_marks = ",".join("?" for _ in parents)
-            summaries = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT DISTINCT source_file FROM chunks WHERE origin=? "  # nosec B608
-                    f"AND source_file IN ({summary_marks})",
-                    [ORIGIN_CONSOLIDATION_POLICY, *parents],
-                )
-            }
-            hidden |= {k for k, parent in parents.items() if k in summaries and parent in held}
-        return hidden
-
     def _stored_scope_rows(
         self, keys: Iterable[str], *, db: sqlite3.Connection | None = None
     ) -> list[tuple[str, str, str | None, str | None]]:
@@ -4452,11 +4409,6 @@ class IndexEngine:
         # suspension, and after it another task may own an open transaction.
         rows = self._stored_scope_rows(key_spellings(stored_key), db=scope_db)
         candidates = twin_candidates(stored_key, self._stored_source_keys(db=scope_db))
-        hidden = (
-            self._listing_hidden_keys([stored_key, *candidates], db=scope_db)
-            if candidates
-            else set()
-        )
         if await asyncio.to_thread(stored_key_moved, stored_key):
             return relinked_detail(name, op=op)
         # Before ``if not rows``: an index-only delete takes no sidecar lock, so
@@ -4465,18 +4417,7 @@ class IndexEngine:
         if candidates:
             twins = await asyncio.to_thread(source_twins, stored_key, candidates)
             if twins:
-                # The Sources tab hides a held or pending path and one its list
-                # route classifies as project_local; the remedy exists while
-                # either spelling is listed.
-                unlisted = True
-                for spelling in (stored_key, twins[0]):
-                    if spelling in hidden:
-                        continue
-                    tier, _ = await asyncio.to_thread(self._resolve_scope, Path(spelling))
-                    if tier != "project_local":
-                        unlisted = False
-                        break
-                return twin_detail(stored_key, twins[0], op=op, surface=surface, unlisted=unlisted)
+                return twin_detail(stored_key, twins[0], op=op, surface=surface)
         if not rows:
             return None
         decision_path = await asyncio.to_thread(resolve_path, Path(stored_key))
