@@ -1521,6 +1521,18 @@ _ACTIVE_APP: ContextVar[_ActiveAppBinding | None] = ContextVar("memtomem_active_
 # by nature: one process runs one transport. ``mem_project_bind`` refuses
 # anything but ``"stdio"``, where one client owns the process; streamable HTTP
 # shares one ``AppContext`` across its clients, so a binding would cross them.
+# Set by a shared daemon (#3381) to a callable returning its summary. Kept here,
+# not in ``memtomem.server.daemon``: run as ``python -m``, that module is
+# ``__main__`` and an import of it by name would load a second, empty copy.
+_shared_daemon_summary: Callable[[], dict[str, object]] | None = None
+
+
+def shared_daemon_summary() -> dict[str, object] | None:
+    """Name, pid and open connections of the shared daemon this process runs, or ``None``."""
+    provider = _shared_daemon_summary
+    return provider() if provider is not None else None
+
+
 _server_transport: str | None = None
 
 

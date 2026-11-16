@@ -448,6 +448,45 @@ def _age_buckets(ages: list[float]) -> dict[str, int]:
     return buckets
 
 
+def _check_shared_daemons() -> CheckResult:
+    """Shared daemons (#3381) by their lifetime locks, as an observation only.
+
+    A daemon is also counted above, as one server, once it has opened its
+    store. Which store it serves is not shown: its lifetime lock records a pid
+    and a start time, not the registry identity a store attribution needs.
+    """
+    from memtomem.cli._liveness import enumerate_daemons
+
+    inventory = enumerate_daemons()
+    if inventory.error is not None:
+        return CheckResult(
+            name="shared-daemons",
+            status="info",
+            message="shared daemons could not be listed",
+            detail=scrub_text(inventory.error),
+        )
+    live = [d for d in inventory.daemons if d.state.alive]
+    stale = len(inventory.daemons) - len(live)
+    data: dict[str, object] = {
+        "daemons": [{"name": d.name, "pid": d.state.pid, "started": d.state.started} for d in live],
+        "stale": stale,
+        "warnings": list(inventory.warnings),
+    }
+    if not live:
+        message = "no shared daemon running"
+    else:
+        listed = ", ".join(
+            f"{d.name} (pid {d.state.pid if d.state.pid is not None else '?'})" for d in live
+        )
+        message = f"{len(live)} shared daemon(s) running: {listed}"
+    notes = [f"{stale} stale lifetime lock file(s) left by daemons that exited"] if stale else []
+    notes.extend(scrub_text(warning) for warning in inventory.warnings)
+    detail = "; ".join(notes) or None
+    return CheckResult(
+        name="shared-daemons", status="info", message=message, detail=detail, data=data
+    )
+
+
 def _check_registry_hygiene(snapshot: RegistrySnapshot) -> CheckResult:
     """Leftovers in the sentinel and presence directories, as an observation."""
     # Counted together but reported apart in the JSON: both directories leave
@@ -608,6 +647,7 @@ def doctor(
         _check_runtime_dir(snapshot),
         _check_server_instances(snapshot, rows),
         _check_registry_hygiene(snapshot),
+        _check_shared_daemons(),
     ]
     status = _overall_status(results)
 

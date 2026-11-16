@@ -358,6 +358,17 @@ def _tokenizer_fallback_warning(configured: str, storage: SqliteBackend) -> dict
     }
 
 
+def _shared_daemon_runtime() -> dict[str, object]:
+    """``{"shared_daemon": {...}}`` inside a shared daemon (#3381), else ``{}``.
+
+    A standalone server has no daemon, and the key is then absent, not null.
+    """
+    from memtomem.server.context import shared_daemon_summary
+
+    summary = shared_daemon_summary()
+    return {"shared_daemon": summary} if summary is not None else {}
+
+
 async def collect_status_report(app: AppContext) -> dict:
     """Gather the status report as a structured dict.
 
@@ -645,6 +656,7 @@ async def collect_status_report(app: AppContext) -> dict:
             "cwd": str(cwd) if cwd is not None else None,
             "project_context_root": str(project_root) if project_root is not None else None,
             "project_context_source": "bound" if bound_root is not None else "cwd",
+            **_shared_daemon_runtime(),
         },
         "index": {
             "total_chunks": stats["total_chunks"],
@@ -1025,6 +1037,16 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             ),
         ),
     ]
+    if shared := runtime.get("shared_daemon"):
+        lines.append(
+            StatusLine(
+                "kv",
+                key="Shared daemon:".ljust(17),
+                value=(
+                    f"{shared['name']} (pid {shared['pid']}, {shared['connections']} connection(s))"
+                ),
+            )
+        )
     lines.extend(
         _status_source_lines(
             "User sources",

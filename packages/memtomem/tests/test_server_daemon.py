@@ -941,3 +941,319 @@ def test_lifetime_lock_cleanup_is_enrolled_before_its_payload(
     assert len(registered) == 1
     registered[0]()  # type: ignore[operator]
     assert not path.exists()
+
+
+# ── mm daemon, and the daemon in the lifecycle commands (#3381) ──────────────
+
+
+def _mm(denv: DaemonEnv, monkeypatch: pytest.MonkeyPatch, *args: str):
+    """Run ``mm`` in this process against the daemon's home and runtime directory."""
+    """Read-only commands only: a destructive one goes through :func:`_mm_isolated`."""
+    from click.testing import CliRunner
+
+    from memtomem.cli import cli
+
+    assert args[0] not in _DESTRUCTIVE, f"run {args[0]!r} through _mm_isolated"
+    monkeypatch.setenv("HOME", str(denv.home))
+    return CliRunner().invoke(cli, list(args))
+
+
+_DESTRUCTIVE = frozenset({"reset", "uninstall", "purge", "gc", "embedding-reset"})
+
+# Refuses to run unless HOME resolves inside the test's own directory: these
+# commands delete state, and some of their paths are fixed at import time.
+_ISOLATED_MM = """
+import pathlib, sys
+root, args = pathlib.Path(sys.argv[1]).resolve(), sys.argv[2:]
+home = pathlib.Path.home().resolve()
+if root not in home.parents and home != root:
+    sys.exit(f"refusing: HOME {home} is outside {root}")
+from memtomem.cli import cli
+sys.argv = ["mm", *args]
+cli()
+"""
+
+
+@dataclass
+class _Ran:
+    exit_code: int
+    output: str
+
+
+def _mm_isolated(denv: DaemonEnv, *args: str) -> _Ran:
+    """A destructive ``mm`` command in its own process, with HOME inside the test.
+
+    In process, a module imported earlier under the real HOME keeps paths it
+    derived from it (``uninstall_cmd._DEFAULT_STATE_DIR``), and the command
+    would act on the real state directory.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _ISOLATED_MM, str(denv.root), *args],
+        env=denv.env(),
+        cwd=str(denv.root),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return _Ran(proc.returncode, proc.stdout + proc.stderr)
+
+
+def _lifetime(denv: DaemonEnv, name: str = "t") -> Path:
+    return denv.runtime / f"server-daemon-{name}.pid"
+
+
+def _store_pid_file(denv: DaemonEnv) -> Path:
+    from memtomem._runtime_paths import server_pid_path
+
+    return denv.runtime / server_pid_path(denv.store).name
+
+
+def test_the_isolated_runner_refuses_a_home_outside_the_test(denv: DaemonEnv) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-c", _ISOLATED_MM, str(denv.root), "uninstall", "--yes"],
+        env={
+            **denv.env(),
+            "HOME": str(denv.root.parent),
+            "USERPROFILE": str(denv.root.parent),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 1
+    assert f"refusing: HOME {denv.root.parent.resolve()} is outside" in proc.stderr
+
+
+def test_daemon_status_reports_a_running_daemon(
+    denv: DaemonEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proc = denv.start()
+    result = _mm(denv, monkeypatch, "daemon", "status")
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(f"t  running  pid={proc.pid}  started=")
+
+    result = _mm(denv, monkeypatch, "daemon", "status", "t", "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["count"] == 1
+    (row,) = payload["daemons"]
+    assert (row["name"], row["status"], row["pid"], row["socket"]) == (
+        "t",
+        "running",
+        proc.pid,
+        True,
+    )
+
+    result = _mm(denv, monkeypatch, "daemon", "status", "other")
+    assert result.exit_code == 3
+    assert result.output == "no shared daemon named 'other'\n"
+
+
+def test_daemon_stop_ends_its_sessions_and_releases_every_lock(
+    denv: DaemonEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proc = denv.start()
+    client = denv.connect().initialize()
+    client.tool("mem_search", {"query": "anything"})  # the store is open
+    assert _lifetime(denv).exists() and _store_pid_file(denv).exists()
+
+    result = _mm(denv, monkeypatch, "daemon", "stop", "t")
+    assert result.exit_code == 0, result.output
+    assert result.output == f"stopped t pid={proc.pid}\n"
+    assert _exit_code(proc) == 0
+    assert client.at_eof()
+    assert not _lifetime(denv).exists()
+    assert not _store_pid_file(denv).exists()
+    assert not denv.socket_path("t").exists()
+    assert not _barrier_refuses()
+
+    result = _mm(denv, monkeypatch, "daemon", "status", "t")
+    assert result.exit_code == 3
+    result = _mm(denv, monkeypatch, "daemon", "stop", "t")
+    assert result.exit_code == 0
+    assert result.output == "shared daemon 't' is not running\n"
+
+
+def test_daemon_stop_without_a_name_stops_every_daemon(
+    denv: DaemonEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = denv.start("a")
+    second = denv.start("b")
+    result = _mm(denv, monkeypatch, "daemon", "stop")
+    assert result.exit_code == 0, result.output
+    assert result.output == f"stopped a pid={first.pid}\nstopped b pid={second.pid}\n"
+    assert _exit_code(first) == 0 and _exit_code(second) == 0
+
+
+def test_a_stale_lifetime_lock_is_shown_and_left_by_stop(
+    denv: DaemonEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = _lifetime(denv)
+    stale.write_text("999999\n\n2026-11-16T00:00:00+00:00\n")
+    result = _mm(denv, monkeypatch, "daemon", "status")
+    assert result.exit_code == 3
+    assert result.output == f"t  stopped  (stale pid file at {stale})\n"
+    result = _mm(denv, monkeypatch, "daemon", "stop")
+    assert result.exit_code == 0, result.output
+    assert result.output == "no shared daemon running\n"
+    assert stale.exists()  # harmless; the next daemon named t takes it over
+
+
+def test_a_transient_holder_of_the_lifetime_lock_delays_the_daemon_without_ending_it(
+    tmp_path: Path,
+) -> None:
+    """A stale-file cleanup locks the file briefly to delete it; a starting daemon waits.
+
+    In process, so the hold provably overlaps the daemon's lock attempt: a
+    subprocess's start-up alone outlasts a short hold.
+    """
+    import threading
+
+    import memtomem.server.daemon as daemon_mod
+    from memtomem._pid_lock import lock_pid_file
+
+    path = tmp_path / "server-daemon-t.pid"
+    held = lock_pid_file(path, label="test", timeout_s=0)
+    assert held is not None
+    releaser = threading.Timer(0.2, held.close)
+    releaser.start()
+    targets: list[object] = []
+    try:
+        fp = daemon_mod._lock_lifetime(path, targets, "2026-11-16T00:00:00+00:00")
+    finally:
+        releaser.join()
+    try:
+        assert targets == [path]
+        assert path.read_text().startswith(f"{os.getpid()}\n")
+    finally:
+        fp.close()
+
+
+def test_reset_names_a_daemon_that_has_not_opened_its_store(denv: DaemonEnv) -> None:
+    proc = denv.start()
+    result = _mm_isolated(denv, "reset", "--yes")
+    assert result.exit_code == 2, result.output
+    assert f"Shared daemon 't' still running (pid {proc.pid})" in result.output
+    assert "Stop it with `mm daemon stop t`" in result.output
+
+
+def test_reset_and_uninstall_name_a_daemon_serving_a_session(denv: DaemonEnv) -> None:
+    proc = denv.start()
+    client = denv.connect().initialize()
+    client.tool("mem_search", {"query": "anything"})  # registered as a live instance
+    hint = f"Shared daemon 't' (pid {proc.pid}) is running; stop it with `mm daemon stop t`."
+    result = _mm_isolated(denv, "reset", "--yes")
+    assert result.exit_code == 2, result.output
+    assert "A live memtomem instance" in result.output
+    assert hint in result.output
+    result = _mm_isolated(denv, "uninstall", "--yes")
+    assert result.exit_code == 2, result.output
+    assert "A live memtomem instance" in result.output
+    assert hint in result.output
+    assert denv.config_path.exists()
+
+
+def test_uninstall_removes_dead_daemons_leftovers_and_keeps_a_starting_ones_lock(
+    denv: DaemonEnv,
+) -> None:
+    from memtomem._pid_lock import lock_pid_file
+
+    dead = _lifetime(denv, "dead")
+    dead.write_text("999999\n\n2026-11-16T00:00:00+00:00\n")
+    orphan = denv.socket_path("orphan")  # a socket whose lock file is already gone
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(orphan))
+    sock.close()
+    starting = _lifetime(denv, "starting")
+    # A daemon that has taken its lifetime lock and waits for the barrier.
+    held = lock_pid_file(starting, label="test", timeout_s=0)
+    assert held is not None
+    try:
+        result = _mm_isolated(denv, "uninstall", "--yes")
+        assert result.exit_code == 0, result.output
+        assert "No memtomem state to remove" not in result.output
+        assert not denv.config_path.exists()  # state was deleted, so the sweep ran
+        assert not dead.exists()
+        assert not orphan.exists()
+        assert starting.exists()
+    finally:
+        held.close()
+
+
+def test_doctor_lists_a_running_daemon(denv: DaemonEnv, monkeypatch: pytest.MonkeyPatch) -> None:
+    proc = denv.start()
+    result = _mm(denv, monkeypatch, "doctor", "--json")
+    payload = json.loads(result.stdout)
+    (check,) = [c for c in payload["checks"] if c["name"] == "shared-daemons"]
+    assert check["status"] == "info"
+    assert check["message"] == f"1 shared daemon(s) running: t (pid {proc.pid})"
+    assert [d["name"] for d in check["data"]["daemons"]] == ["t"]
+
+
+def test_mem_status_inside_a_daemon_names_it(denv: DaemonEnv) -> None:
+    """Through the real module entry, where the daemon module runs as ``__main__``."""
+    log = denv.root / "module-entry.log"
+    with log.open("w") as out:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "memtomem.server.daemon", "t"],
+            env=denv.env(),
+            cwd=str(denv.root),
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+        )
+    proc.log = log  # type: ignore[attr-defined]
+    denv.procs.append(proc)
+    assert _wait(lambda: denv.socket_path("t").exists() or proc.poll() is not None)
+    assert proc.poll() is None, _log(proc)
+    client = denv.connect().initialize()
+    text = client.tool("mem_status")
+    assert f"Shared daemon:   t (pid {proc.pid}, 1 connection(s))" in text
+
+
+def test_the_summary_is_published_only_while_the_daemon_serves(tmp_path: Path) -> None:
+    import memtomem.server.daemon as daemon_mod
+    from memtomem.server.context import shared_daemon_summary
+
+    daemon = daemon_mod.Daemon(
+        name="t",
+        idle_timeout_s=0,
+        frozen_store=tmp_path / "store.db",
+        runtime_dir=tmp_path,
+        sigterm_targets=[],
+    )
+    assert shared_daemon_summary() is None
+    with pytest.raises(RuntimeError):
+        with daemon_mod._published_summary(daemon):
+            assert shared_daemon_summary() == {
+                "name": "t",
+                "pid": os.getpid(),
+                "connections": 0,
+            }
+            raise RuntimeError("serve failed")
+    assert shared_daemon_summary() is None
+
+
+def test_mem_status_outside_a_daemon_has_no_shared_daemon_key() -> None:
+    from memtomem.server.tools.status_config import _shared_daemon_runtime
+
+    assert _shared_daemon_runtime() == {}
+
+
+def test_a_terminal_failure_after_the_idle_exit_was_chosen_fails_the_exit(
+    tmp_path: Path,
+) -> None:
+    import memtomem.server.daemon as daemon_mod
+
+    daemon = daemon_mod.Daemon(
+        name="t",
+        idle_timeout_s=0,
+        frozen_store=tmp_path / "store.db",
+        runtime_dir=tmp_path,
+        sigterm_targets=[],
+    )
+    daemon.exit_reason = "idle"
+    assert daemon.exit_code() == daemon_mod.EXIT_OK
+    daemon.notify_terminal("the store changed during teardown")
+    assert daemon.exit_code() == daemon_mod.EXIT_FAILED

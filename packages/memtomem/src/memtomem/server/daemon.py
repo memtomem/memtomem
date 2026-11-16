@@ -32,19 +32,20 @@ import itertools
 import json
 import logging
 import os
-import re
 import socket
 import struct
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from memtomem._daemon_paths import NAME_PATTERN, lifetime_lock_path, socket_path
+
 logger = logging.getLogger(__name__)
 
-NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 PROTOCOL_VERSION = 1
 PREAMBLE_LIMIT = 64 * 1024
 PREAMBLE_TIMEOUT_S = 5.0
@@ -67,10 +68,6 @@ class DaemonStartError(Exception):
     """The daemon refuses to start; the message says why."""
 
 
-def socket_path(runtime_dir: Path, name: str) -> Path:
-    return runtime_dir / f"daemon-{name}.sock"
-
-
 # ``sizeof(sun_path)`` less the terminating NUL: 104 on macOS and the BSDs, 108 on Linux.
 _SUN_PATH_MAX = 103 if sys.platform == "darwin" or "bsd" in sys.platform else 107
 
@@ -81,12 +78,6 @@ def check_socket_path(path: Path) -> None:
             f"the socket path {str(path)!r} is longer than this platform's limit of "
             f"{_SUN_PATH_MAX} bytes"
         )
-
-
-def lifetime_lock_path(runtime_dir: Path, name: str) -> Path:
-    # In the ``server-*.pid`` family the global inventory enumerates, and never
-    # equal to a store's ``server-<16 hex>.pid``: the ``daemon-`` infix is not hex.
-    return runtime_dir / f"server-daemon-{name}.pid"
 
 
 def validate_name(name: str) -> str:
@@ -647,6 +638,21 @@ class Daemon:
             logger.error("shared daemon %r exiting: %s", self.name, self.exit_reason)
         if self.failures:
             logger.error("shared daemon %r: %s", self.name, "; ".join(self.failures))
+        elif self.terminal_reason is not None and self.exit_reason == "idle":
+            logger.error("shared daemon %r exiting: %s", self.name, self.terminal_reason)
+        return self.exit_code()
+
+    def summary(self) -> dict[str, object]:
+        """What ``mem_status`` shows: name, pid and open connections."""
+        return {"name": self.name, "pid": os.getpid(), "connections": self._admitted}
+
+    def exit_code(self) -> int:
+        """The process exit code once :meth:`serve` has torn everything down.
+
+        A terminal failure fails the exit even when it was reported after the
+        idle exit had been chosen, during teardown.
+        """
+        if self.failures or self.terminal_reason is not None:
             return EXIT_FAILED
         return EXIT_OK if self.exit_reason == "idle" else EXIT_FAILED
 
@@ -728,7 +734,9 @@ def _lock_lifetime(path: Path, targets: list[Any], process_started: str) -> Any:
 
     from memtomem._pid_lock import lock_pid_file
 
-    fp = lock_pid_file(path, label="shared daemon", timeout_s=0)
+    # The default bounded retry, not ``0``: a stale-file cleanup that briefly
+    # locks this file to delete it delays a starting daemon instead of ending it.
+    fp = lock_pid_file(path, label="shared daemon")
     if fp is None:
         raise DaemonStartError(f"another daemon is already running under this name ({path})")
     targets.append(path)
@@ -745,6 +753,19 @@ def _lock_lifetime(path: Path, targets: list[Any], process_started: str) -> Any:
     fp.write(f"{os.getpid()}\n\n{process_started}\n")
     fp.flush()
     return fp
+
+
+@contextlib.contextmanager
+def _published_summary(daemon: Daemon) -> Iterator[None]:
+    """Let ``mem_status`` see *daemon* while it serves, and only then."""
+    from memtomem.server import context as server_context
+
+    previous = server_context._shared_daemon_summary
+    server_context._shared_daemon_summary = daemon.summary
+    try:
+        yield
+    finally:
+        server_context._shared_daemon_summary = previous
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -812,7 +833,8 @@ def main(argv: list[str] | None = None) -> int:
         # directory, so a process-cwd read this code still makes finds nobody's files.
         os.chdir(runtime)
         _set_server_transport("stdio")
-        return anyio.run(daemon.serve, sock)
+        with _published_summary(daemon):
+            return anyio.run(daemon.serve, sock)
     except Exception as exc:
         logger.exception("shared daemon %r failed", name)
         print(f"memtomem shared daemon: failed: {exc}", file=sys.stderr)

@@ -21,6 +21,7 @@ _LAZY_SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "agent": ("memtomem.cli.agent_cmd", "agent"),
     "config": ("memtomem.cli.config_cmd", "config"),
     "context": ("memtomem.cli.context_cmd", "context"),
+    "daemon": ("memtomem.cli.daemon_cmd", "daemon"),
     "doctor": ("memtomem.cli.doctor_cmd", "doctor"),
     "embedding-reset": ("memtomem.cli.embedding_cmd", "embedding_reset"),
     "gc": ("memtomem.cli.gc_cmd", "gc"),
