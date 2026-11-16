@@ -228,7 +228,11 @@ mem_dedup_merge(keep_id="chunk-A-uuid", delete_ids=["chunk-B-uuid"])
 → Deleted 1, kept chunk-A (tags merged)
 ```
 
-> **Performance**: `max_scan` controls how many chunks are compared pairwise. For large indexes (500+), start with `max_scan=100` to avoid timeouts (30s limit). Increase gradually if needed.
+> **What a scan covers**: `max_scan` (default 500) bounds the scan's pool: the first `max_scan` scannable chunks in chunk-id order. Scannable chunks are the indexed chunks outside held and pending sources, and outside any file that holds a consolidation summary of a held or pending source, so their number can be smaller than the total `mem_status` reports. On a store with more scannable chunks than `max_scan`, the pool is a subset, and the same one on every run while the scannable chunks and `max_scan` stay the same. The last line of the output says which case applies: `Scanned all 412 scannable chunks` or `Scanned 500 of 39458 scannable chunks (...)`.
+>
+> The two phases treat the pool differently. Exact duplicates (same content hash) are found among pool chunks only, so a copy is reported when at least two of its members are in the pool. Near duplicates are searched with the stored vector of each pool chunk that has one, among its nearest neighbours in the user tier and that chunk's own project, so a neighbour can come from outside the pool. A chunk without a stored vector is counted and not searched, and a BM25-only store runs no near search; the last line reports both.
+>
+> **Performance**: the near phase runs one vector search per pool chunk that has a stored vector (none on a BM25-only store), so its time grows with `max_scan` (on a store of about 51,000 chunks, 500 chunks took 13 s and 5,000 took 136 s). A smaller `max_scan` is faster and scans a smaller subset. The web route and the Maintenance panel stop a scan after 120 s.
 
 ### Auto-tagging
 

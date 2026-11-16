@@ -58,9 +58,14 @@ class DedupCoverage:
     A scan reads at most ``max_scan`` chunks, so an empty candidate list means
     "nothing in this pool", never "nothing in the store"; near-phase neighbours
     can still come from outside the pool.
+
+    The pool is the first ``max_scan`` visible chunks in ascending id order.
+    When it is smaller than ``eligible`` it is a subset, and the same one on
+    every run while the visible chunks and ``max_scan`` stay the same.
     """
 
     pool: int  # chunks selected for the scan (the exact phase's input)
+    eligible: int  # visible chunks the pool was selected from
     near_search_enabled: bool  # False for a BM25-only store
     probed: int  # pool chunks searched with their stored vector
     # Pool chunks the vector lookup returned nothing for: not vectorised yet, or
@@ -101,7 +106,8 @@ class DedupScanner:
     ) -> tuple[list[DedupCandidate], DedupCoverage]:
         """Return duplicate candidate pairs and what the scan covered.
 
-        Phase 1 groups up to *max_scan* chunks by content_hash.
+        The pool is the first *max_scan* visible chunks in ascending id order.
+        Phase 1 groups the pool by content_hash.
         Phase 2 searches each of those chunks with its stored vector. Chunks
         without one are counted in the coverage, not probed: re-embedding them
         here would need an embedder, and re-embedding bare ``content`` did not
@@ -111,7 +117,7 @@ class DedupScanner:
         """
         if max_scan < 1:
             raise ValueError(f"max_scan must be at least 1, got {max_scan}")
-        all_chunks = await self._get_all_chunks(max_scan)
+        all_chunks, eligible = await self._select_pool(max_scan)
 
         seen: set[frozenset] = set()
         candidates: list[DedupCandidate] = []
@@ -120,7 +126,7 @@ class DedupScanner:
         candidates.extend(self._find_exact_duplicates(all_chunks, seen))
 
         # Phase 2: near duplicates over the same pool
-        near, coverage = await self._find_near_duplicates(all_chunks, threshold, seen)
+        near, coverage = await self._find_near_duplicates(all_chunks, eligible, threshold, seen)
         candidates.extend(near)
 
         # Exact first, then by score descending
@@ -242,24 +248,14 @@ class DedupScanner:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _get_all_chunks(self, max_count: int) -> list[Chunk]:
-        """Fetch up to *max_count* chunks from all source files."""
-        source_files = await self._storage.get_all_source_files()
-        chunks: list[Chunk] = []
-        for source in source_files:
-            remaining = max_count - len(chunks)
-            if remaining <= 0:
-                break
-            # Only what is still missing: the slice below used to discard the rest.
-            # The read judges the hold itself, and matches the stored path as
-            # stored, so a symlink placed at a held path cannot return another
-            # file's rows here (they would be scanned twice, against themselves).
-            chunks.extend(
-                await self._storage.list_chunks_by_source(
-                    source, limit=remaining, exclude_hidden=True, as_stored=True
-                )
-            )
-        return chunks[:max_count]
+    async def _select_pool(self, max_scan: int) -> tuple[list[Chunk], int]:
+        """The first *max_scan* visible chunks by id, and how many are visible.
+
+        Id order depends on the stored rows only, so two processes scanning one
+        store select the same pool. It is also an input to the result: where
+        timestamps tie, the stable sorts below keep the pool's order.
+        """
+        return await self._storage.list_visible_chunks_by_id(max_scan)
 
     def _find_exact_duplicates(
         self, chunks: list[Chunk], seen: set[frozenset]
@@ -285,6 +281,7 @@ class DedupScanner:
     async def _find_near_duplicates(
         self,
         chunks: list[Chunk],
+        eligible: int,
         threshold: float,
         seen: set[frozenset],
     ) -> tuple[list[DedupCandidate], DedupCoverage]:
@@ -292,7 +289,11 @@ class DedupScanner:
         enabled = getattr(self._storage, "dense_enabled", True) is not False
         if not chunks or not enabled:
             return candidates, DedupCoverage(
-                pool=len(chunks), near_search_enabled=enabled, probed=0, without_vector=0
+                pool=len(chunks),
+                eligible=eligible,
+                near_search_enabled=enabled,
+                probed=0,
+                without_vector=0,
             )
 
         # The vectors the chunks are stored with. Ingress embeds
@@ -340,6 +341,7 @@ class DedupScanner:
                 )
         return candidates, DedupCoverage(
             pool=len(chunks),
+            eligible=eligible,
             near_search_enabled=True,
             probed=probed,
             without_vector=without_vector,
