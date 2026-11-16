@@ -14,12 +14,12 @@ Native Windows has not yet been verified.
 
 ## Install
 
-The npm release for this core version is `opencode-memtomem@0.3.33`, bundling
+The npm release for this core version is `opencode-memtomem@0.3.34`, bundling
 core `0.7.10`. Add it through OpenCode's singular `plugin` configuration key
 (there is no `opencode plugin add` command):
 
 ```json
-{"plugin": ["opencode-memtomem@0.3.33"]}
+{"plugin": ["opencode-memtomem@0.3.34"]}
 ```
 
 Upgrade if your `plugin` array still pins `0.1.3` or older: those releases

@@ -34,7 +34,7 @@ behaviour is the same everywhere and only the invocation differs.
 
 This guide describes the workflows as shipped with memtomem `0.7.10` and these
 plugin versions:
-`claude` 0.5.37 · `codex` 0.3.35 · `opencode` 0.3.33 · `kimi` 0.2.25 · `antigravity` 0.2.14 · `cursor` 0.1.0.
+`claude` 0.5.38 · `codex` 0.3.36 · `opencode` 0.3.34 · `kimi` 0.2.26 · `antigravity` 0.2.15 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).
@@ -147,12 +147,12 @@ rationale), `bugfix` (non-obvious root causes and how they were resolved), and
 commit has to state the reason the commit message gives; a commit that does not
 say why is skipped. Before each write, `update` searches existing memories and
 skips a candidate that memory already holds. Each item, its citations
-included, is at most 1,000 characters, or 600 when any of it is in Korean,
-Japanese, or Chinese, so that a store indexing with an exact token ceiling (384
+included, is at most 1,000 characters, with each Korean, Japanese, or Chinese
+character counted as two, so that a store indexing with an exact token ceiling (384
 tokens under `multilingual-e5-small`) usually keeps it in one chunk. Only the prose is
 shortened to fit, never a required citation or a verbatim path, symbol, command
 or quote; an item that still does not fit is written and reported as over the
-limit. Each item carries the tags `memory-update`, `memory-update-item`, the
+limit with its weighted count. Each item carries the tags `memory-update`, `memory-update-item`, the
 kind, `from-<runtime>`, and `git-head-<sha>`. Items land in the project tier;
 only a personal preference you explicitly asked to keep across projects goes to
 user scope.
