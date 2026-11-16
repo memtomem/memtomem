@@ -59,6 +59,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A delete or edit no longer removes lines from a file the store holds under two spellings
+  of its path (#3408).** On a case-insensitive volume, a directory indexed once as `Notes` and
+  once as `notes` stores each file in it twice, and a duplicate scan lists the two copies as a
+  pair. Deleting one copy by chunk id removed its lines from the one real file while the other
+  copy's rows kept returning them in search. `mem_delete` and `mem_edit` by chunk id, and the
+  web UI's chunk edit and delete, now refuse when the file is also stored under another
+  spelling (same file on disk, path equal ignoring case and Unicode form), and say to remove
+  the stale spelling's rows from the web UI's Sources tab first, which removes index rows only.
+  Where that tab cannot list either spelling (both inside a project's `memories.local` tier),
+  the refusal says so. Nothing else changes: indexing a second spelling still adds its rows,
+  and existing duplicates stay until removed (#3409).
 - **A bounded duplicate scan selects the same chunks in every process (#3390).**
   `mem_dedup_scan`, the web `GET /dedup/candidates` route and the scheduled `dedup_scan` job
   scan at most `max_scan` chunks (default 500). They filled that pool source by source in the

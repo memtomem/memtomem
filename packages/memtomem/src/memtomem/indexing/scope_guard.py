@@ -118,6 +118,49 @@ def relinked_detail(name: str, *, op: str) -> str:
     )
 
 
+def twin_detail(
+    key: str,
+    twin: str,
+    *,
+    op: str,
+    surface: RemedySurface = "neutral",
+    local_tier: bool = False,
+) -> str:
+    """The refusal for a rewrite through a key whose file is also stored as ``twin`` (#3408).
+
+    Removing lines through one spelling would leave the other spelling's rows
+    serving them, which is how deleting "the duplicate" removed the only copy.
+    The remedy is the Sources tab's delete, which removes one stored key's rows
+    and does not touch the file. That tab does not list a path it classifies as
+    ``project_local``; when it classifies both spellings so (``local_tier``),
+    no remedy is named. As in
+    :func:`scope_change_detail`, only ``mcp`` names host paths and commands.
+    """
+    name = Path(key).name
+    if surface == "mcp":
+        what = (
+            f"{op} refused: the store holds {name} under two spellings of its path, "
+            f"{key} and {twin}"
+        )
+    else:
+        what = f"{op} refused: {name} is indexed under two spellings of its path"
+    lead = (
+        f"{what}; removing lines through one would leave the other's rows serving them, "
+        "and nothing was written."
+    )
+    if local_tier:
+        return (
+            f"{lead} The web UI does not list this file's tier, so the stale spelling's rows "
+            "cannot be removed there; edit the file directly instead."
+        )
+    if surface == "mcp":
+        return (
+            f"{lead} Delete the stale spelling's rows from the Sources tab of the web UI "
+            "(mm web); that removes index rows only and does not change the file. Then retry."
+        )
+    return f"{lead} Delete the stale spelling's rows from the Sources tab, then retry."
+
+
 def scope_held_notice(op: str) -> str:
     """What a by-id rewrite tells its caller when its re-index held the source instead.
 

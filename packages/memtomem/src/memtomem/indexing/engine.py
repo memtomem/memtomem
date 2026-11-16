@@ -4327,6 +4327,19 @@ class IndexEngine:
         """
         return classify_scope(file_path, self._config.project_memory_dirs, resolved=resolved)
 
+    def _stored_source_keys(self, *, db: sqlite3.Connection | None = None) -> list[str]:
+        """Every distinct stored source key, read as :meth:`_stored_scope_rows` reads.
+
+        One scan of the covering ``(source_file, start_line)`` index. A store
+        that is not SQLite has no keys to compare.
+        """
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        if not isinstance(self._storage, SqliteBackend):
+            return []
+        conn = db if db is not None else self._storage._get_db()
+        return [row[0] for row in conn.execute("SELECT DISTINCT source_file FROM chunks")]
+
     def _stored_scope_rows(
         self, keys: Iterable[str], *, db: sqlite3.Connection | None = None
     ) -> list[tuple[str, str, str | None, str | None]]:
@@ -4360,18 +4373,25 @@ class IndexEngine:
         """Why a by-id rewrite of the source stored as ``stored_key`` must not run (#2923).
 
         Asked under the caller's source locks, before it writes. ``None`` means
-        the rewrite may proceed. Two refusals: the key now resolves to another
-        file, so the write would land there; or re-indexing the file would
-        store the source's project rows under another scope or project root.
+        the rewrite may proceed. Three refusals: the key now resolves to another
+        file, so the write would land there; the file is also stored under
+        another spelling of its path, whose rows would keep serving the lines
+        the rewrite removes (#3408); or re-indexing the file would store the
+        source's project rows under another scope or project root.
         """
         from memtomem.indexing.scope_guard import (
             key_spellings,
             relinked_detail,
             scope_change,
             scope_change_detail,
+            twin_detail,
         )
         from memtomem.storage.sqlite_backend import SqliteBackend
-        from memtomem.storage.sqlite_helpers import stored_key_moved
+        from memtomem.storage.sqlite_helpers import (
+            source_twins,
+            stored_key_moved,
+            twin_candidates,
+        )
 
         name = Path(stored_key).name
         # The scope read waits out another task's write transaction instead of
@@ -4384,9 +4404,30 @@ class IndexEngine:
             if isinstance(self._storage, SqliteBackend)
             else None
         )
+        # Every read on ``scope_db`` happens here, before the first ``await``:
+        # the idle writer is handed out only for reads that run before the next
+        # suspension, and after it another task may own an open transaction.
         rows = self._stored_scope_rows(key_spellings(stored_key), db=scope_db)
+        candidates = twin_candidates(stored_key, self._stored_source_keys(db=scope_db))
         if await asyncio.to_thread(stored_key_moved, stored_key):
             return relinked_detail(name, op=op)
+        # Before ``if not rows``: an index-only delete takes no sidecar lock, so
+        # this key's own rows can be gone while the caller still holds the chunk
+        # it fetched, and the twin's rows would still serve the lines.
+        if candidates:
+            twins = await asyncio.to_thread(source_twins, stored_key, candidates)
+            if twins:
+                # The Sources tab hides a path its list route classifies as
+                # project_local; the remedy exists while either spelling is listed.
+                unlisted = True
+                for spelling in (stored_key, twins[0]):
+                    tier, _ = await asyncio.to_thread(self._resolve_scope, Path(spelling))
+                    if tier != "project_local":
+                        unlisted = False
+                        break
+                return twin_detail(
+                    stored_key, twins[0], op=op, surface=surface, local_tier=unlisted
+                )
         if not rows:
             return None
         decision_path = await asyncio.to_thread(resolve_path, Path(stored_key))
