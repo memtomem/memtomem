@@ -53,6 +53,7 @@ async def scan_duplicates(
         candidates=out,
         total=len(out),
         scanned_chunks=coverage.pool,
+        eligible_chunks=coverage.eligible,
         near_search_enabled=coverage.near_search_enabled,
         probed_chunks=coverage.probed,
         chunks_without_vector=coverage.without_vector,

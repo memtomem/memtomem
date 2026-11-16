@@ -207,6 +207,7 @@ async def _run_dedup_scan(
         "candidates": len(candidates),
         "threshold": threshold,
         "pool": coverage.pool,
+        "eligible": coverage.eligible,
         "probed": coverage.probed,
         "without_vector": coverage.without_vector,
         "near_search_enabled": coverage.near_search_enabled,
