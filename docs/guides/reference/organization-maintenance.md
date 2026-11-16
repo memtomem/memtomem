@@ -234,6 +234,10 @@ mem_dedup_merge(keep_id="chunk-A-uuid", delete_ids=["chunk-B-uuid"])
 >
 > **Performance**: the near phase runs one vector search per pool chunk that has a stored vector (none on a BM25-only store), so its time grows with `max_scan` (on a store of about 51,000 chunks, 500 chunks took 13 s and 5,000 took 136 s). A smaller `max_scan` is faster and scans a smaller subset. The web route and the Maintenance panel stop a scan after 120 s.
 
+> **Removing a copy from its file**: `mem_dedup_merge` deletes index rows only; the file still holds the text, so the next index pass brings it back. `mem_dedup_remove(remove_id, keep_id)` removes `remove_id`'s lines from its file and re-indexes it, as `mem_delete(chunk_id)` does, after checking both members: each member's file and stored rows must still match that file's last index receipt, the two must be in different files, and neither file may have another hard-linked name. A refusal names the member and the reason and removes nothing. A plain `mm index <file>` writes the receipt the check needs; `mm index --force`, the re-index a memory write runs, and index passes with `indexing.enrich_chunk_context` or `indexing.auto_summarize` on do not.
+>
+> The check does not decide whether the two members say the same thing. Chunks with the same body can sit under different headings, frontmatter or link targets, and removing a chunk can take a heading the rest of its file depends on; read both members before you remove one. The kept file is checked, not locked, so a change to it after the check is not seen.
+
 ### Auto-tagging
 
 ```

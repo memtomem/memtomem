@@ -18,6 +18,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mem_dedup_remove` removes one member of a duplicate pair from its file after checking
+  both members (#3419).** `mem_delete(chunk_id)` checks only the lines it removes, so a pair
+  whose kept file had changed since it was indexed could be resolved by deleting the last
+  copy of what the pair held. The new tool removes `remove_id`'s lines only when each
+  member's file and stored rows still match that file's last index receipt, the two are in
+  different files, and neither file has another hard-linked name; otherwise it refuses,
+  names the member and the reason, and removes nothing. It does not judge whether the two
+  members say the same thing, and a change to the kept file after the check is not seen.
+  Receipts come from a plain index pass; `--force`, the re-index a memory write runs, and
+  passes with `indexing.enrich_chunk_context` or `indexing.auto_summarize` on write none. A
+  file with no receipt that matches it is refused until a plain `mm index` of it, which
+  under those two settings does not help: the refusal says so. In core mode it is reached as `mem_do(action="dedup_remove", ...)`.
 - **`mem_dedup_scan` can show what the store holds about each member of a candidate pair
   (experimental, off by default).** Two chunks with the same body are not always the same
   record: the content hash covers the body only. With

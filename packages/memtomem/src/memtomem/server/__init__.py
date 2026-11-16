@@ -156,6 +156,7 @@ from memtomem.server.tools.dedup_decay import (
     mem_cleanup_orphans,
     mem_dedup_scan,
     mem_dedup_merge,
+    mem_dedup_remove,
     mem_decay_scan,
     mem_decay_expire,
 )
