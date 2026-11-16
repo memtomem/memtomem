@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 from uuid import UUID
 
+from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
+from memtomem.search.dedup import DIFFERING_FIELDS, differing_fields
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -14,6 +18,12 @@ from memtomem.server.tools._provenance import (
     flag_untracked_write,
 )
 from memtomem.storage.orphan_detect import RetainRule, group_orphans, scan_orphans, source_state
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from memtomem.models import Chunk, ChunkTopology
+    from memtomem.search.dedup import DedupCandidate
 
 
 @mcp.tool()
@@ -47,6 +57,10 @@ async def mem_dedup_scan(
     )
     footer = _dedup_coverage_line(coverage)
 
+    if candidates and app.config.maintenance.experimental_duplicate_brief:
+        evidence = await app.dedup_scanner.member_evidence(candidates)
+        return _duplicate_brief(candidates, evidence, threshold, footer)
+
     if not candidates:
         return f"No duplicate chunks found (threshold={threshold}).\n{footer}"
 
@@ -76,6 +90,160 @@ def _dedup_coverage_line(coverage) -> str:
     if coverage.without_vector:
         line += f", {coverage.without_vector} had no usable stored vector and were not probed"
     return f"{line}."
+
+
+#: Says what was compared: two members can still differ in what is not, such
+#: as the body of a near pair or the read-only flag printed on the line above.
+_NO_DIFFERENCE = f"none (compared: {', '.join(DIFFERING_FIELDS)})"
+
+
+def _duplicate_brief(
+    candidates: Sequence[DedupCandidate],
+    evidence: dict[UUID, tuple[Chunk, ChunkTopology]],
+    threshold: float,
+    footer: str,
+) -> str:
+    """The scan's pairs with what the store holds about each member.
+
+    Every member line is rendered from *evidence*, the read made after the
+    scan, so a member's facts describe one moment. A pair is left out when
+    that read no longer returns one of its members, or when an exact pair's
+    members no longer hash the same. The scan supplies the pairing, its order
+    and a near pair's score, which is not recomputed.
+    """
+    pairs = []
+    for candidate in candidates:
+        a = evidence.get(candidate.chunk_a.id)
+        b = evidence.get(candidate.chunk_b.id)
+        if a is None or b is None:
+            continue
+        if candidate.exact and a[0].content_hash != b[0].content_hash:
+            continue
+        pairs.append((candidate, a, b))
+
+    tail = [footer]
+    omitted = len(candidates) - len(pairs)
+    if omitted:
+        tail.insert(
+            0,
+            f"{omitted} pair{'' if omitted == 1 else 's'} omitted: since the scan read them, "
+            "a member was deleted, its source became unavailable, or the bodies of an exact "
+            "pair stopped matching.",
+        )
+    if not pairs:
+        return "\n".join([f"No duplicate chunks found (threshold={threshold}).", *tail])
+
+    parts = [f"Duplicate candidates: {len(pairs)} pairs (threshold={threshold}):\n"]
+    for i, (candidate, a, b) in enumerate(pairs, 1):
+        kind = "exact duplicate" if candidate.exact else f"score={candidate.score:.4f}"
+        differs = differing_fields(a[0].metadata, b[0].metadata)
+        parts.append(
+            f"[{i}] {kind}\n"
+            f"{_brief_member('A', *a)}\n"
+            f"{_brief_member('B', *b)}\n"
+            f"  differs: {', '.join(differs) or _NO_DIFFERENCE}"
+        )
+    return "\n".join([*parts, *tail])
+
+
+def _brief_member(label: str, chunk: Chunk, topology: ChunkTopology) -> str:
+    meta = chunk.metadata
+    preview = _quoted(chunk.content[:80].replace("\n", " "))
+    scope = _quoted(meta.scope)
+    if meta.project_root:
+        scope += f" ({_quoted(str(meta.project_root))})"
+    record = [
+        f"heading={' > '.join(map(_quoted, meta.heading_hierarchy)) or '(none)'}",
+        f"namespace={_quoted(meta.namespace)}",
+        f"scope={scope}",
+        f"tags={', '.join(map(_quoted, meta.tags)) or '(none)'}",
+        f"valid={_brief_validity(meta.valid_from_unix, meta.valid_to_unix)}",
+    ]
+
+    # "stored flag": what the index recorded, not what the configuration says
+    # now. ``mem_delete`` asks the configuration itself.
+    source = ["read-only (stored flag)" if meta.source_read_only else "writable (stored flag)"]
+    if meta.redaction_count:
+        source.append("masked projection")
+    if topology.at_source_start is None:
+        source.append("line span not recorded")
+    else:
+        if topology.at_source_start:
+            source.append("no sibling starts on an earlier line")
+        if topology.span_shared:
+            source.append("line span overlaps a sibling chunk")
+    if topology.only_in_source:
+        source.append("only chunk of its source")
+
+    links = []
+    if meta.origin == ORIGIN_CONSOLIDATION_POLICY:
+        links.append("policy summary")
+    if topology.consolidated_into:
+        links.append(f"covered by {_count(topology.consolidated_into, 'summary', 'summaries')}")
+    if topology.consolidates:
+        links.append(f"summary of {_count(topology.consolidates, 'chunk', 'chunks')}")
+    if topology.other_relations:
+        links.append(_count(topology.other_relations, "other relation", "other relations"))
+    if topology.links_out:
+        links.append(
+            "link source: " + ", ".join(f"{_quoted(kind)} x{n}" for kind, n in topology.links_out)
+        )
+    if topology.links_in:
+        links.append("link target: " + ", ".join(map(_quoted, topology.links_in)))
+
+    return (
+        f"  {label} ({chunk.id}): {_quoted(str(meta.source_file))}:{meta.start_line} — {preview}\n"
+        f"     record: {' | '.join(record)}\n"
+        f"     source: {' | '.join(source)}\n"
+        f"     links: {' | '.join(links) or 'none'}"
+    )
+
+
+def _count(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def _quoted(text: str) -> str:
+    """*text* in double quotes, on one line.
+
+    Headings, tags, namespaces, paths and bodies are whatever a file or a
+    caller stored. Quoted, with the quote, the backslash and every
+    non-printable character escaped, such a value cannot end its own field,
+    pass for the next one, or start a line that reads as evidence.
+    ``str.isprintable`` is false for the line breaks ``splitlines`` honours
+    beyond ``\\n`` (U+0085, U+2028) as well as for control characters.
+    """
+    escaped = (
+        "\\" + ch
+        if ch in '"\\'
+        else ch
+        if ch.isprintable()
+        else ch.encode("unicode_escape").decode("ascii")
+        for ch in text
+    )
+    return f'"{"".join(escaped)}"'
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _brief_validity(valid_from: int | None, valid_to: int | None) -> str:
+    def instant(unix: int) -> str:
+        # To the second: two bounds a day apart or ten seconds apart must not
+        # read the same. A stored bound is any signed 64-bit integer (a bundle
+        # import accepts the full range), most of which no calendar reaches;
+        # ``fromtimestamp`` would also refuse a negative one on Windows.
+        try:
+            return (_EPOCH + timedelta(seconds=unix)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except OverflowError:
+            return f"unix {unix}"
+
+    bounds = []
+    if valid_from is not None:
+        bounds.append(f"from {instant(valid_from)}")
+    if valid_to is not None:
+        bounds.append(f"until {instant(valid_to)}")
+    return " ".join(bounds) or "always"
 
 
 @mcp.tool()

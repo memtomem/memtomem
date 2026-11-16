@@ -16,6 +16,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `--with 'huggingface-hub>=1.20'`, so a uv configuration that cannot resolve
   `huggingface-hub` 1.20 or later now stops the server from starting.
 
+### Added
+
+- **`mem_dedup_scan` can show what the store holds about each member of a candidate pair
+  (experimental, off by default).** Two chunks with the same body are not always the same
+  record: the content hash covers the body only. With
+  `maintenance.experimental_duplicate_brief` set in `config.json`, or
+  `MEMTOMEM_MAINTENANCE__EXPERIMENTAL_DUPLICATE_BRIEF=true`, each member is followed by its
+  heading, namespace, scope, tags and validity window, the stored read-only flag, where it sits
+  in its source, and its relations and links, and each pair by the fields the two members
+  differ on. These are facts for whoever judges the pair; the scan recommends nothing and
+  still changes nothing. Members are shown as the store holds them in a second read after the
+  scan, so a heading or line number that changed in between shows its new value; a pair is
+  left out, and counted, when in that interval a member was deleted or its source was held, or
+  the bodies of an exact pair stopped matching. With the setting off the output is unchanged. The
+  tool's parameters are the same either way, and `mem_config` and `mm config set` do not
+  change the setting.
+
 ### Changed
 
 - **The polling file watcher rescans every 10 s instead of every 1 s, and

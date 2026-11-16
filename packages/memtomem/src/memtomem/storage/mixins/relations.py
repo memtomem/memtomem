@@ -9,10 +9,62 @@ from typing import Sequence
 from uuid import UUID
 
 from memtomem.errors import StorageError
-from memtomem.models import Chunk
+from memtomem.models import Chunk, ChunkTopology
 from memtomem.storage.sqlite_helpers import utc_stamp
 from memtomem.storage.sqlite_scope import scope_context_sql
-from memtomem.storage.sqlite_visibility import NOT_WITHHELD_CHUNKS, VISIBLE_SOURCE_CHUNKS
+from memtomem.storage.sqlite_visibility import (
+    NOT_WITHHELD_CHUNKS,
+    VISIBLE_SOURCE_CHUNKS,
+    VISIBLE_SOURCE_PATH,
+    visible_path_sql,
+)
+
+# ``get_chunks_with_topology``. A line span is recorded when it is a positive
+# range; the structured chunker stores ``0, 0`` for a value it cannot place.
+_SPAN_C = "(c.start_line >= 1 AND c.end_line >= c.start_line)"
+_SPAN_O = "(o.start_line >= 1 AND o.end_line >= o.start_line)"
+_SIBLING = "SELECT 1 FROM chunks o WHERE o.source_file = c.source_file"
+
+
+def _listed(endpoint: str) -> str:
+    # The other end of an edge counts only while a scan would list it.
+    return f"EXISTS (SELECT 1 FROM chunks WHERE chunks.id = {endpoint} AND {VISIBLE_SOURCE_PATH})"
+
+
+def _edges(end: str, other_end: str, type_test: str) -> str:
+    return (
+        f"(SELECT COUNT(*) FROM chunk_relations r WHERE r.{end} = c.id "  # nosec B608
+        f"AND r.relation_type {type_test} 'consolidated_into' AND {_listed(f'r.{other_end}')})"
+    )
+
+
+# Topology columns first: ``_row_to_chunk`` reads ``chunks`` columns by
+# position and takes trailing ones for optional chunk columns, so a fixed-width
+# prefix is sliced off before the row reaches it.
+_TOPOLOGY_COLUMNS = (
+    f"NOT EXISTS ({_SIBLING} AND o.id <> c.id)",
+    f"CASE WHEN {_SPAN_C} THEN NOT EXISTS "
+    f"({_SIBLING} AND o.start_line < c.start_line AND {_SPAN_O}) END",
+    f"CASE WHEN {_SPAN_C} THEN EXISTS ({_SIBLING} AND o.id <> c.id "
+    f"AND o.start_line <= c.end_line AND o.end_line >= c.start_line AND {_SPAN_O}) END",
+    _edges("source_id", "target_id", "="),
+    _edges("target_id", "source_id", "="),
+    # A self-edge is one row and is counted from its source end only.
+    f"{_edges('source_id', 'target_id', '<>')} + "
+    f"(SELECT COUNT(*) FROM chunk_relations r WHERE r.target_id = c.id "  # nosec B608
+    f"AND r.source_id <> c.id AND r.relation_type <> 'consolidated_into' "
+    f"AND {_listed('r.source_id')})",
+    "(SELECT json_group_array(json_array(t, n)) FROM (SELECT l.link_type AS t, COUNT(*) AS n "  # nosec B608
+    f"FROM chunk_links l WHERE l.source_id = c.id AND {_listed('l.target_id')} "
+    "GROUP BY l.link_type))",
+    # A link whose source chunk was deleted keeps its row with a NULL source.
+    "(SELECT json_group_array(l.link_type) FROM chunk_links l WHERE l.target_id = c.id "  # nosec B608
+    f"AND (l.source_id IS NULL OR {_listed('l.source_id')}))",
+)
+_TOPOLOGY_SQL = (
+    f"SELECT {', '.join(_TOPOLOGY_COLUMNS)}, c.* FROM chunks c "  # nosec B608
+    f"WHERE c.id IN (SELECT value FROM json_each(?)) AND {visible_path_sql('c.source_file')}"
+)
 
 
 class RelationMixin:
@@ -157,6 +209,48 @@ class RelationMixin:
                 edges.extend(row for row in rows if row[1] in members)
         edges.sort(key=lambda row: (row[0], row[1]))
         return [(UUID(sid), UUID(tid), rel) for sid, tid, rel in edges]
+
+    async def get_chunks_with_topology(
+        self, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, tuple[Chunk, ChunkTopology]]:
+        """Each of *chunk_ids* a duplicate scan would list now, with its topology.
+
+        One statement, so a chunk's row and its topology describe one moment.
+        A caller that got the ids from an earlier scan reads the chunk from
+        here: a re-index keeps an id while it changes the heading, the line
+        range or the read-only flag, and the caller's copy would be the old one.
+
+        The rule is the scan's own, path-level one (``VISIBLE_SOURCE_PATH``,
+        as ``list_chunks_by_source(exclude_hidden=True)`` applies it): a chunk
+        on a hidden path is absent, like an id with no row, and an edge or
+        link is counted only while its other end is on a listed path. No
+        namespace or scope filter: the scan is a whole-store surface.
+
+        The ids travel as one JSON array, so their number is not bounded by
+        the host-parameter limit.
+        """
+        ids = json.dumps([str(cid) for cid in chunk_ids])
+        width = len(_TOPOLOGY_COLUMNS)
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(_TOPOLOGY_SQL, (ids,)).fetchall()
+        found: dict[UUID, tuple[Chunk, ChunkTopology]] = {}
+        for row in rows:
+            only, at_start, shared, into, covers, other, links_out, links_in = row[:width]
+            chunk = self._row_to_chunk(tuple(row[width:]))
+            found[chunk.id] = (
+                chunk,
+                ChunkTopology(
+                    only_in_source=bool(only),
+                    at_source_start=None if at_start is None else bool(at_start),
+                    span_shared=None if shared is None else bool(shared),
+                    consolidated_into=into,
+                    consolidates=covers,
+                    other_relations=other,
+                    links_out=tuple(sorted((kind, n) for kind, n in json.loads(links_out))),
+                    links_in=tuple(sorted(json.loads(links_in))),
+                ),
+            )
+        return found
 
     async def insert_relations(self, edges: Sequence[tuple[UUID, UUID, str]]) -> int:
         """Insert *edges* whose both ends exist; return the edges inserted.
