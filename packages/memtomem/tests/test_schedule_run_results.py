@@ -397,9 +397,9 @@ class TestDedupJobCoverage:
         a, b, pending = _chunk("alpha"), _chunk("alpha, again"), _chunk("not vectorised")
         storage = MagicMock()
         storage.dense_enabled = True
-        storage.get_all_source_files = AsyncMock(return_value={Path("/s.md")})
         storage.is_source_held = AsyncMock(return_value=False)
-        storage.list_chunks_by_source = AsyncMock(return_value=[a, b, pending])
+        # Three of four scannable chunks: the result reports both numbers.
+        storage.list_visible_chunks_by_id = AsyncMock(return_value=([a, b, pending], 4))
         storage.get_embeddings_for_chunks = AsyncMock(
             return_value={str(a.id): [0.0], str(b.id): [1.0]}
         )
@@ -419,6 +419,7 @@ class TestDedupJobCoverage:
             "candidates": 1,
             "threshold": 0.92,
             "pool": 3,
+            "eligible": 4,
             "probed": 2,
             "without_vector": 1,
             "near_search_enabled": True,

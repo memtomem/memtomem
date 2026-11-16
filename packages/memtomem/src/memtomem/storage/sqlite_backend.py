@@ -3730,6 +3730,25 @@ class SqliteBackend(
             rows = db.execute("SELECT DISTINCT source_file FROM chunks").fetchall()
         return {Path(row[0]) for row in rows}
 
+    async def list_visible_chunks_by_id(self, limit: int) -> tuple[list[Chunk], int]:
+        """The first ``limit`` visible chunks in ascending id order, and how many are visible.
+
+        The order is a property of the stored rows alone, so every process
+        selects the same chunks from the same store. The visibility rule is the
+        path-level one a listing uses (``VISIBLE_SOURCE_PATH``). One statement
+        returns the rows and the count, so both describe one snapshot; it reads
+        stored keys and takes no path as input, so there is none to resolve.
+        """
+        sql = (
+            f"SELECT (SELECT COUNT(*) FROM chunks WHERE {VISIBLE_SOURCE_PATH}), chunks.* "  # nosec B608
+            f"FROM chunks WHERE {VISIBLE_SOURCE_PATH} ORDER BY id LIMIT ?"
+        )
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(sql, (limit,)).fetchall()
+        # No row carries the count when nothing is visible, and then it is zero.
+        visible = int(rows[0][0]) if rows else 0
+        return [self._row_to_chunk(row[1:]) for row in rows], visible
+
     async def get_orphan_candidate_source_files(self) -> set[Path]:
         """Exclude attached virtual summaries from filesystem checks.
 
