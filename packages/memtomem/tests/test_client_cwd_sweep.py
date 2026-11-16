@@ -9,7 +9,8 @@ signals fail it:
   ``abspath``, ``open``, ``stat`` or one of their relatives while it is still
   relative, or as an absolute path under the process working directory. Either
   way the process working directory decided where a client's argument points.
-  A call that passes a ``dir_fd`` is relative to that directory and is exempt.
+  A relative path passed with a ``dir_fd`` is relative to that directory and
+  is exempt; an absolute one ignores the descriptor and is not.
 - **``os.getcwd``.** A call with memtomem code on its stack, from a site that
   is not registered below as owned by the process.
 
@@ -70,6 +71,60 @@ _HOME_GUARD_FILE = _home_guard.__file__
 # working directory only when it is unset are not reached and are not here;
 # ``test_client_cwd_table.py`` registers those by source location.
 PROCESS_OWNED_GETCWD: dict[tuple[str, str], str] = {}
+
+
+@dataclass(frozen=True)
+class PathArgument:
+    """One parameter of a wrapped call that names a file."""
+
+    position: int
+    # Its keyword, under every name an implementation of the call gives it.
+    keywords: tuple[str, ...]
+    # The keyword of the directory descriptor that goes with it, if any.
+    descriptor: str | None = None
+
+
+def _path(*keywords: str, descriptor: str | None = None) -> tuple[PathArgument, ...]:
+    return (PathArgument(0, keywords, descriptor),)
+
+
+# ``posixpath``, ``ntpath`` and ``genericpath`` do not agree on the name.
+_OS_PATH = _path("path", "s", "filename")
+_TWO_ENDS = (
+    PathArgument(0, ("src",), "src_dir_fd"),
+    PathArgument(1, ("dst",), "dst_dir_fd"),
+)
+
+# The wrapped calls, and which of their parameters are paths. Nothing else is
+# looked at: a mode, an encoding or the name of an error handler is not a path,
+# whatever text it holds. ``test_the_table_names_each_calls_real_parameters``
+# holds the names against the signatures of the platform it runs on.
+WRAPPED_CALLS: dict[tuple[str, str], tuple[PathArgument, ...]] = {
+    ("os.path", "abspath"): _OS_PATH,
+    ("os.path", "realpath"): _OS_PATH,
+    ("os.path", "exists"): _OS_PATH,
+    ("os.path", "lexists"): _OS_PATH,
+    ("os.path", "isdir"): _OS_PATH,
+    ("os.path", "isfile"): _OS_PATH,
+    ("os.path", "islink"): _OS_PATH,
+    ("os", "stat"): _path("path", descriptor="dir_fd"),
+    ("os", "lstat"): _path("path", descriptor="dir_fd"),
+    ("os", "scandir"): _path("path"),
+    ("os", "listdir"): _path("path"),
+    ("os", "open"): _path("path", descriptor="dir_fd"),
+    ("os", "mkdir"): _path("path", descriptor="dir_fd"),
+    ("os", "makedirs"): _path("name"),
+    ("os", "remove"): _path("path", descriptor="dir_fd"),
+    ("os", "unlink"): _path("path", descriptor="dir_fd"),
+    ("os", "rmdir"): _path("path", descriptor="dir_fd"),
+    ("os", "access"): _path("path", descriptor="dir_fd"),
+    ("os", "chdir"): _path("path"),
+    ("os", "rename"): _TWO_ENDS,
+    ("os", "replace"): _TWO_ENDS,
+    ("builtins", "open"): _path("file"),
+    ("io", "open"): _path("file"),
+}
+_MODULES: dict[str, object] = {"os.path": os.path, "os": os, "builtins": builtins, "io": io}
 
 
 @dataclass(frozen=True)
@@ -200,48 +255,27 @@ class Observer:
             self._add("under-process-cwd", op, text, _site())
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def wrap_function(module: object, name: str) -> None:
+        def wrap_function(module: object, name: str, arguments: tuple[PathArgument, ...]) -> None:
             real = getattr(module, name)
-            two_paths = name in ("rename", "replace")
 
             def wrapper(*args: Any, **kwargs: Any) -> Any:
-                # Every argument, by position or by keyword: ``note`` keeps
-                # only a path that carries a sentinel. A path that comes with
-                # its own directory descriptor is relative to that directory.
-                for key, value in (*enumerate(args), *kwargs.items()):
-                    if not two_paths:
-                        descriptor = "dir_fd"
-                    elif key in (1, "dst"):
-                        descriptor = "dst_dir_fd"
+                for argument in arguments:
+                    if argument.position < len(args):
+                        value = args[argument.position]
                     else:
-                        descriptor = "src_dir_fd"
-                    if kwargs.get(descriptor) is None:
+                        value = next((kwargs[k] for k in argument.keywords if k in kwargs), None)
+                    descriptor = kwargs.get(argument.descriptor) if argument.descriptor else None
+                    # The home guard's rule: a directory descriptor makes a
+                    # relative path relative to it, and an absolute path
+                    # ignores it, so only the first is out of this check.
+                    if _home_guard._resolvable(value, descriptor):
                         self.note(name, value)
                 return real(*args, **kwargs)
 
             monkeypatch.setattr(module, name, wrapper)
 
-        for name in ("abspath", "realpath", "exists", "lexists", "isdir", "isfile", "islink"):
-            wrap_function(os.path, name)
-        for name in (
-            "stat",
-            "lstat",
-            "scandir",
-            "listdir",
-            "open",
-            "mkdir",
-            "makedirs",
-            "remove",
-            "unlink",
-            "rename",
-            "replace",
-            "rmdir",
-            "access",
-            "chdir",
-        ):
-            wrap_function(os, name)
-        wrap_function(builtins, "open")
-        wrap_function(io, "open")
+        for (module_name, name), arguments in WRAPPED_CALLS.items():
+            wrap_function(_MODULES[module_name], name, arguments)
 
         for name in ("resolve", "absolute"):
             real_method = getattr(pathlib.Path, name)
@@ -546,6 +580,76 @@ def test_each_end_of_a_rename_has_its_own_directory_descriptor(
         ("relative", "rename", f"{MARK}-outside")
     ]
     assert (process_cwd / f"{MARK}-outside").is_file()
+
+
+def test_an_absolute_path_is_judged_whatever_descriptor_comes_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operating system ignores a directory descriptor for an absolute path."""
+    process_cwd = tmp_path / "process"
+    (process_cwd / "d").mkdir(parents=True)
+    monkeypatch.chdir(process_cwd)
+    if os.rename not in os.supports_dir_fd or os.stat not in os.supports_dir_fd:
+        pytest.skip("no dir_fd on this platform")
+    (process_cwd / "d" / "plain").write_text("x", encoding="utf-8")
+    destination = str(process_cwd / f"{MARK}-absolute")
+    observer = Observer(process_cwd)
+    fd = os.open("d", os.O_RDONLY)
+    try:
+        with monkeypatch.context() as patches, observer.during("witness"):
+            observer.install(patches)
+            os.rename("plain", destination, src_dir_fd=fd, dst_dir_fd=fd)
+            os.stat(destination, dir_fd=fd)
+    finally:
+        os.close(fd)
+
+    assert [(r.kind, r.op, r.path) for r in observer.records] == [
+        ("under-process-cwd", "rename", destination),
+        ("under-process-cwd", "stat", destination),
+    ]
+    assert Path(destination).is_file()
+
+
+def test_an_option_that_is_not_a_path_is_not_a_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sentinel in an encoding option names no file."""
+    import codecs
+
+    process_cwd = tmp_path / "process"
+    process_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("x", encoding="utf-8")
+    handler = f"{MARK}-handler"
+    codecs.register_error(handler, codecs.strict_errors)
+    observer = Observer(process_cwd)
+    with monkeypatch.context() as patches, observer.during("witness"):
+        observer.install(patches)
+        with open(elsewhere, encoding="utf-8", errors=handler) as handle:
+            assert handle.read() == "x"
+        with open(file=elsewhere, mode="r", encoding="utf-8", errors=handler) as handle:
+            assert handle.read() == "x"
+
+    assert observer.records == []
+
+
+def test_the_table_names_each_calls_real_parameters() -> None:
+    """A path parameter under a name the table does not know would go unseen."""
+    checked = 0
+    for (module_name, name), arguments in WRAPPED_CALLS.items():
+        try:
+            parameters = inspect.signature(getattr(_MODULES[module_name], name)).parameters
+        except (TypeError, ValueError):
+            continue  # a builtin that publishes no signature on this platform
+        names = list(parameters)
+        for argument in arguments:
+            assert names[argument.position] in argument.keywords, (module_name, name, names)
+            if argument.descriptor is not None:
+                assert argument.descriptor in parameters, (module_name, name, names)
+        checked += 1
+    # The ``os`` calls and ``open`` publish a signature everywhere.
+    assert checked >= 16, checked
 
 
 def test_getcwd_is_attributed_to_the_memtomem_frame_that_asked(
