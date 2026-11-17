@@ -3,7 +3,8 @@
 A scan bounded by ``max_scan`` used to fill its pool source by source in the
 iteration order of a ``set``, so each process scanned a different sample. The
 pool is now the first rows in ascending id order, read with the number of rows
-it was taken from, in one statement.
+it was taken from, in one statement. A cursor moves the pool on: the rows with an
+id above it, and how many of those there are.
 
 Rows are seeded with SQL so that each case controls the ids, the insertion
 order, the timestamps and the holds it names.
@@ -81,8 +82,17 @@ def _release(backend: SqliteBackend, source: str) -> None:
 
 
 async def _pool(backend: SqliteBackend, limit: int) -> tuple[list[int], int]:
-    chunks, visible = await backend.list_visible_chunks_by_id(limit)
-    return [c.id.int for c in chunks], visible
+    pool = await backend.list_visible_chunks_by_id(limit)
+    return [c.id.int for c in pool.chunks], pool.visible
+
+
+async def _pool_after(
+    backend: SqliteBackend, limit: int, after: int | None
+) -> tuple[list[int], int, int]:
+    """Ids of the pool, the visible count and the count above the cursor."""
+    cursor = None if after is None else str(UUID(int=after))
+    pool = await backend.list_visible_chunks_by_id(limit, cursor)
+    return [c.id.int for c in pool.chunks], pool.visible, pool.above_cursor
 
 
 def _five_in_four_orders(backend: SqliteBackend) -> None:
@@ -185,7 +195,8 @@ class TestVisibility:
             _hide(backend, source, kind)
         label = {chunk_id: name for name, chunk_id in seeded.items()}
 
-        chunks, visible = await backend.list_visible_chunks_by_id(100)
+        pool = await backend.list_visible_chunks_by_id(100)
+        chunks, visible = pool.chunks, pool.visible
 
         expected = [
             "plain",
@@ -242,6 +253,99 @@ class TestOneSnapshot:
         assert await _pool(backend, 2) == ([10, 20], 5)
         assert len(statements) == 1, statements
 
+    @pytest.mark.parametrize(
+        ("after", "expected"),
+        [(20, ([30, 40], 5, 3)), (50, ([], 5, 0))],
+        ids=["mid-store", "empty-pool"],
+    )
+    async def test_a_cursor_read_is_one_statement_too(self, backend, monkeypatch, after, expected):
+        _five_in_four_orders(backend)
+        real = backend._lease_txn_read_db
+        statements: list[str] = []
+
+        @asynccontextmanager
+        async def traced():
+            async with real() as db:
+                db.set_trace_callback(statements.append)
+                try:
+                    yield db
+                finally:
+                    db.set_trace_callback(None)
+
+        monkeypatch.setattr(backend, "_lease_txn_read_db", traced)
+
+        assert await _pool_after(backend, 2, after) == expected
+        assert len(statements) == 1, statements
+
+
+class TestCursor:
+    async def test_no_cursor_counts_every_visible_chunk_as_above_it(self, backend):
+        _five_in_four_orders(backend)
+
+        assert await _pool_after(backend, 2, None) == ([10, 20], 5, 5)
+
+    async def test_the_cursor_is_exclusive(self, backend):
+        _five_in_four_orders(backend)
+
+        assert await _pool_after(backend, 2, 20) == ([30, 40], 5, 3)
+
+    async def test_the_cursor_need_not_be_a_stored_id(self, backend):
+        _five_in_four_orders(backend)
+
+        assert await _pool_after(backend, 2, 25) == ([30, 40], 5, 3)
+        assert await _pool_after(backend, 2, 1) == ([10, 20], 5, 5)
+
+    async def test_a_walk_continues_after_a_deleted_cursor_row(self, backend):
+        _five_in_four_orders(backend)
+        assert await _pool_after(backend, 2, None) == ([10, 20], 5, 5)
+        db = backend._get_db()
+        db.execute("DELETE FROM chunks WHERE id=?", (str(UUID(int=20)),))
+        db.commit()
+
+        assert await _pool_after(backend, 2, 20) == ([30, 40], 4, 3)
+
+    @pytest.mark.parametrize("after", [50, 51, 99], ids=["last-id", "just-past", "well-past"])
+    async def test_an_empty_pool_still_reports_the_visible_count(self, backend, after):
+        _five_in_four_orders(backend)
+
+        assert await _pool_after(backend, 2, after) == ([], 5, 0)
+
+    async def test_hidden_chunks_are_counted_on_neither_side_of_the_cursor(self, backend):
+        _five_in_four_orders(backend)
+        _seed(backend, 5, "/m/held-below.md")
+        _seed(backend, 35, "/m/held-above.md")
+        _seed(backend, 45, "/m/pending-above.md")
+        _hide(backend, "/m/held-below.md", "scan_missing")
+        _hide(backend, "/m/held-above.md", "scan_missing")
+        _hide(backend, "/m/pending-above.md", "pending")
+
+        assert await _pool_after(backend, 2, 20) == ([30, 40], 5, 3)
+        assert await _pool_after(backend, 2, 40) == ([50], 5, 1)
+
+    @pytest.mark.parametrize("step", [1, 2, 3, 5, 7])
+    async def test_a_walk_visits_every_visible_chunk_once_and_in_order(self, backend, step):
+        _five_in_four_orders(backend)
+        _seed(backend, 25, "/m/held.md")
+        _hide(backend, "/m/held.md", "scan_missing")
+        walked: list[int] = []
+        after: int | None = None
+        reads = 0
+
+        while True:
+            ids, visible, above = await _pool_after(backend, step, after)
+            reads += 1
+            assert visible == 5
+            # What the read says is above the cursor is what is left to walk.
+            assert above == 5 - len(walked)
+            walked.extend(ids)
+            if above == len(ids):
+                break
+            after = ids[-1]
+
+        assert walked == [10, 20, 30, 40, 50]
+        # The end is seen on the read that reaches it: no empty read after it.
+        assert reads == -(-5 // step)
+
 
 _PRINT_POOL = """
 import asyncio, sys
@@ -259,8 +363,8 @@ async def main():
     )
     await backend.initialize()
     try:
-        chunks, _ = await DedupScanner(backend)._select_pool(int(sys.argv[2]))
-        print(" ".join(str(c.id.int) for c in chunks))
+        pool = await DedupScanner(backend)._select_pool(int(sys.argv[2]))
+        print(" ".join(str(c.id.int) for c in pool.chunks))
     finally:
         await backend.close()
 
@@ -310,3 +414,45 @@ class TestScannerUsesIt:
 
         assert candidates == []
         assert (coverage.pool, coverage.eligible) == (2, 5)
+
+    async def test_the_scanner_walks_the_store_with_the_cursor_it_reports(self, backend):
+        _five_in_four_orders(backend)
+        _seed(backend, 5, "/m/held.md")
+        _hide(backend, "/m/held.md", "scan_missing")
+        scanner = DedupScanner(backend)
+        steps: list[tuple[int, int, int | None]] = []
+        after = None
+
+        while True:
+            _, coverage = await scanner.scan_with_coverage(max_scan=2, after=after)
+            assert coverage.after == after
+            assert coverage.eligible == 5
+            cursor = coverage.next_after
+            steps.append((coverage.pool, coverage.remaining, cursor.int if cursor else None))
+            if cursor is None:
+                break
+            after = cursor
+
+        assert steps == [(2, 3, 20), (2, 1, 40), (1, 0, None)]
+
+    async def test_a_pool_that_ends_on_the_last_chunk_reports_the_end(self, backend):
+        for n in (10, 20, 30, 40):
+            _seed(backend, n, f"/m/{n}.md")
+        scanner = DedupScanner(backend)
+
+        _, first = await scanner.scan_with_coverage(max_scan=2)
+        _, last = await scanner.scan_with_coverage(max_scan=2, after=first.next_after)
+
+        assert (first.pool, first.remaining, first.next_after) == (2, 2, UUID(int=20))
+        assert (last.pool, last.remaining, last.next_after) == (2, 0, None)
+
+    async def test_a_cursor_past_the_end_scans_nothing_and_reports_the_end(self, backend):
+        _five_in_four_orders(backend)
+
+        candidates, coverage = await DedupScanner(backend).scan_with_coverage(
+            max_scan=2, after=UUID(int=50)
+        )
+
+        assert candidates == []
+        assert (coverage.pool, coverage.eligible) == (0, 5)
+        assert (coverage.remaining, coverage.next_after) == (0, None)

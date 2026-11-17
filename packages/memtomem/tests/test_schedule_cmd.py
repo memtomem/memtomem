@@ -12,7 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
-from memtomem.search.dedup import DedupScanner
+from memtomem.search.dedup import DedupCoverage, DedupScanner
 
 
 def _patched_cli_components(comp):
@@ -124,13 +124,8 @@ class TestStoredUnknownKeyStillRuns:
     """A row stored before registration refused unknown keys keeps running."""
 
     def test_cli_run_now_ignores_the_stored_key(self, runner, components, monkeypatch):
-        coverage = SimpleNamespace(
-            pool=0,
-            eligible=0,
-            probed=0,
-            without_vector=0,
-            near_search_enabled=False,
-            same_source_read_only=0,
+        coverage = DedupCoverage(
+            pool=0, eligible=0, near_search_enabled=False, probed=0, without_vector=0
         )
         scan = AsyncMock(return_value=([], coverage))
         monkeypatch.setattr(DedupScanner, "scan_with_coverage", scan)

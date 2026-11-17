@@ -13,7 +13,7 @@ from uuid import UUID
 from memtomem.errors import RetryableError, StorageError
 from memtomem.indexing.engine import StoredSourceRead, read_stored_source
 from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
-from memtomem.search.dedup import DIFFERING_FIELDS, differing_fields
+from memtomem.search.dedup import DIFFERING_FIELDS, differing_fields, parse_scan_cursor
 from memtomem.server import mcp
 from memtomem.server.client_paths import anchor_client_path, client_cwd_of
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
@@ -32,7 +32,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from memtomem.models import Chunk, ChunkTopology
-    from memtomem.search.dedup import DedupCandidate
+    from memtomem.search.dedup import DedupCandidate, DedupCoverage
+
+
+#: The most pairs one ``mem_dedup_scan`` call returns.
+_DEDUP_LIMIT_MAX = 500
 
 
 @mcp.tool()
@@ -42,6 +46,7 @@ async def mem_dedup_scan(
     threshold: float = 0.92,
     limit: int = 50,
     max_scan: int = 500,
+    after: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Scan for duplicate chunk candidates (dry-run, no mutations).
@@ -50,21 +55,26 @@ async def mem_dedup_scan(
         threshold: Dense score 1/(1+L2) threshold (0-1, default 0.92)
         limit: Maximum number of candidate pairs to return
         max_scan: Maximum chunks to scan, taken in chunk-id order
+        after: Chunk id to scan after; the last scan's result names the next one
     """
     if not 0.0 <= threshold <= 1.0:
         return f"Error: threshold must be between 0 and 1, got {threshold}."
-    if not 1 <= limit <= 500:
-        return f"Error: limit must be between 1 and 500, got {limit}."
+    if not 1 <= limit <= _DEDUP_LIMIT_MAX:
+        return f"Error: limit must be between 1 and {_DEDUP_LIMIT_MAX}, got {limit}."
     if max_scan < 1:
         return f"Error: max_scan must be at least 1, got {max_scan}."
+    try:
+        cursor = parse_scan_cursor(after)
+    except ValueError as exc:
+        return f"Error: {exc}."
 
     app = await _get_app_initialized(ctx)
     if app.dedup_scanner is None:
         return "DedupScanner not initialized."
     candidates, coverage = await app.dedup_scanner.scan_with_coverage(
-        threshold=threshold, limit=limit, max_scan=max_scan
+        threshold=threshold, limit=limit, max_scan=max_scan, after=cursor
     )
-    footer = _dedup_coverage_line(coverage)
+    footer = _dedup_coverage_line(coverage, limit)
 
     if candidates and app.config.maintenance.experimental_duplicate_brief:
         evidence = await app.dedup_scanner.member_evidence(candidates)
@@ -90,20 +100,26 @@ async def mem_dedup_scan(
     return "\n".join(parts)
 
 
-def _dedup_coverage_line(coverage) -> str:
+def _dedup_coverage_line(coverage: DedupCoverage, limit: int | None = None) -> str:
     """Say what the scan looked at, so an empty result is not read as a clean store.
 
     The first clause is about pool selection only: "all" means no scannable
     chunk was left out of the pool, not that every duplicate was looked for.
+    The last clauses say how to see what this call did not show: the pairs
+    *limit* cut, then the chunks after the pool.
     """
-    if coverage.pool < coverage.eligible:
-        # The rule and when it repeats, not what the subset is like: id order
-        # promises neither a spread over files nor anything about age.
+    if coverage.after is not None:
+        # The rule, not what the subset is like: id order promises neither a
+        # spread over files nor anything about age.
+        which = f"the {coverage.pool}" if coverage.pool else "none"
         line = (
             f"Scanned {coverage.pool} of {coverage.eligible} scannable chunks "
-            f"(the first {coverage.pool} in chunk-id order: the same chunks on every run "
-            "while the scannable chunks and max_scan stay the same; "
-            "raise max_scan to cover more)"
+            f"({which} after {coverage.after} in chunk-id order)"
+        )
+    elif coverage.pool < coverage.eligible:
+        line = (
+            f"Scanned {coverage.pool} of {coverage.eligible} scannable chunks "
+            f"(the first {coverage.pool} in chunk-id order)"
         )
     else:
         noun = "chunk" if coverage.pool == 1 else "chunks"
@@ -121,6 +137,24 @@ def _dedup_coverage_line(coverage) -> str:
             f"; left out {n} {noun} of read-only chunks from the same file "
             "(neither member can be removed)"
         )
+    if limit is not None and coverage.pairs_found > limit:
+        # What ``limit`` selected, not what is displayed: the brief can leave
+        # out further pairs when it renders, and says so on its own line.
+        # Moving the cursor on never reaches the pairs cut here. A higher
+        # ``limit`` over the same pool lists the same pairs and more of them,
+        # so it is named while it can list them all. A smaller ``max_scan``
+        # is not named: the exact phase pairs each copy with the oldest copy
+        # in its pool, so a smaller pool reports other pairs, not the cut ones.
+        line += f"; limit={limit} kept {limit} of {coverage.pairs_found} pairs: "
+        if coverage.pairs_found <= _DEDUP_LIMIT_MAX:
+            line += "to see the rest, scan again from the same position with a higher limit"
+        else:
+            line += f"one call lists at most {_DEDUP_LIMIT_MAX}"
+    if coverage.next_after is not None:
+        verb = "remains" if coverage.remaining == 1 else "remain"
+        line += f'; {coverage.remaining} {verb}: continue with after="{coverage.next_after}"'
+    elif coverage.after is not None:
+        line += "; reached the end of the store"
     return f"{line}."
 
 
