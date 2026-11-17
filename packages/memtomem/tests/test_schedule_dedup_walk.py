@@ -242,8 +242,10 @@ class TestWalk:
         ]
 
     def test_a_position_too_deeply_nested_to_parse_starts_from_the_first_pool(self, store):
-        # The parser raises RecursionError on this, not ValueError. The run
-        # must still happen, from the first pool, and leave a usable position.
+        # On 3.12 and 3.13 the parser raises RecursionError on this, not
+        # ValueError; 3.14 parses this deep and raises ValueError for the
+        # brackets that never close. Either way the run must still happen,
+        # from the first pool, and leave a usable position.
         sid = store.add(params=PARAMS)
         store.sql("UPDATE schedules SET job_state=? WHERE id=?", "[" * 10000, sid)
 

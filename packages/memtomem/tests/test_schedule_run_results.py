@@ -360,7 +360,11 @@ class TestStoredState:
     @pytest.mark.asyncio
     async def test_a_claim_leaves_it_alone_won_or_lost(self, storage):
         sid = await storage.schedule_insert("* * * * *", "dedup_scan")
-        await storage.schedule_mark_run(sid, "ok", result={}, state=self.POSITION)
+        # A fixed earlier time: the claim below stamps the current time, and
+        # the second claim loses only if that stamp differs from the token.
+        # Two stamps taken in a row can be equal on a coarse clock (Windows).
+        when = datetime(2026, 1, 1, 6, 0, 0, tzinfo=timezone.utc)
+        await storage.schedule_mark_run(sid, "ok", when=when, result={}, state=self.POSITION)
         token = (await storage.schedule_get(sid))["last_run_at"]
 
         assert await storage.schedule_try_claim(sid, token) is True
@@ -459,17 +463,10 @@ class TestStoredState:
             ("[1, 2]", "schedule {id} has a malformed job_state; ignoring"),
             ('"text"', "schedule {id} has a malformed job_state; ignoring"),
             ("null", "schedule {id} has a malformed job_state; ignoring"),
-            # Nesting this deep raises RecursionError in the parser, whether
-            # or not the brackets close and whatever the container is.
+            # Unreadable on every interpreter, for two reasons: 3.12 and 3.13
+            # raise RecursionError at this depth, 3.14 parses this deep and
+            # raises ValueError for the brackets that never close.
             ("[" * 10000, "schedule {id} has an unreadable job_state; ignoring"),
-            (
-                "[" * 10000 + "]" * 10000,
-                "schedule {id} has an unreadable job_state; ignoring",
-            ),
-            (
-                '{"a":' * 10000 + "1" + "}" * 10000,
-                "schedule {id} has an unreadable job_state; ignoring",
-            ),
         ],
         ids=[
             "unparseable",
@@ -477,8 +474,6 @@ class TestStoredState:
             "string",
             "json-null",
             "deep-unclosed",
-            "deep-list",
-            "deep-object",
         ],
     )
     async def test_a_stored_value_that_is_not_an_object_reads_as_none(
@@ -492,6 +487,44 @@ class TestStoredState:
             sched = await storage.schedule_get(sid)
         assert sched["state"] is None
         assert [r.getMessage() for r in caplog.records] == [message.replace("{id}", sid)]
+
+    @pytest.mark.asyncio
+    async def test_a_parser_that_gives_up_on_the_nesting_reads_as_none(
+        self, storage, caplog, monkeypatch
+    ):
+        """``RecursionError`` from the parser is an unreadable value, on every read.
+
+        How deep the text has to be nested differs by interpreter: 3.12 and
+        3.13 stop at the recursion limit, 3.14 at the C stack, where 100,000
+        levels still parse. So the parser is replaced for the stored value,
+        and the three reads are checked for what they do with the error.
+        """
+        stored = '{"after": "nested too deeply for this parser"}'
+        bad = await storage.schedule_insert("* * * * *", "dedup_scan")
+        good = await storage.schedule_insert("* * * * *", "dedup_scan")
+        await storage.schedule_mark_run(good, "ok", result={}, state=self.POSITION)
+        db = storage._get_db()
+        db.execute("UPDATE schedules SET job_state=? WHERE id=?", (stored, bad))
+        db.commit()
+        parse = json.loads
+
+        def give_up_on(raw, *args, **kwargs):
+            if raw == stored:
+                raise RecursionError("maximum recursion depth exceeded")
+            return parse(raw, *args, **kwargs)
+
+        monkeypatch.setattr(json, "loads", give_up_on)
+        expected = {bad: None, good: self.POSITION}
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.storage.mixins.schedules"):
+            assert (await storage.schedule_get(bad))["state"] is None
+        assert [r.getMessage() for r in caplog.records] == [
+            f"schedule {bad} has an unreadable job_state; ignoring"
+        ]
+        assert {r["id"]: r["state"] for r in await storage.schedule_list_all()} == expected
+        later = datetime.now(timezone.utc) + timedelta(minutes=5)
+        due = await storage.schedule_list_due(later)
+        assert {r["id"]: r["state"] for r in due} == expected
 
     @pytest.mark.asyncio
     async def test_one_unreadable_state_does_not_hide_the_other_schedules(self, storage):
