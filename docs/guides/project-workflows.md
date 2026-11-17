@@ -34,7 +34,7 @@ behaviour is the same everywhere and only the invocation differs.
 
 This guide describes the workflows as shipped with memtomem `0.7.10` and these
 plugin versions:
-`claude` 0.5.39 · `codex` 0.3.37 · `opencode` 0.3.35 · `kimi` 0.2.27 · `antigravity` 0.2.16 · `cursor` 0.1.0.
+`claude` 0.5.40 · `codex` 0.3.38 · `opencode` 0.3.36 · `kimi` 0.2.28 · `antigravity` 0.2.17 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).
