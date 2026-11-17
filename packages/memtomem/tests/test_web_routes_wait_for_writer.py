@@ -44,6 +44,8 @@ from memtomem.web.routes._writer_wait import (
     WRITER_BUSY_REFUSED_NOTHING_CHANGED_DETAIL,
 )
 
+from ._writer_overlap import CEILING_S, queued_on_writer, until_queued
+
 _NOTE = "## Alpha\n\nalpha falcon body\n\n## Beta\n\nbeta heron body\n"
 _WAIT_MODULES = (
     backend_mod,
@@ -80,7 +82,7 @@ class _Owner:
 
     async def start(self) -> None:
         self.task = asyncio.create_task(self._run())
-        await asyncio.wait_for(self.entered.wait(), 5)
+        await asyncio.wait_for(self.entered.wait(), CEILING_S)
 
     async def finish(self) -> None:
         self._release.set()
@@ -88,23 +90,14 @@ class _Owner:
             await self.task
 
 
-def _queued(storage) -> bool:
-    """Whether a task is queued on the writer lock (test-only peek at asyncio)."""
-    return any(not w.cancelled() for w in (storage._writer_lock._waiters or ()))
-
-
 async def _send_while_owned(env, method: str, url: str, *, inside=None, **kwargs):
     """Send a request while another task owns the writer; return ``(queued, response)``."""
     owner = _Owner(env.storage, inside)
     await owner.start()
     task = asyncio.ensure_future(env.client.request(method, url, **kwargs))
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 5
-    while not _queued(env.storage) and not task.done() and loop.time() < deadline:
-        await asyncio.sleep(0.005)
-    queued = _queued(env.storage) and not task.done()
+    queued = await until_queued(env.storage, owner, task)
     await owner.finish()
-    return queued, await asyncio.wait_for(task, 10)
+    return queued, await asyncio.wait_for(task, CEILING_S)
 
 
 async def _send_past_wait(env, method: str, url: str, **kwargs):
@@ -551,13 +544,9 @@ async def test_the_rename_waits_for_a_writer_taken_while_it_locked_its_sources(e
     task = asyncio.ensure_future(
         env.client.post("/api/namespaces/default/rename", json={"new_name": "renamed"})
     )
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 5
-    while not _queued(env.storage) and not task.done() and loop.time() < deadline:
-        await asyncio.sleep(0.005)
-    queued = _queued(env.storage) and not task.done()
+    queued = await until_queued(env.storage, owner, task)
     await owner.finish()
-    resp = await asyncio.wait_for(task, 10)
+    resp = await asyncio.wait_for(task, CEILING_S)
     assert queued
     assert resp.status_code == 200, resp.text
     assert await env.storage.count_chunks_by_namespace("renamed") == 2
@@ -590,13 +579,9 @@ async def test_replay_waits_for_a_writer_taken_during_an_earlier_case(env, monke
 
     monkeypatch.setattr(pipeline, "search", search_then_own)
     task = asyncio.ensure_future(env.client.post("/api/quality/replay", json={}))
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 5
-    while not _queued(env.storage) and not task.done() and loop.time() < deadline:
-        await asyncio.sleep(0.005)
-    queued = _queued(env.storage) and not task.done()
+    queued = await until_queued(env.storage, owner, task)
     await owner.finish()
-    resp = await asyncio.wait_for(task, 10)
+    resp = await asyncio.wait_for(task, CEILING_S)
     assert queued
     assert resp.status_code == 200, resp.text
     assert len(resp.json()["cases"]) == 2
@@ -614,13 +599,9 @@ async def test_promote_search_run_waits_for_the_writer(env):
     task = asyncio.ensure_future(
         env.storage.promote_search_run(env.run_id, name="case-1", fingerprints=fingerprints)
     )
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 5
-    while not _queued(env.storage) and not task.done() and loop.time() < deadline:
-        await asyncio.sleep(0.005)
-    queued = _queued(env.storage) and not task.done()
+    queued = await until_queued(env.storage, owner, task)
     await owner.finish()
-    case = await asyncio.wait_for(task, 10)
+    case = await asyncio.wait_for(task, CEILING_S)
     assert queued
     assert case["name"] == "case-1"
 
@@ -638,7 +619,7 @@ async def test_a_per_chunk_tag_edit_refuses_at_once_with_503(env):
         resp = await asyncio.wait_for(
             env.client.patch(f"/api/chunks/{env.chunk_id}/tags", json={"tags": ["t9"]}), 10
         )
-        assert not _queued(env.storage)
+        assert not queued_on_writer(env.storage)
     finally:
         await owner.finish()
     assert resp.status_code == 503, resp.text
@@ -652,13 +633,9 @@ async def test_get_search_feedback_waits_for_the_writer(env):
     owner = _Owner(env.storage)
     await owner.start()
     task = asyncio.ensure_future(env.storage.get_search_feedback(env.run_id))
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 5
-    while not _queued(env.storage) and not task.done() and loop.time() < deadline:
-        await asyncio.sleep(0.005)
-    queued = _queued(env.storage) and not task.done()
+    queued = await until_queued(env.storage, owner, task)
     await owner.finish()
-    assert await asyncio.wait_for(task, 10) == []
+    assert await asyncio.wait_for(task, CEILING_S) == []
     assert queued
 
 

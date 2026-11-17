@@ -30,6 +30,9 @@ from memtomem.indexing.engine import PrivacyRejection
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD, SCOPE_LOST_HOLD
 from memtomem.storage.sqlite_helpers import norm_path
 
+from . import _writer_overlap
+from ._writer_overlap import CEILING_S, Queued, until_queued
+
 # Assembled at runtime so the literal never sits in the tree as a key.
 _SECRET = "AKIA" + "IOSFODNN7EXAMPLE"
 _NOTE = "# Note\n\n## Plans\n\nalpha falcon body\n"
@@ -51,17 +54,12 @@ class _Owner:
 
     async def start(self) -> None:
         self.task = asyncio.create_task(self._run())
-        await asyncio.wait_for(self.entered.wait(), 5)
+        await asyncio.wait_for(self.entered.wait(), CEILING_S)
 
     async def finish(self) -> None:
         self._release.set()
         if self.task is not None:
             await self.task
-
-
-def _queued(storage) -> bool:
-    """Whether a task is queued on the writer lock (test-only peek at asyncio)."""
-    return any(not w.cancelled() for w in (storage._writer_lock._waiters or ()))
 
 
 async def _overlap(storage, owner: _Owner, call, *, while_queued=None):
@@ -73,18 +71,12 @@ async def _overlap(storage, owner: _Owner, call, *, while_queued=None):
     test with its own error and no transaction stays open.
     """
     task = asyncio.ensure_future(call)
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 5
-    while not (owner.entered.is_set() and _queued(storage)) and not task.done():
-        if loop.time() > deadline:
-            break
-        await asyncio.sleep(0.005)
-    queued = owner.entered.is_set() and _queued(storage) and not task.done()
+    queued = await until_queued(storage, owner, task)
     if queued and while_queued is not None:
         while_queued()
     await owner.finish()
-    result = await asyncio.wait_for(task, 10)
-    assert queued, "the call never queued on the writer while the owner held it"
+    result = await asyncio.wait_for(task, CEILING_S)
+    assert queued, str(queued)
     return result
 
 
@@ -727,3 +719,122 @@ async def test_the_overlap_harness_rejects_a_call_refused_at_once(tmp_path: Path
             await _overlap(storage, owner, refused())
     finally:
         await storage.close()
+
+
+@pytest.fixture
+async def bare_storage(tmp_path: Path):
+    from memtomem.config import StorageConfig
+    from memtomem.storage.sqlite_backend import SqliteBackend
+
+    storage = SqliteBackend(StorageConfig(sqlite_path=str(tmp_path / "h.db")), dimension=4)
+    await storage.initialize()
+    yield storage
+    await storage.close()
+
+
+async def test_the_overlap_harness_names_a_call_that_finished_unobserved(bare_storage):
+    owner = _Owner(bare_storage)
+    await owner.start()
+
+    async def untouched() -> None:
+        return None
+
+    with pytest.raises(AssertionError, match="finished before a writer wait was observed") as seen:
+        await _overlap(bare_storage, owner, untouched())
+
+    assert "entered=True, waiter visible=False" in str(seen.value)
+
+
+async def test_the_overlap_harness_cannot_tell_once_its_ceiling_runs_out(bare_storage):
+    """The state behind #3451: the call is still on its way when the look ends."""
+    owner = _Owner(bare_storage)
+    release = asyncio.Event()
+    task = asyncio.ensure_future(release.wait())
+
+    seen = await until_queued(bare_storage, owner, task, ceiling_s=0.05)
+    text = repr(seen)
+
+    # What it saw stays what it saw, whatever the owner and the call do next.
+    await owner.start()
+    release.set()
+    await task
+    await owner.finish()
+    assert not seen
+    assert (seen.started, seen.entered, seen.waiting, seen.done) == (False, False, False, False)
+    assert seen.waited_s > 0.05
+    assert repr(seen) == text
+    assert text.startswith("could not tell: gave up after ")
+    assert "(ceiling 0.05s) with the call still running" in text
+    assert text.endswith("(owner started=False, entered=False, waiter visible=False)")
+
+
+@pytest.mark.parametrize(
+    ("entered", "waiting", "done", "queued", "text"),
+    [
+        (True, True, False, True, "queued on the writer after "),
+        (True, False, False, False, "could not tell: gave up after "),
+        (True, False, True, False, "the call finished before a writer wait was observed"),
+        # The call is done, so the waiter is another task's.
+        (True, True, True, False, "the call finished before a writer wait was observed"),
+        # The owner has not taken the writer, so the wait is behind another task.
+        (False, True, False, False, "could not tell: gave up after "),
+    ],
+)
+def test_the_overlap_harness_counts_only_a_running_call_waiting_behind_the_owner(
+    entered, waiting, done, queued, text
+):
+    seen = Queued(
+        started=True, entered=entered, waiting=waiting, done=done, waited_s=1.0, ceiling_s=60.0
+    )
+
+    assert bool(seen) is queued
+    assert repr(seen).startswith(text)
+
+
+class _DrivenClock:
+    """The harness's clock, moved by the test. Each read is announced."""
+
+    def __init__(self) -> None:
+        self._at, self._read = 0.0, asyncio.Event()
+
+    def __call__(self) -> float:
+        self._read.set()
+        return self._at
+
+    async def advance(self, seconds: float, looking: asyncio.Future) -> None:
+        """Move the clock, then return once ``looking`` has read the new time or ended."""
+        self._at += seconds
+        self._read.clear()
+        read = asyncio.ensure_future(self._read.wait())
+        await asyncio.wait({read, looking}, return_when=asyncio.FIRST_COMPLETED)
+        read.cancel()
+
+
+async def test_the_overlap_harness_outlasts_a_call_six_seconds_from_the_writer(
+    bare_storage, monkeypatch
+):
+    """A call that reaches the writer after the former five-second ceiling still counts."""
+    clock = _DrivenClock()
+    monkeypatch.setattr(_writer_overlap, "_now", clock)
+    owner = _Owner(bare_storage)
+    arrive = asyncio.Event()
+
+    async def late() -> None:
+        await arrive.wait()
+        await owner.start()
+        async with bare_storage.transaction(wait=engine_mod.WRITER_WAIT_S):
+            pass
+
+    task = asyncio.ensure_future(late())
+    looking = asyncio.ensure_future(until_queued(bare_storage, owner, task))
+    await clock.advance(0.0, looking)  # the look has begun, at time zero
+    await clock.advance(6.0, looking)
+    still_looking = not looking.done()
+    arrive.set()
+    seen = await asyncio.wait_for(looking, CEILING_S)
+    await owner.finish()
+    await task
+
+    assert still_looking
+    assert seen, seen
+    assert seen.waited_s == 6.0
