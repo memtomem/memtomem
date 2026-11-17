@@ -1211,8 +1211,9 @@ def test_workflows_read_the_entry_chunks_line_as_mem_add_prints_it(
 
     Their text quotes the line's prefix, tells a value that starts with an integer
     from one that starts with ``unknown``, and a bare value from one with a note in
-    parentheses. A server string that leaves those shapes fails here, so the
-    workflow text is read again with it.
+    parentheses. ``remember`` quotes the prefix too and reports the value unchanged,
+    whatever its shape (#3437). A server string that leaves those shapes fails here,
+    so the workflow text is read again with it.
     """
     from uuid import uuid4
 
@@ -1234,7 +1235,7 @@ def test_workflows_read_the_entry_chunks_line_as_mem_add_prints_it(
     prefix = "- Entry chunks: "
     assert line.startswith(prefix), line
     assert re.fullmatch(shape, line.removeprefix(prefix)), line
-    for workflow in ("update", "handoff"):
+    for workflow in ("update", "handoff", "remember"):
         assert f"`{prefix.rstrip()}`" in _project_body(workflow), workflow
 
 
