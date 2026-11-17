@@ -126,6 +126,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Cursor stays `0.1.0` while its first marketplace review is open, but its rendered skills
   change too.
 
+- **The `remember` workflow reports the `Entry chunks` value too, and only for a write
+  (#3437).** It reported an "indexed chunk count", which was `Chunks indexed`, the count for
+  the whole file. It now reports the value of the result's `Entry chunks` line unchanged and
+  does not interpret it. memtomem `0.7.10` and older print no such line: the workflow then
+  says that the server did not report a count, and does not substitute `Chunks indexed`. A
+  result that is a refusal or an error is reported unchanged, with no file or count added.
+  `remember` ships in the Hermes plugin and the OpenClaw bundle as well, so their
+  versions move with the text: Claude `0.5.40`, Codex `0.3.38`, OpenCode `0.3.36`, Kimi
+  `0.2.28`, Antigravity `0.2.17`, Hermes `0.1.24`, OpenClaw `0.1.2`. Cursor stays `0.1.0`
+  while its first marketplace review is open, but its rendered skill changes too.
+
 - **The duplicate scan leaves out pairs of read-only chunks from the same file, and says how
   many (#3418).** A large JSON file is sliced into chunks that are all stored read-only, and
   when it is minified every slice sits on line 1 and pairs with its siblings: on one real

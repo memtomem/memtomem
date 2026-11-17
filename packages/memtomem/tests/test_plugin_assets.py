@@ -766,6 +766,49 @@ def test_bound_remember_never_passes_a_file() -> None:
     assert flat.index("Always leave `force_unsafe=false`") > flat.index("Any other result: stop")
 
 
+_REMEMBER_WORKFLOW = _ROOT / "packages/memtomem-plugin-assets/workflows/remember.md"
+# The markers start after the tool name: the OpenCode render rewrites `mem_add` to its own.
+_REMEMBER_REPORT = (
+    # The entry's own count as `mem_add` printed it, never the file-wide upsert count.
+    "confirms the write, report the effective scope, written file, and how many chunks the "
+    "memory's lines fall in: the value of the result's `- Entry chunks:` line, unchanged.",
+    "If the result has no such line, say that the server did not report it; do not "
+    "substitute `- Chunks indexed:`, which counts the whole file.",
+    # A refused write has no file and no count: without this sentence the fallback above
+    # would describe it as a write whose count the server did not report. No literal prefix
+    # is named: one refusal does not start with `Error:`, and a host can wrap the result.
+    "When the result is a refusal or an error instead, report it unchanged and add no file "
+    "or chunk count of your own.",
+)
+
+
+def test_remember_reports_the_entry_chunks_value() -> None:
+    """`remember` reports the written entry's own chunk count in every delivery (#3437)."""
+    source = _flat(_REMEMBER_WORKFLOW.read_text(encoding="utf-8"))
+    for marker in _REMEMBER_REPORT:
+        assert marker in source, marker
+    assert "indexed chunk count" not in source
+
+    rendered = _renderer().expected_files()  # type: ignore[attr-defined]
+    by_path = {path.relative_to(_ROOT).as_posix(): text for path, text in rendered.items()}
+    # By the skill directory's exact name: a checkout path can contain "remember" too.
+    deliveries = {
+        path: text
+        for path, text in by_path.items()
+        if path.endswith("/SKILL.md") and path.split("/")[-2] in {"remember", "memtomem-remember"}
+    }
+    # The two hosts that ship `remember` without `update` or `handoff`.
+    for package in ("packages/memtomem-hermes-plugin/", "packages/memtomem-openclaw-bundle/"):
+        assert any(path.startswith(package) for path in deliveries), package
+    commands = _opencode_commands(by_path["packages/opencode-memtomem/src/generated.ts"])
+    deliveries["opencode memtomem-remember command"] = commands["memtomem-remember"]["template"]
+    for label, text in deliveries.items():
+        flat = _flat(text)
+        for marker in _REMEMBER_REPORT:
+            assert marker in flat, (label, marker)
+        assert "indexed chunk count" not in flat, label
+
+
 def test_bound_skills_ship_only_in_the_antigravity_bundle() -> None:
     skills = {
         path.parent.name: path.read_text(encoding="utf-8")
@@ -1168,8 +1211,9 @@ def test_workflows_read_the_entry_chunks_line_as_mem_add_prints_it(
 
     Their text quotes the line's prefix, tells a value that starts with an integer
     from one that starts with ``unknown``, and a bare value from one with a note in
-    parentheses. A server string that leaves those shapes fails here, so the
-    workflow text is read again with it.
+    parentheses. ``remember`` quotes the prefix too and reports the value unchanged,
+    whatever its shape (#3437). A server string that leaves those shapes fails here,
+    so the workflow text is read again with it.
     """
     from uuid import uuid4
 
@@ -1191,7 +1235,7 @@ def test_workflows_read_the_entry_chunks_line_as_mem_add_prints_it(
     prefix = "- Entry chunks: "
     assert line.startswith(prefix), line
     assert re.fullmatch(shape, line.removeprefix(prefix)), line
-    for workflow in ("update", "handoff"):
+    for workflow in ("update", "handoff", "remember"):
         assert f"`{prefix.rstrip()}`" in _project_body(workflow), workflow
 
 
