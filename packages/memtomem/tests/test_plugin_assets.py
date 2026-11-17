@@ -878,6 +878,27 @@ def test_scope_selector_rejects_malformed_markers(text: str, message: str) -> No
         module._select_scope(text, "project")  # type: ignore[attr-defined]
 
 
+_HANDOFF_SAVE_REPORT = (
+    # Save reports the record's own count as `mem_add` printed it (#3400), never the
+    # file-wide upsert count, which also covers earlier sections of the day's file.
+    "confirms the write, report the exact `handoff_id`, effective scope, namespace, written "
+    "file, and how many chunks the record's lines fall in: the value of the result's "
+    "`- Entry chunks:` line, unchanged.",
+    "If the result has no such line, say that the server did not report it; do not "
+    "substitute `- Chunks indexed:`, which counts the whole file.",
+    # A refused write has no count: without this sentence the fallback above would describe
+    # it as a write whose count the server did not report (#3443). No literal prefix is
+    # named: one refusal does not start with `Error:`, and a host can wrap the result.
+    "When the result is a refusal or an error instead, report it unchanged and add no file "
+    "or chunk count of your own.",
+)
+# The condition itself, which the markers above start after: OpenCode names the tool
+# `memtomem_mem_add`, so the tool name is matched, not quoted.
+_HANDOFF_SAVE_CONDITION = re.compile(
+    r"\d\. When `(?:memtomem_)?mem_add` confirms the write, report the exact `handoff_id`"
+)
+
+
 def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     contract = _contract()
     handoff = next(row for row in contract["workflows"] if row["id"] == "handoff")
@@ -1032,15 +1053,11 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "normalize `claude` to `claude-code`, `codex` to `codex-cli`, `kimi` to `kimi-code`, "
         "and `antigravity` or `agy` to `antigravity-cli`",
         "insufficient_input: runtime",
-        # Save reports the record's own count as `mem_add` printed it (#3400), never the
-        # file-wide upsert count, which also covers earlier sections of the day's file.
-        "written file, and how many chunks the record's lines fall in: the value of the "
-        "result's `- Entry chunks:` line, unchanged",
-        "If the result has no such line, say that the server did not report it; do not "
-        "substitute `- Chunks indexed:`, which counts the whole file",
+        *_HANDOFF_SAVE_REPORT,
     )
     for marker in required:
         assert marker in flat, marker
+    assert _HANDOFF_SAVE_CONDITION.search(flat)
     assert "indexed chunk count" not in flat
     # The designs #2930's plan review rejected: a fetch's effect depends on refspec,
     # prune and fetch.all config; ancestry lazily fetches in a partial clone;
@@ -1090,6 +1107,29 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         encoding="utf-8"
     )
     assert not (kimi_root / "agents").exists()
+
+
+def test_handoff_save_reports_a_refusal_in_every_delivery() -> None:
+    """Every host's `handoff` reports a refused `mem_add` as the refusal (#3443)."""
+    rendered = _renderer().expected_files()  # type: ignore[attr-defined]
+    by_path = {path.relative_to(_ROOT).as_posix(): text for path, text in rendered.items()}
+    # By the skill directory's exact name: a checkout path can contain "handoff" too.
+    deliveries = {
+        path: text
+        for path, text in by_path.items()
+        if path.endswith("/SKILL.md") and path.split("/")[-2] in {"handoff", "memtomem-handoff"}
+    }
+    # The two hosts that ship the bound render.
+    for package in ("packages/memtomem-antigravity-plugin/", "packages/memtomem-cursor-plugin/"):
+        assert any(path.startswith(package) for path in deliveries), package
+    commands = _opencode_commands(by_path["packages/opencode-memtomem/src/generated.ts"])
+    deliveries["opencode memtomem-handoff command"] = commands["memtomem-handoff"]["template"]
+    assert len(deliveries) == 6, sorted(deliveries)
+    for label, text in deliveries.items():
+        flat = _flat(text)
+        for marker in _HANDOFF_SAVE_REPORT:
+            assert marker in flat, (label, marker)
+        assert _HANDOFF_SAVE_CONDITION.search(flat), label
 
 
 def test_brief_workflow_pins_read_only_project_local_contract() -> None:
@@ -2048,11 +2088,20 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
 
     # Chunk counts: the guides name the value both workflows report, not the file-wide count.
     assert "the written file, and the value of the result's `Entry chunks` line" in flat_guide
+    assert (
+        "When `mem_add` refuses the record or returns an error, Save reports that result "
+        "unchanged and adds no file or chunk count of its own." in flat_guide
+    )
     assert "the saved items with their files and each item's `Entry chunks` value" in flat_guide
     assert "Items whose value is 2 or more are listed separately" in flat_guide
     handoff_guide = " ".join(_CROSS_RUNTIME_HANDOFF_GUIDE.read_text(encoding="utf-8").split())
     assert "written file, and the `Entry chunks` value its `mem_add` result printed" in (
         handoff_guide
+    )
+    assert "Each save that `mem_add` confirms must report its `handoff_id`" in handoff_guide
+    assert (
+        "A save that `mem_add` refuses, or that ends in an error, must report that result "
+        "unchanged, with no file or chunk count added." in handoff_guide
     )
     for text in (flat_guide, handoff_guide):
         assert "indexed chunk count" not in text

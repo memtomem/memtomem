@@ -8,14 +8,14 @@ mcp_extras = ["onnx"]
 extra_tools = ["mem_update_coverage"]
 
 [plugins]
-claude_version = "0.5.40"
-codex_version = "0.3.38"
+claude_version = "0.5.41"
+codex_version = "0.3.39"
 automation_version = "0.3.24"
-opencode_version = "0.3.36"
-kimi_version = "0.2.28"
+opencode_version = "0.3.37"
+kimi_version = "0.2.29"
 hermes_version = "0.1.24"
 hermes_memory_version = "0.2.1"
-antigravity_version = "0.2.17"
+antigravity_version = "0.2.18"
 cursor_version = "0.1.0"
 openclaw_version = "0.1.2"
 

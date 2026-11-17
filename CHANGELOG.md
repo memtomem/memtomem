@@ -155,6 +155,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `0.2.28`, Antigravity `0.2.17`, Hermes `0.1.24`, OpenClaw `0.1.2`. Cursor stays `0.1.0`
   while its first marketplace review is open, but its rendered skill changes too.
 
+- **`handoff` save reports a refused `mem_add` as the refusal (#3443).** A `mem_add` result
+  that is a refusal or an error has no `Entry chunks` line, so save described it as a write
+  whose count the server did not report. Save now reports the handoff id, scope, namespace,
+  file and `Entry chunks` value only when `mem_add` confirms the write. It reports a refusal
+  or an error unchanged and adds no file or chunk count of its own; a refusal that names a
+  file in its own text keeps it. `handoff` can get such a result because it passes
+  `force_unsafe=false` and an `idempotency_key`: a record that matches a privacy pattern is
+  refused, and so is a call that finds a claim on its key still pending. The delivery
+  versions move with that text: Claude `0.5.41`, Codex `0.3.39`, OpenCode `0.3.37`, Kimi
+  `0.2.29`, Antigravity `0.2.18`. Cursor stays `0.1.0` while its first marketplace review
+  is open, but its rendered skill changes too.
+
 - **The duplicate scan leaves out pairs of read-only chunks from the same file, and says how
   many (#3418).** A large JSON file is sliced into chunks that are all stored read-only, and
   when it is minified every slice sits on line 1 and pairs with its siblings: on one real
