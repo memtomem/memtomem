@@ -136,8 +136,13 @@ uv run pytest packages/memtomem/tests/web/
 # Run everything; tests carrying ``@pytest.mark.browser`` auto-skip when
 # pytest-playwright or Chromium aren't available, so the full suite
 # stays green on contributor laptops that haven't run the install
-# above (see ``packages/memtomem/tests/conftest.py:108``).
+# above (see ``_playwright_browser_unavailable`` in
+# ``packages/memtomem/tests/conftest.py``; the skip reason names the error).
 uv run pytest -m "not ollama"
+
+# Make a Chromium that cannot launch an error instead of a skip, as the
+# CI ``browser`` job does.
+MEMTOMEM_TEST_REQUIRE_BROWSER=1 uv run pytest packages/memtomem/tests/web -m browser
 ```
 
 ### Harness shape
