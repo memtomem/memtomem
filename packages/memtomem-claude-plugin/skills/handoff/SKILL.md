@@ -131,8 +131,11 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
      exact record addressable without paging.
    - `idempotency_key="handoff:<project-slug>:<from>:<to>:<handoff-id>"`
    - `force_unsafe=false`
-4. Report the exact `handoff_id`, effective scope, namespace, written file, and indexed chunk
-   count. Surface any similar-memory or safety warning unchanged.
+4. Report the exact `handoff_id`, effective scope, namespace, written file, and how many chunks
+   the record's lines fall in: the value of the result's `- Entry chunks:` line, unchanged. If
+   the result has no such line, say that the server did not report it; do not substitute
+   `- Chunks indexed:`, which counts the whole file. Surface any similar-memory or safety
+   warning unchanged.
 
 ## Resume
 

@@ -89,7 +89,8 @@ first word of the arguments: `/memtomem:handoff s to codex-cli`,
 `/memtomem:handoff r <ID>`.
 
 Each save must report its `handoff_id`, `project_local` scope,
-`shared:<project-slug>` namespace, written file, and indexed chunk count. Each
+`shared:<project-slug>` namespace, written file, and the `Entry chunks` value
+its `mem_add` result printed (or that the server did not report one). Each
 resume must report whether the stored project root, Git commit, and worktree
 summary agree with the live repository. Resolve divergence from Git before
 continuing.

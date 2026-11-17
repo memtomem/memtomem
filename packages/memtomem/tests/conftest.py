@@ -783,3 +783,61 @@ async def onnx_components(tmp_path, monkeypatch):
         yield comp, mem_dir
     finally:
         await close_components(comp)
+
+
+_FASTEMBED_CACHE_ENV = ("MEMTOMEM_FASTEMBED_CACHE", "FASTEMBED_CACHE_PATH")
+
+
+def _verified_cached_e5_tokenizer() -> str | None:
+    """A copy of the pinned tokenizer already in a fastembed cache, read only.
+
+    Looks where the product would (the non-empty overrides, then the default
+    ``~/.memtomem/cache/fastembed``) without creating or writing anything, and
+    returns a file only when its checksum is the pinned one.
+    """
+    import hashlib
+    from pathlib import Path
+
+    from memtomem.embedding.profiles import E5_MODEL, E5_REVISION, E5_TOKENIZER_SHA256
+
+    roots = [os.environ[name] for name in _FASTEMBED_CACHE_ENV if os.environ.get(name)]
+    roots.append(str(Path.home() / ".memtomem" / "cache" / "fastembed"))
+    snapshot = Path("models--" + E5_MODEL.replace("/", "--"), "snapshots", E5_REVISION)
+    for root in roots:
+        candidate = Path(root).expanduser() / snapshot / "tokenizer.json"
+        if not candidate.is_file():
+            continue
+        with candidate.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() == E5_TOKENIZER_SHA256:
+                return str(candidate)
+    return None
+
+
+@pytest.fixture(scope="session")
+def _e5_tokenizer_file(tmp_path_factory) -> str:
+    """The pinned E5 ``tokenizer.json``, checksum-verified, as a plain path.
+
+    Reuses a verified copy from an existing cache without writing to it;
+    otherwise downloads into a temporary cache, never the developer's. Skips
+    only when the file cannot be fetched. A checksum mismatch on the download
+    (``ValueError``) is a real failure and propagates.
+    """
+    pytest.importorskip("tokenizers")
+    pytest.importorskip("huggingface_hub")
+    httpx = pytest.importorskip("httpx")
+    from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+
+    from memtomem.embedding.profiles import E5_TOKENIZER, resolve_tokenizer
+
+    cached = _verified_cached_e5_tokenizer()
+    if cached is not None:
+        return cached
+    with pytest.MonkeyPatch.context() as mp:
+        # ``MEMTOMEM_FASTEMBED_CACHE`` outranks ``FASTEMBED_CACHE_PATH``, so
+        # this alone keeps the download out of any cache the developer uses.
+        mp.setenv("MEMTOMEM_FASTEMBED_CACHE", str(tmp_path_factory.mktemp("fastembed")))
+        try:
+            path = resolve_tokenizer(E5_TOKENIZER)
+        except (HfHubHTTPError, LocalEntryNotFoundError, OSError, httpx.TransportError) as exc:
+            pytest.skip(f"pinned E5 tokenizer unavailable: {type(exc).__name__}: {exc}")
+    return str(path)
