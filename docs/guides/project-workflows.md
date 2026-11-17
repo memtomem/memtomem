@@ -34,7 +34,7 @@ behaviour is the same everywhere and only the invocation differs.
 
 This guide describes the workflows as shipped with memtomem `0.7.10` and these
 plugin versions:
-`claude` 0.5.40 · `codex` 0.3.38 · `opencode` 0.3.36 · `kimi` 0.2.28 · `antigravity` 0.2.17 · `cursor` 0.1.0.
+`claude` 0.5.41 · `codex` 0.3.39 · `opencode` 0.3.37 · `kimi` 0.2.29 · `antigravity` 0.2.18 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).
@@ -82,7 +82,9 @@ The record goes to `scope="project_local"` with the tags `handoff`,
 `handoff-id-<id>`. Save reports the `handoff_id`, the effective scope and
 namespace, the written file, and the value of the result's `Entry chunks` line:
 how many chunks the record's lines fall in. When the server does not print that
-line, Save says so instead of reporting another number.
+line, Save says so instead of reporting another number. When `mem_add` refuses
+the record or returns an error, Save reports that result unchanged and adds no
+file or chunk count of its own.
 
 **Resume** loads one record: the one whose `handoff_id` you name, or otherwise
 the newest one addressed to the current runtime or to `any`. It treats the
