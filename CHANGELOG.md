@@ -5,8 +5,44 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.11] — 2026-11-17
+
 ### Upgrading
 
+- **The plugins move their pin to 0.7.11 in the same release; a plugin that is not updated
+  keeps launching 0.7.10.** This release delivers Claude `0.5.42`, Codex `0.3.40`,
+  `memtomem-automation` `0.3.25`, OpenCode `0.3.38`, Hermes `0.1.25`, Antigravity `0.2.19`,
+  OpenClaw `0.1.3` and Kimi `0.2.29` (`0.2.25` in the 0.7.10 release); Cursor stays
+  `0.1.0`. The entries below name the
+  version in which each workflow text first changed. OpenCode `0.3.34` to `0.3.37` were
+  never published to npm, so `opencode-memtomem@0.3.38` is the first npm release that
+  carries those changes.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.25 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.11;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.11`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.11`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.11.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.10" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.10` to
+  `==0.7.11` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.11 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.11`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
 - **Hermes plugin 0.1.23: a gated or private Hugging Face model needs your own server
   entry.** The plugin's bundled server entry no longer uses a saved Hugging Face login or an
   `HF_TOKEN` variable (see Changed). The default models are public and download as before.
@@ -15,6 +51,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   README's example for that entry is the starting point. The launch line also gains
   `--with 'huggingface-hub>=1.20'`, so a uv configuration that cannot resolve
   `huggingface-hub` 1.20 or later now stops the server from starting.
+- **An existing `dedup_scan` schedule starts walking the store (#3432).** Its next run scans
+  the first pool, and each later run the pool after it, with no setting that keeps a
+  schedule on one pool (see Changed). The first 0.7.11 process to open a store adds a
+  `job_state` column to its `schedules` table. An older memtomem can keep using the same
+  database: its runs neither read nor change the stored position.
+- **Under the polling watcher, an edit made outside memtomem is indexed later (#2838).**
+  Polling is the default watcher on macOS. It now rescans every 10 s instead of every 1 s,
+  so such an edit reaches the index about 10 to 15 s after the write, where it took about
+  5 to 6 s (see Changed for the measurements). To keep the old interval, set
+  `indexing.watcher_poll_interval_ms` to `1000` and restart the server.
+- **A delete or edit by chunk id can now be refused on a store that holds one file under two
+  spellings of its path (#3408).** Such a store exists where a directory on a
+  case-insensitive volume was indexed under two spellings. The refusal says how to go on:
+  remove the stale spelling's rows from the web UI's Sources tab, which removes index rows
+  only, or edit the file directly when that tab lists neither spelling, as for a project's
+  `memories.local` tier (see Fixed).
+- **A `.env` kept inside the installed package's `memtomem/server/` directory is no longer
+  read (#3381).** The server's search for the nearest `.env` now starts one directory
+  higher (see Changed). Move such a file up to `memtomem/` or to any directory above it:
+  this release and earlier ones both find it there.
+- **An Ollama model that thinks now answers without thinking (#3382).** Every request the
+  Ollama provider sends carries `think: false`, in every LLM feature, and no setting turns
+  thinking back on. What such a model writes can differ from before (see Fixed).
 
 ### Added
 
@@ -32,18 +91,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   such as `.json`, or another writer's text in the file), and `unknown (this write did not
   index the file)` when this write left the file's chunks not current: an exclusion, a
   relink, an embedding failure, a file type with no chunker, a file too large or binary, or
-  another hold. An idempotent replay repeats the line. `mem_batch_add` has no such line: one
+  another hold. An idempotent replay returns the stored result, so it repeats the line when
+  the first call's result had it. `mem_batch_add` has no such line: one
   append covers the whole batch, so there is no count per entry. `Chunks indexed` is
   unchanged.
 
 - **A bounded duplicate scan can be continued (#3397).** `mem_dedup_scan` and
   `GET /api/dedup/candidates` take `after`, a chunk id: the scan takes the next `max_scan`
-  scannable chunks after it in chunk-id order. A scan used to cover the first `max_scan`
-  chunks and nothing could ask for the ones after them, so on a large store most chunks were
-  never scanned unless `max_scan` was raised, and the near phase's time grows with it. The
-  tool's last line now ends with how many chunks remain and the value that continues
-  (`38958 remain: continue with after="<chunk id>"`), or with `reached the end of the store`;
-  it no longer advises raising `max_scan`. The route returns `next_after` and
+  scannable chunks after it in chunk-id order. A scan covered one pool of at most `max_scan`
+  chunks and nothing could ask for the rest, so on a large store a scan left most chunks
+  out unless `max_scan` was raised, and the near phase's time grows with it. The tool's
+  last line now says how many chunks remain and the value that continues
+  (`38958 remain: continue with after="<chunk id>"`), and a scan that was given `after`
+  and took the last chunks says `reached the end of the store`. The route returns `next_after` and
   `remaining_chunks`. The cursor is a position in chunk-id order, so chunks added or removed
   between calls do not shift the ones still to come; a chunk added before the cursor waits
   for the next walk. When one pool holds more pairs than `limit`, the scan says so
@@ -71,7 +131,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **`memtomem-server --shared NAME` and `mm serve --shared NAME` let MCP clients share one
   engine (POSIX, opt-in, #3381).** The first session starts the daemon NAME, and later ones
   join it when they match it on the `MEMTOMEM_*` and `LANGFUSE_*` variables after `.env`, the
-  tool mode and extra tools, `HOME`, the store path and the installed package. A session that does
+  tool mode and extra tools, `HOME`, the store path and the installed package. The variables
+  are compared in the order the process holds them, so the same variables in another order do
+  not match (the reason then reads `env (order)`). A session that does
   not match, cannot share its store, uses a relative configured path, or runs on Windows is
   served standalone, and `mem_status` shows `Shared daemon: NAME not joined (<reason>)`. Without
   the option nothing changes. A joined session uses the daemon's live configuration, and inputs
@@ -82,7 +144,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **`mm daemon status` and `mm daemon stop` report and stop shared daemons (POSIX).** A
   shared daemon serves several client sessions from one engine (#3381). A client starts or joins
-  one with `--shared NAME` (below). `status` lists each daemon's
+  one with `--shared NAME` (previous entry). `status` lists each daemon's
   name, pid and start time, and exits 0 when one runs, 3 when none does, and 1 when the runtime
   directory cannot be listed. `--json` prints `{"daemons": [...], "count": N}`. `stop` sends
   SIGTERM, then SIGKILL after `--grace` seconds only if the process is still alive, and confirms
@@ -103,18 +165,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   scan, so a heading or line number that changed in between shows its new value; a pair is
   left out, and counted, when that read does not return one of its members (deleted, or on a
   path the scan's listing hides) or the bodies of an exact pair do not match. With the setting
-  off the output is unchanged. The
+  off none of these lines are printed. The
   tool's parameters are the same either way, and `mem_config` and `mm config set` do not
   change the setting.
 
 ### Changed
 
-- **The scheduled `dedup_scan` job walks the store instead of scanning the first pool on
-  every run (#3432).** A schedule scanned the first `max_scan` scannable chunks in chunk-id
-  order on each run, the same chunks every time, so on a large store a schedule never looked
-  at most of it. Each run now scans the pool after the one the schedule's last finished run
-  scanned, and a run that reaches the end of the store makes the next one start from the
-  first pool. A schedule that already exists starts from the first pool on its next run;
+- **The scheduled `dedup_scan` job walks the store instead of scanning one pool on every run
+  (#3432).** A schedule scanned at most `max_scan` scannable chunks on each run, chosen the
+  same way every time, and nothing moved it on to the rest, so on a large store a schedule
+  never looked at most of it. (0.7.10 chose them in an order that differed between
+  processes: see Fixed, #3390.) Each run now scans the pool after the one the schedule's
+  last finished run scanned, in chunk-id order, and a run that reaches the end of the store
+  makes the next one start from the first pool. A schedule that already exists starts from
+  the first pool on its next run;
   there is no setting that keeps the old behaviour. The position is stored on the schedule
   and shown as `state` (`{"after": "<chunk id>"}`, or `null`) in `schedule_list` and
   `mm schedule list --json`; the plain `mm schedule list` lines are unchanged. A run's
@@ -124,8 +188,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   run-now` and `schedule_run_now` move it as a dispatched run does, and deleting a schedule
   deletes it. Runs of one schedule that overlap scan the same pool, and one that finishes
   late puts the position back at the end of its own pool. The counts of a walk's runs do
-  not add up to a count for the store. An older memtomem sharing the database scans the
-  first pool on its runs and leaves the position alone.
+  not add up to a count for the store. An older memtomem sharing the database scans a
+  pool of its own choosing on its runs and leaves the position alone.
 
 - **The `update` and `handoff` workflows report the `Entry chunks` value `mem_add` prints
   (#3400).** Both reported a chunk count, and the only one a `mem_add` result had was
@@ -155,9 +219,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `0.2.28`, Antigravity `0.2.17`, Hermes `0.1.24`, OpenClaw `0.1.2`. Cursor stays `0.1.0`
   while its first marketplace review is open, but its rendered skill changes too.
 
-- **`handoff` save reports a refused `mem_add` as the refusal (#3443).** A `mem_add` result
-  that is a refusal or an error has no `Entry chunks` line, so save described it as a write
-  whose count the server did not report. Save now reports the handoff id, scope, namespace,
+- **`handoff` save reports a refused `mem_add` as the refusal (#3443).** Save's last step
+  had no branch for a `mem_add` result that is a refusal or an error, so it reported such a
+  result in the shape of a write. Save now reports the handoff id, scope, namespace,
   file and `Entry chunks` value only when `mem_add` confirms the write. It reports a refusal
   or an error unchanged and adds no file or chunk count of its own; a refusal that names a
   file in its own text keeps it. `handoff` can get such a result because it passes
@@ -173,7 +237,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   store such pairs were 306 of 412 at `max_scan=5000`. Neither member of such a pair can be
   removed (`mem_delete` and `mem_dedup_remove` refuse a read-only chunk), so they no longer
   take `limit` slots. Read-only pairs across two files and pairs with a writable member are
-  still listed. `mem_dedup_scan`'s coverage line ends with `left out N pairs of read-only
+  still listed. `mem_dedup_scan`'s coverage line says `left out N pairs of read-only
   chunks from the same file` when there are any, `GET /api/dedup/candidates` adds
   `same_source_read_only_pairs`, the Maintenance panel shows the count under the results
   (including "No duplicates found"), and a scheduled `dedup_scan` result adds the same key.
@@ -200,6 +264,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   what it writes and does not wait for the watcher. Set the interval between 100 and
   60000 ms in `config.json` or with `MEMTOMEM_INDEXING__WATCHER_POLL_INTERVAL_MS`, and
   restart the server to apply a change. The native backend ignores it.
+- **The server's search for a `.env` starts one directory higher (#3381).** python-dotenv
+  looked for the nearest `.env` starting in the installed package's `memtomem/server/`
+  directory. It now starts in `memtomem/`, so a `.env` placed inside `memtomem/server/` is no
+  longer read. Every directory above the package is searched as before.
 - **The Hermes plugin's server no longer uses a saved Hugging Face login.** With ONNX
   embedding or the local reranker configured, the server's model downloads sent the login
   that `hf auth login` saved (normally `~/.cache/huggingface/token`): the download libraries
@@ -208,16 +276,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` and holds `huggingface-hub` at 1.20 or later, the first
   release that checks the variable before it opens the saved login; `HF_TOKEN` is not used
   either. A fresh BM25-only configuration never contacted Hugging Face. The launch entries
-  of the other clients are unchanged.
+  of the other clients gain no such setting.
 
 ### Fixed
-
-- **`mm schedule add --job` choices are evaluated dynamically at command runtime (#3439).**
-  The `--job` parameter type previously built its choice list when `memtomem.cli.schedule_cmd`
-  was first imported. If another command or test in the same process loaded `schedule_cmd`
-  while the `JOB_KINDS` registry was temporarily patched, the allowed choices became permanently
-  frozen to that subset for all subsequent `mm schedule add` invocations. Choices are now
-  resolved dynamically on invocation through a custom `click.Choice` delegate.
 
 - **The `update` workflow no longer holds an item to 600 characters because it quotes a few
   Korean, Japanese, or Chinese characters.** An item was capped at 1,000 characters, or at 600
@@ -244,19 +305,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   project's `memories.local` tier or a held source). Nothing else changes: indexing a second spelling still adds its rows,
   and existing duplicates stay until removed (#3409).
 - **A bounded duplicate scan selects the same chunks in every process (#3390).**
-  `mem_dedup_scan`, the web `GET /dedup/candidates` route and the scheduled `dedup_scan` job
+  `mem_dedup_scan`, the web `GET /api/dedup/candidates` route and the scheduled `dedup_scan` job
   scan at most `max_scan` chunks (default 500). They filled that pool source by source in the
   iteration order of a Python `set`, which changes with the per-process hash seed, so the MCP
   server and `mm web` on one store, or one job on either side of a restart, scanned different
   samples and reported different candidates. On a store with 39,458 scannable chunks, two
-  processes found 15 and 10 candidate pairs at the default. The pool is now the first
-  `max_scan` scannable chunks in chunk-id order, read in one statement: the same chunks on
-  every run while the scannable chunks and `max_scan` stay the same (32 pairs on that store).
+  processes found 15 and 10 candidate pairs at the default. The pool is now `max_scan`
+  scannable chunks taken in chunk-id order, read in one statement, from the start of the
+  store unless the call gives `after` (see Added, #3397): the same chunks in every process
+  for the same starting position while the scannable chunks and `max_scan` stay the same (32
+  pairs on that store for the first pool). A scheduled job moves its starting position
+  between runs (see Changed, #3432).
   "Scannable" leaves out held and pending sources and any file holding a consolidation summary
   of one, the scan's existing rule.
   - The coverage line says how much of the store that was and how it was chosen:
     `Scanned all 412 scannable chunks; ...` when the pool is every scannable chunk, and
-    `Scanned 500 of 39458 scannable chunks (the first 500 in chunk-id order: ...); ...`
+    `Scanned 500 of 39458 scannable chunks (the first 500 in chunk-id order); ...`
     otherwise. The job's result gains `eligible` and the web response `eligible_chunks`,
     the number of scannable chunks the pool was taken from.
   - The pool's order also decided ties: which member of an exact group with equal timestamps
@@ -267,8 +331,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   - The `max_scan` parameter description now reads "Maximum chunks to scan, taken in
     chunk-id order".
   - A pool smaller than the store is still a subset: chunks outside it are reached only as
-    near neighbours of chunks inside it. Continuing a scan past the first `max_scan` chunks
-    is #3397; exact copies outside the pool are #3398.
+    near neighbours of chunks inside it. A scan continues past its pool with `after` (see
+    Added, #3397); exact copies outside the pool are #3398.
 
 - **A non-string namespace description is rejected with a clear parameter error (#3355).**
   `mem_do(action="ns_update", params=...)` forwarded parameters without type-checking
@@ -277,11 +341,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `[]` triggered a database rollback error. Truthy non-strings (`5`, `["sk-..."]`, `{"k": 1}`)
   failed deep inside the write guard with internal type errors. `set_namespace_meta` now
   validates that any non-`None` description is a string, matching `validate_namespace_color`, so
-  every MCP tool and storage call consistently reports
-  `Error: Invalid namespace description: expected a string` and stores nothing.
+  every MCP tool reports `Error: Invalid namespace description: expected a string`, a
+  storage call raises the same message, and nothing is stored.
 
-- **Resources answer over stdio (#3374).** Reading any of the six resources from a stdio
-  server failed, while tools on the same connection worked. Two causes, one per kind:
+- **Resources answer over stdio (#3374).** Reading the four static resources from a stdio
+  server failed, and with the MCP SDK `mcp` 2.2.0 the two templated ones failed too, while
+  tools on the same connection worked. Two causes, one per kind:
   - The four static ones (`memtomem://sources`, `memtomem://namespaces`, `memtomem://tags`,
     `memtomem://stats`) failed with `Error reading resource <uri>`, while `resources/list`
     still listed all four. Their handlers receive no request context and looked the server's
@@ -292,7 +357,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
     `memtomem://chunks/{chunk_id}`) failed with `Error creating resource from template <uri>`.
     Their handlers did declare the request context, but the SDK validates a template
     function's arguments, and with the annotation these handlers used that validation
-    rebuilt the context object without the request inside it.
+    rebuilt the context object without the request inside it. That is `mcp` 2.2.0: with
+    2.3.0, which a new install resolves, the two already answered on 0.7.10.
 
   The server now binds its state from the request itself for the length of each resource
   read, and all six handlers read it from there. The first cause needs a transport that
@@ -317,8 +383,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   rebuild falls back to `unicode61`, so a fallback rebuild read the same as a real Kiwi one.
   The reply now reads `FTS index rebuilt with <tokenizer> (N chunks).`, and when that is not
   the tokenizer you asked for, it adds a warning that this rebuild and every query in the
-  process fall back to it. `mm config set` already worded its message this way; the web's
-  rebuild paths still do not (#3395).
+  process fall back to it. `mm config set` already worded its message this way, and the web
+  UI's rebuild button now does too (#3395, next entry).
+
+- **The web UI's "Rebuild FTS" names the tokenizer it used (#3395).** `POST
+  /api/fts-rebuild`, the reindex banner's "Rebuild FTS" button, answered `FTS index rebuilt
+  for N chunks.` whichever tokenizer the rows were built with, so a `kiwipiepy` rebuild that
+  fell back to `unicode61` showed the same success toast as a real Kiwi one. Its `message`
+  now reads `FTS index rebuilt with <tokenizer> (N chunks).` and the response gains
+  `tokenizer` and `warning`. When the rebuild did not use the configured tokenizer, `warning`
+  and the message say that this rebuild and every query in the server fall back to it, and
+  the button shows a warning toast. Saving `search.tokenizer` in settings and a `config.json`
+  hot reload rebuild too: both now log the tokenizer the rows were built with, at warning
+  level on a fallback, and the save's response still does not mention a fallback (#3405).
 
 - **The Ollama provider turns thinking off, and an empty LLM answer no longer passes as "no
   tags" or "no entities" (#3382).** With `llm.enabled` on and no model set, the Ollama model
