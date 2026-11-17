@@ -59,6 +59,14 @@ To run the session loop, install the plugin for your coding agent ([Claude Code]
 
 > memtomem is the long-term-memory store. [memtomem-stm](https://github.com/memtomem/memtomem-stm) is a separate, optional MCP proxy for automatic surfacing, compression, and caching.
 
+## Works with
+
+- **Coding agents:** plugins (a skill bundle for Kimi Code) for [Claude Code](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-claude-plugin), [Codex CLI](https://github.com/memtomem/memtomem/tree/main/plugins/memtomem), [OpenCode](https://github.com/memtomem/memtomem/tree/main/packages/opencode-memtomem), [Kimi Code](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-kimi-skills), [Antigravity](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-antigravity-plugin), and [Cursor](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-cursor-plugin) share one local store; the Antigravity and Cursor plugins are [experimental](https://github.com/memtomem/memtomem#stability).
+- **LangGraph:** [`langchain-memtomem`](https://pypi.org/project/langchain-memtomem/) is a LangGraph `BaseStore` whose `search(query=...)` runs memtomem's search pipeline over an index the store owns.
+- **Hermes Agent:** the [plugin](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-hermes-plugin) and the [memory provider](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-hermes-memory) are listed in the Hermes plugin catalog as `memtomem` and `memtomem-memory`; the provider adds relevant notes to each Hermes turn and can mirror Hermes's built-in memory into memtomem (off by default).
+
+The [Works with](https://github.com/memtomem/memtomem#works-with) section on GitHub also covers the Claude Code automation plugin and which hosts run the session loop.
+
 ## What else is inside
 
 | Your memory, your files | Operate it | Plug it in |
