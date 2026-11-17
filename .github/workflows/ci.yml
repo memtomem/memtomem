@@ -232,7 +232,12 @@ jobs:
       # chromium can launch from a clean runner; the install also seeds the
       # browser cache that ``_playwright_browser_available()`` probes.
       - run: uv run playwright install --with-deps chromium
+      # The probe in tests/conftest.py skips every browser test when Chromium
+      # cannot launch, and pytest passes a run that skipped everything it
+      # selected. Here that is a failure, with the launch error in the log (#3453).
       - run: uv run pytest packages/memtomem/tests/web -m browser --tb=short -q
+        env:
+          MEMTOMEM_TEST_REQUIRE_BROWSER: "1"
 
   test-golden-path:
     name: golden-path (ONNX)
