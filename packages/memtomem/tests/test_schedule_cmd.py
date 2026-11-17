@@ -119,6 +119,45 @@ class TestScheduleAdd:
             "* * * * *", "dedup_scan", {"limit": 20}
         )
 
+    def test_job_choices_follow_registry_dynamically(self, runner, monkeypatch):
+        """#3439: --job choices reflect JOB_KINDS dynamically at runtime."""
+        from unittest.mock import patch
+        from pydantic import BaseModel
+        from memtomem.scheduler.jobs import JobSpec
+
+        comp = _mock_components()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        class _CustomParams(BaseModel):
+            pass
+
+        spec = JobSpec("custom_job", "custom job test", _CustomParams, AsyncMock())
+        with patch.dict("memtomem.scheduler.jobs.JOB_KINDS", {"custom_job": spec}, clear=True):
+            res_custom = runner.invoke(
+                cli, ["schedule", "add", "--cron", "* * * * *", "--job", "custom_job"]
+            )
+            assert res_custom.exit_code == 0, res_custom.output
+            res_rejected = runner.invoke(
+                cli, ["schedule", "add", "--cron", "* * * * *", "--job", "dedup_scan"]
+            )
+            assert res_rejected.exit_code != 0
+            assert "Invalid value for '--job'" in res_rejected.output
+
+        res_standard = runner.invoke(
+            cli,
+            [
+                "schedule",
+                "add",
+                "--cron",
+                "* * * * *",
+                "--job",
+                "dedup_scan",
+                "--params",
+                '{"limit": 20}',
+            ],
+        )
+        assert res_standard.exit_code == 0, res_standard.output
+
 
 class TestStoredUnknownKeyStillRuns:
     """A row stored before registration refused unknown keys keeps running."""

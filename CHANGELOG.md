@@ -212,6 +212,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm schedule add --job` choices are evaluated dynamically at command runtime (#3439).**
+  The `--job` parameter type previously built its choice list when `memtomem.cli.schedule_cmd`
+  was first imported. If another command or test in the same process loaded `schedule_cmd`
+  while the `JOB_KINDS` registry was temporarily patched, the allowed choices became permanently
+  frozen to that subset for all subsequent `mm schedule add` invocations. Choices are now
+  resolved dynamically on invocation through a custom `click.Choice` delegate.
+
 - **The `update` workflow no longer holds an item to 600 characters because it quotes a few
   Korean, Japanese, or Chinese characters.** An item was capped at 1,000 characters, or at 600
   as soon as any of its text was in one of those languages. An English item quoting five
