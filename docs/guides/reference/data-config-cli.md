@@ -443,6 +443,8 @@ not taken (exit 1).
 `memtomem-server --daemon NAME [--idle-timeout S]` runs a daemon in the
 foreground with your environment (idle timeout 600 s by default, `0` never). A
 daemon a session starts logs to `daemon-NAME.log` in the runtime directory.
+[Share one server between sessions](../shared-daemon.md) walks through turning
+it on, the reasons a session does not join, and stopping a daemon.
 
 `mm` is a shorthand alias for `memtomem`. All commands support `-h` and `--help`.
 
