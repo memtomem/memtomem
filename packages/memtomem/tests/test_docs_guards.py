@@ -23,6 +23,7 @@ These guards protect invariants that code cannot enforce directly:
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
@@ -3108,3 +3109,371 @@ class TestRecallUntilBoundaryDocs:
         doc = mem_recall.__doc__ or ""
         lines = [line.strip() for line in doc.splitlines() if line.strip().startswith("until:")]
         assert lines == ["until: Date-only includes UTC period; full datetime exclusive"]
+
+
+# ── shared daemon guide ↔ source (#3381) ─────────────────────────────────────
+
+_SHARED_GUIDE = _GUIDES / "shared-daemon.md"
+_ANY = ".+"
+
+
+def _source_tree(relative: str) -> ast.Module:
+    return ast.parse(_read(_SRC / relative))
+
+
+def _evaluated(node: ast.expr) -> object:
+    """A literal, a tuple of literals or a product of numbers; ``ValueError`` otherwise."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float, str)):
+        return node.value
+    if isinstance(node, ast.Tuple):
+        return tuple(_evaluated(element) for element in node.elts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        left, right = _evaluated(node.left), _evaluated(node.right)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            return left * right
+    raise ValueError(ast.dump(node))
+
+
+def _constant(tree: ast.Module, name: str) -> object:
+    """The value of the one module-level ``name = <literal>`` assignment."""
+    values = [
+        _evaluated(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and [t.id for t in node.targets if isinstance(t, ast.Name)] == [name]
+    ]
+    assert len(values) == 1, f"{len(values)} module-level assignments to {name}"
+    return values[0]
+
+
+def _numbers(tree: ast.Module) -> dict[str, int | float]:
+    found: dict[str, int | float] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                try:
+                    value = _evaluated(node.value)
+                except ValueError:
+                    continue
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    found[target.id] = value
+    return found
+
+
+def _pattern(node: ast.expr, numbers: dict[str, int | float]) -> str:
+    """A regex for the text *node* builds: literal parts escaped, the rest ``.+``.
+
+    A placeholder that formats a module-level number is rendered with its
+    value, so a documented ``10 s`` is compared, not waved through.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return re.escape(node.value)
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant):
+                parts.append(re.escape(str(value.value)))
+                continue
+            assert isinstance(value, ast.FormattedValue)
+            inner = value.value
+            if isinstance(inner, ast.Name) and inner.id.isupper():
+                # A constant the message formats has to be one this module
+                # assigns as a number; anything else would match any text.
+                assert inner.id in numbers, f"{inner.id} is not a module-level number"
+                spec = ""
+                if isinstance(value.format_spec, ast.JoinedStr):
+                    spec = "".join(
+                        str(p.value)
+                        for p in value.format_spec.values
+                        if isinstance(p, ast.Constant)
+                    )
+                parts.append(re.escape(format(numbers[inner.id], spec)))
+            else:
+                parts.append(_ANY)
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _pattern(node.left, numbers) + _pattern(node.right, numbers)
+    return _ANY
+
+
+def _fstring_pattern(tree: ast.Module, anchor: str) -> str:
+    """The pattern of the one f-string in *tree* whose literal text contains *anchor*."""
+    numbers = _numbers(tree)
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            literal = "".join(str(v.value) for v in node.values if isinstance(v, ast.Constant))
+            if anchor in literal:
+                found.add(_pattern(node, numbers))
+    assert len(found) == 1, f"{len(found)} f-strings contain {anchor!r}"
+    return found.pop()
+
+
+def _guide_section(heading: str) -> str:
+    text = _read(_SHARED_GUIDE)
+    start = text.index(f"\n## {heading}\n")
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end != -1 else len(text)]
+
+
+def _first_cells(section: str) -> list[str]:
+    """The first cell of every body row of the one table in *section*."""
+    rows = [line for line in section.splitlines() if line.startswith("|")]
+    assert len(rows) >= 3, "no table with a body row"
+    assert set(rows[1].replace("|", "").strip()) <= {"-", " ", ":"}, rows[1]
+    return [row.strip().strip("|").split("|")[0].strip() for row in rows[2:]]
+
+
+def _code_span(cell: str) -> str:
+    assert cell.startswith("`") and cell.endswith("`") and cell.count("`") == 2, cell
+    return cell[1:-1]
+
+
+def _unmatched(patterns: list[str], texts: list[str]) -> tuple[list[str], list[str]]:
+    """Patterns no text matches, and texts no pattern matches."""
+    no_text = [p for p in patterns if not any(re.fullmatch(p, t) for t in texts)]
+    no_pattern = [t for t in texts if not any(re.fullmatch(p, t) for p in patterns)]
+    return no_text, no_pattern
+
+
+def _option_keyword(tree: ast.Module, option: str, keyword: str) -> list[ast.expr]:
+    """The *keyword* argument of every ``add_argument(option, ...)`` call in *tree*."""
+    return [
+        kw.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == option
+        for kw in node.keywords
+        if kw.arg == keyword
+    ]
+
+
+class TestSharedDaemonGuideMatchesSource:
+    """``docs/guides/shared-daemon.md`` quotes numbers, field names and messages.
+
+    Each is read out of the guide and compared with the value the source
+    holds, taken from the source text so the comparison does not depend on
+    what the platform can import. Messages are compared as templates: the
+    literal text must agree, and a formatted value may be anything unless it
+    is a module-level number, which is rendered.
+    """
+
+    def test_every_reason_a_session_does_not_join_has_a_row_and_the_reverse(self) -> None:
+        bridge = _source_tree("_bridge.py")
+        numbers = _numbers(bridge)
+        produced: list[ast.expr] = [
+            node.args[0]
+            for node in ast.walk(bridge)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_Fallback"
+        ]
+        for function in bridge.body:
+            if isinstance(function, ast.FunctionDef) and function.name in (
+                "run_bridge",
+                "_config_error",
+            ):
+                produced.extend(
+                    node.value
+                    for node in ast.walk(function)
+                    if isinstance(node, ast.Return) and node.value is not None
+                )
+        patterns = [_pattern(node, numbers) for node in produced]
+        # Reasons built elsewhere and passed on. Each is accounted for below;
+        # a new one has to be classified here before the guide can be right.
+        passed_on = {ast.unparse(n) for n, p in zip(produced, patterns) if p == _ANY}
+        assert passed_on == {"exc.summary", "_config_error(exc)", "str(exc)"}
+        direct = [p for p in patterns if p != _ANY]
+        assert len(direct) >= 12, "the collection found too few reasons to be right"
+
+        store = _source_tree("_store_identity.py")
+        raised = [
+            node
+            for node in ast.walk(store)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "StoreNotShareable"
+        ]
+        summaries = [_pattern(call.args[1], {}) for call in raised if len(call.args) == 2]
+        assert len(summaries) == 3
+        assert _ANY not in summaries, "a summary that is not a literal would match any row"
+        # The one call without a summary re-raises a relative-path refusal that
+        # only a daemon turns on; a bridge checks relative paths itself, first.
+        assert [len(call.args) for call in raised].count(1) == 1
+
+        expected = direct + summaries
+        section = _guide_section("Why a session did not join")
+        rows = [_code_span(cell) for cell in _first_cells(section)]
+        no_row, no_source = _unmatched(expected, rows)
+        assert not no_row, f"reasons with no row in the guide: {no_row}"
+        assert not no_source, f"guide rows no source produces: {no_source}"
+        assert len(rows) == len(expected)
+
+    def test_the_compared_fields_are_the_admission_fields(self) -> None:
+        admission = _source_tree("_admission.py")
+        section = _guide_section("What has to match")
+        cells = _first_cells(section)
+        assert tuple(_code_span(cell) for cell in cells) == _constant(admission, "FIELDS")
+        env_row = _table_row(section, "env")[1]
+        prefixes = _constant(admission, "_ENV_PREFIXES")
+        assert isinstance(prefixes, tuple) and prefixes
+        assert re.findall(r"`([A-Z]+_)\*`", env_row) == [str(p).upper() for p in prefixes]
+
+    def test_the_idle_timeout_is_the_daemons_default(self) -> None:
+        daemon = _source_tree("server/daemon.py")
+        default = _constant(daemon, "DEFAULT_IDLE_TIMEOUT_S")
+        assert isinstance(default, float) and default == int(default)
+        seconds = str(int(default))
+        bound = _option_keyword(daemon, "--idle-timeout", "default")
+        assert [ast.unparse(node) for node in bound] == ["DEFAULT_IDLE_TIMEOUT_S"]
+
+        stated = re.findall(r"(?i)after (\d+) seconds with no connection", _read(_SHARED_GUIDE))
+        assert stated and set(stated) == {seconds}
+        reference = " ".join(_read(_GUIDES / "reference" / "data-config-cli.md").split())
+        assert re.findall(r"idle timeout (\d+) s by default", reference) == [seconds]
+        helps = _option_keyword(_source_tree("_server_entry.py"), "--idle-timeout", "help")
+        assert len(helps) == 1 and isinstance(helps[0], ast.Constant)
+        assert re.findall(r"default (\d+);", str(helps[0].value)) == [seconds]
+
+    def test_the_two_size_limits_are_the_bridges_and_the_daemons(self) -> None:
+        limits = _guide_section("Limits")
+        mib = 1024 * 1024
+        buffer_limit = _constant(_source_tree("_bridge.py"), "BUFFER_LIMIT")
+        frame_limit = _constant(_source_tree("server/daemon.py"), "FRAME_LIMIT")
+        assert isinstance(buffer_limit, int) and buffer_limit % mib == 0
+        assert isinstance(frame_limit, int) and frame_limit % mib == 0
+        assert re.findall(r"\*\*More than (\d+) MiB waiting in either direction", limits) == [
+            str(buffer_limit // mib)
+        ]
+        assert re.findall(r"One message from the client larger than (\d+) MiB", limits) == [
+            str(frame_limit // mib)
+        ]
+
+    def test_the_name_rule_is_the_name_pattern(self) -> None:
+        compiled = [
+            node.value.args[0].value
+            for node in _source_tree("_daemon_paths.py").body
+            if isinstance(node, ast.Assign)
+            and [t.id for t in node.targets if isinstance(t, ast.Name)] == ["NAME_PATTERN"]
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.args[0], ast.Constant)
+        ]
+        assert len(compiled) == 1
+        shape = re.fullmatch(r"\[a-z0-9\]\[a-z0-9-\]\{0,(\d+)\}", compiled[0])
+        assert shape is not None, compiled[0]
+        stated = re.findall(
+            r"is 1 to (\d+) characters from `a-z`, `0-9` and `-`, starting with a letter or\s+"
+            r"digit",
+            _read(_SHARED_GUIDE),
+        )
+        assert stated == [str(1 + int(shape.group(1)))]
+
+    def test_the_status_lines_have_the_shapes_mem_status_prints(self) -> None:
+        status = _source_tree("server/tools/status_config.py")
+        templates = [
+            _fstring_pattern(status, " connection(s))"),
+            _fstring_pattern(status, " not joined ("),
+        ]
+        # Both lines open with the daemon's name; the guide's daemon is ``main``,
+        # so the name is compared too instead of matching any text.
+        assert all(template.startswith(_ANY) for template in templates)
+        shapes = [template.replace(_ANY, "main", 1) for template in templates]
+        widths = {
+            node.args[0].value
+            for node in ast.walk(status)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "ljust"
+            and isinstance(node.func.value, ast.Constant)
+            and node.func.value.value == "Shared daemon:"
+            and isinstance(node.args[0], ast.Constant)
+        }
+        assert len(widths) == 1
+        key = "Shared daemon:".ljust(widths.pop())
+        lines = [
+            line
+            for line in _guide_section("Check that a session joined").splitlines()
+            if line.startswith("Shared daemon:")
+        ]
+        assert len(lines) == 2 and all(line.startswith(key) for line in lines)
+        no_line, no_shape = _unmatched(shapes, [line[len(key) :] for line in lines])
+        assert not no_line and not no_shape, (no_line, no_shape)
+
+    @pytest.mark.parametrize(
+        ("module", "anchor", "quotation"),
+        [
+            (
+                "cli/doctor_cmd.py",
+                " shared daemon(s) running: ",
+                r"`(\d+ shared daemon\(s\) running: [^`]+)`",
+            ),
+            (
+                "cli/doctor_cmd.py",
+                " bridge(s))",
+                r"running: (main \(pid \d+, \d+ bridge\(s\)\))`",
+            ),
+            ("cli/daemon_cmd.py", "stopped  pid=", r"prints `(stopped [^`]+)`"),
+            ("cli/daemon_cmd.py", "  started=", r"\n(main  running  pid=\S+  started=\S+)\n"),
+            (
+                "cli/_liveness.py",
+                " is running; stop it with ",
+                r"\n  (Shared daemon .+ is running; stop it with .+)\n",
+            ),
+        ],
+    )
+    def test_quoted_command_output_has_the_shape_the_command_prints(
+        self, module: str, anchor: str, quotation: str
+    ) -> None:
+        found = re.findall(quotation, _read(_SHARED_GUIDE))
+        assert len(found) == 1, f"{len(found)} quotations in the guide"
+        shape = _fstring_pattern(_source_tree(module), anchor)
+        assert re.fullmatch(shape, found[0]), (shape, found[0])
+
+    def test_the_grace_default_is_the_commands(self) -> None:
+        daemon = _CLI.commands["daemon"]
+        assert isinstance(daemon, click.Group)
+        defaults = [p.default for p in daemon.commands["stop"].params if p.name == "grace"]
+        assert len(defaults) == 1 and defaults[0] == int(defaults[0])
+        stated = re.findall(r"after `--grace` seconds \(default (\d+)\)", _read(_SHARED_GUIDE))
+        assert stated == [str(int(defaults[0]))]
+
+    def test_the_usage_errors_are_the_parsers(self) -> None:
+        entry = _source_tree("_server_entry.py")
+        errors = [
+            _pattern(node.args[0], {})
+            for node in ast.walk(entry)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "error"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "parser"
+        ]
+        about_sharing = [
+            p for p in errors if any(o in p for o in ("shared", "daemon", "idle\\-timeout"))
+        ]
+        assert len(about_sharing) == 4
+        section = _guide_section("Usage errors")
+        bullets = re.findall(r"^- `(--[^`]+)`$", section, flags=re.MULTILINE)
+        no_bullet, no_error = _unmatched(about_sharing, bullets)
+        assert not no_bullet and not no_error, (no_bullet, no_error)
+        quoted = re.findall(r"^- a name that .*\(`([^`]+)`\)$", section, flags=re.MULTILINE)
+        assert len(quoted) == 1
+        # The quoted words are part of the one message the name check raises.
+        assert _fstring_pattern(entry, f" {quoted[0]}: ")
+
+    def test_every_server_command_line_in_the_guide_parses(self) -> None:
+        from memtomem._server_entry import parse_server_args
+
+        blocks = re.findall(r"```bash\n(.*?)```", _read(_SHARED_GUIDE), flags=re.DOTALL)
+        parsed = []
+        for line in "".join(blocks).splitlines():
+            words = shlex.split(line, comments=True)
+            if "memtomem-server" in words:
+                parsed.append(parse_server_args(words[words.index("memtomem-server") + 1 :]))
+        assert [(args.shared, args.daemon, args.idle_timeout) for args in parsed] == [
+            ("main", None, None),
+            (None, "main", 0.0),
+        ]

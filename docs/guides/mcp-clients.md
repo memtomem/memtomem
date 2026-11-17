@@ -985,7 +985,11 @@ listing both pids. Two readings, both real:
 
 - **Multiple editor sessions are open.** One MCP server per session is
   normal — several Claude Code windows against one user store will show
-  this warning, and no action is needed.
+  this warning, and no action is needed. On macOS and Linux the sessions
+  can instead be served by one process: see
+  [Share one server between sessions](shared-daemon.md), an opt-in option.
+  Sessions that joined one shared daemon do not raise the warning; a
+  session beside them that did not join does, in all of them.
 - **One client has two memtomem registrations** (e.g. a manual
   `claude mcp add` entry *and* the plugin — see the client sections
   above). With a single editor session open, this is the likely cause:
