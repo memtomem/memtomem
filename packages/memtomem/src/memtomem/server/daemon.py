@@ -45,7 +45,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from memtomem._daemon_paths import NAME_PATTERN, lifetime_lock_path, log_path, socket_path
 
@@ -175,8 +175,8 @@ def parse_preamble(line: bytes) -> Preamble:
     fields = payload.get("admission")
     if (reason := malformed(fields)) is not None:
         raise PreambleError(reason)
-    assert isinstance(fields, dict)  # narrowed by ``malformed``
-    return Preamble(resolved, fields)
+    # ``malformed`` answers ``None`` for a dict only.
+    return Preamble(resolved, cast("dict[str, Any]", fields))
 
 
 def _request_id(message: Any) -> object | None:

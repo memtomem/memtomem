@@ -410,14 +410,18 @@ def _drain(
     write: Callable[[bytes], object],
     events: queue.Queue[str],
     finish: Callable[[], object],
+    failed: str = "error",
 ) -> None:
-    """Write *buffer* out until it is closed and empty, then call *finish*."""
+    """Write *buffer* out until it is closed and empty, then call *finish*.
+
+    A write that fails is reported as *failed* and nothing is finished.
+    """
     try:
         while (data := buffer.get()) is not None:
             write(data)
             buffer.written(len(data))
     except OSError:
-        events.put("error")
+        events.put(failed)
     else:
         finish()
 
@@ -430,6 +434,10 @@ def _start_session(sock: socket.socket, rest: bytes, stdin: int, stdout: int) ->
     take what it read, so the client's EOF is seen while the daemon is not
     reading and the daemon's while the client is not; a side that leaves more
     than :data:`BUFFER_LIMIT` untaken is reported as ``overflow``.
+
+    A failed write to the client is ``stdout-error``, which is how a client
+    that has left looks. Every other failed read or write is ``error``: bytes
+    were lost on the way to or from the daemon.
     """
     events: queue.Queue[str] = queue.Queue()
     incoming, outgoing = _Buffer(BUFFER_LIMIT), _Buffer(BUFFER_LIMIT)
@@ -454,6 +462,7 @@ def _start_session(sock: socket.socket, rest: bytes, stdin: int, stdout: int) ->
                 lambda data: _write_all(stdout, data),
                 events,
                 lambda: events.put("flushed"),
+                "stdout-error",
             ),
         ),
     )
@@ -468,8 +477,10 @@ def _pump(name: str, sock: socket.socket, rest: bytes) -> NoReturn:
     The daemon closing first means it is gone: exit 1, no reconnect. stdin
     closing first means the client is gone: the write half is shut once what
     the client sent has been passed on, and the exit is 0 once the daemon's
-    last answers are written, as it is on SIGTERM. Either way the wait for the
-    rest is bounded by :data:`CONNECTION_DRAIN_S`, and the process ends with
+    last answers are written, as it is on SIGTERM. A read or write that fails
+    on the way to or from the daemon makes the exit 1 as well, after what the
+    daemon already sent has been written. Either way the wait for the rest is
+    bounded by :data:`CONNECTION_DRAIN_S`, and the process ends with
     ``os._exit``, so a thread blocked on a read or a write cannot hold it.
     """
     from memtomem._instance_registry import register_bridge
@@ -485,15 +496,18 @@ def _pump(name: str, sock: socket.socket, rest: bytes) -> NoReturn:
 
 
 def _wait_for_end(events: queue.Queue[str]) -> int:
-    """The exit code: 0 when the client ended the session, 1 when anything else did.
+    """The exit code: 0 when the client ended the session and nothing was lost, else 1.
 
     Of stdin's EOF and the daemon's EOF, the one reported first says who ended
-    it; the other follows from it and changes nothing. After either, the wait
-    for the rest (the daemon's last answers, or the client taking them) lasts
-    at most :data:`CONNECTION_DRAIN_S`. An overflow is never the client's end:
-    bytes were dropped.
+    it; the other follows from it and changes nothing. An ``error`` means
+    bytes were lost on the way to or from the daemon, so the exit is 1
+    whoever ended it. After any of the three, what the daemon already sent is
+    still written to the client, and the wait for that lasts at most
+    :data:`CONNECTION_DRAIN_S`. An ``overflow`` ends the session at once:
+    bytes were dropped and the side that should take them is not taking any.
     """
     first: str | None = None
+    lost = False
     deadline: float | None = None
     while True:
         if _terminated:
@@ -504,12 +518,16 @@ def _wait_for_end(events: queue.Queue[str]) -> int:
             if deadline is None or time.monotonic() < deadline:
                 continue
         else:
-            if event in ("stdin-eof", "socket-eof"):
-                first = first or event
+            if event == "overflow":
+                return 1
+            if event in ("stdin-eof", "socket-eof", "error"):
+                if event == "error":
+                    lost = True
+                else:
+                    first = first or event
                 if deadline is None:
                     deadline = time.monotonic() + CONNECTION_DRAIN_S
                 continue
-            if event == "overflow":
-                return 1
-        # ``flushed``, ``error``, or the drain ran out.
-        return 0 if first == "stdin-eof" else 1
+        # ``flushed``, ``stdout-error`` (the client took all there was, or is
+        # gone), or the drain ran out.
+        return 0 if first == "stdin-eof" and not lost else 1

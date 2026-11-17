@@ -95,6 +95,7 @@ def test_store_resolution_and_dotenv_do_not_import_the_server(tmp_path: Path) ->
     assert result["heavy"] == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="on Windows the bridge falls back before connecting")
 def test_the_bridge_before_and_around_connecting_does_not_import_the_server(
     tmp_path: Path,
 ) -> None:

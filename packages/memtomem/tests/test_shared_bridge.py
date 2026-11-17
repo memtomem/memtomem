@@ -1118,33 +1118,45 @@ def _events(*names: str):
         (("stdin-eof", "socket-eof", "flushed"), 0),  # the client left, the daemon answered it
         (("socket-eof", "stdin-eof", "flushed"), 1),  # the daemon left first
         (("socket-eof", "flushed"), 1),
-        (("stdin-eof", "error"), 0),  # a client that is gone has closed its stdout too
-        (("error",), 1),
+        (("stdin-eof", "stdout-error"), 0),  # a client that is gone has closed its stdout too
+        (("stdout-error",), 1),
+        # Bytes lost on the way to or from the daemon: 1, whoever left first, and
+        # only once what the daemon had sent was written.
+        (("stdin-eof", "error", "socket-eof", "flushed"), 1),
+        (("error", "stdin-eof", "socket-eof", "flushed"), 1),
+        (("error", "flushed"), 1),
+        (("stdin-eof", "error", "stdout-error"), 1),
         (("overflow",), 1),
         (("stdin-eof", "overflow"), 1),  # bytes were dropped, whoever left first
     ],
 )
-def test_the_side_that_ended_first_decides_the_exit_code(
+def test_who_ended_the_session_and_whether_bytes_were_lost_decide_the_exit_code(
     order: tuple[str, ...], code: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import memtomem._bridge as bridge
 
     monkeypatch.setattr(bridge, "_terminated", False)
+    events = _events(*order)
 
-    assert bridge._wait_for_end(_events(*order)) == code
+    assert bridge._wait_for_end(events) == code
+    assert events.empty()  # nothing was decided before the last of them
 
 
-@pytest.mark.parametrize("first, code", [("stdin-eof", 0), ("socket-eof", 1)])
-def test_the_wait_after_either_eof_is_bounded(
-    first: str, code: int, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "seen, code",
+    [(("stdin-eof",), 0), (("socket-eof",), 1), (("error",), 1), (("stdin-eof", "error"), 1)],
+)
+def test_the_wait_for_what_is_still_to_be_written_is_bounded(
+    seen: tuple[str, ...], code: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """After an EOF or an error the session goes on, but only for the drain time."""
     import memtomem._bridge as bridge
 
     monkeypatch.setattr(bridge, "_terminated", False)
     monkeypatch.setattr(bridge, "CONNECTION_DRAIN_S", 0.2)
     started = time.monotonic()
 
-    assert bridge._wait_for_end(_events(first)) == code
+    assert bridge._wait_for_end(_events(*seen)) == code
     assert 0.2 <= time.monotonic() - started < 5
 
 
@@ -1166,7 +1178,8 @@ def test_the_guide_states_the_limit_a_session_has() -> None:
     guide = Path(__file__).parents[3] / "docs/guides/reference/data-config-cli.md"
 
     assert bridge.BUFFER_LIMIT == 32 * 1024 * 1024
-    assert "more than 32 MiB is waiting in either direction" in " ".join(guide.read_text().split())
+    text = guide.read_text(encoding="utf-8")
+    assert "more than 32 MiB is waiting in either direction" in " ".join(text.split())
 
 
 def test_an_end_of_input_is_reported_before_its_buffer_is_closed() -> None:
@@ -1227,7 +1240,10 @@ def test_what_was_written_no_longer_counts_and_the_end_comes_after_it() -> None:
     assert buffer.put(b"1234567890")  # the whole limit is free again
 
 
-def test_a_write_error_is_reported_and_nothing_is_finished() -> None:
+@pytest.mark.parametrize("named, reported", [((), "error"), (("stdout-error",), "stdout-error")])
+def test_a_write_error_is_reported_under_its_name_and_nothing_is_finished(
+    named: tuple[str, ...], reported: str
+) -> None:
     import memtomem._bridge as bridge
 
     def write(data: bytes) -> None:
@@ -1237,22 +1253,26 @@ def test_a_write_error_is_reported_and_nothing_is_finished() -> None:
     buffer.put(b"1")
     buffer.close()
 
-    bridge._drain(buffer, write, events, _must_not_run)
+    bridge._drain(buffer, write, events, _must_not_run, *named)
 
-    assert list(events.queue) == ["error"]
+    assert list(events.queue) == [reported]
 
 
 class _Session:
     """``_start_session`` over a socket pair and two pipes: the test is client and daemon."""
 
-    def __init__(self, rest: bytes = b"", sndbuf: int | None = None) -> None:
+    def __init__(self, rest: bytes = b"", sndbuf: int | None = None, ours: object = None) -> None:
+        """With *ours*, a stand-in for the bridge's end, there is no daemon end to play."""
         import memtomem._bridge as bridge
 
-        ours, self.daemon = socket.socketpair()
-        if sndbuf is not None:
-            ours.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf)
-        self.daemon.settimeout(10)
-        self._ours = ours
+        if ours is None:
+            ours, self.daemon = socket.socketpair()
+            if sndbuf is not None:
+                ours.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf)
+            self.daemon.settimeout(10)
+            self._socks = [self.daemon, ours]
+        else:
+            self._socks = [ours]
         stdin_r, self.stdin = os.pipe()
         self.stdout, stdout_w = os.pipe()
         self._fds = [stdin_r, self.stdin, self.stdout, stdout_w]
@@ -1261,6 +1281,10 @@ class _Session:
     def close_stdin(self) -> None:
         os.close(self.stdin)
         self._fds.remove(self.stdin)
+
+    def close_stdout(self) -> None:
+        os.close(self.stdout)
+        self._fds.remove(self.stdout)
 
     def read_stdout(self, count: int, timeout: float = 10.0) -> bytes:
         """Up to *count* bytes of what reached the client; fewer if they do not come in time."""
@@ -1302,7 +1326,7 @@ class _Session:
         return codes[0] if codes else None
 
     def close(self) -> None:
-        for sock in (self.daemon, self._ours):
+        for sock in self._socks:
             sock.close()
         for fd in list(self._fds):
             try:
@@ -1348,6 +1372,54 @@ def test_a_session_whose_daemon_closes_first_ends_with_one(session: list) -> Non
     s.daemon.close()
 
     assert s.read_stdout(4) == b"last"
+    assert s.exit_code() == 1
+
+
+@posix_only
+def test_a_client_that_left_and_closed_its_stdout_too_is_a_normal_end(session: list) -> None:
+    s = _Session()
+    session.append(s)
+
+    s.close_stdin()
+    assert s.daemon.recv(64) == b""  # the client's end is recorded and passed on
+    s.close_stdout()
+    s.daemon.sendall(b"an answer nobody reads")  # the daemon stays; only the write fails
+
+    assert s.exit_code() == 0
+
+
+@posix_only
+def test_input_that_cannot_reach_the_daemon_is_not_a_normal_end(
+    session: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client left after writing, and the write to the daemon failed: its bytes are lost."""
+    import memtomem._bridge as bridge
+
+    released = threading.Event()
+
+    class Deaf:
+        """A connection whose daemon takes nothing more and says nothing, not even EOF."""
+
+        def recv(self, size: int) -> bytes:
+            released.wait(30)
+            return b""
+
+        def sendall(self, data: bytes) -> None:
+            time.sleep(0.2)  # the client's EOF is long recorded by the time this fails
+            raise BrokenPipeError
+
+        def shutdown(self, how: int) -> None:
+            pass
+
+        def close(self) -> None:
+            released.set()
+
+    monkeypatch.setattr(bridge, "CONNECTION_DRAIN_S", 0.3)
+    s = _Session(ours=Deaf())
+    session.append(s)
+
+    s.write_stdin(b"a request", close=True)
+
     assert s.exit_code() == 1
 
 
