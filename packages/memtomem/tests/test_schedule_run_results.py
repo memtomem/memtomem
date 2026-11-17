@@ -372,6 +372,42 @@ class TestStoredState:
         assert (await storage.schedule_get(sid))["state"] == self.POSITION
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("write", ["claim", "completion"])
+    async def test_an_older_binary_run_leaves_it_readable(self, storage, write):
+        """An older binary advances ``last_run_at`` and never names ``job_state``.
+
+        The result stored before such a run stops being shown, because it no
+        longer describes the latest run. The position is not a record of one
+        run, so every read still returns it.
+
+        Only a binary from before ``last_run_result`` leaves a result that is
+        out of date next to a position. One that has the column runs the
+        statements ``schedule_try_claim`` and a ``KEEP_STATE`` completion run.
+        """
+        sid = await storage.schedule_insert("* * * * *", "dedup_scan")
+        when = datetime(2026, 1, 1, 6, 0, 0, tzinfo=timezone.utc)
+        await storage.schedule_mark_run(
+            sid, "ok", when=when, result={"pool": 500}, state=self.POSITION
+        )
+        token = (await storage.schedule_get(sid))["last_run_at"]
+        later = "2026-01-01T06:01:00+00:00"
+        sql, args = {
+            "claim": (_LEGACY_CLAIM_SQL, (later, sid, token)),
+            "completion": (_LEGACY_MARK_SQL, (later, "ok", None, sid)),
+        }[write]
+        db = storage._get_db()
+        cur = db.execute(sql, args)
+        db.commit()
+        assert cur.rowcount == 1
+
+        sched = await storage.schedule_get(sid)
+        assert (sched["last_run_at"], sched["last_run_result"]) == (later, None)
+        assert sched["state"] == self.POSITION
+        assert [r["state"] for r in await storage.schedule_list_all()] == [self.POSITION]
+        due = await storage.schedule_list_due(datetime.now(timezone.utc))
+        assert [r["state"] for r in due] == [self.POSITION]
+
+    @pytest.mark.asyncio
     async def test_the_state_is_committed_with_the_outcome(self, components):
         storage = components.storage
         sid = await storage.schedule_insert("* * * * *", "dedup_scan")
