@@ -13,7 +13,7 @@ import click
 
 from croniter import croniter  # type: ignore[import-untyped]
 
-from memtomem.scheduler.jobs import JOB_KINDS, run_outcome, validate_new_params
+from memtomem.scheduler.jobs import JOB_KINDS, run_job, run_outcome, validate_new_params
 
 
 @click.group()
@@ -200,12 +200,14 @@ async def _run_now(sched_id: str) -> dict:
         timeout = _run_now_timeout(app)
 
         try:
-            result = await asyncio.wait_for(
-                spec.runner(app, **validated.model_dump()),
+            result, state_update = await asyncio.wait_for(
+                run_job(spec, app, validated, sched.get("state")),
                 timeout=timeout,
             )
             status, recorded = run_outcome(result)
-            await app.storage.schedule_mark_run(sched_id, status, result=recorded)
+            await app.storage.schedule_mark_run(
+                sched_id, status, result=recorded, state=state_update
+            )
             return {"ok": True, "reason": "ran", "result": result}
         except asyncio.TimeoutError:
             reason = f"exceeded {timeout}s"

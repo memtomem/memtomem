@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 import sqlite_vec
@@ -29,6 +31,7 @@ from memtomem.models import Chunk, ChunkMetadata, SearchResult
 from memtomem.scheduler.jobs import JOB_KINDS, JobSpec, run_outcome
 from memtomem.search.dedup import DedupScanner
 from memtomem.storage.base import VisiblePool
+from memtomem.storage.mixins.schedules import KEEP_STATE
 from memtomem.server.health_watchdog import HealthWatchdog
 from memtomem.storage.sqlite_meta import MetaManager
 from memtomem.storage.sqlite_schema import create_tables
@@ -287,6 +290,161 @@ class TestMigration:
         row = db.execute("SELECT last_run_result FROM schedules WHERE id='s1'").fetchone()
         assert row == (None,)
 
+    @pytest.mark.parametrize("has_result_column", [False, True])
+    def test_old_table_gains_the_state_column_and_reads_none(self, has_result_column):
+        # Both older shapes: before ``last_run_result``, and with it.
+        db = sqlite3.connect(":memory:")
+        db.enable_load_extension(True)
+        sqlite_vec.load(db)
+        db.enable_load_extension(False)
+        result_column = ", last_run_result TEXT" if has_result_column else ""
+        db.execute(
+            "CREATE TABLE schedules ("
+            "id TEXT PRIMARY KEY, cron_expr TEXT NOT NULL, job_kind TEXT NOT NULL, "
+            "params_json TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1, "
+            "created_at TEXT NOT NULL, last_run_at TEXT, last_run_status TEXT, "
+            f"last_run_error TEXT{result_column})"
+        )
+        db.execute(
+            "INSERT INTO schedules (id, cron_expr, job_kind, created_at) "
+            "VALUES ('s1', '* * * * *', 'dedup_scan', '2026-01-01T00:00:00+00:00')"
+        )
+        meta = MetaManager(lambda: db)
+        for _ in range(2):  # repeated init must stay idempotent
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+        columns = [r[1] for r in db.execute("PRAGMA table_info(schedules)")]
+        assert columns.count("job_state") == 1
+        assert db.execute("SELECT job_state FROM schedules WHERE id='s1'").fetchone() == (None,)
+
+
+# ── Stored position (#3432) ───────────────────────────────────────────
+
+
+def _raw_state(storage, sid):
+    return (
+        storage._get_db().execute("SELECT job_state FROM schedules WHERE id=?", (sid,)).fetchone()
+    )
+
+
+class TestStoredState:
+    POSITION = {"after": "00000000-0000-0000-0000-0000000001f4"}
+
+    @pytest.mark.asyncio
+    async def test_a_new_schedule_has_none_on_every_read(self, storage):
+        sid = await storage.schedule_insert("* * * * *", "dedup_scan")
+        assert (await storage.schedule_get(sid))["state"] is None
+        assert [r["state"] for r in await storage.schedule_list_all()] == [None]
+        later = datetime.now(timezone.utc) + timedelta(minutes=5)
+        assert [r["state"] for r in await storage.schedule_list_due(later)] == [None]
+        assert _raw_state(storage, sid) == (None,)
+
+    @pytest.mark.asyncio
+    async def test_set_keep_and_clear(self, storage):
+        sid = await storage.schedule_insert("* * * * *", "dedup_scan")
+
+        await storage.schedule_mark_run(sid, "ok", result={}, state=self.POSITION)
+        assert (await storage.schedule_get(sid))["state"] == self.POSITION
+        assert [r["state"] for r in await storage.schedule_list_all()] == [self.POSITION]
+        later = datetime.now(timezone.utc) + timedelta(minutes=5)
+        assert [r["state"] for r in await storage.schedule_list_due(later)] == [self.POSITION]
+
+        # No ``state`` argument: a run that did not finish, or a job with none.
+        await storage.schedule_mark_run(sid, "error", error="boom")
+        await storage.schedule_mark_run(sid, "ok", result={"x": 1})
+        assert (await storage.schedule_get(sid))["state"] == self.POSITION
+
+        await storage.schedule_mark_run(sid, "ok", result={}, state=None)
+        assert (await storage.schedule_get(sid))["state"] is None
+        assert _raw_state(storage, sid) == (None,)
+
+    @pytest.mark.asyncio
+    async def test_a_claim_leaves_it_alone_won_or_lost(self, storage):
+        sid = await storage.schedule_insert("* * * * *", "dedup_scan")
+        await storage.schedule_mark_run(sid, "ok", result={}, state=self.POSITION)
+        token = (await storage.schedule_get(sid))["last_run_at"]
+
+        assert await storage.schedule_try_claim(sid, token) is True
+        claimed = await storage.schedule_get(sid)
+        assert (claimed["last_run_status"], claimed["last_run_result"]) == ("running", None)
+        assert claimed["state"] == self.POSITION
+
+        assert await storage.schedule_try_claim(sid, token) is False
+        assert (await storage.schedule_get(sid))["state"] == self.POSITION
+
+    @pytest.mark.asyncio
+    async def test_the_state_is_committed_with_the_outcome(self, components):
+        storage = components.storage
+        sid = await storage.schedule_insert("* * * * *", "dedup_scan")
+        await storage.schedule_mark_run(sid, "ok", result={}, state=self.POSITION)
+        # Another connection sees it: the write did not stay in this one's cache.
+        other = sqlite3.connect(components.config.storage.sqlite_path)
+        try:
+            row = other.execute(
+                "SELECT last_run_status, job_state FROM schedules WHERE id=?", (sid,)
+            ).fetchone()
+        finally:
+            other.close()
+        assert row == ("ok", json.dumps(self.POSITION))
+
+    @pytest.mark.asyncio
+    async def test_commit_failure_rolls_back_the_state_with_the_outcome(self, storage, monkeypatch):
+        sid = await storage.schedule_insert("* * * * *", "dedup_scan")
+        await storage.schedule_mark_run(sid, "ok", result={"run": 1}, state=self.POSITION)
+        before = await storage.schedule_get(sid)
+
+        def fail(db):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(storage, "_commit_if_standalone", fail)
+        for update in ({"after": "00000000-0000-0000-0000-0000000003e8"}, None):
+            with pytest.raises(sqlite3.OperationalError):
+                await storage.schedule_mark_run(sid, "ok", result={"run": 2}, state=update)
+        monkeypatch.undo()
+
+        assert await storage.schedule_get(sid) == before
+        assert before["state"] == self.POSITION
+
+    @pytest.mark.asyncio
+    async def test_a_state_that_is_not_json_is_refused_before_any_write(self, storage):
+        sid = await storage.schedule_insert("* * * * *", "dedup_scan")
+        await storage.schedule_mark_run(sid, "ok", result={"run": 1}, state=self.POSITION)
+        before = await storage.schedule_get(sid)
+        for not_json in (object(), {"after": uuid4()}):
+            with pytest.raises(TypeError):
+                await storage.schedule_mark_run(sid, "ok", result={"run": 2}, state=not_json)
+        assert await storage.schedule_get(sid) == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raw", "message"),
+        [
+            ("{not json", "schedule {id} has an unreadable job_state; ignoring"),
+            ("[1, 2]", "schedule {id} has a malformed job_state; ignoring"),
+            ('"text"', "schedule {id} has a malformed job_state; ignoring"),
+            ("null", "schedule {id} has a malformed job_state; ignoring"),
+        ],
+        ids=["unparseable", "list", "string", "json-null"],
+    )
+    async def test_a_stored_value_that_is_not_an_object_reads_as_none(
+        self, storage, caplog, raw, message
+    ):
+        sid = await storage.schedule_insert("* * * * *", "dedup_scan")
+        db = storage._get_db()
+        db.execute("UPDATE schedules SET job_state=? WHERE id=?", (raw, sid))
+        db.commit()
+        with caplog.at_level(logging.WARNING, logger="memtomem.storage.mixins.schedules"):
+            sched = await storage.schedule_get(sid)
+        assert sched["state"] is None
+        assert [r.getMessage() for r in caplog.records] == [message.replace("{id}", sid)]
+
+    @pytest.mark.asyncio
+    async def test_sql_null_reads_as_none_without_a_warning(self, storage, caplog):
+        await storage.schedule_insert("* * * * *", "dedup_scan")
+        with caplog.at_level(logging.WARNING, logger="memtomem.storage.mixins.schedules"):
+            rows = await storage.schedule_list_all()
+        assert [r["state"] for r in rows] == [None]
+        assert caplog.records == []
+
 
 # ── Dispatch paths ────────────────────────────────────────────────────
 
@@ -417,10 +575,11 @@ class TestDedupJobCoverage:
         app.dedup_scanner = DedupScanner(storage)
 
         spec = JOB_KINDS["dedup_scan"]
-        result = await spec.runner(app, **spec.params_model().model_dump())
+        result, state = await spec.runner(app, **spec.params_model().model_dump())
 
-        # The job passes no cursor: every run scans the first pool.
+        # No stored position: the run scans the first pool.
         storage.list_visible_chunks_by_id.assert_awaited_once_with(500, None)
+        assert state == {"after": str(pending.id)}
         assert result == {
             "candidates": 1,
             "pairs_found": 1,
@@ -432,6 +591,8 @@ class TestDedupJobCoverage:
             "without_vector": 1,
             "near_search_enabled": True,
             "same_source_read_only_pairs": 0,
+            "after": None,
+            "next_after": str(pending.id),
         }
 
     @pytest.mark.asyncio
@@ -448,7 +609,7 @@ class TestDedupJobCoverage:
         app.dedup_scanner = DedupScanner(storage)
 
         spec = JOB_KINDS["dedup_scan"]
-        result = await spec.runner(app, **spec.params_model(limit=1).model_dump())
+        result, _ = await spec.runner(app, **spec.params_model(limit=1).model_dump())
 
         assert (result["candidates"], result["pairs_found"]) == (1, 2)
         assert result["remaining"] == 0
@@ -458,8 +619,12 @@ class TestDedupJobCoverage:
         app = MagicMock()
         app.dedup_scanner = None
         spec = JOB_KINDS["dedup_scan"]
-        result = await spec.runner(app, **spec.params_model().model_dump())
+        result, state = await spec.runner(
+            app, state={"after": "kept"}, **spec.params_model().model_dump()
+        )
         assert run_outcome(result) == (
             "skipped",
             {"candidates": 0, "skipped_reason": "dedup_scanner_not_initialized"},
         )
+        # Nothing was read: the position is neither moved nor cleared.
+        assert state is KEEP_STATE

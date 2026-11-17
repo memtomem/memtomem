@@ -13,19 +13,39 @@ post-crash restart that reads the same due row loses the claim and skips
 it. A crash between the claim and the terminal ``schedule_mark_run``
 skips the slot rather than re-running it — deliberate, because job
 bodies aren't all idempotent. See issue #1564.
+
+A job that continues between runs keeps its position in ``job_state``
+(#3432). A claim leaves it alone, and ``schedule_mark_run`` writes it with
+the outcome of the run that moved it.
 """
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final
 from uuid import uuid4
 
 from croniter import CroniterBadCronError, CroniterBadDateError, croniter  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
+
+
+class _KeepState(enum.Enum):
+    KEEP = "keep"
+
+
+KEEP_STATE: Final = _KeepState.KEEP
+"""``schedule_mark_run``'s default for ``state``: leave ``job_state`` as stored.
+
+Distinct from ``None``, which clears the column. An enum member, so it is
+not JSON: it cannot be stored by mistake.
+"""
+
+StateUpdate = dict[str, Any] | None | _KeepState
+"""What a run does to the stored state: replace it, clear it, or keep it."""
 
 
 def _utcnow_iso() -> str:
@@ -92,8 +112,8 @@ class ScheduleMixin:
         db = self._get_db()
         row = db.execute(
             "SELECT id, cron_expr, job_kind, params_json, enabled, "
-            "created_at, last_run_at, last_run_status, last_run_error, last_run_result "
-            "FROM schedules WHERE id=?",
+            "created_at, last_run_at, last_run_status, last_run_error, last_run_result, "
+            "job_state FROM schedules WHERE id=?",
             (sched_id,),
         ).fetchone()
         return _row_to_dict(row) if row else None
@@ -102,8 +122,8 @@ class ScheduleMixin:
         db = self._get_db()
         rows = db.execute(
             "SELECT id, cron_expr, job_kind, params_json, enabled, "
-            "created_at, last_run_at, last_run_status, last_run_error, last_run_result "
-            "FROM schedules ORDER BY created_at"
+            "created_at, last_run_at, last_run_status, last_run_error, last_run_result, "
+            "job_state FROM schedules ORDER BY created_at"
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
 
@@ -125,8 +145,8 @@ class ScheduleMixin:
         db = self._get_db()
         rows = db.execute(
             "SELECT id, cron_expr, job_kind, params_json, enabled, "
-            "created_at, last_run_at, last_run_status, last_run_error, last_run_result "
-            "FROM schedules WHERE enabled=1"
+            "created_at, last_run_at, last_run_status, last_run_error, last_run_result, "
+            "job_state FROM schedules WHERE enabled=1"
         ).fetchall()
 
         due: list[dict] = []
@@ -189,7 +209,8 @@ class ScheduleMixin:
 
         ``last_run_error`` and ``last_run_result`` are cleared here so the
         prior run's outcome doesn't linger while the new run is in flight;
-        the terminal ``schedule_mark_run`` repopulates them. WAL +
+        the terminal ``schedule_mark_run`` repopulates them. ``job_state``
+        is not touched: it is where the claimed run starts from. WAL +
         ``busy_timeout`` on the write connection serializes the racing
         UPDATEs, so a single conditional statement is self-atomic — no
         explicit transaction needed.
@@ -217,27 +238,43 @@ class ScheduleMixin:
         error: str | None = None,
         when: datetime | None = None,
         result: dict[str, Any] | None = None,
+        state: StateUpdate = KEEP_STATE,
     ) -> None:
         """Record a run outcome. ``status`` ∈ {'ok','skipped','error','timeout'}.
 
         ``result`` is the runner's returned summary. It is stored with the
         ``last_run_at`` written by the same statement, so a reader can tell
         whether it still describes the latest run.
+
+        ``state`` is what the run does to ``job_state``: a dict replaces it,
+        ``None`` clears it, and ``KEEP_STATE`` (the default) leaves it out of
+        the statement. A run that did not finish passes nothing, so the next
+        run starts where this one did. The state is written by the statement
+        that writes ``last_run_at``, so a claim that still matches
+        ``last_run_at`` also matches the state its caller read.
         """
         stamp = _run_stamp(when)
         payload = (
             None if result is None else json.dumps({"run_at": stamp, "result": result}, default=str)
         )
+        state_json = None if state is KEEP_STATE or state is None else json.dumps(state)
         db = self._get_db()
         # Terminal record for a claim that owns its durability: rolling it
         # back would leave the schedule stuck in 'running' forever.
         self._require_transaction_idle("schedule_mark_run")
         with self._rolls_back_if_standalone(db):
-            db.execute(
-                "UPDATE schedules SET last_run_at=?, last_run_status=?, last_run_error=?, "
-                "last_run_result=? WHERE id=?",
-                (stamp, status, error, payload, sched_id),
-            )
+            if state is KEEP_STATE:
+                db.execute(
+                    "UPDATE schedules SET last_run_at=?, last_run_status=?, last_run_error=?, "
+                    "last_run_result=? WHERE id=?",
+                    (stamp, status, error, payload, sched_id),
+                )
+            else:
+                db.execute(
+                    "UPDATE schedules SET last_run_at=?, last_run_status=?, last_run_error=?, "
+                    "last_run_result=?, job_state=? WHERE id=?",
+                    (stamp, status, error, payload, state_json, sched_id),
+                )
             self._commit_if_standalone(db)
 
 
@@ -253,7 +290,29 @@ def _row_to_dict(row: tuple) -> dict:
         "last_run_status": row[7],
         "last_run_error": row[8],
         "last_run_result": _decode_result(row[0], row[6], row[9]),
+        "state": _decode_state(row[0], row[10]),
     }
+
+
+def _decode_state(sched_id: str, raw: str | None) -> dict | None:
+    """Return the stored job state, or ``None`` when there is none to use.
+
+    NULL is the ordinary value: a job that keeps no state, a schedule that
+    has not run, or a walk that starts over. A value that is not a JSON
+    object is logged and read as ``None``; what an object has to hold is
+    the job's own check.
+    """
+    if raw is None:
+        return None
+    try:
+        state = json.loads(raw)
+    except ValueError:
+        logger.warning("schedule %s has an unreadable job_state; ignoring", sched_id)
+        return None
+    if not isinstance(state, dict):
+        logger.warning("schedule %s has a malformed job_state; ignoring", sched_id)
+        return None
+    return state
 
 
 def _decode_result(sched_id: str, last_run_at: str | None, raw: str | None) -> dict | None:

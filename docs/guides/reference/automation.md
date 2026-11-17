@@ -302,13 +302,15 @@ mem_do(action="schedule_delete", params={"id": "<id>"})
 
 ### Reading a run record
 
-Each schedule keeps the outcome of its latest run:
+Each schedule keeps the outcome of its latest run, and the position of a job
+that continues between runs:
 
 | Field             | Meaning                                                                 |
 |-------------------|-------------------------------------------------------------------------|
 | `last_run_status` | `ok`, `skipped`, `error`, `timeout`, or `running` while a run is in flight |
 | `last_run_error`  | Error text for `error` / `timeout`                                      |
 | `last_run_result` | The summary the job returned (`null` for `error` / `timeout`)           |
+| `state`           | Where the next run starts, for a job that continues (`dedup_scan`); `null` for the other jobs |
 
 `skipped` means the job returned normally but did no work, and its
 `skipped_reason` says why. For example, `dedup_scan` has no scanner
@@ -329,10 +331,41 @@ read-only chunks of the same file; neither can be removed) and `pairs_found`
   duplicates were looked for. `without_vector` is then `0` and says nothing
   about vector coverage.
 - **The counts describe the selected pool**, not the whole store.
-- **Every scheduled run scans the first pool.** The job takes no cursor and
-  keeps no position between runs, so `remaining` counts chunks no scheduled
-  run looks at. `mem_dedup_scan` continues past the first pool with `after`
-  (see [Deduplication](organization-maintenance.md#deduplication)).
+
+A `dedup_scan` schedule walks the store, one pool per run:
+
+- **Each run scans the pool after the one the last finished run scanned.**
+  The first run scans the first pool (the first `max_scan` scannable chunks
+  in chunk-id order). A run that reaches the end of the store (`remaining`
+  is `0`) makes the next run start from the first pool again, which is also
+  how a chunk added before the position during a walk gets scanned. In a
+  result, `after` is the chunk id the run started after and `next_after` the
+  one the next run starts after; each is `null` for the first pool.
+- **`state` holds the same position** as `{"after": "<chunk id>"}`, or
+  `null` when the next run starts from the first pool. It is the stored
+  position, not a description of a run in flight, and it is where to read
+  the position after a run that ended in `error` or `timeout`, which has no
+  result.
+- **Only a scan that finished moves the position.** A run that ends in
+  `error` or `timeout`, or is `skipped`, leaves it, so the next run scans
+  the same pool. A pool that times out on every run keeps the schedule
+  there; delete the schedule and register one with a smaller `max_scan`.
+- **Each schedule has its own position.** `mm schedule run-now` and
+  `schedule_run_now` move it as a dispatched run does. Deleting a schedule
+  deletes its position, and a new schedule starts from the first pool.
+- **The counts of a walk's runs do not add up to a count for the store.** A
+  walk in steps is not one scan of the whole store: a near pair whose members
+  are in two pools can be counted in both runs, and copies with one content
+  hash in different pools are left to the near search (see
+  [Deduplication](organization-maintenance.md#deduplication)).
+- **Runs of one schedule that overlap** (a `run-now` while a dispatched run
+  is in flight, or a run still going at its next slot) start from the same
+  position and scan the same pool, and the position is the one the last of
+  them to finish writes. A run that finishes after others have moved on
+  puts the position back at the end of its own pool: the pools after it are
+  scanned again, and a chunk added in the meantime before that position
+  waits for the next walk from the start. If that happens on every walk,
+  such a chunk can stay unscanned.
 
 > Phase A is direct-cron only. Natural-language schedules
 > (`spec="every Sunday 3am"`) and `disable`/`enable` commands arrive in
