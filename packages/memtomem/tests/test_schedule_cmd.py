@@ -140,7 +140,7 @@ class TestStoredUnknownKeyStillRuns:
         result = runner.invoke(cli, ["schedule", "run-now", sid])
 
         assert result.exit_code == 0, result.output
-        scan.assert_awaited_once_with(threshold=0.92, limit=50, max_scan=500)
+        scan.assert_awaited_once_with(threshold=0.92, limit=50, max_scan=500, after=None)
         sched = asyncio.run(components.storage.schedule_get(sid))
         assert sched["last_run_status"] == "ok"
         assert sched["params"] == {"limt": 20}

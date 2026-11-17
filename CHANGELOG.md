@@ -51,8 +51,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   pairs that were cut, scanning the same position again with a higher `limit` does. The tool
   accepts a `limit` up to 500, so no single call lists a pool with more pairs than that, and
   a smaller `max_scan` can report other pairs than the ones that were cut. The scheduled
-  `dedup_scan` job still scans the first pool on every run; its result gains `remaining` and
-  `pairs_found`. A walk in steps is not one scan of the whole store: a near pair across two
+  `dedup_scan` job's result gains `remaining` and `pairs_found` (the job continues between
+  runs: see Changed, #3432). A walk in steps is not one scan of the whole store: a near pair across two
   pools can be reported from both, and copies with one content hash in different pools are
   left to the near search, which a BM25-only store does not run.
 - **`mem_dedup_remove` removes one member of a duplicate pair from its file after checking
@@ -96,6 +96,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   change the setting.
 
 ### Changed
+
+- **The scheduled `dedup_scan` job walks the store instead of scanning the first pool on
+  every run (#3432).** A schedule scanned the first `max_scan` scannable chunks in chunk-id
+  order on each run, the same chunks every time, so on a large store a schedule never looked
+  at most of it. Each run now scans the pool after the one the schedule's last finished run
+  scanned, and a run that reaches the end of the store makes the next one start from the
+  first pool. A schedule that already exists starts from the first pool on its next run;
+  there is no setting that keeps the old behaviour. The position is stored on the schedule
+  and shown as `state` (`{"after": "<chunk id>"}`, or `null`) in `schedule_list` and
+  `mm schedule list --json`; the plain `mm schedule list` lines are unchanged. A run's
+  result gains `after` and `next_after`, the chunk ids the run and the next one start
+  after. Only a scan that finished moves the position: a run that ends in `error` or
+  `timeout`, or is `skipped`, leaves it. Each schedule has its own position, `mm schedule
+  run-now` and `schedule_run_now` move it as a dispatched run does, and deleting a schedule
+  deletes it. Runs of one schedule that overlap scan the same pool, and one that finishes
+  late puts the position back at the end of its own pool. The counts of a walk's runs do
+  not add up to a count for the store. An older memtomem sharing the database scans the
+  first pool on its runs and leaves the position alone.
 
 - **The `update` and `handoff` workflows report the `Entry chunks` value `mem_add` prints
   (#3400).** Both reported a chunk count, and the only one a `mem_add` result had was
