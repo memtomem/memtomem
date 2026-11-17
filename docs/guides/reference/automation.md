@@ -317,16 +317,22 @@ to the status. `mm schedule list --json` and `schedule_list` return the whole
 record.
 
 A `dedup_scan` result also reports what the scan covered: `pool` (chunks
-selected, at most `max_scan`), `probed` (pool chunks searched with their
-stored vector), `without_vector` (pool chunks with no usable stored
-vector, not probed) and `same_source_read_only_pairs` (pairs left out because
-both members are read-only chunks of the same file; neither can be removed).
+selected, at most `max_scan`), `remaining` (scannable chunks after the pool),
+`probed` (pool chunks searched with their stored vector), `without_vector`
+(pool chunks with no usable stored vector, not probed),
+`same_source_read_only_pairs` (pairs left out because both members are
+read-only chunks of the same file; neither can be removed) and `pairs_found`
+(pairs before `limit`; when it is above `candidates`, the list was cut).
 - **Zero candidates with a large `without_vector` count** means part of the
   pool was never checked, not that it is duplicate-free.
 - **`near_search_enabled: false`** (a BM25-only store) means only exact
   duplicates were looked for. `without_vector` is then `0` and says nothing
   about vector coverage.
 - **The counts describe the selected pool**, not the whole store.
+- **Every scheduled run scans the first pool.** The job takes no cursor and
+  keeps no position between runs, so `remaining` counts chunks no scheduled
+  run looks at. `mem_dedup_scan` continues past the first pool with `after`
+  (see [Deduplication](organization-maintenance.md#deduplication)).
 
 > Phase A is direct-cron only. Natural-language schedules
 > (`spec="every Sunday 3am"`) and `disable`/`enable` commands arrive in

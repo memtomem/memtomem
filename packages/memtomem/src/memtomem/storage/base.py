@@ -95,6 +95,21 @@ class ChunkKeyRow:
 
 
 @dataclass(frozen=True, slots=True)
+class VisiblePool:
+    """One bounded read of the visible chunks in ascending id order.
+
+    Returned by :meth:`StorageBackend.list_visible_chunks_by_id`. The three
+    fields describe one snapshot.
+    """
+
+    chunks: list[Chunk]
+    visible: int  # visible chunks in the store
+    # Visible chunks with an id above the cursor the read was given: all of
+    # them without a cursor. Never fewer than ``len(chunks)``.
+    above_cursor: int
+
+
+@dataclass(frozen=True, slots=True)
 class NamespaceRenameResult:
     """Outcome of :meth:`StorageBackend.rename_namespace`.
 
@@ -332,9 +347,13 @@ class StorageBackend(Protocol):
     ) -> dict[str, list[ChunkKeyRow]]: ...
     async def get_stats(self) -> dict[str, int]: ...
     async def get_all_source_files(self) -> set[Path]: ...
-    # The first ``limit`` chunks in ascending id order and the number they were
-    # taken from, both under the path-level hold rule and from one snapshot.
-    async def list_visible_chunks_by_id(self, limit: int) -> tuple[list[Chunk], int]: ...
+    # The first ``limit`` chunks in ascending id order with an id above
+    # ``after`` (the stored id text; from the start without one), and the
+    # counts they were taken from, all under the path-level hold rule and from
+    # one snapshot.
+    async def list_visible_chunks_by_id(
+        self, limit: int, after: str | None = None
+    ) -> VisiblePool: ...
     async def get_orphan_candidate_source_files(self) -> set[Path]: ...
     async def search_source_files_by_content(
         self, query: str, limit: int = 10000

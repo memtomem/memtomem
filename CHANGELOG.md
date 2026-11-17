@@ -36,6 +36,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   append covers the whole batch, so there is no count per entry. `Chunks indexed` is
   unchanged.
 
+- **A bounded duplicate scan can be continued (#3397).** `mem_dedup_scan` and
+  `GET /api/dedup/candidates` take `after`, a chunk id: the scan takes the next `max_scan`
+  scannable chunks after it in chunk-id order. A scan used to cover the first `max_scan`
+  chunks and nothing could ask for the ones after them, so on a large store most chunks were
+  never scanned unless `max_scan` was raised, and the near phase's time grows with it. The
+  tool's last line now ends with how many chunks remain and the value that continues
+  (`38958 remain: continue with after="<chunk id>"`), or with `reached the end of the store`;
+  it no longer advises raising `max_scan`. The route returns `next_after` and
+  `remaining_chunks`. The cursor is a position in chunk-id order, so chunks added or removed
+  between calls do not shift the ones still to come; a chunk added before the cursor waits
+  for the next walk. When one pool holds more pairs than `limit`, the scan says so
+  (`limit=50 kept 50 of 57 pairs`; `pairs_found` on the route): continuing does not show the
+  pairs that were cut, scanning the same position again with a higher `limit` does. The tool
+  accepts a `limit` up to 500, so no single call lists a pool with more pairs than that, and
+  a smaller `max_scan` can report other pairs than the ones that were cut. The scheduled
+  `dedup_scan` job still scans the first pool on every run; its result gains `remaining` and
+  `pairs_found`. A walk in steps is not one scan of the whole store: a near pair across two
+  pools can be reported from both, and copies with one content hash in different pools are
+  left to the near search, which a BM25-only store does not run.
 - **`mem_dedup_remove` removes one member of a duplicate pair from its file after checking
   both members (#3419).** `mem_delete(chunk_id)` checks only the lines it removes, so a pair
   whose kept file had changed since it was indexed could be resolved by deleting the last

@@ -604,7 +604,7 @@ class TestTheSwitch:
 
 
 class TestTheToolSurfaceDidNotMove:
-    """The brief is behind a setting, not a parameter: nothing a client is told changes."""
+    """The brief is behind a setting, not a parameter: it adds nothing a client is told."""
 
     def test_the_action_s_parameters_and_help(self):
         from memtomem.server import mcp  # noqa: F401  (registers the tools)
@@ -618,24 +618,27 @@ class TestTheToolSurfaceDidNotMove:
             "threshold": "float = 0.92",
             "limit": "int = 50",
             "max_scan": "int = 500",
+            "after": "str | None = None",
         }
         assert info.param_docs == {
             "threshold": "Dense score 1/(1+L2) threshold (0-1, default 0.92)",
             "limit": "Maximum number of candidate pairs to return",
             "max_scan": "Maximum chunks to scan, taken in chunk-id order",
+            "after": "Chunk id to scan after; the last scan's result names the next one",
         }
 
     def test_the_function_s_signature_and_docstring(self):
         assert str(inspect.signature(mem_dedup_scan)) == (
             "(threshold: 'float' = 0.92, limit: 'int' = 50, max_scan: 'int' = 500, "
-            "ctx: 'CtxType' = None) -> 'str'"
+            "after: 'str | None' = None, ctx: 'CtxType' = None) -> 'str'"
         )
         assert inspect.getdoc(mem_dedup_scan) == (
             "Scan for duplicate chunk candidates (dry-run, no mutations).\n\n"
             "Args:\n"
             "    threshold: Dense score 1/(1+L2) threshold (0-1, default 0.92)\n"
             "    limit: Maximum number of candidate pairs to return\n"
-            "    max_scan: Maximum chunks to scan, taken in chunk-id order"
+            "    max_scan: Maximum chunks to scan, taken in chunk-id order\n"
+            "    after: Chunk id to scan after; the last scan's result names the next one"
         )
 
 
@@ -840,3 +843,101 @@ class TestAgainstARealStore:
         assert out.splitlines()[0] == "Duplicate candidates: 1 pairs (threshold=0.92):"
         assert out.splitlines()[-2] == f"1 pair {_OMITTED}"
         assert "rewrittenword" not in out and str(second.id) not in out
+
+    async def test_a_cut_scan_that_also_loses_a_pair_states_each_count(
+        self, bm25_only_components, monkeypatch
+    ):
+        # Two counts that are not each other's: ``limit`` keeps 1 of the scan's
+        # 2 pairs, and the brief then leaves that one out. The coverage line
+        # speaks of the first, the omission line of the second.
+        comp, mem_dir = bm25_only_components
+        await self._three_copies(comp, mem_dir)
+        app = AppContext.from_components(comp)
+        scanned: list = []
+
+        async def hold_the_returned_duplicate() -> None:
+            assert await comp.storage.hold_source(
+                scanned[0].chunk_b.metadata.source_file, "scan_missing"
+            )
+
+        scanned = _between_the_reads(monkeypatch, app, hold_the_returned_duplicate)
+
+        out = await mem_dedup_scan(limit=1, ctx=StubCtx(app))
+
+        assert len(scanned) == 1
+        assert out.splitlines() == [
+            "No duplicate chunks found (threshold=0.92).",
+            f"1 pair {_OMITTED}",
+            # This store keeps no vectors, so the exact phase found both pairs.
+            "Scanned all 3 scannable chunks; near-duplicate search probed 0, 3 had no usable "
+            "stored vector and were not probed; limit=1 kept 1 of 2 pairs: to see the rest, "
+            "scan again from the same position with a higher limit.",
+        ]
+
+
+class TestAWalkOnARealStore:
+    """``after`` taken from one call's last line selects the next chunks."""
+
+    pytestmark = pytest.mark.asyncio
+
+    async def test_each_call_names_the_cursor_of_the_next(self, bm25_only_components):
+        comp, mem_dir = bm25_only_components
+        stored = [
+            await _index(comp, mem_dir / f"note-{i}.md", f"# Topic {i}\n\nbody number {i}.\n")
+            for i in range(5)
+        ]
+        ids = sorted(str(chunk.id) for chunk in stored)
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        def unprobed(n: int) -> str:
+            # This store keeps no vectors.
+            return (
+                f"near-duplicate search probed 0, {n} had no usable stored vector "
+                "and were not probed"
+            )
+
+        first = await mem_dedup_scan(max_scan=2, ctx=ctx)
+        second = await mem_dedup_scan(max_scan=2, after=ids[1], ctx=ctx)
+        # Typed in another form than it was printed in: it names the same id.
+        third = await mem_dedup_scan(max_scan=2, after=f"{{{ids[3].upper()}}}", ctx=ctx)
+
+        assert first.splitlines()[-1] == (
+            "Scanned 2 of 5 scannable chunks (the first 2 in chunk-id order); "
+            f'{unprobed(2)}; 3 remain: continue with after="{ids[1]}".'
+        )
+        assert second.splitlines()[-1] == (
+            f"Scanned 2 of 5 scannable chunks (the 2 after {ids[1]} in chunk-id order); "
+            f'{unprobed(2)}; 1 remains: continue with after="{ids[3]}".'
+        )
+        assert third.splitlines()[-1] == (
+            f"Scanned 1 of 5 scannable chunks (the 1 after {ids[3]} in chunk-id order); "
+            f"{unprobed(1)}; reached the end of the store."
+        )
+
+    async def test_a_pair_is_found_in_the_slice_its_members_are_in(self, bm25_only_components):
+        comp, mem_dir = bm25_only_components
+        others = [
+            await _index(comp, mem_dir / f"note-{i}.md", f"# Topic {i}\n\nbody number {i}.\n")
+            for i in range(4)
+        ]
+        low = min(others, key=lambda chunk: str(chunk.id))
+        # Two copies whose ids sort above every other chunk's: found only by
+        # the slice that starts after the lowest id, not by the first chunk.
+        copies = [await _index(comp, mem_dir / f"copy-{i}.md", _BODY) for i in range(2)]
+        db = comp.storage._get_db()
+        for n, chunk in enumerate(copies):
+            db.execute(
+                "UPDATE chunks SET id=? WHERE id=?",
+                (f"ffffffff-ffff-4fff-8fff-00000000000{n}", str(chunk.id)),
+            )
+        db.commit()
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        first = await mem_dedup_scan(max_scan=1, ctx=ctx)
+        rest = await mem_dedup_scan(max_scan=10, after=str(low.id), ctx=ctx)
+
+        assert first.splitlines()[0] == "No duplicate chunks found (threshold=0.92)."
+        assert f'continue with after="{low.id}"' in first.splitlines()[-1]
+        assert rest.splitlines()[0] == "Duplicate candidates: 1 pairs (threshold=0.92):"
+        assert rest.count("ffffffff-ffff-4fff-8fff-00000000000") == 2
+        assert rest.splitlines()[-1].endswith("; reached the end of the store.")

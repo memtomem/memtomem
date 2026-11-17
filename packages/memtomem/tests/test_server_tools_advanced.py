@@ -1028,7 +1028,7 @@ class TestDedup:
         scanner = DedupScanner(storage=storage)
         # Only the exact phase: these rows carry vectors of a width the
         # fixture store may not share, which the near phase would search with.
-        all_chunks, _ = await scanner._select_pool(100)
+        all_chunks = (await scanner._select_pool(100)).chunks
         seen: set[frozenset] = set()
         exact = scanner._find_exact_duplicates(all_chunks, seen, set())
 
@@ -1045,7 +1045,7 @@ class TestDedup:
         await storage.upsert_chunks([c1, c2])
 
         scanner = DedupScanner(storage=storage)
-        all_chunks, _ = await scanner._select_pool(100)
+        all_chunks = (await scanner._select_pool(100)).chunks
         seen: set[frozenset] = set()
         exact = scanner._find_exact_duplicates(all_chunks, seen, set())
         assert len(exact) == 0

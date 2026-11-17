@@ -28,6 +28,7 @@ from memtomem.errors import StorageError
 from memtomem.models import Chunk, ChunkMetadata, SearchResult
 from memtomem.scheduler.jobs import JOB_KINDS, JobSpec, run_outcome
 from memtomem.search.dedup import DedupScanner
+from memtomem.storage.base import VisiblePool
 from memtomem.server.health_watchdog import HealthWatchdog
 from memtomem.storage.sqlite_meta import MetaManager
 from memtomem.storage.sqlite_schema import create_tables
@@ -398,8 +399,11 @@ class TestDedupJobCoverage:
         storage = MagicMock()
         storage.dense_enabled = True
         storage.is_source_held = AsyncMock(return_value=False)
-        # Three of four scannable chunks: the result reports both numbers.
-        storage.list_visible_chunks_by_id = AsyncMock(return_value=([a, b, pending], 4))
+        # Three of four scannable chunks: the result reports both numbers, and
+        # the one the job did not look at.
+        storage.list_visible_chunks_by_id = AsyncMock(
+            return_value=VisiblePool(chunks=[a, b, pending], visible=4, above_cursor=4)
+        )
         storage.get_embeddings_for_chunks = AsyncMock(
             return_value={str(a.id): [0.0], str(b.id): [1.0]}
         )
@@ -415,16 +419,39 @@ class TestDedupJobCoverage:
         spec = JOB_KINDS["dedup_scan"]
         result = await spec.runner(app, **spec.params_model().model_dump())
 
+        # The job passes no cursor: every run scans the first pool.
+        storage.list_visible_chunks_by_id.assert_awaited_once_with(500, None)
         assert result == {
             "candidates": 1,
+            "pairs_found": 1,
             "threshold": 0.92,
             "pool": 3,
             "eligible": 4,
+            "remaining": 1,
             "probed": 2,
             "without_vector": 1,
             "near_search_enabled": True,
             "same_source_read_only_pairs": 0,
         }
+
+    @pytest.mark.asyncio
+    async def test_result_reports_the_pairs_the_limit_cut(self):
+        # ``candidates`` is capped by ``limit``; ``pairs_found`` is not, so a
+        # run's record shows that its list was cut.
+        copies = [_chunk("one body") for _ in range(3)]
+        storage = MagicMock()
+        storage.dense_enabled = False
+        storage.list_visible_chunks_by_id = AsyncMock(
+            return_value=VisiblePool(chunks=copies, visible=3, above_cursor=3)
+        )
+        app = MagicMock()
+        app.dedup_scanner = DedupScanner(storage)
+
+        spec = JOB_KINDS["dedup_scan"]
+        result = await spec.runner(app, **spec.params_model(limit=1).model_dump())
+
+        assert (result["candidates"], result["pairs_found"]) == (1, 2)
+        assert result["remaining"] == 0
 
     @pytest.mark.asyncio
     async def test_missing_scanner_is_skipped(self):

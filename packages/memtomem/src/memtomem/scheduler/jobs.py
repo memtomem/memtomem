@@ -192,6 +192,10 @@ async def _run_dedup_scan(
     Auto-merge is intentionally not part of the scheduled job. A merge
     can lose tags or namespace metadata in subtle ways; the operator
     should run ``mem_dedup_merge`` explicitly after reviewing.
+
+    Every run scans the first pool: the job passes no cursor and keeps no
+    position between runs. ``remaining`` in its result is how many scannable
+    chunks it did not look at.
     """
     if app.dedup_scanner is None:
         # Returning a normal result (not raising): a missing scanner is a
@@ -205,9 +209,12 @@ async def _run_dedup_scan(
     # ``without_vector`` > 0 means part of the pool was never probed.
     return {
         "candidates": len(candidates),
+        # Pairs before ``limit``; above ``candidates`` the list was cut.
+        "pairs_found": coverage.pairs_found,
         "threshold": threshold,
         "pool": coverage.pool,
         "eligible": coverage.eligible,
+        "remaining": coverage.remaining,
         "probed": coverage.probed,
         "without_vector": coverage.without_vector,
         "same_source_read_only_pairs": coverage.same_source_read_only,
