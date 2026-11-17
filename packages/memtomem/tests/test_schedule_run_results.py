@@ -404,7 +404,8 @@ class TestStoredState:
         assert (sched["last_run_at"], sched["last_run_result"]) == (later, None)
         assert sched["state"] == self.POSITION
         assert [r["state"] for r in await storage.schedule_list_all()] == [self.POSITION]
-        due = await storage.schedule_list_due(datetime.now(timezone.utc))
+        # A fixed time after the next slot, not the clock: the row is due at 06:02.
+        due = await storage.schedule_list_due(when + timedelta(minutes=5))
         assert [r["state"] for r in due] == [self.POSITION]
 
     @pytest.mark.asyncio
