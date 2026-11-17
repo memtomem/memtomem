@@ -18,6 +18,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mem_add` reports how many chunks the written entry became (#3400).** `- Chunks indexed`
+  counts the whole file's re-index: it includes an earlier section re-chunked in the same
+  pass, leaves out an entry chunk that kept its id by content hash, and so cannot say whether
+  the entry stayed in one chunk. The result now also has `- Entry chunks: <n>`, the indexed
+  chunks the entry's lines fall in. It is counted by line span, so a whitespace-only fragment
+  inside the entry counts too, and it describes the file as this write indexed it. When the
+  entry's first chunk also holds text from before it, the number is followed by `(shares its
+  first chunk with text before the entry)`: a short entry merged into the previous section,
+  or an entry whose header lands in that section's chunk, which counts that chunk even when
+  the body stays in one chunk of its own. It reads `unknown` when the chunk spans cannot say
+  which chunks hold the entry (chunk overlap, masked text, a file another chunker handles
+  such as `.json`, or another writer's text in the file), and `unknown (this write did not
+  index the file)` when this write left the file's chunks not current: an exclusion, a
+  relink, an embedding failure, a file type with no chunker, a file too large or binary, or
+  another hold. An idempotent replay repeats the line. `mem_batch_add` has no such line: one
+  append covers the whole batch, so there is no count per entry. `Chunks indexed` is
+  unchanged.
+
 - **`mem_dedup_remove` removes one member of a duplicate pair from its file after checking
   both members (#3419).** `mem_delete(chunk_id)` checks only the lines it removes, so a pair
   whose kept file had changed since it was indexed could be resolved by deleting the last

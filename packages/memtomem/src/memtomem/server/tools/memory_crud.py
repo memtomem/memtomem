@@ -500,6 +500,42 @@ async def _flag_imprecise_write(
         await mark_provenance_incomplete(app, session_id)
 
 
+def _entry_chunks_line(stats: IndexingStats) -> str:
+    """The ``- Entry chunks:`` line of a ``mem_add`` result (#3400).
+
+    ``- Chunks indexed`` is the whole file's upsert count, so it cannot say
+    whether the appended entry stayed in one chunk. This line can: it counts
+    the indexed chunks the entry's lines fall in, ``appended_chunk_ids``
+    (#3292), including a chunk that kept an existing id by content hash. The
+    count is by span, not by content, so a whitespace-only fragment inside the
+    entry counts too. It describes the file as this write indexed it; a later
+    write to the file can chunk the entry differently.
+
+    * ``exact``: the number alone. Every counted chunk holds only appended text.
+    * ``merged``: the number, and that the first chunk also holds text from
+      before the entry (a short entry merged into the previous section, or an
+      entry header that lands in that section's chunk, which counts even when
+      the entry's body stays in one chunk of its own).
+    * ``unverified``: ``unknown``. The spans cannot say what a chunk holds
+      (overlap, a masked projection, a chunker other than Markdown), or the
+      file was not the text this call wrote.
+    * The index pass did not leave the file's chunks current (``current_files``
+      is 0: an exclusion, a relink, an embedding failure, a suffix with no
+      chunker, a size or binary skip, any hold). Older rows can remain, a
+      reused entry chunk among them, so this is ``unknown``, not 0.
+
+    The number comes first, so a reader can match ``Entry chunks: (\\d+)``.
+    """
+    if not stats.current_files:
+        return "- Entry chunks: unknown (this write did not index the file)"
+    count = len(stats.appended_chunk_ids)
+    if stats.appended_attribution == "exact":
+        return f"- Entry chunks: {count}"
+    if stats.appended_attribution == "merged":
+        return f"- Entry chunks: {count} (shares its first chunk with text before the entry)"
+    return "- Entry chunks: unknown"
+
+
 async def _preflight_refusal(
     app: AppContext, path: Path, *, op: str, needs_valve: bool
 ) -> tuple[str | None, JudgedSource]:
@@ -1343,6 +1379,7 @@ async def _mem_add_core(
                         f"Memory added to {target}\n"
                         f"- Namespace: {display_ns}\n"
                         f"- Chunks indexed: {stats.indexed_chunks}\n"
+                        f"{_entry_chunks_line(stats)}\n"
                         f"- File: {target}"
                     )
                     # A fact of this write, not an advisory tail: stored with the
