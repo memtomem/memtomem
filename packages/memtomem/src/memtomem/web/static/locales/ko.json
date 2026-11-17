@@ -1151,6 +1151,8 @@
   "settings.dedup.no_results": "중복을 찾을 수 없습니다 (임계값={threshold})",
   "settings.dedup.summary_one": "후보 쌍 {count}개를 찾았습니다. 각 항목을 검토하고 유지할 청크를 선택하세요.",
   "settings.dedup.summary_other": "후보 쌍 {count}개를 찾았습니다. 각 항목을 검토하고 유지할 청크를 선택하세요.",
+  "settings.dedup.omitted_one": "같은 파일의 읽기 전용 청크 쌍 {count}개를 제외했습니다. 여기서는 제거할 수 없습니다.",
+  "settings.dedup.omitted_other": "같은 파일의 읽기 전용 청크 쌍 {count}개를 제외했습니다. 여기서는 제거할 수 없습니다.",
   "settings.dedup.badge_exact": "정확히 일치",
   "settings.dedup.keep_a": "A 유지",
   "settings.dedup.keep_a_title": "A 유지, B 삭제",

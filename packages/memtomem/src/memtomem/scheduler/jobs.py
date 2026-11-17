@@ -210,6 +210,7 @@ async def _run_dedup_scan(
         "eligible": coverage.eligible,
         "probed": coverage.probed,
         "without_vector": coverage.without_vector,
+        "same_source_read_only_pairs": coverage.same_source_read_only,
         "near_search_enabled": coverage.near_search_enabled,
     }
 

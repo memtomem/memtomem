@@ -423,6 +423,7 @@ class TestDedupJobCoverage:
             "probed": 2,
             "without_vector": 1,
             "near_search_enabled": True,
+            "same_source_read_only_pairs": 0,
         }
 
     @pytest.mark.asyncio

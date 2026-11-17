@@ -91,6 +91,29 @@ class TestRunners:
         result = await spec.runner(app, **spec.params_model().model_dump())
         assert "candidates" in result
         assert result["candidates"] == 0
+        assert result["same_source_read_only_pairs"] == 0
+
+    @pytest.mark.asyncio
+    async def test_dedup_scan_reports_left_out_read_only_pairs(self, app):
+        from memtomem.search.dedup import DedupCoverage
+
+        app.dedup_scanner.scan_with_coverage = AsyncMock(
+            return_value=(
+                [],
+                DedupCoverage(
+                    pool=4,
+                    eligible=4,
+                    near_search_enabled=True,
+                    probed=4,
+                    without_vector=0,
+                    same_source_read_only=2,
+                ),
+            )
+        )
+        spec = JOB_KINDS["dedup_scan"]
+        result = await spec.runner(app, **spec.params_model().model_dump())
+        assert result["candidates"] == 0
+        assert result["same_source_read_only_pairs"] == 2
 
     @pytest.mark.asyncio
     async def test_dedup_scan_validates_threshold(self):

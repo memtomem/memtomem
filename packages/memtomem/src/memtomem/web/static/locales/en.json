@@ -1151,6 +1151,8 @@
   "settings.dedup.no_results": "No duplicates found (threshold={threshold})",
   "settings.dedup.summary_one": "Found {count} candidate pair. Review each and choose which chunk to keep.",
   "settings.dedup.summary_other": "Found {count} candidate pairs. Review each and choose which chunk to keep.",
+  "settings.dedup.omitted_one": "Left out {count} pair of read-only chunks from the same file: they cannot be removed from here.",
+  "settings.dedup.omitted_other": "Left out {count} pairs of read-only chunks from the same file: they cannot be removed from here.",
   "settings.dedup.badge_exact": "Exact",
   "settings.dedup.keep_a": "Keep A",
   "settings.dedup.keep_a_title": "Keep A, delete B",
