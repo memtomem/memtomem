@@ -422,8 +422,27 @@ class TestStoredState:
             ("[1, 2]", "schedule {id} has a malformed job_state; ignoring"),
             ('"text"', "schedule {id} has a malformed job_state; ignoring"),
             ("null", "schedule {id} has a malformed job_state; ignoring"),
+            # Nesting this deep raises RecursionError in the parser, whether
+            # or not the brackets close and whatever the container is.
+            ("[" * 10000, "schedule {id} has an unreadable job_state; ignoring"),
+            (
+                "[" * 10000 + "]" * 10000,
+                "schedule {id} has an unreadable job_state; ignoring",
+            ),
+            (
+                '{"a":' * 10000 + "1" + "}" * 10000,
+                "schedule {id} has an unreadable job_state; ignoring",
+            ),
         ],
-        ids=["unparseable", "list", "string", "json-null"],
+        ids=[
+            "unparseable",
+            "list",
+            "string",
+            "json-null",
+            "deep-unclosed",
+            "deep-list",
+            "deep-object",
+        ],
     )
     async def test_a_stored_value_that_is_not_an_object_reads_as_none(
         self, storage, caplog, raw, message
@@ -436,6 +455,25 @@ class TestStoredState:
             sched = await storage.schedule_get(sid)
         assert sched["state"] is None
         assert [r.getMessage() for r in caplog.records] == [message.replace("{id}", sid)]
+
+    @pytest.mark.asyncio
+    async def test_one_unreadable_state_does_not_hide_the_other_schedules(self, storage):
+        # Every read decodes each row it returns. A row that raised would fail
+        # ``schedule_list_due``, which the dispatcher logs and gives up on, so
+        # no schedule in the store would run.
+        bad = await storage.schedule_insert("* * * * *", "dedup_scan")
+        good = await storage.schedule_insert("* * * * *", "dedup_scan")
+        await storage.schedule_mark_run(good, "ok", result={}, state=self.POSITION)
+        db = storage._get_db()
+        db.execute("UPDATE schedules SET job_state=? WHERE id=?", ("[" * 10000, bad))
+        db.commit()
+        expected = {bad: None, good: self.POSITION}
+
+        assert (await storage.schedule_get(bad))["state"] is None
+        assert {r["id"]: r["state"] for r in await storage.schedule_list_all()} == expected
+        later = datetime.now(timezone.utc) + timedelta(minutes=5)
+        due = await storage.schedule_list_due(later)
+        assert {r["id"]: r["state"] for r in due} == expected
 
     @pytest.mark.asyncio
     async def test_sql_null_reads_as_none_without_a_warning(self, storage, caplog):

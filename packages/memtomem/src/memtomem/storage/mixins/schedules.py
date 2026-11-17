@@ -301,12 +301,17 @@ def _decode_state(sched_id: str, raw: str | None) -> dict | None:
     has not run, or a walk that starts over. A value that is not a JSON
     object is logged and read as ``None``; what an object has to hold is
     the job's own check.
+
+    Text nested too deeply to parse raises ``RecursionError``, not
+    ``ValueError``. Every schedule read decodes every row it returns, so
+    letting that through would fail the listing the dispatcher reads and
+    stop every schedule in the store, not only the one with the bad row.
     """
     if raw is None:
         return None
     try:
         state = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         logger.warning("schedule %s has an unreadable job_state; ignoring", sched_id)
         return None
     if not isinstance(state, dict):

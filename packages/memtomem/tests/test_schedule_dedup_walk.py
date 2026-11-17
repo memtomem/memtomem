@@ -241,6 +241,19 @@ class TestWalk:
             "starting from the first pool"
         ]
 
+    def test_a_position_too_deeply_nested_to_parse_starts_from_the_first_pool(self, store):
+        # The parser raises RecursionError on this, not ValueError. The run
+        # must still happen, from the first pool, and leave a usable position.
+        sid = store.add(params=PARAMS)
+        store.sql("UPDATE schedules SET job_state=? WHERE id=?", "[" * 10000, sid)
+
+        result = store.returned_result(sid, store.run(sid))
+
+        assert (result["after"], result["next_after"]) == (None, str(IDS[1]))
+        sched = store.get(sid)
+        assert (sched["last_run_status"], sched["state"]) == ("ok", SECOND_POOL)
+        assert store.cursors == [None]
+
 
 class TestSchedulesAreSeparate:
     def test_two_schedules_of_the_kind_keep_their_own_position(self, mcp_store):
