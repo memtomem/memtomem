@@ -82,17 +82,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (#3400).** Both reported a chunk count, and the only one a `mem_add` result had was
   `Chunks indexed`, the count for the whole file. `update` now reports each saved item's
   `Entry chunks` value unchanged, with any note in parentheses, and lists the items whose
-  value is 2 or more; `handoff` save reports the record's value the same way. The value is
-  how many chunks the item's lines fall in. It does not say which text landed in which
-  chunk, and `update` never rewrites an item because of it. Measured with the pinned
-  `multilingual-e5-small` tokenizer (ceiling 384 tokens): an update item of 1,050
-  characters and 399 tokens reported `2`, stored as 345 tokens plus a 55-token chunk holding
-  only its `Related:` citation; items of 372 and 88 tokens reported `1`. memtomem `0.7.10`
-  and older print no such line, and neither does a replay of a result stored before the
-  line existed: both workflows then say that the server did not report a count, and do not
-  substitute `Chunks indexed`. The delivery versions move with that text: Claude `0.5.39`,
-  Codex `0.3.37`, OpenCode `0.3.35`, Kimi `0.2.27`, Antigravity `0.2.16`. Cursor stays
-  `0.1.0` while its first marketplace review is open, but its rendered skills change too.
+  value is 2 or more. `handoff` save reports the record's value unchanged and does not
+  interpret it. The value is how many chunks the item's lines fall in. It does not say
+  which text landed in which chunk, and `update` never rewrites an item because of it.
+  Measured with the pinned `multilingual-e5-small` tokenizer (ceiling 384 tokens): an update
+  item of 1,050 characters and 399 tokens reported `2`, stored as 345 tokens plus a 55-token
+  chunk holding only its `Related:` citation; items of 372 and 88 tokens reported `1`.
+  memtomem `0.7.10` and older print no such line, and neither does a replay of a result
+  stored before the line existed: both workflows then say that the server did not report a
+  count, and do not substitute `Chunks indexed`. The delivery versions move with that text:
+  Claude `0.5.39`, Codex `0.3.37`, OpenCode `0.3.35`, Kimi `0.2.27`, Antigravity `0.2.16`.
+  Cursor stays `0.1.0` while its first marketplace review is open, but its rendered skills
+  change too.
 
 - **The duplicate scan leaves out pairs of read-only chunks from the same file, and says how
   many (#3418).** A large JSON file is sliced into chunks that are all stored read-only, and
