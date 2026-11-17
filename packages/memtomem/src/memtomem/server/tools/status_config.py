@@ -362,11 +362,16 @@ def _shared_daemon_runtime() -> dict[str, object]:
     """``{"shared_daemon": {...}}`` inside a shared daemon (#3381), else ``{}``.
 
     A standalone server has no daemon, and the key is then absent, not null.
+    A standalone server that a ``--shared NAME`` session fell back to carries
+    ``{"shared_fallback": {"name", "reason"}}`` instead.
     """
-    from memtomem.server.context import shared_daemon_summary
+    from memtomem.server.context import shared_daemon_summary, shared_fallback
 
     summary = shared_daemon_summary()
-    return {"shared_daemon": summary} if summary is not None else {}
+    if summary is not None:
+        return {"shared_daemon": summary}
+    fallback = shared_fallback()
+    return {"shared_fallback": fallback} if fallback is not None else {}
 
 
 async def collect_status_report(app: AppContext) -> dict:
@@ -1045,6 +1050,14 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
                 value=(
                     f"{shared['name']} (pid {shared['pid']}, {shared['connections']} connection(s))"
                 ),
+            )
+        )
+    elif fallback := runtime.get("shared_fallback"):
+        lines.append(
+            StatusLine(
+                "kv",
+                key="Shared daemon:".ljust(17),
+                value=f"{fallback['name']} not joined ({fallback['reason']})",
             )
         )
     lines.extend(

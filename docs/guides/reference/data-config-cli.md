@@ -423,6 +423,27 @@ distribution's console script rather than a dedicated one. `memtomem-server` is
 the dedicated entry point and stays supported — it is the one to use for network
 transports, whose flags live only there.
 
+`memtomem-server --shared NAME`, or `mm serve --shared NAME`, lets several MCP
+clients share one engine (one store writer, one file watcher, one embedding
+model) on POSIX. Nothing is shared without it. The first session starts the
+daemon NAME and later sessions join it. A session joins only when it matches the
+daemon on: the `MEMTOMEM_*` and `LANGFUSE_*` variables after `.env`, the tool mode
+and extra tools, `HOME`, the store path, and the installed package (prefix,
+location, version). Otherwise, and on Windows, it runs as a standalone server, and
+`mem_status` shows `Shared daemon: NAME not joined (<reason>)`, naming what
+differs but no value. A joined session uses the daemon's live configuration.
+Other inputs, such as proxy and TLS variables, `FASTEMBED_CACHE_PATH` and Hugging
+Face variables, are not compared: giving sessions one name asserts that they want
+the same server. After editing an editable install, or replacing the store file
+(restoring a backup, for example), run `mm daemon stop NAME`: a running daemon
+keeps the code and the file it opened. A joined session ends when its daemon goes
+away (exit 1, no reconnect), and when more than 32 MiB is waiting in either
+direction, daemon output the client has not read or client input the daemon has
+not taken (exit 1).
+`memtomem-server --daemon NAME [--idle-timeout S]` runs a daemon in the
+foreground with your environment (idle timeout 600 s by default, `0` never). A
+daemon a session starts logs to `daemon-NAME.log` in the runtime directory.
+
 `mm` is a shorthand alias for `memtomem`. All commands support `-h` and `--help`.
 
 ```bash
@@ -464,6 +485,7 @@ mm upgrade --version 0.7.10 --dry-run  # preview an exact uv-tool reinstall (als
 # upgrade refuses while a Web UI started through the memtomem-web entry point runs (it has no pid lock to stop it by); stop it first
 # warnings is additive on Windows, where processes are never killed automatically; db_lock_warning still requests a manual restart
 # upgrade signals each process once: a shared daemon holds two lock files (its name's and its store's) and both are cleaned
+mm serve --shared NAME                 # join (or start) the shared daemon NAME; a session that cannot join runs standalone and mem_status says why
 mm daemon status                       # list shared daemons (POSIX): name, pid, start time; exit 0 if one runs, 3 if none, 1 if they cannot be listed
 mm daemon status NAME --json           # one daemon as {"daemons": [...], "count": N}; a listing failure prints {"error": "..."} and exits 1
 mm daemon stop [NAME]                  # SIGTERM, then SIGKILL after --grace (default 5 s); no NAME stops every running daemon and ends their sessions

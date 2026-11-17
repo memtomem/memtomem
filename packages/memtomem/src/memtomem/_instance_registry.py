@@ -222,6 +222,16 @@ def presence_dir(root: Path | None = None) -> Path:
     return (runtime_dir() if root is None else root) / "presence"
 
 
+def bridges_dir(root: Path | None = None) -> Path:
+    """Return the stdio-bridge directory path without creating it (#3381)."""
+    return (runtime_dir() if root is None else root) / "bridges"
+
+
+def bridge_name_digest(name: str) -> str:
+    """The 16-hex digest a bridge's entry carries for the daemon name it asked for."""
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+
+
 def registry_sidecar_path(root: Path | None = None) -> Path:
     """Return the mutation-sidecar path (outside :func:`instances_dir`)."""
     return (runtime_dir() if root is None else root) / "instances.registry.lock"
@@ -375,6 +385,10 @@ _active: dict[Path, "RegisteredInstance"] = {}
 # in-process LIVE short-circuit. A handshake-only server is not evidence
 # that the store is open, so the two populations never merge.
 _active_presence: dict[Path, "RegisteredInstance"] = {}
+# Stdio bridges of shared daemons (#3381), apart from both for the same reason:
+# a bridge opens no store and is not a server, and no reader of the two other
+# populations may count it as one.
+_active_bridges: dict[Path, "RegisteredInstance"] = {}
 # Identity set — several shared barrier holders share one path, so a
 # path-keyed dict (as ``_active`` uses) could not hold them all.
 _active_barriers: set["HeldBarrier"] = set()
@@ -711,7 +725,7 @@ class RegisteredInstance:
             # (path, flock) pair and releases identically, and keying the
             # sweep on identity keeps a path that somehow appears in both
             # from unpublishing the wrong record.
-            for pool in (_active, _active_presence):
+            for pool in (_active, _active_presence, _active_bridges):
                 if pool.get(self.path) is self:
                     del pool[self.path]
         try:
@@ -752,7 +766,7 @@ def _atexit_cleanup() -> None:
     # and per-registration callbacks would carry live handles past the
     # active-dict reset. This handler re-reads the dict at exit time, and
     # each cleanup() re-checks the pid guard anyway.
-    for inst in [*_active.values(), *_active_presence.values()]:
+    for inst in [*_active.values(), *_active_presence.values(), *_active_bridges.values()]:
         inst.cleanup()
 
 
@@ -877,62 +891,92 @@ def register_server_presence(
         digest = store_pid_digest(db_path) if db_path is not None else None
         if digest is None:
             digest = _UNKNOWN_STORE_DIGEST
-        pid = os.getpid()
-        with _state_guard:
-            procid = _process_id_locked()
-        name = f"{pid}-{os.getppid()}-{digest}-{procid}-{secrets.token_hex(4)}.lock"
-        # One budget for the whole lock-held span, not just for taking it:
-        # whatever acquisition leaves is what the sweep may spend, and
-        # publishing this process's own marker always happens regardless.
-        deadline = time.monotonic() + _PRESENCE_LOCK_TIMEOUT_S
-        try:
-            with _mutation_lock(deadline):
-                directory = presence_dir()
-                directory.mkdir(mode=0o700, exist_ok=True)
-                # ``exist_ok=True`` accepts a symlink-to-directory and the open
-                # below would then land in the link's target — refuse instead,
-                # the same trust rule the sentinel path applies.
-                if _dir_state(directory) != "dir":
-                    return None
-                # Markers outlive their process only when it died without
-                # running its cleanup (SIGKILL, power loss). Nothing else ever
-                # walks this directory with the mutation lock held, so
-                # registration is the one place that can collect them; the
-                # snapshot readers stay read-only by contract.
-                _gc_stale_presence(directory, deadline)
-                path = directory / name
-                # Let the process-wide SIGTERM cleanup cover the unique path
-                # before ``open`` publishes it.  The callback runs under the
-                # mutation lock and must only record the path; it is invoked
-                # before any filesystem mutation, so a callback failure leaves
-                # no marker behind.
-                if on_path_reserved is not None:
-                    on_path_reserved(path)
-                # The nonce makes this filename fresh — never reuse or unlink
-                # an existing entry here; probe+grace GC above owns that.
-                fp = open(path, "a+b")
-                try:
-                    portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
-                except _LOCK_CONTENDED:
-                    fp.close()
-                    return None
-                inst = RegisteredInstance(path=path, pid=pid, _fp=fp)
-                # Published under the mutation lock, as sentinels are, so the
-                # file is never visible to a same-process read before the
-                # in-memory record exists.
-                with _state_guard:
-                    _active_presence[path] = inst
-                    global _atexit_installed
-                    if not _atexit_installed:
-                        atexit.register(_atexit_cleanup)
-                        _atexit_installed = True
-                return inst
-        except _MutationLockTimeout:
-            logger.debug("presence registration lost the sidecar race", exc_info=True)
-        return None
+        return _register_marker(
+            presence_dir, digest, _active_presence, on_path_reserved=on_path_reserved
+        )
     except Exception:
         logger.debug("presence registration failed", exc_info=True)
         return None
+
+
+def register_bridge(name: str) -> RegisteredInstance | None:
+    """Record that this process is a stdio bridge to the daemon *name* (#3381).
+
+    ``bridges/<pid>-<ppid>-<namedigest16>-<procid8>-<nonce8>.lock``: the
+    presence grammar and liveness rule, with :func:`bridge_name_digest` in
+    the digest slot. Only ``mm doctor`` reads these (:func:`snapshot_bridges`);
+    no gate of ``mm upgrade``, ``mm web stop`` or ``mm uninstall`` sees one, so
+    a bridge neither blocks nor is signalled by them: it ends when its daemon
+    does. Returns ``None``, never raises, on any failure.
+    """
+    try:
+        return _register_marker(bridges_dir, bridge_name_digest(name), _active_bridges)
+    except Exception:
+        logger.debug("bridge registration failed", exc_info=True)
+        return None
+
+
+def _register_marker(
+    directory_for: Callable[[], Path],
+    digest: str,
+    pool: dict[Path, RegisteredInstance],
+    *,
+    on_path_reserved: Callable[[Path], None] | None = None,
+) -> RegisteredInstance | None:
+    """Create and flock one marker under ``directory_for()``, publishing it in ``pool``."""
+    pid = os.getpid()
+    with _state_guard:
+        procid = _process_id_locked()
+    name = f"{pid}-{os.getppid()}-{digest}-{procid}-{secrets.token_hex(4)}.lock"
+    # One budget for the whole lock-held span, not just for taking it:
+    # whatever acquisition leaves is what the sweep may spend, and
+    # publishing this process's own marker always happens regardless.
+    deadline = time.monotonic() + _PRESENCE_LOCK_TIMEOUT_S
+    try:
+        with _mutation_lock(deadline):
+            directory = directory_for()
+            directory.mkdir(mode=0o700, exist_ok=True)
+            # ``exist_ok=True`` accepts a symlink-to-directory and the open
+            # below would then land in the link's target — refuse instead,
+            # the same trust rule the sentinel path applies.
+            if _dir_state(directory) != "dir":
+                return None
+            # Markers outlive their process only when it died without
+            # running its cleanup (SIGKILL, power loss). Nothing else ever
+            # walks this directory with the mutation lock held, so
+            # registration is the one place that can collect them; the
+            # snapshot readers stay read-only by contract.
+            _gc_stale_presence(directory, deadline, own=pool)
+            path = directory / name
+            # Let the process-wide SIGTERM cleanup cover the unique path
+            # before ``open`` publishes it.  The callback runs under the
+            # mutation lock and must only record the path; it is invoked
+            # before any filesystem mutation, so a callback failure leaves
+            # no marker behind.
+            if on_path_reserved is not None:
+                on_path_reserved(path)
+            # The nonce makes this filename fresh — never reuse or unlink
+            # an existing entry here; probe+grace GC above owns that.
+            fp = open(path, "a+b")
+            try:
+                portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            except _LOCK_CONTENDED:
+                fp.close()
+                return None
+            inst = RegisteredInstance(path=path, pid=pid, _fp=fp)
+            # Published under the mutation lock, as sentinels are, so the
+            # file is never visible to a same-process read before the
+            # in-memory record exists.
+            with _state_guard:
+                pool[path] = inst
+                global _atexit_installed
+                if not _atexit_installed:
+                    atexit.register(_atexit_cleanup)
+                    _atexit_installed = True
+            return inst
+    except _MutationLockTimeout:
+        logger.debug("marker registration lost the sidecar race", exc_info=True)
+    return None
 
 
 def sweep_stale_presence() -> None:
@@ -967,27 +1011,33 @@ def sweep_stale_presence() -> None:
             # does not redirect, not that it is owner-only.
             if _dir_state(root) != "dir":
                 continue
-            directory = presence_dir() if root == canonical else presence_dir(root)
-            if _dir_state(directory) != "dir":
-                continue
             lock_root = None if root == canonical else root
-            # One budget per root for acquiring the lock and sweeping under
-            # it, so a large residue directory cannot hold the shared lock
-            # for an unbounded time while a destructive command waits.
-            deadline = time.monotonic() + _LOCK_TIMEOUT_S
-            with _mutation_lock(deadline, root=lock_root):
-                _gc_stale_presence(directory, deadline)
-                # Remove the emptied directory here, under the same lock
-                # that serialized the sweep — never in a second, unlocked
-                # pass. Registration creates this directory and opens its
-                # marker inside one locked span; an unlocked ``rmdir``
-                # could land between those two steps, and the registration
-                # would fail on a directory that vanished underneath it,
-                # leaving a live server invisible. ``rmdir`` refuses a
-                # non-empty directory, so a marker written by any other
-                # process is safe by the same atomicity.
-                with contextlib.suppress(OSError):
-                    directory.rmdir()
+            # Stdio bridges (#3381) use the same grammar and the same rule.
+            for directory_for, pool in (
+                (presence_dir, _active_presence),
+                (bridges_dir, _active_bridges),
+            ):
+                directory = directory_for() if root == canonical else directory_for(root)
+                if _dir_state(directory) != "dir":
+                    continue
+                # One budget per root and directory for acquiring the lock and
+                # sweeping under it, so a large residue directory cannot hold
+                # the shared lock for an unbounded time while a destructive
+                # command waits.
+                deadline = time.monotonic() + _LOCK_TIMEOUT_S
+                with _mutation_lock(deadline, root=lock_root):
+                    _gc_stale_presence(directory, deadline, own=pool)
+                    # Remove the emptied directory here, under the same lock
+                    # that serialized the sweep — never in a second, unlocked
+                    # pass. Registration creates this directory and opens its
+                    # marker inside one locked span; an unlocked ``rmdir``
+                    # could land between those two steps, and the registration
+                    # would fail on a directory that vanished underneath it,
+                    # leaving a live server invisible. ``rmdir`` refuses a
+                    # non-empty directory, so a marker written by any other
+                    # process is safe by the same atomicity.
+                    with contextlib.suppress(OSError):
+                        directory.rmdir()
         except (_MutationLockTimeout, OSError):
             continue
         except Exception:
@@ -995,7 +1045,9 @@ def sweep_stale_presence() -> None:
             continue
 
 
-def _gc_stale_presence(directory: Path, deadline: float) -> None:
+def _gc_stale_presence(
+    directory: Path, deadline: float, *, own: dict[Path, RegisteredInstance]
+) -> None:
     """Collect unlocked, aged presence markers, bounded by ``deadline``.
 
     Runs with the shared mutation lock held, which is why the deadline is not
@@ -1012,7 +1064,7 @@ def _gc_stale_presence(directory: Path, deadline: float) -> None:
     paths before the first check is work done inside the lock for nothing.
     """
     with _state_guard:
-        own = set(_active_presence)
+        held = set(own)
     try:
         with os.scandir(directory) as entries:
             for entry in entries:
@@ -1021,7 +1073,7 @@ def _gc_stale_presence(directory: Path, deadline: float) -> None:
                 if _ENTRY_RE.fullmatch(entry.name) is None:
                     continue
                 path = Path(entry.path)
-                if path in own:
+                if path in held:
                     continue
                 if _probe_entry(path) != "stale" or not _aged(path):
                     continue
@@ -1281,6 +1333,11 @@ def _active_presence_for_root(root: Path) -> dict[Path, "RegisteredInstance"]:
     return {path: inst for path, inst in _active_presence.items() if path.parent.parent == root}
 
 
+def _active_bridges_for_root(root: Path) -> dict[Path, "RegisteredInstance"]:
+    """Return the in-process bridge entries published beneath ``root`` (#3381)."""
+    return {path: inst for path, inst in _active_bridges.items() if path.parent.parent == root}
+
+
 def _enumerate_live_instances_at(
     root: Path, store_digest: str, deadline: float
 ) -> EnumerationResult:
@@ -1445,7 +1502,7 @@ def _scan_registry_root(root: Path, deadline: float) -> _RootScan:
 
 
 def _scan_entry_dir(
-    root: Path, deadline: float, *, kind: Literal["instances", "presence"]
+    root: Path, deadline: float, *, kind: Literal["instances", "presence", "bridges"]
 ) -> _RootScan:
     """Read one root's ``instances/`` or ``presence/`` directory, read-only.
 
@@ -1481,8 +1538,11 @@ def _scan_entry_dir(
     unparseable = 0
     try:
         canonical = runtime_dir()
-        resolve = instances_dir if kind == "instances" else presence_dir
-        pool = _active_for_root if kind == "instances" else _active_presence_for_root
+        resolve, pool = {
+            "instances": (instances_dir, _active_for_root),
+            "presence": (presence_dir, _active_presence_for_root),
+            "bridges": (bridges_dir, _active_bridges_for_root),
+        }[kind]
         with _state_guard:
             own = pool(root)
         for path in own:
@@ -1544,6 +1604,30 @@ def _scan_entry_dir(
         logger.debug("registry snapshot failed for %s", root, exc_info=True)
         return _RootScan(_sorted(results), False, stale, unlocked_fresh, unparseable, None)
     return _RootScan(_sorted(results), complete, stale, unlocked_fresh, unparseable, None)
+
+
+@dataclass(frozen=True)
+class BridgeSnapshot:
+    """The live stdio bridges (#3381); read by ``mm doctor`` and nothing else.
+
+    Apart from :class:`RegistrySnapshot` on purpose: that snapshot's
+    completeness gates ``mm upgrade``, ``mm web stop`` and ``mm uninstall``,
+    and an unreadable ``bridges/`` must never make any of them refuse.
+    """
+
+    bridges: tuple[InstanceInfo, ...]
+    complete: bool
+
+
+def snapshot_bridges() -> BridgeSnapshot:
+    """Read every live bridge entry of the canonical runtime root, read-only."""
+    deadline = time.monotonic() + _LOCK_TIMEOUT_S
+    try:
+        root = runtime_dir()
+    except OSError:
+        return BridgeSnapshot((), False)
+    scan = _scan_entry_dir(root, deadline, kind="bridges")
+    return BridgeSnapshot(scan.instances, scan.complete and scan.error is None)
 
 
 def snapshot_all_instances() -> RegistrySnapshot:

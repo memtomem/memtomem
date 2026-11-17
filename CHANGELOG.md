@@ -68,9 +68,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   file with no receipt that matches it is refused until a plain `mm index` of it, which
   under those two settings does not help: the refusal says so. In core mode it is reached as `mem_do(action="dedup_remove", ...)`.
 
+- **`memtomem-server --shared NAME` and `mm serve --shared NAME` let MCP clients share one
+  engine (POSIX, opt-in, #3381).** The first session starts the daemon NAME, and later ones
+  join it when they match it on the `MEMTOMEM_*` and `LANGFUSE_*` variables after `.env`, the
+  tool mode and extra tools, `HOME`, the store path and the installed package. A session that does
+  not match, cannot share its store, uses a relative configured path, or runs on Windows is
+  served standalone, and `mem_status` shows `Shared daemon: NAME not joined (<reason>)`. Without
+  the option nothing changes. A joined session uses the daemon's live configuration, and inputs
+  outside that list (proxy and TLS variables, `FASTEMBED_CACHE_PATH`, Hugging Face variables)
+  are not compared. `memtomem-server --daemon NAME [--idle-timeout S]` runs a daemon in the
+  foreground. `mm doctor`'s `shared-daemons` check counts each daemon's sessions, and
+  `mm uninstall` also removes a dead daemon's log and stale session entries.
+
 - **`mm daemon status` and `mm daemon stop` report and stop shared daemons (POSIX).** A
-  shared daemon serves several client sessions from one engine (#3381). No client can start one
-  yet: the `--shared` option that does so comes in a later release. `status` lists each daemon's
+  shared daemon serves several client sessions from one engine (#3381). A client starts or joins
+  one with `--shared NAME` (below). `status` lists each daemon's
   name, pid and start time, and exits 0 when one runs, 3 when none does, and 1 when the runtime
   directory cannot be listed. `--json` prints `{"daemons": [...], "count": N}`. `stop` sends
   SIGTERM, then SIGKILL after `--grace` seconds only if the process is still alive, and confirms

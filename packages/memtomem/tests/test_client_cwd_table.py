@@ -183,6 +183,10 @@ TABLE: dict[str, dict[str, str]] = {
 # ``(module, function, what it calls)``: the reads of the process working
 # directory that stay, and why each is right.
 PROCESS_CWD_READS: dict[tuple[str, str, str], str] = {
+    ("_bridge.py", "_join", "getcwd"): (
+        "the stdio bridge is one client's process: its working directory is the client's, "
+        "and it is what the bridge sends the daemon as that connection's client_cwd"
+    ),
     ("runtime/project_context.py", "_resolve_project_context_from_dirs", "getcwd"): (
         "the fallback when no anchor is passed: a connection with no client_cwd, and the "
         "CLI and web callers, which own their process"
