@@ -5,8 +5,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.11] — 2026-11-17
+
 ### Upgrading
 
+- **The plugins move their pin to 0.7.11 in the same release; a plugin that is not updated
+  keeps launching 0.7.10.** This release delivers Claude `0.5.42`, Codex `0.3.40`,
+  `memtomem-automation` `0.3.25`, OpenCode `0.3.38`, Hermes `0.1.25`, Antigravity `0.2.19`
+  and OpenClaw `0.1.3`; Kimi stays `0.2.29` and Cursor `0.1.0`. The entries below name the
+  version in which each workflow text first changed. OpenCode `0.3.34` to `0.3.37` were
+  never published to npm, so `opencode-memtomem@0.3.38` is the first npm release that
+  carries those changes.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.25 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.11;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.11`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.11`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.11.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.10" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.10` to
+  `==0.7.11` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.11 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.11`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
 - **Hermes plugin 0.1.23: a gated or private Hugging Face model needs your own server
   entry.** The plugin's bundled server entry no longer uses a saved Hugging Face login or an
   `HF_TOKEN` variable (see Changed). The default models are public and download as before.
@@ -302,8 +337,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   every MCP tool and storage call consistently reports
   `Error: Invalid namespace description: expected a string` and stores nothing.
 
-- **Resources answer over stdio (#3374).** Reading any of the six resources from a stdio
-  server failed, while tools on the same connection worked. Two causes, one per kind:
+- **Resources answer over stdio (#3374).** Reading the four static resources from a stdio
+  server failed, and with the MCP SDK `mcp` 2.2.0 the two templated ones failed too, while
+  tools on the same connection worked. Two causes, one per kind:
   - The four static ones (`memtomem://sources`, `memtomem://namespaces`, `memtomem://tags`,
     `memtomem://stats`) failed with `Error reading resource <uri>`, while `resources/list`
     still listed all four. Their handlers receive no request context and looked the server's
@@ -314,7 +350,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
     `memtomem://chunks/{chunk_id}`) failed with `Error creating resource from template <uri>`.
     Their handlers did declare the request context, but the SDK validates a template
     function's arguments, and with the annotation these handlers used that validation
-    rebuilt the context object without the request inside it.
+    rebuilt the context object without the request inside it. That is `mcp` 2.2.0: with
+    2.3.0, which a new install resolves, the two already answered on 0.7.10.
 
   The server now binds its state from the request itself for the length of each resource
   read, and all six handlers read it from there. The first cause needs a transport that
