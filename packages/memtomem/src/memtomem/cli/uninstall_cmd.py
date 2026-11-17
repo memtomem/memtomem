@@ -239,13 +239,26 @@ def _sweep_stale_daemon_files(roots: Iterable[Path]) -> None:
     after it holds that barrier shared, so no socket here can be a live one:
     every ``daemon-<name>.sock`` socket is removed. A lifetime lock is removed
     only while this process holds its flock, so a daemon that took it and is
-    now waiting for the barrier keeps it. Neither file is store-scoped, so the
-    store inventory never stages them.
+    now waiting for the barrier keeps it. A ``daemon-<name>.log`` is removed
+    when no live lifetime lock of that name is observed: a daemon opens its
+    log only once it holds the barrier, as it binds its socket. A daemon that
+    takes its lifetime lock in this window and then fails on the barrier this
+    command holds may lose its log. None of these files is store-scoped, so
+    the store inventory never stages them.
     """
     if os.name == "nt":
         return
-    from memtomem._daemon_paths import name_from_lifetime_lock, name_from_socket
-    from memtomem.cli._liveness import UnsafeProbePathError, unlink_stale_pid_file_holding_barrier
+    from memtomem._daemon_paths import (
+        lifetime_lock_path,
+        name_from_lifetime_lock,
+        name_from_log,
+        name_from_socket,
+    )
+    from memtomem.cli._liveness import (
+        UnsafeProbePathError,
+        probe_pid_file,
+        unlink_stale_pid_file_holding_barrier,
+    )
 
     for root in roots:
         try:
@@ -259,6 +272,12 @@ def _sweep_stale_daemon_files(roots: Iterable[Path]) -> None:
                     unlink_stale_pid_file_holding_barrier(path)
                 elif name_from_socket(name) is not None:
                     if stat.S_ISSOCK(os.lstat(path).st_mode):
+                        os.unlink(path)
+                elif (daemon := name_from_log(name)) is not None:
+                    if (
+                        stat.S_ISREG(os.lstat(path).st_mode)
+                        and not probe_pid_file(lifetime_lock_path(root, daemon)).alive
+                    ):
                         os.unlink(path)
             except (OSError, UnsafeProbePathError):
                 continue

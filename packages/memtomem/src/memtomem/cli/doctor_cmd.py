@@ -465,8 +465,18 @@ def _check_shared_daemons() -> CheckResult:
             message="shared daemons could not be listed",
             detail=scrub_text(inventory.error),
         )
+    from memtomem._instance_registry import bridge_name_digest, snapshot_bridges
+
     live = [d for d in inventory.daemons if d.state.alive]
     stale = len(inventory.daemons) - len(live)
+    # Bridges are counted by the name they asked for: a bridge records no pid
+    # of its daemon, only a digest of the name.
+    bridges = snapshot_bridges()
+    by_digest: dict[str, int] = {}
+    for bridge in bridges.bridges:
+        by_digest[bridge.digest] = by_digest.get(bridge.digest, 0) + 1
+    counts = {d.name: by_digest.pop(bridge_name_digest(d.name), 0) for d in live}
+    unmatched = sum(by_digest.values())
     data: dict[str, object] = {
         "daemons": [
             {
@@ -475,20 +485,29 @@ def _check_shared_daemons() -> CheckResult:
                 "started": d.state.started,
                 # A failed probe counts as alive (fail closed); say it is unverified.
                 "unverified": d.state.probe_error is not None,
+                "bridges": counts[d.name],
             }
             for d in live
         ],
         "stale": stale,
+        "bridges_without_daemon": unmatched,
+        "bridges_complete": bridges.complete,
         "warnings": list(inventory.warnings),
     }
     if not live:
         message = "no shared daemon running"
     else:
         listed = ", ".join(
-            f"{d.name} (pid {d.state.pid if d.state.pid is not None else '?'})" for d in live
+            f"{d.name} (pid {d.state.pid if d.state.pid is not None else '?'}, "
+            f"{counts[d.name]} bridge(s))"
+            for d in live
         )
         message = f"{len(live)} shared daemon(s) running: {listed}"
     notes = [f"{stale} stale lifetime lock file(s) left by daemons that exited"] if stale else []
+    if unmatched:
+        notes.append(f"{unmatched} bridge(s) asked for a name with no matching daemon observed")
+    if not bridges.complete:
+        notes.append("the bridge list could not be read completely; counts are a lower bound")
     notes.extend(
         f"{d.name}: unverified ({scrub_text(d.state.probe_error)})"
         for d in live

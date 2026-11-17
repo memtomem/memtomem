@@ -3,8 +3,13 @@
 A daemon serves every connection that reaches its socket from one component
 graph: one store writer, one file watcher, one embedding model. Each connection
 is its own MCP session with its own session state and its own client working
-directory. Nothing starts a daemon yet: there is no flag and no console script,
-and the stdio bridge that would connect a client is a later pull request.
+directory. ``memtomem-server --daemon NAME`` starts one, and a client reaches it
+through ``memtomem-server --shared NAME``, the stdio bridge in
+:mod:`memtomem._bridge`, which also starts one when none is running.
+
+A connection is admitted only when the bridge's fields
+(:mod:`memtomem._admission`) equal the ones this daemon computed at start;
+otherwise it is answered ``mismatch`` with the names of what differs.
 
 What a daemon holds, and from when:
 
@@ -40,13 +45,15 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from memtomem._daemon_paths import NAME_PATTERN, lifetime_lock_path, socket_path
+from memtomem._daemon_paths import NAME_PATTERN, lifetime_lock_path, log_path, socket_path
 
 logger = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = 1
+# 2: the preamble carries the admission fields, and ``accepted`` says they were
+# compared. Version 1 was never released.
+PROTOCOL_VERSION = 2
 PREAMBLE_LIMIT = 64 * 1024
 PREAMBLE_TIMEOUT_S = 5.0
 FRAME_LIMIT = 32 * 1024 * 1024
@@ -133,8 +140,16 @@ class PreambleError(ValueError):
     pass
 
 
-def parse_preamble(line: bytes) -> Path:
-    """The client working directory a connection's first line carries."""
+@dataclass(frozen=True)
+class Preamble:
+    cwd: Path
+    fields: dict[str, Any]
+
+
+def parse_preamble(line: bytes) -> Preamble:
+    """The client working directory and admission fields of a connection's first line."""
+    from memtomem._admission import malformed
+
     try:
         payload = json.loads(line)
     except ValueError as exc:
@@ -157,7 +172,11 @@ def parse_preamble(line: bytes) -> Path:
         raise PreambleError("cwd does not exist") from exc
     if not resolved.is_dir():
         raise PreambleError("cwd is not a directory")
-    return resolved
+    fields = payload.get("admission")
+    if (reason := malformed(fields)) is not None:
+        raise PreambleError(reason)
+    # ``malformed`` answers ``None`` for a dict only.
+    return Preamble(resolved, cast("dict[str, Any]", fields))
 
 
 def _request_id(message: Any) -> object | None:
@@ -215,6 +234,9 @@ class Daemon:
     frozen_store: Path
     runtime_dir: Path
     sigterm_targets: list[Any]
+    # This process's admission fields (:func:`memtomem._admission.local_fields`),
+    # computed once at start; a joining bridge's must equal them.
+    admission: dict[str, Any] = field(default_factory=dict)
     barrier: Any = None
     state: State = "starting"
     terminal_reason: str | None = None
@@ -340,6 +362,11 @@ class Daemon:
         payload.update(extra)
         return json.dumps(payload).encode("utf-8") + b"\n"
 
+    def _differences(self, theirs: dict[str, Any]) -> list[str]:
+        from memtomem._admission import differences
+
+        return differences(self.admission, theirs)
+
     # ── connections ──
 
     async def _handle(self, stream: Any) -> None:
@@ -368,9 +395,21 @@ class Daemon:
             if line is None:
                 return  # no preamble in time
             try:
-                cwd = parse_preamble(line)
+                preamble = parse_preamble(line)
             except PreambleError as exc:
                 await stream.send(self._reply("error", error=str(exc)))
+                return
+            cwd = preamble.cwd
+            differs = self._differences(preamble.fields)
+            if differs:
+                # Before admission: nothing is counted and the idle timer is
+                # untouched. A daemon that is not admitting says so first, so
+                # the bridge waits for its successor, which may well match.
+                if self.state == "accepting":
+                    reply = self._reply("mismatch", differs=differs)
+                else:
+                    reply = self._reply("refused" if self.state == "exiting" else "retry")
+                await stream.send(reply)
                 return
             verdict = await self._admit()
             if verdict != "accepted":
@@ -405,7 +444,7 @@ class Daemon:
 
         try:
             # Sent here, not by the handler: the stream belongs to this task now.
-            await conn.stream.send(self._reply("accepted"))
+            await conn.stream.send(self._reply("accepted", compared=True))
             await self._run_session(conn, buf, cwd)
         except (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream):
             pass
@@ -681,7 +720,10 @@ class Daemon:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m memtomem.server.daemon",
-        description="Run a shared memtomem daemon (internal; no client reaches it yet).",
+        description=(
+            "Run a shared memtomem daemon (internal: use memtomem-server --daemon NAME, "
+            "or --shared NAME, which starts one)."
+        ),
     )
     parser.add_argument("name")
     parser.add_argument(
@@ -690,6 +732,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=DEFAULT_IDLE_TIMEOUT_S,
         help="seconds with no connection before exiting; 0 never exits",
     )
+    # Set by the bridge's spawn, whose daemon has no stderr of its own.
+    parser.add_argument("--log-to-runtime", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.idle_timeout < 0:
         parser.error("--idle-timeout must be 0 or more")
@@ -734,6 +778,22 @@ def _lock_lifetime(path: Path, targets: list[Any], process_started: str) -> Any:
     return fp
 
 
+def _log_to_runtime(path: Path) -> None:
+    """Send this process's stderr, the log included, to ``path`` (0600, truncated).
+
+    Opened only once the shared barrier is held, as the socket is bound: a
+    concurrent ``mm uninstall`` removes these logs inside its exclusive hold,
+    when no daemon can be this far.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        sys.stderr.flush()
+        os.dup2(fd, 2)
+    finally:
+        os.close(fd)
+
+
 @contextlib.contextmanager
 def _published_summary(daemon: Daemon) -> Iterator[None]:
     """Let ``mem_status`` see *daemon* while it serves, and only then."""
@@ -759,6 +819,8 @@ def main(argv: list[str] | None = None) -> int:
 
     from memtomem._instance_registry import acquire_server_lifecycle_barrier
     from memtomem._runtime_paths import ensure_runtime_dir, server_pid_path
+    import memtomem.server as server_package
+    from memtomem._admission import local_fields
     from memtomem.config import refuse_relative_config_paths
     from memtomem.server import (
         _claim_store_pid_file,
@@ -777,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
         with _sigterm_deferred():
             _install_sigterm_handler(targets)
             db_path, frozen = _resolve_frozen_store()
+            admission = local_fields(tools=list(server_package._TOOL_SURFACE_REQUEST), store=frozen)
             runtime = ensure_runtime_dir()
             check_socket_path(socket_path(runtime, name))
             _lock_lifetime(lifetime_lock_path(runtime, name), targets, process_started)
@@ -797,8 +860,16 @@ def main(argv: list[str] | None = None) -> int:
         frozen_store=frozen,
         runtime_dir=runtime,
         sigterm_targets=targets,
+        admission=admission,
         barrier=barrier,
     )
+    if args.log_to_runtime:
+        try:
+            _log_to_runtime(log_path(runtime, name))
+        except OSError as exc:
+            daemon._release_barrier()
+            print(f"memtomem shared daemon: cannot open its log: {exc}", file=sys.stderr)
+            return EXIT_FAILED
     try:
         with _sigterm_deferred():
             sock = daemon.bind_socket()

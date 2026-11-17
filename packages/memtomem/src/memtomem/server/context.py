@@ -1516,6 +1516,16 @@ def shared_daemon_summary() -> dict[str, object] | None:
     return provider() if provider is not None else None
 
 
+# Set by ``run_standalone`` when a ``--shared NAME`` session could not join its
+# daemon (#3381) and this process serves the client on its own instead.
+_shared_fallback: dict[str, str] | None = None
+
+
+def shared_fallback() -> dict[str, str] | None:
+    """``{"name", "reason"}`` of the shared daemon this process did not join, or ``None``."""
+    return dict(_shared_fallback) if _shared_fallback is not None else None
+
+
 _server_transport: str | None = None
 
 

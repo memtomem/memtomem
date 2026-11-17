@@ -22,16 +22,26 @@ import click
 
 
 @click.command("serve")
-def serve() -> None:
+@click.option(
+    "--shared",
+    "shared",
+    metavar="NAME",
+    default=None,
+    help=(
+        "Join the shared daemon NAME, starting it when none is running (POSIX). "
+        "A session that cannot join runs standalone, and mem_status says why."
+    ),
+)
+def serve(shared: str | None) -> None:
     """Run the MCP server over stdio (for MCP clients).
 
     For network transports and their options, use `memtomem-server`.
     """
     from memtomem._server_entry import main as server_main
 
-    # Explicit empty argv, never the implicit ``None``. ``main()`` re-parses
+    # An explicit argv, never the implicit ``None``. ``main()`` re-parses
     # the command line with argparse, and Click does not consume ``serve``
     # from ``sys.argv`` — so ``server_main()`` would hand argparse the
     # subcommand name and die with "unrecognized arguments: serve" (exit 2)
     # before the server ever starts.
-    server_main([])
+    server_main(["--shared", shared] if shared is not None else [])

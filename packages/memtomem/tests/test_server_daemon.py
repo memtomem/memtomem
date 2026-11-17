@@ -37,12 +37,15 @@ START_TIMEOUT_S = 30.0
 class Client:
     """One connection: the preamble, then newline JSON-RPC."""
 
-    def __init__(self, sock_path: Path, cwd: Path, *, timeout: float = 30.0) -> None:
+    def __init__(
+        self, sock_path: Path, cwd: Path, admission: dict, *, timeout: float = 30.0
+    ) -> None:
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.settimeout(timeout)
         self.sock.connect(str(sock_path))
         self.file = self.sock.makefile("rwb", buffering=0)
-        self.file.write(json.dumps({"v": 1, "cwd": str(cwd)}).encode() + b"\n")
+        preamble = {"v": 2, "cwd": str(cwd), "admission": admission}
+        self.file.write(json.dumps(preamble).encode() + b"\n")
         line = self.file.readline()
         self.reply = json.loads(line) if line else None
         self._next_id = 1
@@ -107,6 +110,7 @@ class DaemonEnv:
     runtime: Path
     home: Path
     procs: list[subprocess.Popen] = field(default_factory=list)
+    _admission: dict[str, dict] = field(default_factory=dict)
 
     @property
     def store(self) -> Path:
@@ -146,6 +150,30 @@ class DaemonEnv:
     def socket_path(self, name: str) -> Path:
         return self.runtime / f"daemon-{name}.sock"
 
+    def admission(self, **env: str) -> dict:
+        """The admission fields a bridge in this environment sends (#3381).
+
+        Computed by the bridge's own function in a child with the daemon's
+        environment, so they equal the daemon's unless a test changes one side.
+        """
+        key = self.config_path.read_text() + json.dumps(env, sort_keys=True)
+        if key not in self._admission:
+            code = (
+                "import json; from memtomem._bridge import _admission_fields; "
+                "print(json.dumps(_admission_fields()))"
+            )
+            done = subprocess.run(
+                [sys.executable, "-c", code],
+                env={**self.env(), **env},
+                cwd=str(self.root),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+            self._admission[key] = json.loads(done.stdout.splitlines()[-1])
+        return self._admission[key]
+
     def dir(self, name: str) -> Path:
         path = self.root / name
         path.mkdir(parents=True, exist_ok=True)
@@ -182,7 +210,7 @@ class DaemonEnv:
         """An admitted connection; ``retry`` (a daemon still starting) is retried."""
         deadline = time.monotonic() + START_TIMEOUT_S
         while True:
-            client = Client(self.socket_path(name), cwd or self.dir("client"))
+            client = Client(self.socket_path(name), cwd or self.dir("client"), self.admission())
             if client.state != "retry" or time.monotonic() > deadline:
                 return client
             client.close()
@@ -566,7 +594,7 @@ def test_a_connection_during_idle_teardown_is_told_to_retry(denv: DaemonEnv) -> 
     # still answering.
     assert _wait(lambda: Path(str(gate) + ".entered").exists())
     assert proc.poll() is None
-    late = Client(denv.socket_path("t"), denv.dir("client"))
+    late = Client(denv.socket_path("t"), denv.dir("client"), denv.admission())
     assert late.state == "retry"
     late.close()
     gate.touch()
@@ -580,7 +608,7 @@ def test_a_connection_after_a_terminal_failure_is_refused(denv: DaemonEnv) -> No
     client = denv.connect().initialize()
     denv.write_config(storage={"sqlite_path": str(denv.home / "moved.db")})
     client.tool("mem_status")  # first initialization refuses the moved store
-    late = Client(denv.socket_path("t"), denv.dir("client"))
+    late = Client(denv.socket_path("t"), denv.dir("client"), denv.admission())
     assert late.state == "refused"
     late.close()
     gate.touch()
@@ -710,7 +738,7 @@ def test_a_session_that_raises_ends_only_itself(denv: DaemonEnv) -> None:
     status = denv.root / "status.json"
     denv.start(raise_in_session=True, status_file=str(status))
     good = denv.connect().initialize()
-    bad = Client(denv.socket_path("t"), denv.dir("boom"))
+    bad = Client(denv.socket_path("t"), denv.dir("boom"), denv.admission())
     assert bad.state == "accepted"
     assert bad.at_eof()
     assert "memtomem Status" in good.tool("mem_status")
@@ -730,7 +758,7 @@ def test_a_bad_connection_does_not_end_the_others(denv: DaemonEnv) -> None:
         assert "memtomem Status" in good.tool("mem_status")
     half = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     half.connect(str(denv.socket_path("t")))
-    half.sendall(b'{"v": 1, "cw')
+    half.sendall(b'{"v": 2, "cw')
     half.close()
     assert "memtomem Status" in good.tool("mem_status")
 
@@ -870,11 +898,14 @@ def test_a_failing_credential_query_refuses(monkeypatch: pytest.MonkeyPatch) -> 
     [
         (b"not json", "not JSON"),
         (b"[]", "not a JSON object"),
-        (b'{"v": 2, "cwd": "/"}', "protocol version"),
-        (b'{"v": 1}', "cwd is missing"),
-        (b'{"v": 1, "cwd": "relative"}', "absolute"),
-        (b'{"v": 1, "cwd": "/no/such/dir/here"}', "does not exist"),
-        (b'{"v": 1, "cwd": "/tmp/a\\u0000b"}', "NUL"),
+        (b'{"v": 1, "cwd": "/"}', "protocol version 1"),
+        (b'{"v": 3, "cwd": "/"}', "protocol version 3"),
+        (b'{"v": 2}', "cwd is missing"),
+        (b'{"v": 2, "cwd": "relative"}', "absolute"),
+        (b'{"v": 2, "cwd": "/no/such/dir/here"}', "does not exist"),
+        (b'{"v": 2, "cwd": "/tmp/a\\u0000b"}', "NUL"),
+        (b'{"v": 2, "cwd": "/"}', "admission fields are missing"),
+        (b'{"v": 2, "cwd": "/", "admission": {"env": []}}', "missing: tools, home"),
     ],
 )
 def test_preamble_refusals(line: bytes, message: str) -> None:
@@ -1189,7 +1220,7 @@ def test_doctor_lists_a_running_daemon(denv: DaemonEnv, monkeypatch: pytest.Monk
     payload = json.loads(result.stdout)
     (check,) = [c for c in payload["checks"] if c["name"] == "shared-daemons"]
     assert check["status"] == "info"
-    assert check["message"] == f"1 shared daemon(s) running: t (pid {proc.pid})"
+    assert check["message"] == f"1 shared daemon(s) running: t (pid {proc.pid}, 0 bridge(s))"
     assert [d["name"] for d in check["data"]["daemons"]] == ["t"]
 
 
