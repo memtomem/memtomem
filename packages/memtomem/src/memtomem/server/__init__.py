@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import Context, MCPServer
 
+from memtomem._admission import tool_surface_request as _tool_surface_request
 from memtomem.server.component_factory import (
     Components as Components,
     close_components as close_components,
@@ -52,6 +53,9 @@ if TYPE_CHECKING:
 # instructions text has to describe the tool surface this mode actually
 # exposes (#1608), and ``instructions=`` is only accepted at construction.
 _TOOL_MODE = os.environ.get("MEMTOMEM_TOOL_MODE", "core").lower()
+# What a shared daemon compares a joining bridge's request against (#3381):
+# read from the same environment, at the same moment, as the surface itself.
+_TOOL_SURFACE_REQUEST = _tool_surface_request(os.environ)
 
 # ── Tool mode: core | standard | full ─────────────────────────────────
 # Set MEMTOMEM_TOOL_MODE env var to control which tools are exposed.
@@ -843,8 +847,12 @@ def main(argv: list[str] | None = None) -> None:
     entry_main(argv)
 
 
-def run_standalone(args) -> None:
-    """Run one standalone MCP server with already-parsed ``args``."""
+def run_standalone(args, fallback: dict[str, str] | None = None) -> None:
+    """Run one standalone MCP server with already-parsed ``args``.
+
+    ``fallback`` is ``{"name", "reason"}`` when a ``--shared NAME`` session
+    could not join its daemon (#3381); ``mem_status`` then says so.
+    """
     import atexit
 
     from memtomem._runtime_paths import ensure_runtime_dir, server_pid_path
@@ -943,9 +951,16 @@ def run_standalone(args) -> None:
         assert public_url is not None  # narrowed by the configure branch above
         _print_network_server_info(transport, args, public_url, run_kwargs)
 
-    from memtomem.server.context import _set_server_transport
+    import memtomem.server.context as server_context
 
-    _set_server_transport(transport)
+    server_context._set_server_transport(transport)
+    if fallback is not None:
+        import logging
+
+        server_context._shared_fallback = dict(fallback)
+        logging.getLogger(__name__).warning(
+            "--shared %s: serving this session standalone: %s", fallback["name"], fallback["reason"]
+        )
 
     # ``run`` forwards these kwargs to the matching async runner, and its
     # overloads key off a literal transport — hence the explicit branches

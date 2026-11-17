@@ -95,6 +95,27 @@ def test_store_resolution_and_dotenv_do_not_import_the_server(tmp_path: Path) ->
     assert result["heavy"] == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="on Windows the bridge falls back before connecting")
+def test_the_bridge_before_and_around_connecting_does_not_import_the_server(
+    tmp_path: Path,
+) -> None:
+    """Its fields, a connect that finds no daemon, the lock probe, the registry module."""
+    result = _run(
+        f"""
+        from pathlib import Path
+        from memtomem import _bridge, _instance_registry, _spawn_helper
+
+        fields = _bridge._admission_fields()
+        assert sorted(fields) == ["env", "home", "install", "store", "tools"]
+        # A unix socket path is limited to about 104 bytes; ``tmp_path`` is longer.
+        assert _bridge._connect(Path("/tmp/mm-3381-no-such-daemon.sock"), 1.0) is None
+        assert _bridge._lock_held(Path({str(tmp_path / "no.pid")!r})) is False
+        """,
+        tmp_path,
+    )
+    assert result["heavy"] == []
+
+
 def test_loading_a_dotenv_does_not_import_the_server(tmp_path: Path) -> None:
     """The enabled path, parsing included, against a scratch ``.env`` only."""
     dotenv_file = tmp_path / "scratch.env"
@@ -176,7 +197,12 @@ class TestEveryEntryHandsOverToRunStandalone:
         import memtomem.server as server_mod
 
         seen: list = []
-        monkeypatch.setattr(server_mod, "run_standalone", seen.append)
+
+        def run_standalone(args, fallback=None) -> None:
+            assert fallback is None  # no --shared: nothing was attempted
+            seen.append(args)
+
+        monkeypatch.setattr(server_mod, "run_standalone", run_standalone)
         return seen
 
     def test_entry_main(self, calls: list) -> None:

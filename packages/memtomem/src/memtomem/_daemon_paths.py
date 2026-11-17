@@ -18,6 +18,8 @@ LIFETIME_LOCK_PREFIX = "server-daemon-"
 LIFETIME_LOCK_SUFFIX = ".pid"
 SOCKET_PREFIX = "daemon-"
 SOCKET_SUFFIX = ".sock"
+LOG_PREFIX = "daemon-"
+LOG_SUFFIX = ".log"
 
 
 def socket_path(runtime_dir: Path, name: str) -> Path:
@@ -26,6 +28,11 @@ def socket_path(runtime_dir: Path, name: str) -> Path:
 
 def lifetime_lock_path(runtime_dir: Path, name: str) -> Path:
     return runtime_dir / f"{LIFETIME_LOCK_PREFIX}{name}{LIFETIME_LOCK_SUFFIX}"
+
+
+def log_path(runtime_dir: Path, name: str) -> Path:
+    """Where a daemon started by a bridge writes its log."""
+    return runtime_dir / f"{LOG_PREFIX}{name}{LOG_SUFFIX}"
 
 
 def _name_between(filename: str, prefix: str, suffix: str) -> str | None:
@@ -43,3 +50,8 @@ def name_from_lifetime_lock(filename: str) -> str | None:
 def name_from_socket(filename: str) -> str | None:
     """The daemon name a socket file name carries, or ``None``."""
     return _name_between(filename, SOCKET_PREFIX, SOCKET_SUFFIX)
+
+
+def name_from_log(filename: str) -> str | None:
+    """The daemon name a log file name carries, or ``None``."""
+    return _name_between(filename, LOG_PREFIX, LOG_SUFFIX)

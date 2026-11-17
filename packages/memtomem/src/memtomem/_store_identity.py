@@ -17,7 +17,17 @@ from pathlib import Path
 
 
 class StoreNotShareable(Exception):
-    """The configured store cannot be shared by a daemon; the message says why."""
+    """The configured store cannot be shared by a daemon; the message says why.
+
+    ``summary`` says it without the configured value, for a reason that is
+    logged and shown by ``mem_status``.
+    """
+
+    def __init__(
+        self, message: str, summary: str = "the configured store cannot be shared"
+    ) -> None:
+        super().__init__(message)
+        self.summary = summary
 
 
 def configured_store_path() -> Path | None:
@@ -84,16 +94,21 @@ def resolve_shared_store(db_path: Path | None) -> tuple[Path, Path]:
     configured = config.storage.sqlite_path
     if db_path is None or store_pid_digest(configured) is None:
         raise StoreNotShareable(
-            f"the store {str(configured)!r} cannot be named, so it cannot be shared"
+            f"the store {str(configured)!r} cannot be named, so it cannot be shared",
+            "the configured store (storage.sqlite_path) cannot be named, so it cannot be shared",
         )
     try:
         frozen = resolve_store_path(configured)
         named = resolve_store_path(db_path)
     except (OSError, RuntimeError, ValueError) as exc:
-        raise StoreNotShareable(f"the store {str(configured)!r} cannot be resolved: {exc}") from exc
+        raise StoreNotShareable(
+            f"the store {str(configured)!r} cannot be resolved: {exc}",
+            f"the configured store (storage.sqlite_path) cannot be resolved ({type(exc).__name__})",
+        ) from exc
     if frozen != named:
         raise StoreNotShareable(
             f"the store resolves two ways ({str(named)!r} and {str(frozen)!r}); "
-            "refusing to share it"
+            "refusing to share it",
+            "the configured store (storage.sqlite_path) resolves two ways; refusing to share it",
         )
     return Path(db_path), frozen
