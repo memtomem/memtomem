@@ -989,9 +989,16 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "normalize `claude` to `claude-code`, `codex` to `codex-cli`, `kimi` to `kimi-code`, "
         "and `antigravity` or `agy` to `antigravity-cli`",
         "insufficient_input: runtime",
+        # Save reports the record's own count as `mem_add` printed it (#3400), never the
+        # file-wide upsert count, which also covers earlier sections of the day's file.
+        "written file, and how many chunks the record's lines fall in: the value of the "
+        "result's `- Entry chunks:` line, unchanged",
+        "If the result has no such line, say that the server did not report it; do not "
+        "substitute `- Chunks indexed:`, which counts the whole file",
     )
     for marker in required:
         assert marker in flat, marker
+    assert "indexed chunk count" not in flat
     # The designs #2930's plan review rejected: a fetch's effect depends on refspec,
     # prune and fetch.all config; ancestry lazily fetches in a partial clone;
     # ``--get`` returns the last of several merge values; ``--abbrev-ref`` can name
@@ -1145,6 +1152,49 @@ def test_every_shipped_handoff_and_update_accepts_each_host_runtime_label() -> N
         assert labels in " ".join(content.split()), label
 
 
+@pytest.mark.parametrize(
+    ("attribution", "current_files", "shape"),
+    [
+        pytest.param("exact", 1, r"\d+", id="exact"),
+        pytest.param("merged", 1, r"\d+ \(.+\)", id="merged"),
+        pytest.param("unverified", 1, r"unknown", id="unverified"),
+        pytest.param("exact", 0, r"unknown \(.+\)", id="not-indexed"),
+    ],
+)
+def test_workflows_read_the_entry_chunks_line_as_mem_add_prints_it(
+    attribution: str, current_files: int, shape: str
+) -> None:
+    """``update`` and ``handoff`` key on the shape of ``mem_add``'s ``- Entry chunks:`` value.
+
+    Their text quotes the line's prefix, tells a value that starts with an integer
+    from one that starts with ``unknown``, and a bare value from one with a note in
+    parentheses. A server string that leaves those shapes fails here, so the
+    workflow text is read again with it.
+    """
+    from uuid import uuid4
+
+    from memtomem.models import IndexingStats
+    from memtomem.server.tools.memory_crud import _entry_chunks_line
+
+    stats = IndexingStats(
+        1,
+        2,
+        2,
+        0,
+        0,
+        0.0,
+        current_files=current_files,
+        appended_chunk_ids=(uuid4(), uuid4()),
+        appended_attribution=attribution,  # type: ignore[arg-type]
+    )
+    line = _entry_chunks_line(stats)
+    prefix = "- Entry chunks: "
+    assert line.startswith(prefix), line
+    assert re.fullmatch(shape, line.removeprefix(prefix)), line
+    for workflow in ("update", "handoff"):
+        assert f"`{prefix.rstrip()}`" in _project_body(workflow), workflow
+
+
 def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
     contract = _contract()
     update = next(row for row in contract["workflows"] if row["id"] == "update")
@@ -1280,9 +1330,33 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         "giving its weighted count",
         "An item whose weighted count is 1,000 or less is not over the limit",
         "items written over the length limit (each with its weighted count)",
+        # The item's own count is the `- Entry chunks:` value (#3400), reported as printed.
+        # It is how many chunks the item's lines fall in, not a verdict on what separated:
+        # a count of 2 with a note can be the previous section's chunk holding the item's
+        # heading plus an intact body. Under the real E5 tokenizer an item of 399 tokens
+        # reported 2, its citation alone in the second (test_mem_add_entry_chunks.py).
+        "Read the item's chunk count from the result's `- Entry chunks:` line and from no "
+        "other line: `- Chunks indexed:` counts the whole file, not this item",
+        "The value is everything after `- Entry chunks: ` on that line; report it unchanged, "
+        "including any note in parentheses",
+        "A value that starts with an integer: that is how many chunks the item's lines fall in",
+        "It does not show which text landed where",
+        "one of the chunks also holds text from before the item and may hold nothing of the "
+        "item but its heading",
+        "A value that starts with `unknown`, or a result with no such line (a server that does "
+        "not report it, or a replay of a result stored before it did): the count was not "
+        "reported",
+        "Say so, with the value when there is one",
+        "The count is a report, never a reason to write again: do not shorten, edit, or re-add "
+        "an item because of it",
+        "saved items (with their written files and each item's `Entry chunks` value as read "
+        "from its result)",
+        "items whose `Entry chunks` value starts with an integer of 2 or more (each with the "
+        "value unchanged)",
     )
     for marker in required:
         assert marker in flat, marker
+    assert "chunk counts" not in flat
     assert "at most 1,200 characters" not in flat
     assert "or at most 600 when any of it" not in flat
     assert "mem_do" not in body
@@ -1807,6 +1881,7 @@ def test_automation_failure_log_does_not_store_prompt(
 
 
 _PROJECT_WORKFLOWS_GUIDE = _ROOT / "docs/guides/project-workflows.md"
+_CROSS_RUNTIME_HANDOFF_GUIDE = _ROOT / "docs/guides/integrations/cross-runtime-handoff.md"
 _ROOT_README = _ROOT / "README.md"
 _PYPI_README = _ROOT / "packages/memtomem/README.md"
 _UPDATE_WORKFLOW = _ROOT / "packages/memtomem-plugin-assets/workflows/update.md"
@@ -1926,6 +2001,18 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
         f"is at most {limits[1]} characters, with each Korean, Japanese, or Chinese "
         f"character counted as {limits[2]}," in flat_guide
     ), limits.groups()
+
+    # Chunk counts: the guides name the value both workflows report, not the file-wide count.
+    assert "the written file, and the value of the result's `Entry chunks` line" in flat_guide
+    assert "the saved items with their files and each item's `Entry chunks` value" in flat_guide
+    assert "Items whose value is 2 or more are listed separately" in flat_guide
+    handoff_guide = " ".join(_CROSS_RUNTIME_HANDOFF_GUIDE.read_text(encoding="utf-8").split())
+    assert "written file, and the `Entry chunks` value its `mem_add` result printed" in (
+        handoff_guide
+    )
+    for text in (flat_guide, handoff_guide):
+        assert "indexed chunk count" not in text
+        assert "chunk counts" not in text
 
     # Host table: one row per surface, shipped hosts carry the invocation, the rest say so.
     host_rows = {row[0]: row for row in _table_rows(guide, "") if len(row) == 5}

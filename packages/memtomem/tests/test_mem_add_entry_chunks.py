@@ -7,7 +7,8 @@ content hash, and so cannot say whether the entry stayed in one chunk. The
 ``appended_attribution`` (#3292) instead.
 
 The tests go through the real ``mem_add`` on a BM25-only store and compare the
-reported count with the rows the store holds for the entry.
+reported count with the rows the store holds for the entry. One class does so
+under the E5 profile's budget and its pinned tokenizer.
 """
 
 from __future__ import annotations
@@ -176,6 +177,170 @@ class TestSplit:
         )
         qualifier = "(shares its first chunk with text before the entry)"
         assert _entry_line(result) == f"{len(rows)} {qualifier}"
+
+
+@pytest.fixture
+async def e5_store(tmp_path, monkeypatch, _e5_tokenizer_file):
+    """A BM25-only store chunked under the E5 profile's budget and pinned tokenizer.
+
+    The embedder stays off, so the profile's generated indexing values are
+    passed as explicit ones: left unset, a non-E5 identity resets them. The
+    engine's config is then compared with the profile field by field.
+    """
+    from helpers import isolate_memtomem_env
+    from memtomem.chunking.bounded import TokenBudget
+    from memtomem.config import EmbeddingConfig, Mem2MemConfig
+    from memtomem.embedding.profiles import PROFILE_INDEXING_FIELDS
+    from memtomem.server.component_factory import close_components, create_components
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir(exist_ok=True)
+    profile = Mem2MemConfig(
+        embedding=EmbeddingConfig(provider="onnx", model="multilingual-e5-small")
+    ).indexing
+    generated = {key: getattr(profile, key) for key in PROFILE_INDEXING_FIELDS}
+    assert generated["hard_max_chunk_tokens"] == 384
+    generated["chunk_tokenizer_path"] = _e5_tokenizer_file
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "e5.db"
+    config.embedding.dimension = 1024
+    config.search.enable_dense = False
+    config.indexing = config.indexing.model_copy(update={"memory_dirs": [mem_dir], **generated})
+    comp = await create_components(config)
+    try:
+        for key, value in generated.items():
+            assert getattr(comp.index_engine._config, key) == value, key
+        app = AppContext.from_components(comp)
+        yield app, StubCtx(app), mem_dir, TokenBudget(config.indexing)
+    finally:
+        await close_components(comp)
+
+
+# An update item as the workflow writes one: a line per point, paths and
+# symbols verbatim, then the citation the duplicate check asks for.
+_ITEM_LINES = (
+    "zqitem `mem_add` reported `Chunks indexed: 2` for an item appended to a file with two "
+    "earlier sections.",
+    "The count is `len(persisted_upserts)` for the whole file in "
+    "`packages/memtomem/src/memtomem/indexing/engine.py`, not the entry.",
+    "Cause: the re-index upserts a pending section in the same pass and reuses a chunk by "
+    "content hash (commit 4a97deb6c1f2e3d4a5b6c7d8e9f0a1b2c3d4e5f6).",
+    "Fix: read `IndexingStats.appended_chunk_ids` and `appended_attribution` (#3292), which "
+    "`mem_agent_share` already uses.",
+    "Rationale: the `update` workflow sizes an item for the 384-token ceiling of "
+    "`multilingual-e5-small` and needs the entry's own count.",
+    "Checked with `uv run pytest packages/memtomem/tests/test_mem_add_entry_chunks.py`: 12 "
+    "passed, and 5 mutations failed.",
+    "`mem_batch_add` has no such line: one `append_region` covers the whole batch, so no "
+    "count exists per entry.",
+    "A replay returns the stored result, so its `- Entry chunks:` line repeats the original value.",
+)
+_CITATION = (
+    "Related: (2026-11-16--shared-memtomem-18433f36c5b7778a.md, "
+    "3d0cbb0c-3df4-411f-b52d-2ae60e8d1d52)"
+)
+_KOREAN = "마이그레이션을 마치고 게이트웨이 경로를 검증한 뒤 리뷰를 올린다 "
+
+
+def _item(lines: int) -> str:
+    return "\n".join(_ITEM_LINES[:lines]) + "\n\n" + _CITATION
+
+
+class TestUnderTheE5Profile:
+    """The count against the pinned ``multilingual-e5-small`` tokenizer.
+
+    The other classes bound chunks with a byte-level tokenizer or not at all.
+    These use the budget the ``update`` and ``handoff`` workflows write under:
+    384 tokens, counted by the real tokenizer.
+    """
+
+    @staticmethod
+    async def _add_after_another_item(store, content: str) -> tuple[str, list]:
+        """``mem_add`` *content* below an earlier item; its result and the rows it added."""
+        app, ctx, mem_dir, _ = store
+        path = mem_dir / "a.md"
+        await _add(ctx, content="zqearlier " + LONG, title="Earlier", file="a.md")
+        before = {c.id: c.content for c in await app.storage.list_chunks_by_source(path)}
+
+        result = await _add(
+            ctx, content=content, title="Item", tags=["memory-update-item"], file="a.md"
+        )
+
+        after = await app.storage.list_chunks_by_source(path)
+        assert {c.id: c.content for c in after if c.id in before} == before, (
+            "the earlier item's rows must be untouched, so the new rows are the entry's"
+        )
+        return result, sorted(
+            (c for c in after if c.id not in before), key=lambda c: c.metadata.start_line
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("content", "tokens"),
+        [
+            # Under ``min_chunk_tokens`` (96): a short item with its own title
+            # still does not merge into the item before it.
+            pytest.param(_ITEM_LINES[0] + "\n\n" + _CITATION, 88, id="short"),
+            pytest.param(_item(7), 372, id="just-under-the-ceiling"),
+        ],
+    )
+    async def test_an_item_within_the_ceiling_is_one_chunk(self, e5_store, content, tokens):
+        budget = e5_store[3]
+        assert budget.count(content) == tokens, "the fixture's token count moved"
+
+        result, rows = await self._add_after_another_item(e5_store, content)
+
+        assert _entry_line(result) == "1"
+        (row,) = rows
+        assert "zqitem" in row.content and _CITATION in row.content
+
+    @pytest.mark.asyncio
+    async def test_an_item_over_the_ceiling_reports_the_chunk_its_citation_became(self, e5_store):
+        # The shape of #3400's data point (1,066 characters and 399 tokens there,
+        # stored as 340 plus a 60-token tail holding only the ``Related:`` line):
+        # this item is 1,050 characters and 399 tokens, stored as 345 plus 55.
+        budget = e5_store[3]
+        content = _item(8)
+        assert (len(content), budget.count(content)) == (1050, 399), (
+            "the fixture must sit just over the 384-token ceiling"
+        )
+
+        result, rows = await self._add_after_another_item(e5_store, content)
+
+        assert _entry_line(result) == "2"
+        body, tail = rows
+        assert "zqitem" in body.content and _CITATION not in body.content
+        assert tail.content.strip() == _CITATION
+        assert [budget.count(row.content) for row in rows] == [345, 55]
+
+    @pytest.mark.asyncio
+    async def test_a_run_of_blank_lines_adds_no_chunk_of_its_own(self, e5_store):
+        # The count is by span, so a fragment holding only blank lines would
+        # count. A run of them before the citation of an item over the ceiling
+        # does not become one: the item is still its text and its citation.
+        budget = e5_store[3]
+        content = "\n".join(_ITEM_LINES) + "\n" * 9 + _CITATION
+        assert budget.count(content) > 384, "the fixture must exceed the ceiling"
+
+        result, rows = await self._add_after_another_item(e5_store, content)
+
+        assert _entry_line(result) == str(len(rows)) == "2"
+        assert all(row.content.strip() for row in rows)
+        assert all(line in rows[0].content for line in _ITEM_LINES)
+        assert rows[-1].content.strip() == _CITATION
+
+    @pytest.mark.asyncio
+    async def test_a_korean_item_over_the_ceiling_reports_its_rows(self, e5_store):
+        budget = e5_store[3]
+        content = ("zqitem " + _KOREAN * 30)[:800]
+        assert budget.count(content) == 444, "the fixture must exceed the ceiling"
+
+        result, rows = await self._add_after_another_item(e5_store, content)
+
+        assert len(rows) == 2
+        assert _entry_line(result) == "2"
+        assert all(budget.count(row.content) <= 384 for row in rows)
 
 
 class TestNotExact:

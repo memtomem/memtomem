@@ -34,7 +34,7 @@ behaviour is the same everywhere and only the invocation differs.
 
 This guide describes the workflows as shipped with memtomem `0.7.10` and these
 plugin versions:
-`claude` 0.5.38 · `codex` 0.3.36 · `opencode` 0.3.34 · `kimi` 0.2.26 · `antigravity` 0.2.15 · `cursor` 0.1.0.
+`claude` 0.5.39 · `codex` 0.3.37 · `opencode` 0.3.35 · `kimi` 0.2.27 · `antigravity` 0.2.16 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).
@@ -80,7 +80,9 @@ next_action
 The record goes to `scope="project_local"` with the tags `handoff`,
 `from-<runtime>`, `to-<runtime>`, `handoff-to-<runtime>`, and
 `handoff-id-<id>`. Save reports the `handoff_id`, the effective scope and
-namespace, the written file, and the indexed chunk count.
+namespace, the written file, and the value of the result's `Entry chunks` line:
+how many chunks the record's lines fall in. When the server does not print that
+line, Save says so instead of reporting another number.
 
 **Resume** loads one record: the one whose `handoff_id` you name, or otherwise
 the newest one addressed to the current runtime or to `any`. It treats the
@@ -173,8 +175,16 @@ or the variable not set. `topic` mode never touches coverage, so it keeps
 working either way.
 
 The report names the mode, `git_head`, the commits read, the coverage result,
-the saved items with their files and chunk counts, the skipped duplicates, and
-the yield as `commit-derived: <N>` and `session-derived: <M>`. An incremental
+the saved items with their files and each item's `Entry chunks` value, the
+skipped duplicates, and the yield as `commit-derived: <N>` and
+`session-derived: <M>`. The `Entry chunks` value is the one `mem_add` printed
+for that item. An integer is how many chunks the item's lines fall in, and it
+is followed by a note in parentheses when the first of those chunks also holds
+earlier text. Items whose value is 2 or more are listed separately. The integer
+does not say which text landed in which chunk, and `update` never rewrites an
+item because of it. When the value starts with `unknown`, or the server does
+not print the line, the report says the count was not reported and keeps the
+value when there is one. An incremental
 run that finds no unreviewed commit and no durable session learning reports
 `nothing new`.
 
