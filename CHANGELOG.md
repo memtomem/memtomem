@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Security
+
+- An advisory against `picomatch` 4.0.7 (npm), which GitHub reviewed on 2026-11-17, lets
+  a caller who can supply a glob pattern stall the process with a pattern such as
+  `+(*a)`; no fixed release exists, and 4.0.7 is the latest. It is a dev-only dependency
+  of the web UI's JavaScript unit tests, which reach it through `vitest`. Those tests
+  pass no glob of their own, and the only glob this repository authors for the run is
+  the `include` in `vitest.config.mjs`. The wheel does not contain `tests-js`; the source
+  distribution carries the test sources and their lockfile but no `node_modules`, so
+  installing memtomem neither installs nor runs `picomatch`. The advisory is recorded as
+  an exception with the same 2026-12-20 expiry as the others
+  ([GHSA-fc5q-39xc-vjpf](https://osv.dev/vulnerability/GHSA-fc5q-39xc-vjpf)).
+
 ## [0.7.11] — 2026-11-17
 
 ### Upgrading
