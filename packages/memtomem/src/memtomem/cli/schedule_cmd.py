@@ -8,12 +8,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import click
 
 from croniter import croniter  # type: ignore[import-untyped]
 
 from memtomem.scheduler.jobs import JOB_KINDS, run_job, run_outcome, validate_new_params
+
+
+class _JobChoice(click.Choice):
+    """Dynamic click.Choice reflecting available JOB_KINDS at command execution time.
+
+    Avoids freezing choices at module import time when JOB_KINDS is patched in tests (#3439).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(choices=(), case_sensitive=True)
+
+    @property
+    def choices(self) -> tuple[Any, ...]:
+        from memtomem.scheduler import jobs
+
+        return tuple(sorted(jobs.JOB_KINDS))
+
+    @choices.setter
+    def choices(self, _value: object) -> None:
+        pass
 
 
 @click.group()
@@ -46,7 +67,7 @@ Examples:
     "--job",
     "job_kind",
     required=True,
-    type=click.Choice(sorted(JOB_KINDS)),
+    type=_JobChoice(),
     help="Job kind to run",
 )
 @click.option("--params", "params_json", default=None, help="JSON-encoded params dict")
@@ -61,7 +82,9 @@ def schedule_add(cron_expr: str, job_kind: str, params_json: str | None) -> None
     if not isinstance(params, dict):
         raise click.ClickException("--params must decode to a JSON object")
 
-    spec = JOB_KINDS[job_kind]
+    from memtomem.scheduler import jobs
+
+    spec = jobs.JOB_KINDS[job_kind]
     try:
         validate_new_params(spec, params)
     except Exception as exc:
