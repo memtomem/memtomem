@@ -318,8 +318,9 @@ record.
 
 A `dedup_scan` result also reports what the scan covered: `pool` (chunks
 selected, at most `max_scan`), `probed` (pool chunks searched with their
-stored vector) and `without_vector` (pool chunks with no usable stored
-vector, not probed).
+stored vector), `without_vector` (pool chunks with no usable stored
+vector, not probed) and `same_source_read_only_pairs` (pairs left out because
+both members are read-only chunks of the same file; neither can be removed).
 - **Zero candidates with a large `without_vector` count** means part of the
   pool was never checked, not that it is duplicate-free.
 - **`near_search_enabled: false`** (a BM25-only store) means only exact

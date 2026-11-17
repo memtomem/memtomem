@@ -71,6 +71,26 @@ class DedupCoverage:
     # Pool chunks the vector lookup returned nothing for: not vectorised yet, or
     # a stored vector that could not be decoded. They are not probed.
     without_vector: int
+    # Pairs left out because both members are read-only chunks of one source
+    # (see ``same_source_read_only``). Counted once per pair, before ``limit``.
+    same_source_read_only: int = 0
+
+
+def same_source_read_only(a: Chunk, b: Chunk) -> bool:
+    """Both chunks are stored read-only and come from the same stored source.
+
+    Such a pair cannot be resolved: ``mem_delete`` and ``mem_dedup_remove``
+    refuse a read-only member, and a store-only merge would drop one slice of
+    a file nothing here can rewrite (a near pair's slices hold different text)
+    until that file's next index pass. A minified JSON file sliced by
+    ``chunk_json`` pairs with itself hundreds of times (#3418). Read-only pairs
+    across two sources, and pairs with a writable member, are kept.
+    """
+    return (
+        a.metadata.source_read_only
+        and b.metadata.source_read_only
+        and a.metadata.source_file == b.metadata.source_file
+    )
 
 
 class DedupScanner:
@@ -119,20 +139,26 @@ class DedupScanner:
             raise ValueError(f"max_scan must be at least 1, got {max_scan}")
         all_chunks, eligible = await self._select_pool(max_scan)
 
+        # A pair is recorded in ``seen`` whether it is kept or left out, so no
+        # later phase or reverse probe reaches it again; ``omitted`` holds the
+        # left-out ones, so each is counted once.
         seen: set[frozenset] = set()
+        omitted: set[frozenset] = set()
         candidates: list[DedupCandidate] = []
 
         # Phase 1: exact duplicates
-        candidates.extend(self._find_exact_duplicates(all_chunks, seen))
+        candidates.extend(self._find_exact_duplicates(all_chunks, seen, omitted))
 
         # Phase 2: near duplicates over the same pool
-        near, coverage = await self._find_near_duplicates(all_chunks, eligible, threshold, seen)
+        near, coverage = await self._find_near_duplicates(
+            all_chunks, eligible, threshold, seen, omitted
+        )
         candidates.extend(near)
 
         # Exact first, then by score descending
         candidates.sort(key=lambda c: (not c.exact, -c.score))
 
-        return candidates[:limit], coverage
+        return candidates[:limit], replace(coverage, same_source_read_only=len(omitted))
 
     async def member_evidence(
         self, candidates: Sequence[DedupCandidate]
@@ -258,7 +284,7 @@ class DedupScanner:
         return await self._storage.list_visible_chunks_by_id(max_scan)
 
     def _find_exact_duplicates(
-        self, chunks: list[Chunk], seen: set[frozenset]
+        self, chunks: list[Chunk], seen: set[frozenset], omitted: set[frozenset]
     ) -> list[DedupCandidate]:
         hash_groups: dict[str, list[Chunk]] = defaultdict(list)
         for chunk in chunks:
@@ -275,6 +301,9 @@ class DedupScanner:
                 if pair in seen:
                     continue
                 seen.add(pair)
+                if same_source_read_only(keep, dup):
+                    omitted.add(pair)
+                    continue
                 candidates.append(DedupCandidate(chunk_a=keep, chunk_b=dup, score=1.0, exact=True))
         return candidates
 
@@ -284,6 +313,7 @@ class DedupScanner:
         eligible: int,
         threshold: float,
         seen: set[frozenset],
+        omitted: set[frozenset],
     ) -> tuple[list[DedupCandidate], DedupCoverage]:
         candidates: list[DedupCandidate] = []
         enabled = getattr(self._storage, "dense_enabled", True) is not False
@@ -331,6 +361,9 @@ class DedupScanner:
                 if pair in seen:
                     continue
                 seen.add(pair)
+                if same_source_read_only(chunk, r.chunk):
+                    omitted.add(pair)
+                    continue
                 # Older chunk becomes chunk_a (keep candidate)
                 if chunk.created_at <= r.chunk.created_at:
                     chunk_a, chunk_b = chunk, r.chunk
