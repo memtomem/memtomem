@@ -698,34 +698,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def _resolve_frozen_store() -> tuple[Path, Path]:
     """``(pid-naming path, frozen identity)``, or :class:`DaemonStartError`."""
-    from memtomem._runtime_paths import store_pid_digest
-    from memtomem.config import RelativeConfigPathError
-    from memtomem.config_signature import build_fresh_config
+    from memtomem._store_identity import StoreNotShareable, resolve_shared_store
     from memtomem.server import _resolve_store_db_path
 
-    db_path = _resolve_store_db_path()
     try:
-        config = build_fresh_config(migrate=False, strict_overrides=False)
-    except RelativeConfigPathError as exc:
+        return resolve_shared_store(_resolve_store_db_path())
+    except StoreNotShareable as exc:
         raise DaemonStartError(str(exc)) from exc
-    configured = config.storage.sqlite_path
-    if db_path is None or store_pid_digest(configured) is None:
-        raise DaemonStartError(
-            f"the store {str(configured)!r} cannot be named, so it cannot be shared"
-        )
-    from memtomem.server.context import resolve_store_path
-
-    try:
-        frozen = resolve_store_path(configured)
-        named = resolve_store_path(db_path)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise DaemonStartError(f"the store {str(configured)!r} cannot be resolved: {exc}") from exc
-    if frozen != named:
-        raise DaemonStartError(
-            f"the store resolves two ways ({str(named)!r} and {str(frozen)!r}); "
-            "refusing to share it"
-        )
-    return Path(db_path), frozen
 
 
 def _lock_lifetime(path: Path, targets: list[Any], process_started: str) -> Any:
