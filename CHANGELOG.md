@@ -11,8 +11,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **The plugins move their pin to 0.7.11 in the same release; a plugin that is not updated
   keeps launching 0.7.10.** This release delivers Claude `0.5.42`, Codex `0.3.40`,
-  `memtomem-automation` `0.3.25`, OpenCode `0.3.38`, Hermes `0.1.25`, Antigravity `0.2.19`
-  and OpenClaw `0.1.3`; Kimi stays `0.2.29` and Cursor `0.1.0`. The entries below name the
+  `memtomem-automation` `0.3.25`, OpenCode `0.3.38`, Hermes `0.1.25`, Antigravity `0.2.19`,
+  OpenClaw `0.1.3` and Kimi `0.2.29` (`0.2.25` in the 0.7.10 release); Cursor stays
+  `0.1.0`. The entries below name the
   version in which each workflow text first changed. OpenCode `0.3.34` to `0.3.37` were
   never published to npm, so `opencode-memtomem@0.3.38` is the first npm release that
   carries those changes.
@@ -64,7 +65,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   spellings of its path (#3408).** Such a store exists where a directory on a
   case-insensitive volume was indexed under two spellings. The refusal says how to go on:
   remove the stale spelling's rows from the web UI's Sources tab, which removes index rows
-  only (see Fixed).
+  only, or edit the file directly when that tab lists neither spelling, as for a project's
+  `memories.local` tier (see Fixed).
+- **A `.env` kept inside the installed package's `memtomem/server/` directory is no longer
+  read (#3381).** The server's search for the nearest `.env` now starts one directory
+  higher (see Changed). Move such a file up to `memtomem/` or to any directory above it:
+  this release and earlier ones both find it there.
 - **An Ollama model that thinks now answers without thinking (#3382).** Every request the
   Ollama provider sends carries `think: false`, in every LLM feature, and no setting turns
   thinking back on. What such a model writes can differ from before (see Fixed).
@@ -85,18 +91,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   such as `.json`, or another writer's text in the file), and `unknown (this write did not
   index the file)` when this write left the file's chunks not current: an exclusion, a
   relink, an embedding failure, a file type with no chunker, a file too large or binary, or
-  another hold. An idempotent replay repeats the line. `mem_batch_add` has no such line: one
+  another hold. An idempotent replay returns the stored result, so it repeats the line when
+  the first call's result had it. `mem_batch_add` has no such line: one
   append covers the whole batch, so there is no count per entry. `Chunks indexed` is
   unchanged.
 
 - **A bounded duplicate scan can be continued (#3397).** `mem_dedup_scan` and
   `GET /api/dedup/candidates` take `after`, a chunk id: the scan takes the next `max_scan`
-  scannable chunks after it in chunk-id order. A scan used to cover the first `max_scan`
-  chunks and nothing could ask for the ones after them, so on a large store most chunks were
-  never scanned unless `max_scan` was raised, and the near phase's time grows with it. The
-  tool's last line now ends with how many chunks remain and the value that continues
-  (`38958 remain: continue with after="<chunk id>"`), or with `reached the end of the store`;
-  it no longer advises raising `max_scan`. The route returns `next_after` and
+  scannable chunks after it in chunk-id order. A scan covered one pool of at most `max_scan`
+  chunks and nothing could ask for the rest, so on a large store a scan left most chunks
+  out unless `max_scan` was raised, and the near phase's time grows with it. The tool's
+  last line now says how many chunks remain and the value that continues
+  (`38958 remain: continue with after="<chunk id>"`), and a scan that was given `after`
+  and took the last chunks says `reached the end of the store`. The route returns `next_after` and
   `remaining_chunks`. The cursor is a position in chunk-id order, so chunks added or removed
   between calls do not shift the ones still to come; a chunk added before the cursor waits
   for the next walk. When one pool holds more pairs than `limit`, the scan says so
@@ -126,7 +133,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   join it when they match it on the `MEMTOMEM_*` and `LANGFUSE_*` variables after `.env`, the
   tool mode and extra tools, `HOME`, the store path and the installed package. The variables
   are compared in the order the process holds them, so the same variables in another order do
-  not match (`not joined (env (order))`). A session that does
+  not match (the reason then reads `env (order)`). A session that does
   not match, cannot share its store, uses a relative configured path, or runs on Windows is
   served standalone, and `mem_status` shows `Shared daemon: NAME not joined (<reason>)`. Without
   the option nothing changes. A joined session uses the daemon's live configuration, and inputs
@@ -158,7 +165,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   scan, so a heading or line number that changed in between shows its new value; a pair is
   left out, and counted, when that read does not return one of its members (deleted, or on a
   path the scan's listing hides) or the bodies of an exact pair do not match. With the setting
-  off the output is unchanged. The
+  off none of these lines are printed. The
   tool's parameters are the same either way, and `mem_config` and `mm config set` do not
   change the setting.
 
@@ -181,8 +188,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   run-now` and `schedule_run_now` move it as a dispatched run does, and deleting a schedule
   deletes it. Runs of one schedule that overlap scan the same pool, and one that finishes
   late puts the position back at the end of its own pool. The counts of a walk's runs do
-  not add up to a count for the store. An older memtomem sharing the database scans the
-  first pool on its runs and leaves the position alone.
+  not add up to a count for the store. An older memtomem sharing the database scans a
+  pool of its own choosing on its runs and leaves the position alone.
 
 - **The `update` and `handoff` workflows report the `Entry chunks` value `mem_add` prints
   (#3400).** Both reported a chunk count, and the only one a `mem_add` result had was
@@ -212,9 +219,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `0.2.28`, Antigravity `0.2.17`, Hermes `0.1.24`, OpenClaw `0.1.2`. Cursor stays `0.1.0`
   while its first marketplace review is open, but its rendered skill changes too.
 
-- **`handoff` save reports a refused `mem_add` as the refusal (#3443).** A `mem_add` result
-  that is a refusal or an error has no `Entry chunks` line, so save described it as a write
-  whose count the server did not report. Save now reports the handoff id, scope, namespace,
+- **`handoff` save reports a refused `mem_add` as the refusal (#3443).** Save's last step
+  had no branch for a `mem_add` result that is a refusal or an error, so it reported such a
+  result in the shape of a write. Save now reports the handoff id, scope, namespace,
   file and `Entry chunks` value only when `mem_add` confirms the write. It reports a refusal
   or an error unchanged and adds no file or chunk count of its own; a refusal that names a
   file in its own text keeps it. `handoff` can get such a result because it passes
@@ -230,7 +237,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   store such pairs were 306 of 412 at `max_scan=5000`. Neither member of such a pair can be
   removed (`mem_delete` and `mem_dedup_remove` refuse a read-only chunk), so they no longer
   take `limit` slots. Read-only pairs across two files and pairs with a writable member are
-  still listed. `mem_dedup_scan`'s coverage line ends with `left out N pairs of read-only
+  still listed. `mem_dedup_scan`'s coverage line says `left out N pairs of read-only
   chunks from the same file` when there are any, `GET /api/dedup/candidates` adds
   `same_source_read_only_pairs`, the Maintenance panel shows the count under the results
   (including "No duplicates found"), and a scheduled `dedup_scan` result adds the same key.
@@ -269,7 +276,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` and holds `huggingface-hub` at 1.20 or later, the first
   release that checks the variable before it opens the saved login; `HF_TOKEN` is not used
   either. A fresh BM25-only configuration never contacted Hugging Face. The launch entries
-  of the other clients are unchanged.
+  of the other clients gain no such setting.
 
 ### Fixed
 
@@ -298,7 +305,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   project's `memories.local` tier or a held source). Nothing else changes: indexing a second spelling still adds its rows,
   and existing duplicates stay until removed (#3409).
 - **A bounded duplicate scan selects the same chunks in every process (#3390).**
-  `mem_dedup_scan`, the web `GET /dedup/candidates` route and the scheduled `dedup_scan` job
+  `mem_dedup_scan`, the web `GET /api/dedup/candidates` route and the scheduled `dedup_scan` job
   scan at most `max_scan` chunks (default 500). They filled that pool source by source in the
   iteration order of a Python `set`, which changes with the per-process hash seed, so the MCP
   server and `mm web` on one store, or one job on either side of a restart, scanned different
@@ -334,8 +341,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `[]` triggered a database rollback error. Truthy non-strings (`5`, `["sk-..."]`, `{"k": 1}`)
   failed deep inside the write guard with internal type errors. `set_namespace_meta` now
   validates that any non-`None` description is a string, matching `validate_namespace_color`, so
-  every MCP tool and storage call consistently reports
-  `Error: Invalid namespace description: expected a string` and stores nothing.
+  every MCP tool reports `Error: Invalid namespace description: expected a string`, a
+  storage call raises the same message, and nothing is stored.
 
 - **Resources answer over stdio (#3374).** Reading the four static resources from a stdio
   server failed, and with the MCP SDK `mcp` 2.2.0 the two templated ones failed too, while
