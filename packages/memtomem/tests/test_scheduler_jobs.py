@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from memtomem.scheduler import JOB_KINDS, JobSpec
-from memtomem.scheduler.jobs import validate_new_params
+from memtomem.scheduler.jobs import _dedup_cursor, run_job, validate_new_params
+from memtomem.storage.mixins.schedules import KEEP_STATE
 from memtomem.server.context import AppContext
 from memtomem.storage import orphan_detect
 
@@ -55,6 +58,81 @@ class TestJobRegistryShape:
         assert "mm gc orphan-sources --apply" in description, description
 
 
+class _OneParam(BaseModel):
+    n: int = 1
+
+
+class TestRunJob:
+    """``run_job`` is the one place a runner is called from (#3432)."""
+
+    def test_only_the_dedup_scan_keeps_state(self):
+        assert {name for name, spec in JOB_KINDS.items() if spec.keeps_state} == {"dedup_scan"}
+
+    @pytest.mark.asyncio
+    async def test_a_job_without_state_is_not_handed_one_and_keeps_what_is_stored(self):
+        calls = []
+
+        async def runner(app, **kwargs):
+            calls.append((app, kwargs))
+            return {"done": True}
+
+        spec = JobSpec("plain", "t", _OneParam, runner)
+        out = await run_job(spec, "app", _OneParam(n=3), {"stored": 1})
+        assert out == ({"done": True}, KEEP_STATE)
+        assert calls == [("app", {"n": 3})]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("update", [{"after": "x"}, None, KEEP_STATE])
+    async def test_a_job_with_state_gets_it_and_says_what_to_store(self, update):
+        calls = []
+
+        async def runner(app, *, state, **kwargs):
+            calls.append((app, state, kwargs))
+            return {"done": True}, update
+
+        spec = JobSpec("walking", "t", _OneParam, runner, keeps_state=True)
+        result, returned = await run_job(spec, "app", _OneParam(n=3), {"stored": 1})
+        assert result == {"done": True}
+        assert returned is update or returned == update
+        assert calls == [("app", {"stored": 1}, {"n": 3})]
+
+
+class TestDedupCursor:
+    def test_no_state_is_no_cursor_and_no_warning(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="memtomem.scheduler.jobs"):
+            assert _dedup_cursor(None) is None
+        assert caplog.records == []
+
+    def test_a_stored_chunk_id_is_the_cursor(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="memtomem.scheduler.jobs"):
+            cursor = _dedup_cursor({"after": "00000000-0000-0000-0000-0000000001f4"})
+        assert cursor == UUID(int=500)
+        assert caplog.records == []
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            {},
+            {"after": None},
+            {"after": 500},
+            {"after": "nope"},
+            # Forms ``UUID()`` parses that are not the form ids are stored in:
+            # as a cursor they would compare as other text than the ids.
+            {"after": "00000000-0000-0000-0000-0000000001F4"},
+            {"after": "000000000000000000000000000001f4"},
+            {"after": "{00000000-0000-0000-0000-0000000001f4}"},
+            {"after": " 00000000-0000-0000-0000-0000000001f4"},
+        ],
+        ids=["empty", "null", "number", "text", "upper", "no-hyphens", "braces", "padded"],
+    )
+    def test_anything_else_is_logged_and_read_as_no_cursor(self, state, caplog):
+        with caplog.at_level(logging.WARNING, logger="memtomem.scheduler.jobs"):
+            assert _dedup_cursor(state) is None
+        assert [r.getMessage() for r in caplog.records] == [
+            f"dedup_scan: stored position {state!r} is not a chunk id; starting from the first pool"
+        ]
+
+
 class TestRunners:
     @pytest.mark.asyncio
     async def test_compaction_idempotent_on_empty(self, app):
@@ -88,10 +166,12 @@ class TestRunners:
     @pytest.mark.asyncio
     async def test_dedup_scan_zero_on_empty(self, app):
         spec = JOB_KINDS["dedup_scan"]
-        result = await spec.runner(app, **spec.params_model().model_dump())
+        result, state = await spec.runner(app, **spec.params_model().model_dump())
         assert "candidates" in result
         assert result["candidates"] == 0
         assert result["same_source_read_only_pairs"] == 0
+        # An empty store is one whole walk: nothing to continue from.
+        assert (result["after"], result["next_after"], state) == (None, None, None)
 
     @pytest.mark.asyncio
     async def test_dedup_scan_reports_left_out_read_only_pairs(self, app):
@@ -111,7 +191,7 @@ class TestRunners:
             )
         )
         spec = JOB_KINDS["dedup_scan"]
-        result = await spec.runner(app, **spec.params_model().model_dump())
+        result, _ = await spec.runner(app, **spec.params_model().model_dump())
         assert result["candidates"] == 0
         assert result["same_source_read_only_pairs"] == 2
 
