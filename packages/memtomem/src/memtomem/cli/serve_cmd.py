@@ -27,7 +27,7 @@ def serve() -> None:
 
     For network transports and their options, use `memtomem-server`.
     """
-    from memtomem.server import main as server_main
+    from memtomem._server_entry import main as server_main
 
     # Explicit empty argv, never the implicit ``None``. ``main()`` re-parses
     # the command line with argparse, and Click does not consume ``serve``

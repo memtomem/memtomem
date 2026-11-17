@@ -280,9 +280,14 @@ def _hermetic_dotenv(
         if upper in _BARE_LANGFUSE_ENV_VARS or upper.startswith(_SESSION_TRACE_ENV_PREFIX):
             monkeypatch.delenv(key, raising=False)
     if request.node.get_closest_marker("real_dotenv") is None:
+        from memtomem import _dotenv
         from memtomem.server import lifespan as lifespan_mod
 
+        # Both: the lifespan's seam is what server code and existing tests
+        # replace, the light module is what a caller outside the server
+        # package reaches directly.
         monkeypatch.setattr(lifespan_mod, "_load_dotenv", lambda: None)
+        monkeypatch.setattr(_dotenv, "load_dotenv", lambda: [])
 
 
 def _ollama_available() -> bool:
