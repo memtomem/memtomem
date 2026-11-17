@@ -62,3 +62,14 @@ id = "GHSA-chp3-j5qr-2vfr"
 owner = "memtomem"
 reason = "effect (npm) flaw reached only by building a Set-Cookie header from untrusted cookie name, domain or path; dev-only, @opencode-ai/plugin pins effect 4.0.0-beta.83 exactly (plugin 1.19.5, its latest, still does); opencode-memtomem imports only types from @opencode-ai/plugin and nothing from effect, ships no dependencies, and neither it nor its build sets cookies"
 ignoreUntil = 2026-12-20
+
+# picomatch 4.0.7 in packages/memtomem/tests-js/package-lock.json (dev). OSV.dev revised
+# GHSA-fc5q-39xc-vjpf on 2026-11-17 to cover 4.0.7, which is also picomatch's latest
+# release, so no version is fixed. vitest 5.1.0 pulls it through vite 8.3.6, tinyglobby and
+# fdir. Remove when picomatch publishes a fixed release and the lock moves to it.
+
+[[exceptions]]
+id = "GHSA-fc5q-39xc-vjpf"
+owner = "memtomem"
+reason = "picomatch (npm) ReDoS reached only by matching against an untrusted extglob pattern; dev-only, pulled by vitest 5.1.0 through vite, tinyglobby and fdir in the JS unit-test runner; 4.0.7 is the latest release and no fix exists; its patterns come from vitest.config.mjs, vitest's own defaults and a developer's CLI flags, never from application input; the sdist carries the tests-js lockfile but nothing installs picomatch at runtime"
+ignoreUntil = 2026-12-20

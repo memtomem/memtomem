@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Security
+
+- An advisory against `picomatch` (npm), revised on 2026-11-17 to cover 4.0.7, lets an
+  untrusted extglob pattern take super-linear time to match. 4.0.7 is picomatch's latest
+  release, so no fixed version exists. It is a dev-only dependency of the JS unit tests,
+  pulled by `vitest` through `vite`, `tinyglobby` and `fdir`. Its patterns come from
+  `vitest.config.mjs`, vitest's defaults and a developer's command-line flags, never from
+  application input, and no memtomem install pulls in picomatch at runtime, so the
+  advisory is recorded as an exception with the same 2026-12-20 expiry as the others.
+
 ## [0.7.11] — 2026-11-17
 
 ### Upgrading
