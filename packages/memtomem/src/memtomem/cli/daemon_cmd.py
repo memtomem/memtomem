@@ -185,9 +185,9 @@ def _stop_one(daemon: DaemonState, grace: float) -> str | None:
 def stop(name: str | None, grace: float) -> None:
     """Stop the shared daemon NAME, or every running one.
 
-    Every session connected to a stopped daemon ends; its client starts a new
-    server when it next needs one. Exit status: 0 when nothing selected is left
-    running, 1 otherwise.
+    Every session connected to a stopped daemon ends (its server exits 1); the
+    client may need a reconnect or a restart. Exit status: 0 when nothing selected
+    is left running, 1 otherwise.
     """
     name = _validated_name(name)
     if os.name == "nt":

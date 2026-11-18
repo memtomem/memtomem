@@ -7,6 +7,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm daemon stop --help` clarifies client session termination and reconnect behavior (#3447).**
+  The help text previously stated that a connected client starts a new server when it next needs
+  one, which memtomem does not control or guarantee. The help text now accurately documents
+  that connected sessions end with status code 1 and that reconnecting or restarting is the
+  client's responsibility, aligning the CLI docstring with the shared daemon guide.
 - **A schedule the dispatcher cannot schedule now says so in every listing (#3459).** A row
   stored with non-ASCII digits or spaces, which croniter 7 refuses and croniter 6 accepted,
   was skipped on every dispatcher tick with only a warning in the log, and every listing
