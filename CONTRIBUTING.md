@@ -65,7 +65,7 @@ uv run mypy packages/memtomem/src packages/langchain-memtomem/src
 - `packages/memtomem-cursor-plugin/` — Cursor plugin (the Antigravity skill set, with the explicit-only workflows marked `disable-model-invocation`; the repo-root `.cursor-plugin/marketplace.json` lists it)
 - `packages/memtomem-openclaw-bundle/` — OpenClaw plugin bundle in the Codex bundle format (the Hermes user-scope skill set and launch line; `openclaw.plugin.json` carries the ClawHub name and category)
 - `packages/langchain-memtomem/` — `langchain-memtomem`: a LangGraph `BaseStore` whose query search runs the memtomem pipeline in an index the store owns (ADR-0042); second workspace member, own version line
-- `packages/memtomem-hermes-memory/` — Hermes Agent memory provider `memtomem-memory` (recall-only, through Hermes's own memtomem MCP connection; standard library, Python 3.11+)
+- `packages/memtomem-hermes-memory/` — Hermes Agent memory provider `memtomem-memory` (recall on eligible user turns, plus optional mirroring of Hermes's built-in memory with `mirror_writes`, through Hermes's own memtomem MCP connection; standard library, Python 3.11+)
 - `packages/memtomem-plugin-assets/` — shared plugin contract (`contract.toml`) and workflow sources rendered into the plugins by `tools/render_plugin_assets.py`
 
 The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](https://github.com/memtomem/memtomem-stm).
@@ -136,8 +136,13 @@ uv run pytest packages/memtomem/tests/web/
 # Run everything; tests carrying ``@pytest.mark.browser`` auto-skip when
 # pytest-playwright or Chromium aren't available, so the full suite
 # stays green on contributor laptops that haven't run the install
-# above (see ``packages/memtomem/tests/conftest.py:108``).
+# above (see ``_playwright_browser_unavailable`` in
+# ``packages/memtomem/tests/conftest.py``; the skip reason names the error).
 uv run pytest -m "not ollama"
+
+# Make a Chromium that cannot launch an error instead of a skip, as the
+# CI ``browser`` job does.
+MEMTOMEM_TEST_REQUIRE_BROWSER=1 uv run pytest packages/memtomem/tests/web -m browser
 ```
 
 ### Harness shape
