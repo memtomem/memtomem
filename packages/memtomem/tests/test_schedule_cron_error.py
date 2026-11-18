@@ -2,9 +2,11 @@
 
 croniter 7 refuses expressions with non-ASCII digits or spaces that croniter 6
 accepted, so a row stored under 6 raises in ``schedule_list_due`` on every
-tick and is skipped with only a log line. An expression for a date that never
-comes (``0 0 30 2 *``) passes ``croniter.is_valid`` and is skipped the same
-way. Each read now carries ``cron_error`` for such a row.
+tick and is skipped with only a log line. Each read now carries
+``cron_error``: the croniter error when croniter cannot parse the expression
+(blocked), or ``unchecked: ...`` when the check did not reach a verdict, which
+includes ``CroniterBadDateError`` (a date that never occurs, or one draw of a
+random field).
 """
 
 from __future__ import annotations
@@ -15,9 +17,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
+import croniter as croniter_mod  # type: ignore[import-untyped]
 import pytest
 from click.testing import CliRunner
-import croniter as croniter_mod  # type: ignore[import-untyped]
 from croniter import croniter  # type: ignore[import-untyped]
 
 from memtomem.cli import cli
@@ -25,9 +27,12 @@ from memtomem.server.context import AppContext
 from memtomem.server.tools import schedule as schedule_tools
 from memtomem.storage.mixins import schedules as schedules_mod
 
-DIGIT = "0 ٣ * * *"  # ARABIC-INDIC DIGIT THREE as the hour
-NBSP = "0 3 * * *"  # NO-BREAK SPACE between the fields
-NEVER = "0 0 30 2 *"  # valid syntax, no 30 February
+DIGIT = "0 \u0663 * * *"  # ARABIC-INDIC DIGIT THREE as the hour
+NBSP = "0\u00a03 * * *"  # NO-BREAK SPACE between the fields
+BOGUS = "bogus"  # refused by every croniter version
+NEVER = "0 0 30 2 *"  # parses, no 30 February
+RANDOM = "0 0 R(28-30) 2 *"  # fails only on the draw that lands on the 30th
+RARE = "0 0 29 2 * 0 R(1970-2028)"  # schedules only when the year draw is 2028
 VALID = "*/5 * * * *"
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -71,26 +76,36 @@ def _set_last_run_at(storage, sid: str, value: str) -> None:
     db.commit()
 
 
-class TestStoredRows:
+def _error(storage, sid: str) -> str | None:
+    return asyncio.run(storage.schedule_get(sid))["cron_error"]
+
+
+def _blocked_class(value: str | None) -> type | None:
+    """The croniter class a blocked value names, or None when it is not blocked."""
+    if value is None or value.startswith("unchecked: "):
+        return None
+    return getattr(croniter_mod, value.split(":", 1)[0])
+
+
+class TestBlocked:
     @pytest.mark.parametrize(
-        ("expr", "error_class"),
+        "expr",
         [
-            pytest.param(DIGIT, "CroniterBadCronError", marks=needs_croniter_7),
-            pytest.param(NBSP, "CroniterBadCronError", marks=needs_croniter_7),
-            (NEVER, "CroniterBadDateError"),
+            BOGUS,
+            pytest.param(DIGIT, marks=needs_croniter_7),
+            pytest.param(NBSP, marks=needs_croniter_7),
         ],
     )
-    def test_a_row_the_dispatcher_skips_carries_the_croniter_error(self, wired, expr, error_class):
+    def test_an_expression_croniter_cannot_parse_is_blocked(self, wired, expr):
         sid = _insert(wired, expr)
 
-        got = asyncio.run(wired.schedule_get(sid))["cron_error"]
+        got = _error(wired, sid)
         listed = {r["id"]: r for r in asyncio.run(wired.schedule_list_all())}
 
         # croniter raises subclasses (CroniterNotAlphaError for the digit); the
         # dispatcher's catch is on the base class, so the name must be one of them.
-        assert got is not None, got
-        raised = getattr(croniter_mod, got.split(":", 1)[0])
-        assert issubclass(raised, getattr(croniter_mod, error_class)), got
+        raised = _blocked_class(got)
+        assert raised is not None and issubclass(raised, croniter_mod.CroniterBadCronError), got
         assert listed[sid]["cron_error"] == got
         # The row is the one the dispatcher skips, a day of slots later.
         due = asyncio.run(wired.schedule_list_due(BASE + timedelta(days=1)))
@@ -116,8 +131,7 @@ class TestStoredRows:
 
     @pytest.mark.parametrize("ran", [False, True])
     def test_the_base_is_the_dispatchers(self, wired, monkeypatch, ran):
-        # last_run_at once the row has run, created_at before; the error does
-        # not depend on the base, so the call itself is what is checked.
+        # last_run_at once the row has run, created_at before.
         sid = _insert(wired, VALID, ran_at=BASE if ran else None)
         row = asyncio.run(wired.schedule_get(sid))
         bases: list[datetime] = []
@@ -134,11 +148,45 @@ class TestStoredRows:
         assert (row["last_run_at"] is None) is (not ran)
         assert bases == [schedules_mod._parse_iso_utc(expected)]
 
+
+class TestUnchecked:
+    def test_a_date_that_never_comes_is_unchecked(self, wired):
+        sid = _insert(wired, NEVER)
+
+        got = _error(wired, sid)
+
+        assert got.startswith("unchecked: CroniterBadDateError: "), got
+        due = asyncio.run(wired.schedule_list_due(BASE + timedelta(days=1)))
+        assert sid not in [d["id"] for d in due]
+
+    @pytest.mark.parametrize("expr", [RANDOM, RARE])
+    def test_a_random_field_is_never_reported_blocked(self, wired, expr):
+        # Each read draws again; whatever it draws, it is not a blocked verdict.
+        sid = _insert(wired, expr)
+
+        seen = {_error(wired, sid) for _ in range(30)}
+
+        assert all(v is None or v.startswith("unchecked: ") for v in seen), seen
+
+    def test_a_date_error_is_one_computation_not_a_search_loop(self, wired, monkeypatch):
+        sid = _insert(wired, VALID)
+        calls = {"n": 0}
+
+        def date_error(*args, **kwargs):
+            calls["n"] += 1
+            raise croniter_mod.CroniterBadDateError("failed to find next date")
+
+        monkeypatch.setattr(schedules_mod, "croniter", date_error)
+        got = _error(wired, sid)
+
+        assert got == "unchecked: CroniterBadDateError: failed to find next date"
+        assert calls["n"] == 1
+
     def test_a_timestamp_that_does_not_parse_is_unchecked_not_raised(self, wired):
         sid = _insert(wired, VALID)
         _set_last_run_at(wired, sid, "not-a-timestamp")
 
-        got = asyncio.run(wired.schedule_get(sid))["cron_error"]
+        got = _error(wired, sid)
         listed = {r["id"]: r for r in asyncio.run(wired.schedule_list_all())}
 
         assert got.startswith("unchecked: ValueError: "), got
@@ -162,74 +210,10 @@ class TestStoredRows:
         assert listed[sid]["cron_error"] == "unchecked: RuntimeError: boom"
 
 
-class TestRandomField:
-    """croniter's ``R`` field is drawn per construction; one failed draw is no verdict."""
-
-    def test_a_draw_that_fails_once_is_unchecked_not_blocked(self, wired, monkeypatch):
-        sid = _insert(wired, VALID)
-        real = schedules_mod.croniter
-        calls = {"n": 0}
-
-        def first_draw_fails(expr, base, *args, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise schedules_mod.CroniterBadDateError("failed to find next date")
-            return real(expr, base, *args, **kwargs)
-
-        monkeypatch.setattr(schedules_mod, "croniter", first_draw_fails)
-        got = asyncio.run(wired.schedule_get(sid))["cron_error"]
-
-        assert got == (
-            "unchecked: some draws of a random field fail: "
-            "CroniterBadDateError: failed to find next date"
-        )
-        assert calls["n"] == 2
-
-    def test_every_draw_failing_stays_blocked(self, wired, monkeypatch):
-        sid = _insert(wired, VALID)
-        calls = {"n": 0}
-
-        def always_fails(*args, **kwargs):
-            calls["n"] += 1
-            raise schedules_mod.CroniterBadDateError("failed to find next date")
-
-        monkeypatch.setattr(schedules_mod, "croniter", always_fails)
-        got = asyncio.run(wired.schedule_get(sid))["cron_error"]
-
-        assert got == "CroniterBadDateError: failed to find next date"
-        assert calls["n"] == 1 + schedules_mod._CRON_REDRAWS
-
-    def test_a_real_random_expression_is_never_reported_blocked(self, wired):
-        # 0 0 R(28-30) 2 * fails only on the draw that lands on the 30th.
-        sid = _insert(wired, "0 0 R(28-30) 2 *")
-
-        seen = {asyncio.run(wired.schedule_get(sid))["cron_error"] for _ in range(20)}
-
-        assert all(v is None or v.startswith("unchecked: ") for v in seen), seen
-
-    def test_the_listing_does_not_tell_you_to_replace_it(self, wired, monkeypatch):
-        sid = _insert(wired, VALID)
-        real = schedules_mod.croniter
-        state = {"failed": False}
-
-        def fails_once_per_row(expr, base, *args, **kwargs):
-            if not state["failed"]:
-                state["failed"] = True
-                raise schedules_mod.CroniterBadDateError("failed to find next date")
-            return real(expr, base, *args, **kwargs)
-
-        monkeypatch.setattr(schedules_mod, "croniter", fails_once_per_row)
-        result = CliRunner().invoke(cli, ["schedule", "list"])
-
-        assert result.exit_code == 0, result.output
-        (line,) = [ln for ln in result.output.splitlines() if sid in ln]
-        assert line.endswith(UNCHECKED_MARK), line
-        assert "not run automatically" not in result.output
-
-
 class TestListings:
     def test_the_json_listings_carry_the_field(self, wired):
-        bad = _insert(wired, NEVER)
+        bad = _insert(wired, BOGUS)
+        never = _insert(wired, NEVER)
         good = _insert(wired, VALID)
 
         mcp = json.loads(asyncio.run(schedule_tools.mem_schedule_list()))["schedules"]
@@ -238,11 +222,11 @@ class TestListings:
         for rows in (mcp, cli_rows):
             errors = {r["id"]: r["cron_error"] for r in rows}
             assert errors[good] is None
-            assert errors[bad].startswith("CroniterBadDateError: ")
+            assert _blocked_class(errors[bad]) is not None
+            assert errors[never].startswith("unchecked: CroniterBadDateError: ")
 
-    @needs_croniter_7
     def test_the_plain_listing_marks_each_kind_and_says_what_to_do_once(self, wired):
-        bad = _insert(wired, DIGIT)
+        bad = _insert(wired, BOGUS)
         never = _insert(wired, NEVER)
         odd = _insert(wired, VALID)
         _set_last_run_at(wired, odd, "not-a-timestamp")
@@ -253,36 +237,36 @@ class TestListings:
         assert result.exit_code == 0, result.output
         lines = {ln.split()[0]: ln for ln in result.output.splitlines() if ln.startswith("  ")}
         assert lines[bad].endswith(BLOCKED_MARK)
-        assert lines[never].endswith(BLOCKED_MARK)
+        assert lines[never].endswith(UNCHECKED_MARK)
         assert lines[odd].endswith(UNCHECKED_MARK)
         assert lines[good].endswith("(ok)"), lines[good]
         closing = [ln for ln in result.output.splitlines() if "not run automatically" in ln]
         assert closing == [
-            "2 schedule(s) are not run automatically: their cron expression cannot be "
+            "1 schedule(s) are not run automatically: their cron expression cannot be "
             "scheduled (see cron_error in 'mm schedule list --json'). Replace each with "
             "'mm schedule add', then remove it with 'mm schedule delete <id>'."
         ]
 
     def test_a_listing_with_nothing_blocked_has_no_closing_line(self, wired):
         _insert(wired, VALID)
-        odd = _insert(wired, VALID)
-        _set_last_run_at(wired, odd, "not-a-timestamp")
+        never = _insert(wired, NEVER)
 
         result = CliRunner().invoke(cli, ["schedule", "list"])
 
         assert result.exit_code == 0, result.output
         assert "not run automatically" not in result.output
         assert len(result.output.splitlines()) == 2
-        (odd_line,) = [ln for ln in result.output.splitlines() if odd in ln]
-        assert odd_line.endswith(UNCHECKED_MARK), odd_line
+        (never_line,) = [ln for ln in result.output.splitlines() if never in ln]
+        assert never_line.endswith(UNCHECKED_MARK), never_line
 
 
 class TestRunNowStillRunsABlockedRow:
     def test_cli_run_now(self, wired, monkeypatch):
         monkeypatch.setattr(schedule_tools, "_run_now_timeout", lambda app: 5.0)
-        sid = _insert(wired, NEVER, ran_at=None)
+        sid = _insert(wired, BOGUS, ran_at=None)
         before = asyncio.run(wired.schedule_get(sid))
-        assert before["cron_error"] is not None and before["last_run_status"] is None
+        assert _blocked_class(before["cron_error"]) is not None
+        assert before["last_run_status"] is None
 
         result = CliRunner().invoke(cli, ["schedule", "run-now", sid])
 
@@ -293,9 +277,10 @@ class TestRunNowStillRunsABlockedRow:
 
     def test_mcp_run_now(self, wired, monkeypatch):
         monkeypatch.setattr(schedule_tools, "_run_now_timeout", lambda app: 5.0)
-        sid = _insert(wired, NEVER, ran_at=None)
+        sid = _insert(wired, BOGUS, ran_at=None)
         before = asyncio.run(wired.schedule_get(sid))
-        assert before["cron_error"] is not None and before["last_run_status"] is None
+        assert _blocked_class(before["cron_error"]) is not None
+        assert before["last_run_status"] is None
 
         out = json.loads(asyncio.run(schedule_tools.mem_schedule_run_now(sid)))
 

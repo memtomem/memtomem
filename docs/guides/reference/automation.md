@@ -324,23 +324,20 @@ dispatcher finds the next slot: from `last_run_at`, or `created_at` before the
 first run. It does not depend on how the last run ended. It has three kinds of
 value:
 - `null`: the expression can be scheduled.
-- A croniter error, such as `CroniterBadCronError: …` or
-  `CroniterBadDateError: failed to find next date`: the dispatcher skips the
-  schedule on every tick, so it never runs on its own. An expression stored
-  with non-ASCII digits or spaces that an older croniter accepted is refused
-  by croniter 7, and one for a date that never comes (`0 0 30 2 *`) is
-  accepted by `mm schedule add` but cannot fire. `mm schedule list` marks
-  such a row `automatic runs blocked`; `mm schedule run-now <id>` still runs
-  it.
-- `unchecked: …`: the check itself failed, for example on a stored timestamp
-  that does not parse. It says nothing about the expression.
-
-An expression with croniter's random `R` field is drawn again on every read and
-on every dispatcher tick. When a draw fails, the check draws again; if any draw
-schedules, `cron_error` is `unchecked: some draws of a random field fail: …`
-and the row is not marked blocked, because the dispatcher runs it on the ticks
-whose draw schedules. `0 0 R(28-30) 2 *` is such an expression: it fails only
-on the draw that lands on the 30th.
+- A croniter parse error, such as `CroniterBadCronError: …` or its subclass
+  `CroniterNotAlphaError: …`: croniter cannot read the expression, so the
+  dispatcher skips the schedule on every tick and it never runs on its own.
+  An expression stored with non-ASCII digits or spaces that croniter 6
+  accepted is refused by croniter 7 this way. `mm schedule list` marks such a
+  row `automatic runs blocked`; `mm schedule run-now <id>` still runs it.
+- `unchecked: …`: the check did not reach a verdict. That covers a stored
+  timestamp that does not parse, and `CroniterBadDateError` ("failed to find
+  next date"), which croniter raises both for a date that never occurs
+  (`0 0 30 2 *`, which `mm schedule add` accepts) and for one draw of its
+  random `R` field that the next draw may not repeat (`0 0 R(28-30) 2 *`
+  fails only on the draw that lands on the 30th). `mm schedule list` marks
+  such a row `cron check failed`. A row whose message names a date that never
+  occurs is skipped on every tick like a blocked one; replace it the same way.
 
 To replace a blocked schedule, add the corrected one first, written with ASCII
 digits and spaces and for a date that exists, with the same `--job` and the
