@@ -74,6 +74,17 @@ def _parse_iso_utc(value: str) -> datetime:
     return dt
 
 
+_CRON_REDRAWS: Final = 32
+"""Extra computations ``_cron_error`` makes after a croniter error.
+
+A random ``R`` field is drawn again on every construction, so one failed
+draw is not a verdict. If any of these succeeds, the expression sometimes
+schedules: ``0 0 R(28-30) 2 *`` fails one draw in three, so 32 more all
+failing has odds below 1e-5. A fixed expression gives the same answer every
+time, so the redraws cost something only for rows that already failed.
+"""
+
+
 def _cron_error(cron_expr: str, created_at: str, last_run_at: str | None) -> str | None:
     """Why the dispatcher cannot schedule this row, or ``None`` when it can.
 
@@ -83,23 +94,35 @@ def _cron_error(cron_expr: str, created_at: str, last_run_at: str | None) -> str
     longer accepts (croniter 7 refuses non-ASCII digits and spaces that 6
     accepted) and one it accepts but can never fire, such as ``0 0 30 2 *``.
 
-    croniter's random ``R`` field is drawn again on every construction, here
-    and on every dispatcher tick, so for such an expression this is one
-    draw, not a verdict: ``0 0 R(28-30) 2 *`` fails only when it draws 30.
-
-    A croniter refusal is ``"<error class>: <message>"``. Anything else that
-    fails (a stored timestamp that does not parse) is prefixed
-    ``"unchecked: "``: it is not a verdict on the expression, and it must not
-    fail the listing that carries it, so it is returned instead of raised.
+    A croniter refusal is ``"<error class>: <message>"``. Anything else is
+    prefixed ``"unchecked: "``: it is not a verdict on the expression, and it
+    must not fail the listing that carries it, so it is returned instead of
+    raised. That covers a stored timestamp that does not parse, and an
+    expression whose random ``R`` field fails on some draws and not on
+    others: the dispatcher draws again on every tick, so it runs on the draws
+    that schedule (see ``_CRON_REDRAWS``).
     """
     try:
         base = _parse_iso_utc(last_run_at or created_at)
-        croniter(cron_expr, base).get_next(datetime)
-    except (CroniterBadCronError, CroniterBadDateError) as exc:
-        return f"{type(exc).__name__}: {exc}"
     except Exception as exc:
         return f"unchecked: {type(exc).__name__}: {exc}"
-    return None
+    try:
+        croniter(cron_expr, base).get_next(datetime)
+    except (CroniterBadCronError, CroniterBadDateError) as exc:
+        first = exc
+    except Exception as exc:
+        return f"unchecked: {type(exc).__name__}: {exc}"
+    else:
+        return None
+    for _ in range(_CRON_REDRAWS):
+        try:
+            croniter(cron_expr, base).get_next(datetime)
+        except (CroniterBadCronError, CroniterBadDateError):
+            continue
+        except Exception as exc:
+            return f"unchecked: {type(exc).__name__}: {exc}"
+        return f"unchecked: some draws of a random field fail: {type(first).__name__}: {first}"
+    return f"{type(first).__name__}: {first}"
 
 
 class ScheduleMixin:

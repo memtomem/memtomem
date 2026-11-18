@@ -162,6 +162,71 @@ class TestStoredRows:
         assert listed[sid]["cron_error"] == "unchecked: RuntimeError: boom"
 
 
+class TestRandomField:
+    """croniter's ``R`` field is drawn per construction; one failed draw is no verdict."""
+
+    def test_a_draw_that_fails_once_is_unchecked_not_blocked(self, wired, monkeypatch):
+        sid = _insert(wired, VALID)
+        real = schedules_mod.croniter
+        calls = {"n": 0}
+
+        def first_draw_fails(expr, base, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise schedules_mod.CroniterBadDateError("failed to find next date")
+            return real(expr, base, *args, **kwargs)
+
+        monkeypatch.setattr(schedules_mod, "croniter", first_draw_fails)
+        got = asyncio.run(wired.schedule_get(sid))["cron_error"]
+
+        assert got == (
+            "unchecked: some draws of a random field fail: "
+            "CroniterBadDateError: failed to find next date"
+        )
+        assert calls["n"] == 2
+
+    def test_every_draw_failing_stays_blocked(self, wired, monkeypatch):
+        sid = _insert(wired, VALID)
+        calls = {"n": 0}
+
+        def always_fails(*args, **kwargs):
+            calls["n"] += 1
+            raise schedules_mod.CroniterBadDateError("failed to find next date")
+
+        monkeypatch.setattr(schedules_mod, "croniter", always_fails)
+        got = asyncio.run(wired.schedule_get(sid))["cron_error"]
+
+        assert got == "CroniterBadDateError: failed to find next date"
+        assert calls["n"] == 1 + schedules_mod._CRON_REDRAWS
+
+    def test_a_real_random_expression_is_never_reported_blocked(self, wired):
+        # 0 0 R(28-30) 2 * fails only on the draw that lands on the 30th.
+        sid = _insert(wired, "0 0 R(28-30) 2 *")
+
+        seen = {asyncio.run(wired.schedule_get(sid))["cron_error"] for _ in range(20)}
+
+        assert all(v is None or v.startswith("unchecked: ") for v in seen), seen
+
+    def test_the_listing_does_not_tell_you_to_replace_it(self, wired, monkeypatch):
+        sid = _insert(wired, VALID)
+        real = schedules_mod.croniter
+        state = {"failed": False}
+
+        def fails_once_per_row(expr, base, *args, **kwargs):
+            if not state["failed"]:
+                state["failed"] = True
+                raise schedules_mod.CroniterBadDateError("failed to find next date")
+            return real(expr, base, *args, **kwargs)
+
+        monkeypatch.setattr(schedules_mod, "croniter", fails_once_per_row)
+        result = CliRunner().invoke(cli, ["schedule", "list"])
+
+        assert result.exit_code == 0, result.output
+        (line,) = [ln for ln in result.output.splitlines() if sid in ln]
+        assert line.endswith(UNCHECKED_MARK), line
+        assert "not run automatically" not in result.output
+
+
 class TestListings:
     def test_the_json_listings_carry_the_field(self, wired):
         bad = _insert(wired, NEVER)

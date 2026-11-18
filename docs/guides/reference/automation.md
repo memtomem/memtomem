@@ -336,8 +336,11 @@ value:
   that does not parse. It says nothing about the expression.
 
 An expression with croniter's random `R` field is drawn again on every read and
-on every dispatcher tick, so `cron_error` reports one draw: for
-`0 0 R(28-30) 2 *` it is set only when the draw lands on the 30th.
+on every dispatcher tick. When a draw fails, the check draws again; if any draw
+schedules, `cron_error` is `unchecked: some draws of a random field fail: …`
+and the row is not marked blocked, because the dispatcher runs it on the ticks
+whose draw schedules. `0 0 R(28-30) 2 *` is such an expression: it fails only
+on the draw that lands on the 30th.
 
 To replace a blocked schedule, add the corrected one first, written with ASCII
 digits and spaces and for a date that exists, with the same `--job` and the
