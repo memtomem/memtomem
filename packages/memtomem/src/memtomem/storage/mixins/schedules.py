@@ -81,10 +81,12 @@ def _cron_error(cron_expr: str, created_at: str, last_run_at: str | None) -> str
     same base (``last_run_at`` or ``created_at``), once.
 
     ``CroniterBadCronError`` (and its subclasses) is ``"<error class>:
-    <message>"``: croniter cannot parse the expression, which no draw or base
-    changes. croniter 7 refuses non-ASCII digits and spaces that 6 accepted,
-    so a row stored under 6 lands here. The dispatcher skips such a row on
-    every tick.
+    <message>"``: croniter cannot parse the expression. croniter 7 refuses
+    non-ASCII digits and spaces that 6 accepted, so a row stored under 6 lands
+    here, and the dispatcher skips it on every tick. One exception reaches
+    this branch on a single draw: under croniter 6 a random field whose range
+    leaves the field's bounds (``R(0-60)`` for minutes) fails to parse only on
+    the out-of-range draws; croniter 7 refuses such an expression every time.
 
     Everything else is prefixed ``"unchecked: "``, returned rather than
     raised so it never fails the listing that carries it.

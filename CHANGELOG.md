@@ -15,7 +15,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (`schedule_list` through `mem_do`) return now carries `cron_error`: `null` when the
   expression can be scheduled; the croniter error when croniter cannot parse it, which `mm
   schedule list` marks `(automatic runs blocked: cron not accepted)` and counts in a closing
-  line naming `mm schedule add` and `mm schedule delete <id>`; or `unchecked: …`, marked
+  line naming `mm schedule add` and `mm schedule delete <id>` (under croniter 6 only, a random
+  `R` field whose range leaves the field's bounds fails to parse on its out-of-range draws
+  alone, so such a row can be reported blocked and still run); or `unchecked: …`, marked
   `(cron check failed)`, when the check reached no verdict. `unchecked` covers a stored
   timestamp that does not parse and croniter's "failed to find next date", which comes both
   from a date that never occurs (`0 0 30 2 *`, which `mm schedule add` accepts and the

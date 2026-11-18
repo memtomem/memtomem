@@ -330,14 +330,20 @@ value:
   An expression stored with non-ASCII digits or spaces that croniter 6
   accepted is refused by croniter 7 this way. `mm schedule list` marks such a
   row `automatic runs blocked`; `mm schedule run-now <id>` still runs it.
+  Under croniter 6 only, a random `R` field whose range leaves the field's
+  bounds (`R(0-60)` for minutes) fails this way only on its out-of-range
+  draws, so such a row can be reported blocked and still run; croniter 7
+  refuses that expression every time.
 - `unchecked: …`: the check did not reach a verdict. That covers a stored
   timestamp that does not parse, and `CroniterBadDateError` ("failed to find
   next date"), which croniter raises both for a date that never occurs
   (`0 0 30 2 *`, which `mm schedule add` accepts) and for one draw of its
   random `R` field that the next draw may not repeat (`0 0 R(28-30) 2 *`
   fails only on the draw that lands on the 30th). `mm schedule list` marks
-  such a row `cron check failed`. A row whose message names a date that never
-  occurs is skipped on every tick like a blocked one; replace it the same way.
+  such a row `cron check failed`. The message is the same for both causes,
+  so look at the row's `cron_expr`: one with no random field and a date that
+  never occurs is skipped on every tick like a blocked row; replace it the
+  same way.
 
 To replace a blocked schedule, add the corrected one first, written with ASCII
 digits and spaces and for a date that exists, with the same `--job` and the
