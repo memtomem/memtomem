@@ -42,6 +42,7 @@ from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.web.app import create_app
 from memtomem.web.deps import require_configured
 
+from ._writer_overlap import CEILING_S, until_queued
 from .helpers import isolate_config_paths
 from .test_mutation_reindex_gate import _intruder_after_the_append
 
@@ -75,27 +76,12 @@ class _Owner:
 
     async def start(self) -> None:
         self.task = asyncio.create_task(self._run())
-        await asyncio.wait_for(self.entered.wait(), 5)
+        await asyncio.wait_for(self.entered.wait(), CEILING_S)
 
     async def finish(self) -> None:
         self._release.set()
         if self.task is not None:
             await self.task
-
-
-def _queued(storage) -> bool:
-    """Whether a task is queued on the writer lock (test-only peek at asyncio)."""
-    return any(not w.cancelled() for w in (storage._writer_lock._waiters or ()))
-
-
-async def _until_queued(storage, owner: _Owner, task: asyncio.Future) -> bool:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 5
-    while not (owner.entered.is_set() and _queued(storage)) and not task.done():
-        if loop.time() > deadline:
-            break
-        await asyncio.sleep(0.005)
-    return owner.entered.is_set() and _queued(storage) and not task.done()
 
 
 async def _overlap(storage, owner: _Owner, call, *, while_queued=None):
@@ -105,11 +91,11 @@ async def _overlap(storage, owner: _Owner, call, *, while_queued=None):
     ``while_queued`` runs then, before the owner is released.
     """
     task = asyncio.ensure_future(call)
-    queued = await _until_queued(storage, owner, task)
+    queued = await until_queued(storage, owner, task)
     witness = while_queued() if queued and while_queued is not None else None
     await owner.finish()
-    result = await asyncio.wait_for(task, 10)
-    assert queued, "the call never queued on the writer while the owner held it"
+    result = await asyncio.wait_for(task, CEILING_S)
+    assert queued, str(queued)
     return result, witness
 
 
@@ -117,7 +103,8 @@ async def _timed_out(storage, owner: _Owner, call):
     """Run ``call`` while ``owner`` holds the writer past the shortened wait."""
     task = asyncio.ensure_future(call)
     try:
-        assert await _until_queued(storage, owner, task), "refused without waiting"
+        queued = await until_queued(storage, owner, task)
+        assert queued, str(queued)
         return await asyncio.wait_for(task, 10)
     finally:
         task.cancel()
