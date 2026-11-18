@@ -215,19 +215,24 @@ class TestListings:
 class TestRunNowStillRunsABlockedRow:
     def test_cli_run_now(self, wired, monkeypatch):
         monkeypatch.setattr(schedule_tools, "_run_now_timeout", lambda app: 5.0)
-        sid = _insert(wired, NEVER)
-        assert asyncio.run(wired.schedule_get(sid))["cron_error"] is not None
+        sid = _insert(wired, NEVER, ran_at=None)
+        before = asyncio.run(wired.schedule_get(sid))
+        assert before["cron_error"] is not None and before["last_run_status"] is None
 
         result = CliRunner().invoke(cli, ["schedule", "run-now", sid])
 
         assert result.exit_code == 0, result.output
-        assert asyncio.run(wired.schedule_get(sid))["last_run_status"] == "ok"
+        after = asyncio.run(wired.schedule_get(sid))
+        assert after["last_run_status"] == "ok"
+        assert after["last_run_result"] == {"dead_links_deleted": 0}
 
     def test_mcp_run_now(self, wired, monkeypatch):
         monkeypatch.setattr(schedule_tools, "_run_now_timeout", lambda app: 5.0)
-        sid = _insert(wired, NEVER)
-        assert asyncio.run(wired.schedule_get(sid))["cron_error"] is not None
+        sid = _insert(wired, NEVER, ran_at=None)
+        before = asyncio.run(wired.schedule_get(sid))
+        assert before["cron_error"] is not None and before["last_run_status"] is None
 
         out = json.loads(asyncio.run(schedule_tools.mem_schedule_run_now(sid)))
 
-        assert out["ok"] is True, out
+        assert out == {"ok": True, "reason": "ran", "result": {"dead_links_deleted": 0}}, out
+        assert asyncio.run(wired.schedule_get(sid))["last_run_status"] == "ok"
