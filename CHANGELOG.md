@@ -67,9 +67,10 @@ provider's README describes its catalog install.
 
 - **`mm daemon stop --help` clarifies client session termination and reconnect behavior (#3447).**
   The help text previously stated that a connected client starts a new server when it next needs
-  one, which memtomem does not control or guarantee. The help text now accurately documents
-  that connected sessions end with status code 1 and that reconnecting or restarting is the
-  client's responsibility, aligning the CLI docstring with the shared daemon guide.
+  one, which memtomem does not control or guarantee. It now says what memtomem does: every
+  session connected to the stopped daemon ends, its server (`memtomem-server --shared NAME`)
+  exits with status 1, and the client may need a reconnect or a restart. This matches the
+  shared daemon guide.
 - **A schedule the dispatcher cannot schedule now says so in every listing (#3459).** A row
   stored with non-ASCII digits or spaces, which croniter 7 refuses and croniter 6 accepted,
   was skipped on every dispatcher tick with only a warning in the log, and every listing
