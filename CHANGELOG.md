@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Docs
+
+- **The Hermes plugin's README now discloses three things its server does.** Hermes's plugin
+  catalog asks for risky behaviour in both the catalog pull request and the plugin's README.
+  Two were only in the catalog entry: with lifecycle policies enabled (`policy.enabled`) they
+  run on a timer without a tool call, and an `auto_consolidate` policy sends the chunks it
+  summarizes to the configured LLM provider; turning reranking on through `mem_do`
+  (`rerank.enabled`) loads the reranker at once, so the default local reranker downloads its
+  model from Hugging Face when it is not cached. The third is new in 0.7.11: the
+  `dedup_remove` action re-reads both chunks' whole source files, including a kept file
+  indexed from outside the configured memory directories. The Scope section also stops saying
+  indexing paths must be absolute: a relative one resolves against the plugin directory. The
+  Hermes package goes to 0.1.27 without a core release; its server stays
+  `memtomem[onnx]==0.7.12`.
+
 ## [0.7.12] — 2026-11-18
 
 A patch with two fixes: a schedule the dispatcher cannot schedule now says so in every
