@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **One schedule with a stored value memtomem cannot read no longer stops every other
+  schedule (#3440).** Each schedule read decodes every row it returns, and one row could raise
+  out of it. `params_json` that is not JSON, or `params_json` or `last_run_result` nested too
+  deeply to parse, failed `mm schedule list`, `mem_schedule_list` and the due check; a
+  `last_run_at` / `created_at` that is not an ISO date failed the due check (the listings
+  showed it as `unchecked: …` since 0.7.12). The dispatcher gives up on a tick whose due check
+  raises, so it ran no schedule at all until the row was deleted. Python 3.14 parses text
+  nested 100,000 levels deep, so there the read succeeded and the listings failed to serialise
+  it. Each value is now checked on its own row: `job_state` and `last_run_result` that are not a
+  JSON object, or that nest deeper than 100 levels, read as `null` with a warning. `params`
+  read that way are never replaced by the job's defaults (for `importance_decay` that is a
+  deletion at `max_age_days=90`): the row carries `params: null` and a new `params_error`, and
+  every run of it, from the dispatcher or `run-now`, is recorded as `error` with `invalid
+  params: <reason>` before the job starts. Empty `params_json`, `null` and `[]`, which used to
+  run with the defaults, are among them, and so is a params key nested deeper than 100 levels
+  that a release before `mm schedule add` refused unknown keys stored and the job ignored. A
+  timestamp that does not parse skips only its own row, and `cron_error` reports it as
+  `unparsable last_run_at: …` (or `created_at`) rather than `unchecked: …`; `mm schedule list`
+  marks it `(automatic runs blocked: stored timestamp unreadable)` and counts it in the closing
+  line, which now reads "the dispatcher cannot schedule them". An empty `last_run_at` is newly
+  blocked the same way: it used to fall back to `created_at`. Any other failure computing one
+  row's next slot (a date out of croniter's range raised `OverflowError`) also skips that row
+  alone. Text that is not valid UTF-8 still fails every schedule read; no memtomem writer
+  stores it.
+
 ### Docs
 
 - **The Hermes plugin's README now discloses three things its server does.** Hermes's plugin

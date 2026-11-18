@@ -4,15 +4,17 @@ croniter 7 refuses expressions with non-ASCII digits or spaces that croniter 6
 accepted, so a row stored under 6 raises in ``schedule_list_due`` on every
 tick and is skipped with only a log line. Each read now carries
 ``cron_error``: the croniter error when croniter cannot parse the expression
-(blocked), or ``unchecked: ...`` when the check did not reach a verdict, which
-includes ``CroniterBadDateError`` (a date that never occurs, or one draw of a
-random field).
+(blocked), ``unparsable <column>: ...`` when the stored base timestamp does not
+parse (blocked, #3440), or ``unchecked: ...`` when the check did not reach a
+verdict, which includes ``CroniterBadDateError`` (a date that never occurs, or
+one draw of a random field).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
@@ -43,6 +45,7 @@ needs_croniter_7 = pytest.mark.skipif(
 )
 
 BLOCKED_MARK = "(automatic runs blocked: cron not accepted)"
+TIMESTAMP_MARK = "(automatic runs blocked: stored timestamp unreadable)"
 UNCHECKED_MARK = "(cron check failed)"
 
 
@@ -182,19 +185,23 @@ class TestUnchecked:
         assert got == "unchecked: CroniterBadDateError: failed to find next date"
         assert calls["n"] == 1
 
-    def test_a_timestamp_that_does_not_parse_is_unchecked_not_raised(self, wired):
+    def test_a_date_out_of_range_is_unchecked_and_skips_only_its_row(self, wired, caplog):
+        # The timestamp parses; croniter raises OverflowError, which neither of
+        # the due scan's named catches covers (#3440).
         sid = _insert(wired, VALID)
-        _set_last_run_at(wired, sid, "not-a-timestamp")
+        _set_last_run_at(wired, sid, "9999-12-31T23:59:30+00:00")
+        good = _insert(wired, VALID)
 
         got = _error(wired, sid)
-        listed = {r["id"]: r for r in asyncio.run(wired.schedule_list_all())}
+        with caplog.at_level(logging.WARNING, logger="memtomem.storage.mixins.schedules"):
+            due = asyncio.run(wired.schedule_list_due(BASE + timedelta(days=1)))
 
-        assert got.startswith("unchecked: ValueError: "), got
-        assert listed[sid]["cron_error"] == got
-        # The due scan keeps its behaviour: it still raises for this row, and
-        # the dispatcher logs and skips the tick (health_watchdog.py).
-        with pytest.raises(ValueError):
-            asyncio.run(wired.schedule_list_due(BASE + timedelta(days=1)))
+        assert got.startswith("unchecked: OverflowError: "), got
+        assert [d["id"] for d in due] == [good]
+        assert [r.getMessage() for r in caplog.records] == [
+            f"schedule {sid}: no next slot for '{VALID}' from last_run_at "
+            "'9999-12-31T23:59:30+00:00'; skipping"
+        ]
 
     def test_an_unexpected_failure_is_unchecked_and_does_not_fail_the_listing(
         self, wired, monkeypatch
@@ -208,6 +215,75 @@ class TestUnchecked:
         listed = {r["id"]: r for r in asyncio.run(wired.schedule_list_all())}
 
         assert listed[sid]["cron_error"] == "unchecked: RuntimeError: boom"
+
+
+def _set_created_at(storage, sid: str, value: str) -> None:
+    db = storage._get_db()
+    db.execute("UPDATE schedules SET created_at=? WHERE id=?", (value, sid))
+    db.commit()
+
+
+class TestUnparsableTimestamp:
+    """A base timestamp that does not parse is blocked, and skips only its row (#3440).
+
+    Before, it was ``unchecked:`` in the listings and raised out of the due
+    scan, so the dispatcher skipped the tick for every schedule.
+    """
+
+    # (last_run_at, created_at) as stored; None leaves the column as written.
+    CASES = {
+        "last_run_at text": ("not-a-timestamp", None, "last_run_at"),
+        # An empty last_run_at is not "never run": the base stays last_run_at.
+        "last_run_at empty": ("", None, "last_run_at"),
+        "created_at, never run": (None, "not-a-timestamp", "created_at"),
+    }
+
+    def _store(self, storage, last_run_at, created_at) -> str:
+        sid = _insert(storage, VALID, ran_at=None)
+        if created_at is not None:
+            _set_created_at(storage, sid, created_at)
+        if last_run_at is not None:
+            _set_last_run_at(storage, sid, last_run_at)
+        return sid
+
+    @pytest.mark.parametrize("case", list(CASES))
+    def test_the_listing_and_the_due_scan_agree(self, wired, caplog, case):
+        last_run_at, created_at, column = self.CASES[case]
+        sid = self._store(wired, last_run_at, created_at)
+        good = _insert(wired, VALID)
+        stored = last_run_at if column == "last_run_at" else created_at
+
+        got = _error(wired, sid)
+        with caplog.at_level(logging.WARNING, logger="memtomem.storage.mixins.schedules"):
+            due = asyncio.run(wired.schedule_list_due(BASE + timedelta(days=1)))
+
+        assert got == f"unparsable {column}: ValueError: Invalid isoformat string: {stored!r}"
+        assert [d["id"] for d in due] == [good]
+        assert [r.getMessage() for r in caplog.records] == [
+            f"schedule {sid} has an unparsable {column} {stored!r}; skipping (ValueError)"
+        ]
+
+    def test_a_bad_created_at_is_not_the_base_once_the_row_has_run(self, wired):
+        sid = _insert(wired, VALID)  # ran at BASE, written by this binary
+        _set_created_at(wired, sid, "not-a-timestamp")
+        _set_last_run_at(wired, sid, "2026-01-01T00:00:00+00:00")  # an older binary's stamp
+
+        due = asyncio.run(wired.schedule_list_due(BASE + timedelta(minutes=5)))
+
+        assert _error(wired, sid) is None
+        assert [d["id"] for d in due] == [sid]
+
+    def test_the_logged_value_is_cut_short(self, wired, caplog):
+        sid = self._store(wired, "x" * 10_000, None)
+
+        with caplog.at_level(logging.WARNING, logger="memtomem.storage.mixins.schedules"):
+            asyncio.run(wired.schedule_list_due(BASE + timedelta(days=1)))
+
+        (message,) = [r.getMessage() for r in caplog.records]
+        assert (
+            message
+            == f"schedule {sid} has an unparsable last_run_at '{'x' * 79}; skipping (ValueError)"
+        )
 
 
 class TestListings:
@@ -238,12 +314,12 @@ class TestListings:
         lines = {ln.split()[0]: ln for ln in result.output.splitlines() if ln.startswith("  ")}
         assert lines[bad].endswith(BLOCKED_MARK)
         assert lines[never].endswith(UNCHECKED_MARK)
-        assert lines[odd].endswith(UNCHECKED_MARK)
+        assert lines[odd].endswith(TIMESTAMP_MARK)
         assert lines[good].endswith("(ok)"), lines[good]
         closing = [ln for ln in result.output.splitlines() if "not run automatically" in ln]
         assert closing == [
-            "1 schedule(s) are not run automatically: their cron expression cannot be "
-            "scheduled (see cron_error in 'mm schedule list --json'). Replace each with "
+            "2 schedule(s) are not run automatically: the dispatcher cannot schedule them "
+            "(see cron_error in 'mm schedule list --json'). Replace each with "
             "'mm schedule add', then remove it with 'mm schedule delete <id>'."
         ]
 

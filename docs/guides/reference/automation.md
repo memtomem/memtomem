@@ -311,7 +311,8 @@ that continues between runs:
 | `last_run_error`  | Error text for `error` / `timeout`                                      |
 | `last_run_result` | The summary the job returned (`null` for `error` / `timeout`)           |
 | `state`           | Where the next run starts, for a job that continues (`dedup_scan`); `null` for the other jobs |
-| `cron_error`      | Why the cron expression cannot be scheduled, or `null` when it can (see below) |
+| `params_error`    | Why the stored `params` cannot be read, or `null` when they can (see below) |
+| `cron_error`      | Why the dispatcher cannot schedule the row, or `null` when it can (see below) |
 
 `skipped` means the job returned normally but did no work, and its
 `skipped_reason` says why. For example, `dedup_scan` has no scanner
@@ -321,7 +322,7 @@ record.
 
 `cron_error` is checked each time the schedule is read, the same way the
 dispatcher finds the next slot: from `last_run_at`, or `created_at` before the
-first run. It does not depend on how the last run ended. It has three kinds of
+first run. It does not depend on how the last run ended. It has four kinds of
 value:
 - `null`: the expression can be scheduled.
 - A croniter parse error, such as `CroniterBadCronError: …` or its subclass
@@ -334,8 +335,13 @@ value:
   bounds (`R(0-60)` for minutes) fails this way only on its out-of-range
   draws, so such a row can be reported blocked and still run; croniter 7
   refuses that expression every time.
-- `unchecked: …`: the check did not reach a verdict. That covers a stored
-  timestamp that does not parse, and `CroniterBadDateError` ("failed to find
+- `unparsable last_run_at: …` or `unparsable created_at: …`: the stored
+  timestamp the next slot is counted from is not an ISO date (an empty
+  `last_run_at` included), so the dispatcher skips the schedule on every tick.
+  `mm schedule list` marks such a row
+  `automatic runs blocked: stored timestamp unreadable`.
+- `unchecked: …`: the check did not reach a verdict. That covers
+  `CroniterBadDateError` ("failed to find
   next date"), which croniter raises both for a date that never occurs
   (`0 0 30 2 *`, which `mm schedule add` accepts) and for one draw of its
   random `R` field that the next draw may not repeat (`0 0 R(28-30) 2 *`
@@ -352,6 +358,21 @@ to `--params`. If `mm schedule add` refuses a key as unsupported, leave it out:
 the job ignores keys it does not define. Then remove the old schedule with
 `mm schedule delete <id>`. The new schedule starts with no run history, and a
 `dedup_scan` walk starts again from the first pool.
+
+A stored value that cannot be read affects its own schedule only; the others
+keep running and listing. That holds for text that is valid UTF-8, which is
+what every memtomem writer stores; bytes that are not, written to the database
+by other means, still fail the whole listing. `state` and `last_run_result`
+that are not a JSON object, or that nest deeper than 100 levels, read as
+`null` with a warning in the server log. `params` read that way become `null` and
+`params_error` gives the reason. They are never replaced by the job's
+defaults: every run of that schedule, automatic or `run-now`, is recorded as
+`error` with `invalid params: <reason>` before the job starts. The plain
+`mm schedule list` shows only `(error)`; the reason is in
+`mm schedule list --json`. Such a row has no params to copy, so replace it
+with the params it was meant to have. Releases before `mm schedule add`
+refused unknown params keys stored them as given; one nested deeper than 100
+levels makes its row's params unreadable now, though the job ignored it.
 
 A `dedup_scan` result also reports what the scan covered: `pool` (chunks
 selected, at most `max_scan`), `remaining` (scannable chunks after the pool),

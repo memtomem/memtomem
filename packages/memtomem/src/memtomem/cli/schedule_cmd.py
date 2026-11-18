@@ -14,7 +14,13 @@ import click
 
 from croniter import croniter  # type: ignore[import-untyped]
 
-from memtomem.scheduler.jobs import JOB_KINDS, run_job, run_outcome, validate_new_params
+from memtomem.scheduler.jobs import (
+    JOB_KINDS,
+    run_job,
+    run_outcome,
+    stored_params,
+    validate_new_params,
+)
 
 
 class _JobChoice(click.Choice):
@@ -132,6 +138,9 @@ def schedule_list(as_json: bool) -> None:
         marker = ""
         if cron_error and cron_error.startswith("unchecked: "):
             marker = "  (cron check failed)"
+        elif cron_error and cron_error.startswith("unparsable "):
+            marker = "  (automatic runs blocked: stored timestamp unreadable)"
+            blocked += 1
         elif cron_error:
             marker = "  (automatic runs blocked: cron not accepted)"
             blocked += 1
@@ -141,8 +150,8 @@ def schedule_list(as_json: bool) -> None:
         )
     if blocked:
         click.echo(
-            f"\n{blocked} schedule(s) are not run automatically: their cron expression cannot "
-            "be scheduled (see cron_error in 'mm schedule list --json'). Replace each with "
+            f"\n{blocked} schedule(s) are not run automatically: the dispatcher cannot "
+            "schedule them (see cron_error in 'mm schedule list --json'). Replace each with "
             "'mm schedule add', then remove it with 'mm schedule delete <id>'."
         )
 
@@ -226,7 +235,7 @@ async def _run_now(sched_id: str) -> dict:
             return {"ok": False, "reason": reason}
 
         try:
-            validated = spec.params_model.model_validate(sched.get("params") or {})
+            validated = stored_params(spec, sched)
         except Exception as exc:
             reason = f"invalid params: {exc}"
             await app.storage.schedule_mark_run(sched_id, "error", error=reason)

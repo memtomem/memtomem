@@ -74,11 +74,27 @@ def _parse_iso_utc(value: str) -> datetime:
     return dt
 
 
+def _schedule_base(created_at: str, last_run_at: str | None) -> tuple[str, str]:
+    """The column the next slot is computed from, and its stored value.
+
+    ``last_run_at`` when set, else ``created_at``. Selected on ``None``, not
+    on truthiness: a stored empty ``last_run_at`` is not "never run", and
+    falling back to ``created_at`` would keep such a row due on every tick.
+    """
+    if last_run_at is not None:
+        return "last_run_at", last_run_at
+    return "created_at", created_at
+
+
 def _cron_error(cron_expr: str, created_at: str, last_run_at: str | None) -> str | None:
     """Why the dispatcher cannot schedule this row, or ``None`` when it can.
 
     Repeats the next-slot computation ``schedule_list_due`` makes, from the
-    same base (``last_run_at`` or ``created_at``), once.
+    same base (``_schedule_base``), once.
+
+    A base timestamp that does not parse is ``"unparsable <column>: <error
+    class>: <message>"``. ``schedule_list_due`` skips such a row on every
+    tick, so it is as blocked as an expression croniter cannot parse.
 
     ``CroniterBadCronError`` (and its subclasses) is ``"<error class>:
     <message>"``: croniter cannot parse the expression. croniter 7 refuses
@@ -94,11 +110,14 @@ def _cron_error(cron_expr: str, created_at: str, last_run_at: str | None) -> str
     comes both from a date that never occurs (``0 0 30 2 *``) and from one
     draw of croniter's random ``R`` field that the next draw may not repeat
     (``0 0 R(28-30) 2 *`` fails only on the 30th), and croniter offers no
-    public way to tell the two apart. So is a stored timestamp that does not
-    parse.
+    public way to tell the two apart.
     """
+    column, stored = _schedule_base(created_at, last_run_at)
     try:
-        base = _parse_iso_utc(last_run_at or created_at)
+        base = _parse_iso_utc(stored)
+    except (ValueError, TypeError) as exc:
+        return f"unparsable {column}: {type(exc).__name__}: {exc}"
+    try:
         croniter(cron_expr, base).get_next(datetime)
     except CroniterBadCronError as exc:
         return f"{type(exc).__name__}: {exc}"
@@ -165,7 +184,8 @@ class ScheduleMixin:
 
         Catch-up semantics: a schedule that missed N slots fires
         **once** on the next call, not N times. The base for the next
-        slot is ``last_run_at`` if set, else ``created_at``.
+        slot is ``last_run_at`` if set, else ``created_at``
+        (``_schedule_base``).
 
         ``now`` defaults to ``datetime.now(timezone.utc)``; tests pass
         a frozen value.
@@ -182,11 +202,25 @@ class ScheduleMixin:
             "job_state FROM schedules WHERE enabled=1"
         ).fetchall()
 
+        # One row never stops the others: every failure below skips its own
+        # row with a warning. The dispatcher's ``except`` around this call
+        # gives up on the whole tick, which is the wrong reach for one row.
+        # ``_row_to_dict`` itself does not raise for any stored JSON value.
         due: list[dict] = []
         for r in rows:
             sched = _row_to_dict(r)
-            base_iso = sched["last_run_at"] or sched["created_at"]
-            base = _parse_iso_utc(base_iso)
+            column, stored = _schedule_base(sched["created_at"], sched["last_run_at"])
+            try:
+                base = _parse_iso_utc(stored)
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "schedule %s has an unparsable %s %.80r; skipping (%s)",
+                    sched["id"],
+                    column,
+                    stored,
+                    type(exc).__name__,
+                )
+                continue
             try:
                 next_fire = croniter(sched["cron_expr"], base).get_next(datetime)
             except (CroniterBadCronError, CroniterBadDateError) as exc:
@@ -200,6 +234,19 @@ class ScheduleMixin:
                     sched["id"],
                     sched["cron_expr"],
                     exc,
+                )
+                continue
+            except Exception:
+                # What the two named errors miss: a base that parses can still
+                # be out of croniter's range (``9999-12-31T23:59:30+00:00``
+                # raises ``OverflowError``).
+                logger.warning(
+                    "schedule %s: no next slot for %r from %s %.80r; skipping",
+                    sched["id"],
+                    sched["cron_expr"],
+                    column,
+                    stored,
+                    exc_info=True,
                 )
                 continue
             if next_fire.tzinfo is None:
@@ -311,12 +358,95 @@ class ScheduleMixin:
             self._commit_if_standalone(db)
 
 
+_MAX_STORED_DEPTH: Final = 100
+"""Deepest nesting a stored JSON value may have and still be read.
+
+Every value memtomem writes is one or two levels deep. The limit exists
+because Python 3.14 parses text nested 100,000 levels deep (3.12 and 3.13
+raise ``RecursionError`` below 10,000), and serialising such a value fails,
+or emits hundreds of millions of characters, in the listings that carry it.
+At 100 levels ``json.dumps(..., indent=2)`` of the value is about 21,000
+characters.
+"""
+
+
+def _too_deep(value: object) -> bool:
+    """Whether *value* nests dicts and lists past ``_MAX_STORED_DEPTH``.
+
+    Iterative, because the values it rejects are the ones a recursive walk
+    cannot finish.
+    """
+    stack: list[tuple[object, int]] = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        children: Any
+        if isinstance(node, dict):
+            children = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > _MAX_STORED_DEPTH:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+def _load_object(raw: Any) -> tuple[dict | None, tuple[str, str] | None]:
+    """Decode a stored JSON column that must hold an object.
+
+    Returns ``(value, None)``, or ``(None, (kind, detail))``: *kind* is
+    ``"unreadable"`` when the text does not parse and ``"malformed"`` when
+    it parses to anything but an object at most ``_MAX_STORED_DEPTH`` deep.
+
+    Never raises. Every schedule read decodes every row it returns, so one
+    value that raised would fail the listings and the due check for the
+    whole store. Text nested too deeply to parse raises ``RecursionError``,
+    which is not a ``ValueError``.
+    """
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError, RecursionError) as exc:
+        return None, ("unreadable", f"{type(exc).__name__}: {exc}")
+    if not isinstance(value, dict):
+        return None, ("malformed", f"a JSON {type(value).__name__}, not an object")
+    if _too_deep(value):
+        return None, ("malformed", f"nested deeper than {_MAX_STORED_DEPTH} levels")
+    return value, None
+
+
+def _warn_ignored(sched_id: str, column: str, kind: str) -> None:
+    article = "an" if kind == "unreadable" else "a"
+    logger.warning("schedule %s has %s %s %s; ignoring", sched_id, article, kind, column)
+
+
+def _decode_params(sched_id: str, raw: Any) -> tuple[dict | None, str | None]:
+    """Return ``(params, None)``, or ``(None, reason)`` when they cannot be used.
+
+    Unlike the other two columns, an unusable value is not read as empty:
+    ``{}`` would run the job with its defaults, which for
+    ``importance_decay`` is a deletion at ``max_age_days=90``. The reason is
+    the row's ``params_error``, and every run path records the run as an
+    error with it (``scheduler.jobs.stored_params``). Empty text, ``null``
+    and ``[]`` are unusable too; they used to run with the defaults.
+    """
+    params, problem = _load_object(raw)
+    if problem is None:
+        return params, None
+    kind, detail = problem
+    reason = f"{kind} params_json ({detail})"
+    logger.warning("schedule %s has %s; its runs record an error", sched_id, reason)
+    return None, reason
+
+
 def _row_to_dict(row: tuple) -> dict:
+    params, params_error = _decode_params(row[0], row[3])
     return {
         "id": row[0],
         "cron_expr": row[1],
         "job_kind": row[2],
-        "params": json.loads(row[3]) if row[3] else {},
+        "params": params,
+        "params_error": params_error,
         "enabled": bool(row[4]),
         "created_at": row[5],
         "last_run_at": row[6],
@@ -332,24 +462,15 @@ def _decode_state(sched_id: str, raw: str | None) -> dict | None:
     """Return the stored job state, or ``None`` when there is none to use.
 
     NULL is the ordinary value: a job that keeps no state, a schedule that
-    has not run, or a walk that starts over. A value that is not a JSON
-    object is logged and read as ``None``; what an object has to hold is
+    has not run, or a walk that starts over. A value ``_load_object``
+    refuses is logged and read as ``None``; what an object has to hold is
     the job's own check.
-
-    Text nested too deeply to parse raises ``RecursionError``, not
-    ``ValueError``. Every schedule read decodes every row it returns, so
-    letting that through would fail the listing the dispatcher reads and
-    stop every schedule in the store, not only the one with the bad row.
     """
     if raw is None:
         return None
-    try:
-        state = json.loads(raw)
-    except (ValueError, RecursionError):
-        logger.warning("schedule %s has an unreadable job_state; ignoring", sched_id)
-        return None
-    if not isinstance(state, dict):
-        logger.warning("schedule %s has a malformed job_state; ignoring", sched_id)
+    state, problem = _load_object(raw)
+    if problem is not None:
+        _warn_ignored(sched_id, "job_state", problem[0])
         return None
     return state
 
@@ -364,12 +485,11 @@ def _decode_result(sched_id: str, last_run_at: str | None, raw: str | None) -> d
     """
     if raw is None:
         return None
-    try:
-        envelope = json.loads(raw)
-    except ValueError:
-        logger.warning("schedule %s has an unreadable last_run_result; ignoring", sched_id)
+    envelope, problem = _load_object(raw)
+    if problem is not None:
+        _warn_ignored(sched_id, "last_run_result", problem[0])
         return None
-    if not isinstance(envelope, dict) or not isinstance(envelope.get("result"), dict):
+    if envelope is None or not isinstance(envelope.get("result"), dict):
         logger.warning("schedule %s has a malformed last_run_result; ignoring", sched_id)
         return None
     if envelope.get("run_at") != last_run_at:
