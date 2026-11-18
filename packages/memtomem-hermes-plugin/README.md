@@ -263,15 +263,16 @@ model passes them to `mem_do`.
 
 Memory is stored locally in `~/.memtomem`. The server is downloaded from PyPI on first
 start, and uv downloads Python 3.12 then too if it cannot find one. With a fresh BM25-only
-configuration nothing else leaves the machine on its own. Two calls reach the network on
-request, and the skills make neither: `mem_do(action="fetch", params={"url": ...})`
+configuration nothing else leaves the machine on its own, and two calls reach the network
+on request there; the skills make neither: `mem_do(action="fetch", params={"url": ...})`
 downloads the page at the URL it is given and indexes it, and turning reranking on with
 `mem_do(action="config", params={"key": "rerank.enabled", "value": "true"})` loads the
 configured reranker at once, so the default local reranker downloads its model from Hugging
 Face then when it is not cached. An existing memtomem configuration may enable its own
 network paths: model downloads from Hugging Face (ONNX embedding or local
 reranker; a saved Hugging Face login and `HF_TOKEN` are not used, see "First run"), a
-remote embedding or LLM provider, Cohere reranking (sends the query and
+remote embedding or LLM provider (which `mem_do` actions such as `auto_tag` and
+`policy_run` then send chunk text to), Cohere reranking (sends the query and
 candidate chunks), or search webhooks (send events including the query).
 
 ## License
