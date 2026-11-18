@@ -114,13 +114,25 @@ class TestStoredRows:
 
         assert [(d["id"], d["cron_error"]) for d in due] == [(sid, None)]
 
-    def test_the_base_is_created_at_before_the_first_run(self, wired):
-        sid = _insert(wired, NEVER, ran_at=None)
-
+    @pytest.mark.parametrize("ran", [False, True])
+    def test_the_base_is_the_dispatchers(self, wired, monkeypatch, ran):
+        # last_run_at once the row has run, created_at before; the error does
+        # not depend on the base, so the call itself is what is checked.
+        sid = _insert(wired, VALID, ran_at=BASE if ran else None)
         row = asyncio.run(wired.schedule_get(sid))
+        bases: list[datetime] = []
+        real = schedules_mod.croniter
 
-        assert row["last_run_at"] is None
-        assert row["cron_error"].startswith("CroniterBadDateError: ")
+        def spy(expr, base, *args, **kwargs):
+            bases.append(base)
+            return real(expr, base, *args, **kwargs)
+
+        monkeypatch.setattr(schedules_mod, "croniter", spy)
+        asyncio.run(wired.schedule_get(sid))
+
+        expected = row["last_run_at"] if ran else row["created_at"]
+        assert (row["last_run_at"] is None) is (not ran)
+        assert bases == [schedules_mod._parse_iso_utc(expected)]
 
     def test_a_timestamp_that_does_not_parse_is_unchecked_not_raised(self, wired):
         sid = _insert(wired, VALID)
@@ -196,12 +208,15 @@ class TestListings:
         assert result.exit_code == 0, result.output
         assert "not run automatically" not in result.output
         assert len(result.output.splitlines()) == 2
+        (odd_line,) = [ln for ln in result.output.splitlines() if odd in ln]
+        assert odd_line.endswith(UNCHECKED_MARK), odd_line
 
 
 class TestRunNowStillRunsABlockedRow:
     def test_cli_run_now(self, wired, monkeypatch):
         monkeypatch.setattr(schedule_tools, "_run_now_timeout", lambda app: 5.0)
         sid = _insert(wired, NEVER)
+        assert asyncio.run(wired.schedule_get(sid))["cron_error"] is not None
 
         result = CliRunner().invoke(cli, ["schedule", "run-now", sid])
 
@@ -211,6 +226,7 @@ class TestRunNowStillRunsABlockedRow:
     def test_mcp_run_now(self, wired, monkeypatch):
         monkeypatch.setattr(schedule_tools, "_run_now_timeout", lambda app: 5.0)
         sid = _insert(wired, NEVER)
+        assert asyncio.run(wired.schedule_get(sid))["cron_error"] is not None
 
         out = json.loads(asyncio.run(schedule_tools.mem_schedule_run_now(sid)))
 

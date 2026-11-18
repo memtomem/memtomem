@@ -83,6 +83,10 @@ def _cron_error(cron_expr: str, created_at: str, last_run_at: str | None) -> str
     longer accepts (croniter 7 refuses non-ASCII digits and spaces that 6
     accepted) and one it accepts but can never fire, such as ``0 0 30 2 *``.
 
+    croniter's random ``R`` field is drawn again on every construction, here
+    and on every dispatcher tick, so for such an expression this is one
+    draw, not a verdict: ``0 0 R(28-30) 2 *`` fails only when it draws 30.
+
     A croniter refusal is ``"<error class>: <message>"``. Anything else that
     fails (a stored timestamp that does not parse) is prefixed
     ``"unchecked: "``: it is not a verdict on the expression, and it must not

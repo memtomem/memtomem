@@ -20,7 +20,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   date that never comes, such as `0 0 30 2 *`, which `mm schedule add` accepts. Nothing else
   changes: such a row is still skipped, `mm schedule run-now <id>` still runs it, and
   croniter 7's reading of an expression it accepts is its own (`59/15 * * * *` now fires
-  once an hour, at minute 59). To replace a skipped schedule, add the corrected one first
+  once an hour, at minute 59). For croniter's random `R` field, which is drawn again on every read and every
+  tick, `cron_error` reports one draw. To replace a skipped schedule, add the corrected one first
   with the same `--job` and the old row's `params` as `--params`, leaving out any key `mm
   schedule add` refuses as unsupported (the job ignored it), then delete the old one; the new
   schedule starts with no run history, and a `dedup_scan` walk starts from the first pool

@@ -335,6 +335,10 @@ value:
 - `unchecked: …`: the check itself failed, for example on a stored timestamp
   that does not parse. It says nothing about the expression.
 
+An expression with croniter's random `R` field is drawn again on every read and
+on every dispatcher tick, so `cron_error` reports one draw: for
+`0 0 R(28-30) 2 *` it is set only when the draw lands on the 30th.
+
 To replace a blocked schedule, add the corrected one first, written with ASCII
 digits and spaces and for a date that exists, with the same `--job` and the
 `params` that `mm schedule list --json` shows for the old row, passed as JSON
