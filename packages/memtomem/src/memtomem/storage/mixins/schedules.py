@@ -74,6 +74,30 @@ def _parse_iso_utc(value: str) -> datetime:
     return dt
 
 
+def _cron_error(cron_expr: str, created_at: str, last_run_at: str | None) -> str | None:
+    """Why the dispatcher cannot schedule this row, or ``None`` when it can.
+
+    Repeats the next-slot computation ``schedule_list_due`` makes, from the
+    same base (``last_run_at`` or ``created_at``), so a row it skips is the
+    row reported here. That covers an expression the installed croniter no
+    longer accepts (croniter 7 refuses non-ASCII digits and spaces that 6
+    accepted) and one it accepts but can never fire, such as ``0 0 30 2 *``.
+
+    A croniter refusal is ``"<error class>: <message>"``. Anything else that
+    fails (a stored timestamp that does not parse) is prefixed
+    ``"unchecked: "``: it is not a verdict on the expression, and it must not
+    fail the listing that carries it, so it is returned instead of raised.
+    """
+    try:
+        base = _parse_iso_utc(last_run_at or created_at)
+        croniter(cron_expr, base).get_next(datetime)
+    except (CroniterBadCronError, CroniterBadDateError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    except Exception as exc:
+        return f"unchecked: {type(exc).__name__}: {exc}"
+    return None
+
+
 class ScheduleMixin:
     """Mixin providing scheduled-job CRUD. Requires self._get_db()."""
 
@@ -291,6 +315,7 @@ def _row_to_dict(row: tuple) -> dict:
         "last_run_error": row[8],
         "last_run_result": _decode_result(row[0], row[6], row[9]),
         "state": _decode_state(row[0], row[10]),
+        "cron_error": _cron_error(row[1], row[5], row[6]),
     }
 
 

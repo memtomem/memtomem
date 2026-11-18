@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A schedule the dispatcher cannot schedule now says so in every listing (#3459).** Each
+  schedule row that `mm schedule list --json` and `mem_schedule_list` (`schedule_list`
+  through `mem_do`) return carries `cron_error`: `null` when the expression can be
+  scheduled, the croniter error when the dispatcher skips the row, or `unchecked: …` when the
+  check itself failed, for example on a stored timestamp that does not parse. `mm schedule
+  list` marks a skipped row `(automatic runs blocked: cron not accepted)` and ends with a line
+  that counts them and names `mm schedule add` and `mm schedule delete <id>`. Two kinds of row
+  were skipped on every dispatcher tick with only a warning in the log: one stored with
+  non-ASCII digits or spaces, which croniter 7 refuses and croniter 6 accepted (memtomem
+  requires `croniter>=2.0`, so a fresh install of 0.7.11 already runs 7.0.0), and one for a
+  date that never comes, such as `0 0 30 2 *`, which `mm schedule add` accepts. Nothing else
+  changes: such a row is still skipped, `mm schedule run-now <id>` still runs it, and
+  croniter 7's reading of an expression it accepts is its own (`59/15 * * * *` now fires
+  once an hour, at minute 59). To replace a skipped schedule, add the corrected one first
+  with the same `--job` and the old row's `params` as `--params`, leaving out any key `mm
+  schedule add` refuses as unsupported (the job ignored it), then delete the old one; the new
+  schedule starts with no run history, and a `dedup_scan` walk starts from the first pool
+  (`docs/guides/reference/automation.md`).
+
 ### Security
 
 - An advisory against `picomatch` 4.0.7 (npm), which GitHub reviewed on 2026-11-17, lets

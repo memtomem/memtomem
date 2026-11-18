@@ -311,12 +311,37 @@ that continues between runs:
 | `last_run_error`  | Error text for `error` / `timeout`                                      |
 | `last_run_result` | The summary the job returned (`null` for `error` / `timeout`)           |
 | `state`           | Where the next run starts, for a job that continues (`dedup_scan`); `null` for the other jobs |
+| `cron_error`      | Why the cron expression cannot be scheduled, or `null` when it can (see below) |
 
 `skipped` means the job returned normally but did no work, and its
 `skipped_reason` says why. For example, `dedup_scan` has no scanner
 (`dedup_scanner_not_initialized`). `mm schedule list` prints the reason next
 to the status. `mm schedule list --json` and `schedule_list` return the whole
 record.
+
+`cron_error` is checked each time the schedule is read, the same way the
+dispatcher finds the next slot: from `last_run_at`, or `created_at` before the
+first run. It does not depend on how the last run ended. It has three kinds of
+value:
+- `null`: the expression can be scheduled.
+- A croniter error, such as `CroniterBadCronError: …` or
+  `CroniterBadDateError: failed to find next date`: the dispatcher skips the
+  schedule on every tick, so it never runs on its own. An expression stored
+  with non-ASCII digits or spaces that an older croniter accepted is refused
+  by croniter 7, and one for a date that never comes (`0 0 30 2 *`) is
+  accepted by `mm schedule add` but cannot fire. `mm schedule list` marks
+  such a row `automatic runs blocked`; `mm schedule run-now <id>` still runs
+  it.
+- `unchecked: …`: the check itself failed, for example on a stored timestamp
+  that does not parse. It says nothing about the expression.
+
+To replace a blocked schedule, add the corrected one first, written with ASCII
+digits and spaces and for a date that exists, with the same `--job` and the
+`params` that `mm schedule list --json` shows for the old row, passed as JSON
+to `--params`. If `mm schedule add` refuses a key as unsupported, leave it out:
+the job ignores keys it does not define. Then remove the old schedule with
+`mm schedule delete <id>`. The new schedule starts with no run history, and a
+`dedup_scan` walk starts again from the first pool.
 
 A `dedup_scan` result also reports what the scan covered: `pool` (chunks
 selected, at most `max_scan`), `remaining` (scannable chunks after the pool),
