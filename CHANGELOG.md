@@ -65,13 +65,16 @@ and the Hermes memory provider's README describes its catalog install.
   from a date that never occurs (`0 0 30 2 *`, which `mm schedule add` accepts and the
   dispatcher skips on every tick) and from one draw of croniter's random `R` field (`0 0
   R(28-30) 2 *` fails only on the draw that lands on the 30th, and the dispatcher draws again
-  on every tick). Nothing else changes: such rows are skipped as before, `mm schedule run-now
-  <id>` still runs them, and croniter 7's reading of an expression it accepts is its own
-  (`59/15 * * * *` now fires once an hour, at minute 59). To replace a schedule, add the
-  corrected one first with the same `--job` and the old row's `params` as `--params`, leaving
-  out any key `mm schedule add` refuses as unsupported (the job ignored it), then delete the
-  old one; the new schedule starts with no run history, and a `dedup_scan` walk starts from
-  the first pool (`docs/guides/reference/automation.md`).
+  on every tick). Nothing else changes: a row whose expression croniter refuses or finds no
+  date for is skipped as before, `mm schedule run-now <id>` still runs it, and croniter 7's
+  reading of an expression it accepts is its own (`59/15 * * * *` now fires once an hour, at
+  minute 59). Also unchanged from 0.7.11: while an enabled row's base timestamp
+  (`last_run_at`, else `created_at`) does not parse, the dispatcher's due check stops for
+  every schedule; memtomem never writes such a value (#3440). To replace a
+  schedule, add the corrected one first with the same `--job` and the old row's `params` as
+  `--params`, leaving out any key `mm schedule add` refuses as unsupported (the job ignored
+  it), then delete the old one; the new schedule starts with no run history, and a
+  `dedup_scan` walk starts from the first pool (`docs/guides/reference/automation.md`).
 
 ### Security
 
