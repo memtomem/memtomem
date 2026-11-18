@@ -239,7 +239,7 @@ class ScheduleMixin:
             except Exception:
                 # What the two named errors miss: a base that parses can still
                 # be out of croniter's range (``9999-12-31T23:59:30+00:00``
-                # raises ``OverflowError``).
+                # raises ``OverflowError``, or ``OSError`` on Windows).
                 logger.warning(
                     "schedule %s: no next slot for %r from %s %.80r; skipping",
                     sched["id"],

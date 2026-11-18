@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
@@ -186,8 +187,10 @@ class TestUnchecked:
         assert calls["n"] == 1
 
     def test_a_date_out_of_range_is_unchecked_and_skips_only_its_row(self, wired, caplog):
-        # The timestamp parses; croniter raises OverflowError, which neither of
-        # the due scan's named catches covers (#3440).
+        # The timestamp parses; croniter's next slot does not fit a datetime,
+        # and neither of the due scan's named catches covers what it raises
+        # (#3440): OverflowError on macOS and Linux, OSError (errno 22) on
+        # Windows, where datetime.fromtimestamp fails that way.
         sid = _insert(wired, VALID)
         _set_last_run_at(wired, sid, "9999-12-31T23:59:30+00:00")
         good = _insert(wired, VALID)
@@ -196,7 +199,8 @@ class TestUnchecked:
         with caplog.at_level(logging.WARNING, logger="memtomem.storage.mixins.schedules"):
             due = asyncio.run(wired.schedule_list_due(BASE + timedelta(days=1)))
 
-        assert got.startswith("unchecked: OverflowError: "), got
+        expected = "OSError" if sys.platform == "win32" else "OverflowError"
+        assert got.startswith(f"unchecked: {expected}: "), got
         assert [d["id"] for d in due] == [good]
         assert [r.getMessage() for r in caplog.records] == [
             f"schedule {sid}: no next slot for '{VALID}' from last_run_at "

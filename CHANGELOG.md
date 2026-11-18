@@ -28,9 +28,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   marks it `(automatic runs blocked: stored timestamp unreadable)` and counts it in the closing
   line, which now reads "the dispatcher cannot schedule them". An empty `last_run_at` is newly
   blocked the same way: it used to fall back to `created_at`. Any other failure computing one
-  row's next slot (a date out of croniter's range raised `OverflowError`) also skips that row
-  alone. Text that is not valid UTF-8 still fails every schedule read; no memtomem writer
-  stores it.
+  row's next slot (a date out of croniter's range raised `OverflowError`, or `OSError` on
+  Windows) also skips that row alone. Text that is not valid UTF-8 still fails every schedule
+  read; no memtomem writer stores it.
 
 ### Docs
 
