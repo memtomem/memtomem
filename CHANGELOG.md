@@ -5,6 +5,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.12] — 2026-11-18
+
+A patch with two fixes: a schedule the dispatcher cannot schedule now says so in every
+listing, and `mm daemon stop --help` no longer promises that a client reconnects (see Fixed).
+The PyPI project page now names the LangGraph and Hermes integrations, and the Hermes memory
+provider's README describes its catalog install.
+
+### Upgrading
+
+- **The plugins move their pin to 0.7.12 in the same release; a plugin that is not updated
+  keeps launching 0.7.11.** This release delivers Claude `0.5.43`, Codex `0.3.41`,
+  `memtomem-automation` `0.3.26`, OpenCode `0.3.39`, Hermes `0.1.26`, Antigravity `0.2.20`,
+  OpenClaw `0.1.4` and the Hermes memory provider `0.2.2` (README wording only); Kimi stays
+  `0.2.29` and Cursor `0.1.0`. The Hermes catalog entries install a pinned commit, which
+  today carries plugin `0.1.23` and provider `0.2.1`, so `hermes plugins install` keeps
+  installing those until the catalog moves its pin.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.26 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.12;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.12`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.12`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.12.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.11" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.11` to
+  `==0.7.12` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.12 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.12`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+
 ### Fixed
 
 - **`mm daemon stop --help` clarifies client session termination and reconnect behavior (#3447).**
@@ -28,13 +71,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   from a date that never occurs (`0 0 30 2 *`, which `mm schedule add` accepts and the
   dispatcher skips on every tick) and from one draw of croniter's random `R` field (`0 0
   R(28-30) 2 *` fails only on the draw that lands on the 30th, and the dispatcher draws again
-  on every tick). Nothing else changes: such rows are skipped as before, `mm schedule run-now
-  <id>` still runs them, and croniter 7's reading of an expression it accepts is its own
-  (`59/15 * * * *` now fires once an hour, at minute 59). To replace a schedule, add the
-  corrected one first with the same `--job` and the old row's `params` as `--params`, leaving
-  out any key `mm schedule add` refuses as unsupported (the job ignored it), then delete the
-  old one; the new schedule starts with no run history, and a `dedup_scan` walk starts from
-  the first pool (`docs/guides/reference/automation.md`).
+  on every tick). Nothing else changes: a row whose expression croniter refuses or finds no
+  date for is skipped as before, `mm schedule run-now <id>` still runs it, and croniter 7's
+  reading of an expression it accepts is its own (`59/15 * * * *` now fires once an hour, at
+  minute 59). Also unchanged from 0.7.11: while an enabled row's base timestamp
+  (`last_run_at`, else `created_at`) does not parse, the dispatcher's due check stops for
+  every schedule; memtomem never writes such a value (#3440). To replace a
+  schedule, add the corrected one first with the same `--job` and the old row's `params` as
+  `--params`, leaving out any key `mm schedule add` refuses as unsupported (the job ignored
+  it), then delete the old one; the new schedule starts with no run history, and a
+  `dedup_scan` walk starts from the first pool (`docs/guides/reference/automation.md`).
 
 ### Security
 
