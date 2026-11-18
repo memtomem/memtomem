@@ -333,6 +333,45 @@ def writable_namespace_arg(value: object) -> str | None:
     return validate_writable_namespace(value)
 
 
+# A namespace color is display metadata that the Web UI writes into ``style``
+# and ``value`` attributes, so only a CSS hex color is stored: ``#`` plus 3, 4,
+# 6 or 8 hex digits. A 5- or 7-digit value is not a CSS color, so a browser
+# would draw nothing for it. The web schema derives its pattern from this one,
+# so both boundaries accept the same set.
+NAMESPACE_COLOR_PATTERN: Final[str] = r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
+
+
+def validate_namespace_color(color: object) -> str | None:
+    """Return *color* if it may be stored as a namespace color.
+
+    ``None`` (leave unchanged) and ``""`` (clear) pass through. Anything else
+    must be ``#`` followed by 3, 4, 6 or 8 hex digits, else ``ValueError``.
+    """
+    if color is None:
+        return None
+    if color == "":
+        return ""
+    if not isinstance(color, str) or re.fullmatch(NAMESPACE_COLOR_PATTERN, color) is None:
+        raise ValueError(
+            f"Invalid namespace color: {color!r} "
+            "(expected '#' followed by 3, 4, 6 or 8 hex digits, or '' to clear)"
+        )
+    return color
+
+
+def validate_namespace_description(description: object) -> str | None:
+    """Return *description* if it may be stored as a namespace description.
+
+    ``None`` (leave unchanged) and any string pass through. Anything else
+    raises :class:`ValueError`.
+    """
+    if description is None:
+        return None
+    if not isinstance(description, str):
+        raise ValueError("Invalid namespace description: expected a string")
+    return description
+
+
 # Read-side selector for "every namespace except the system prefixes". It is
 # an explicit value, so ``namespace or current_namespace`` keeps it over an
 # active session or agent namespace, and :meth:`NamespaceFilter.parse` turns

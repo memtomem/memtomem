@@ -142,7 +142,7 @@ function _buildNsCard(ns, defaultNs) {
 
   const dot = document.createElement('span');
   dot.className = 'ns-color-dot';
-  dot.style.backgroundColor = ns.color || 'var(--muted)';
+  dot.style.backgroundColor = safeCssColor(ns.color, 'var(--muted)');
 
   const name = document.createElement('span');
   name.className = 'ns-name';
@@ -279,7 +279,7 @@ function editNamespaceMeta(ns, card) {
     </div>
     <div class="ns-edit-row">
       <label>Color</label>
-      <input type="color" class="ns-edit-color" value="${ns.color || '#808080'}" />
+      <input type="color" class="ns-edit-color" value="${safeCssColor(ns.color, '#808080')}" />
       <button class="btn-ghost btn-xs ns-edit-reset-color">Reset</button>
     </div>
     <div class="ns-edit-actions">
@@ -288,22 +288,43 @@ function editNamespaceMeta(ns, card) {
     </div>
   `;
 
+  // A color input only holds #rrggbb, so it cannot show every stored color
+  // (#abc reads #aabbcc, a non-hex value reads as the gray fallback). Save
+  // therefore sends `color` only when the user touched the picker or pressed
+  // Reset, never by comparing what the input shows with what it showed first.
+  let colorTouched = false;
+  const markColorTouched = () => { colorTouched = true; };
+
   form.querySelector('.ns-edit-cancel').addEventListener('click', () => form.remove());
   form.querySelector('.ns-edit-reset-color').addEventListener('click', () => {
     form.querySelector('.ns-edit-color').value = '#808080';
+    markColorTouched();
   });
+  form.querySelector('.ns-edit-color').addEventListener('input', markColorTouched);
+  form.querySelector('.ns-edit-color').addEventListener('change', markColorTouched);
   form.querySelector('.ns-edit-save').addEventListener('click', async () => {
     const desc = form.querySelector('.ns-edit-desc').value.trim();
     const colorVal = form.querySelector('.ns-edit-color').value;
     const body = { description: desc };
-    // Only send color if not default gray
-    body.color = colorVal === '#808080' ? '' : colorVal;
+    // Default gray means "no color", so it clears the stored one.
+    if (colorTouched) body.color = colorVal === '#808080' ? '' : colorVal;
     try {
       await api('PATCH', `/api/namespaces/${encodeURIComponent(ns.namespace)}`, body);
       showToast(t('toast.ns_updated'), 'success');
       loadNamespacesTab();
       loadNamespaceDropdowns();
     } catch (err) {
+      // The server scans the description and has no bypass for it (#3352),
+      // so this is a plain refusal: no confirm-and-retry, unlike /api/add.
+      if (err instanceof RedactionBlockedError) {
+        // Label rules also match prose that names a credential without
+        // holding one (#3354), so that refusal says what to reword.
+        const key = err.labelOnly === true
+          ? 'toast.ns_description_redaction_blocked_label'
+          : 'toast.ns_description_redaction_blocked';
+        showToast(t(key, { hits: err.hits }), 'error');
+        return;
+      }
       showToast(t('toast.error', { error: err.message }), 'error');
     }
   });
@@ -550,7 +571,7 @@ _renderNsChart = function(namespaces) {
 
   g.selectAll('path').data(pie(sorted)).join('path')
     .attr('d', arc)
-    .attr('fill', (d, i) => d.data.color || palette[i % palette.length])
+    .attr('fill', (d, i) => safeCssColor(d.data.color, palette[i % palette.length]))
     .attr('stroke', 'var(--surface)')
     .attr('stroke-width', 2)
     .attr('tabindex', 0)
@@ -583,7 +604,7 @@ _renderNsChart = function(namespaces) {
   const legend = document.createElement('div');
   legend.className = 'ns-legend-row';
   legend.innerHTML = sorted.map((ns, i) => {
-    const c = ns.color || palette[i % palette.length];
+    const c = safeCssColor(ns.color, palette[i % palette.length]);
     const nsName = String(ns.namespace || '');
     const nsAttr = escapeAttr(nsName);
     const label = escapeHtml(formatNsLabel(nsName));

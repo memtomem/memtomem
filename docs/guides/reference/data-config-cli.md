@@ -23,10 +23,16 @@ Back up, restore, and ingest memories; inspect and change settings; and the full
 > [Stability](../../../README.md#stability).
 
 ```
-mem_export(output_file="~/backup.json")
-mem_export(output_file="~/work-backup.json", namespace="work")
-mem_export(output_file="~/recent.json", since="2026-03-01")
+mem_export(output_file="backup.json")
+mem_export(output_file="work-backup.json", namespace="work")
+mem_export(output_file="recent.json", since="2026-03-01")
 ```
+
+`output_file` is a file name, not a path: the bundle is written to
+`~/.memtomem/exports/` and the result names the full path. The name may use
+ASCII letters, digits, `.`, `_` and `-`; a path such as `~/backup.json` is
+refused, and so is an `exports` directory that is a symbolic link. Copy the
+bundle elsewhere yourself if you want it there.
 
 Exports chunks with content, metadata, and tags as a JSON bundle, together with
 the links between them (`mem_link` relations and the `consolidated_into` edges
@@ -46,11 +52,11 @@ is a comment and not part of the value; see
 ### Restore
 
 ```
-mem_import(input_file="~/backup.json")                                # skip duplicates (default)
-mem_import(input_file="~/backup.json", namespace="imported")
-mem_import(input_file="~/backup.json", on_conflict="update")          # overwrite metadata
-mem_import(input_file="~/backup.json", on_conflict="duplicate")       # add distinct keys; skip occupied keys
-mem_import(input_file="~/backup.json", preserve_ids=True)             # keep bundle UUIDs
+mem_import(input_file="~/.memtomem/exports/backup.json")                           # skip duplicates (default)
+mem_import(input_file="~/.memtomem/exports/backup.json", namespace="imported")
+mem_import(input_file="~/.memtomem/exports/backup.json", on_conflict="update")     # overwrite metadata
+mem_import(input_file="~/.memtomem/exports/backup.json", on_conflict="duplicate")  # add distinct keys; skip occupied keys
+mem_import(input_file="~/.memtomem/exports/backup.json", preserve_ids=True)        # keep bundle UUIDs
 ```
 
 Import re-embeds chunks using the current model. New exports use memory bundle
@@ -371,13 +377,13 @@ all modes initialize storage and may create or initialize the database.
 
 ## CLI Reference
 
-The complete v0.7.3 top-level command catalog is grouped below. Run `mm
+The complete v0.7.11 top-level command catalog is grouped below. Run `mm
 <command> --help` for its subcommands and flags.
 
 | Area | Top-level commands |
 |---|---|
 | First use and core memory | `init`, `status`, `add`, `index`, `search`, `recall`, `memory`, `mem`, `pinned`, `review` |
-| Configuration and lifecycle | `config`, `embedding-reset`, `warmup`, `version`, `upgrade`, `reset`, `purge`, `gc`, `uninstall`, `doctor` |
+| Configuration and lifecycle | `config`, `embedding-reset`, `warmup`, `version`, `upgrade`, `daemon`, `reset`, `purge`, `gc`, `uninstall`, `doctor` |
 | Organization and automation | `tags`, `agent`, `session`, `activity`, `schedule`, `watchdog` |
 | Retrieval quality | `quality` |
 | Import and synchronization | `ingest`, `context`, `wiki`, `sync-doctor` |
@@ -417,6 +423,29 @@ distribution's console script rather than a dedicated one. `memtomem-server` is
 the dedicated entry point and stays supported — it is the one to use for network
 transports, whose flags live only there.
 
+`memtomem-server --shared NAME`, or `mm serve --shared NAME`, lets several MCP
+clients share one engine (one store writer, one file watcher, one embedding
+model) on POSIX. Nothing is shared without it. The first session starts the
+daemon NAME and later sessions join it. A session joins only when it matches the
+daemon on: the `MEMTOMEM_*` and `LANGFUSE_*` variables after `.env`, the tool mode
+and extra tools, `HOME`, the store path, and the installed package (prefix,
+location, version). Otherwise, and on Windows, it runs as a standalone server, and
+`mem_status` shows `Shared daemon: NAME not joined (<reason>)`, naming what
+differs but no value. A joined session uses the daemon's live configuration.
+Other inputs, such as proxy and TLS variables, `FASTEMBED_CACHE_PATH` and Hugging
+Face variables, are not compared: giving sessions one name asserts that they want
+the same server. After editing an editable install, or replacing the store file
+(restoring a backup, for example), run `mm daemon stop NAME`: a running daemon
+keeps the code and the file it opened. A joined session ends when its daemon goes
+away (exit 1, no reconnect), and when more than 32 MiB is waiting in either
+direction, daemon output the client has not read or client input the daemon has
+not taken (exit 1).
+`memtomem-server --daemon NAME [--idle-timeout S]` runs a daemon in the
+foreground with your environment (idle timeout 600 s by default, `0` never). A
+daemon a session starts logs to `daemon-NAME.log` in the runtime directory.
+[Share one server between sessions](../shared-daemon.md) walks through turning
+it on, the reasons a session does not join, and stopping a daemon.
+
 `mm` is a shorthand alias for `memtomem`. All commands support `-h` and `--help`.
 
 ```bash
@@ -452,11 +481,18 @@ mm reset --backup                      # snapshot the DB to <db>.pre-reset-<ts>.
 mm reset --force                       # bypass only the stale pid/web/DB-lock heuristics (not registry or barrier evidence)
 mm reset --json                        # emit a machine-readable ack instead of prose (also on mm add / mm purge)
 mm upgrade                             # uv-tool installs: on POSIX stop every MCP server and Web UI, reinstall, then recycle respawns
-mm upgrade --version 0.7.3 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
+mm upgrade --version 0.7.11 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
 # upgrade re-passes the extras in uv's tool receipt; if it is missing or unreadable, --dry-run shows "Extras: none detected" — pass --extras (e.g. all or onnx,web)
 # upgrade --json: dry runs add inventory_complete/warnings; a post-install partial failure adds cleanup_complete:false
 # upgrade refuses while a Web UI started through the memtomem-web entry point runs (it has no pid lock to stop it by); stop it first
 # warnings is additive on Windows, where processes are never killed automatically; db_lock_warning still requests a manual restart
+# upgrade signals each process once: a shared daemon holds two lock files (its name's and its store's) and both are cleaned
+mm serve --shared NAME                 # join (or start) the shared daemon NAME; a session that cannot join runs standalone and mem_status says why
+mm daemon status                       # list shared daemons (POSIX): name, pid, start time; exit 0 if one runs, 3 if none, 1 if they cannot be listed
+mm daemon status NAME --json           # one daemon as {"daemons": [...], "count": N}; a listing failure prints {"error": "..."} and exits 1
+mm daemon stop [NAME]                  # SIGTERM, then SIGKILL after --grace (default 5 s); no NAME stops every running daemon and ends their sessions
+# a stopped daemon skips its session drain and WAL checkpoint, as mm upgrade does to a server; SQLite recovers the WAL on the next open
+# mm reset and mm uninstall refuse while a daemon runs and name it with the mm daemon stop command
 
 # Tags — bulk tag maintenance (mutations are dry-run unless --apply; --yes skips the prompt)
 # held sources (missing, pending, or redaction-refused) are left out of the counts and the writes
@@ -623,6 +659,13 @@ mm context import ~/foo.json --to project_local --apply --as foo2  # land under 
 # staging-dir-first scan + atomic os.replace promote so a blocked push leaves
 # the existing dst tree unchanged.
 #
+# Gate A on `sync --include=settings` (#3343): the canonical
+# .memtomem/settings.json is git-tracked for every hooks.target_scope, so
+# a hit anywhere in it raises ClickException before any runtime settings
+# file is written, at every tier; `--force-unsafe` does not apply. If the
+# canonical turns secret-bearing while the sync runs, files already written
+# stay written and the remaining targets report `error`.
+#
 # Web Context Gateway missing-canonical remediation:
 #   project_shared → web Pull can initialize from detected runtime files;
 #                    CLI bootstrap requires explicit git-tracked-tier confirmation.
@@ -736,30 +779,13 @@ A paused destination refuses (`mm context projects resume <scope_id>`
 re-enables it), and a cross-project destination must already be a
 memtomem project (`mm context init` there first).
 
-### Headless agents (MCP)
+### No MCP tool
 
-`mem_context_artifact_transfer` is the same engine via `mem_do` —
-core mode needs no extra tools:
-
-```python
-mem_do(action="context_artifact_transfer", params={
-    "asset_type": "agents", "name": "reviewer", "mode": "copy",
-    "to_project_scope_id": "p-1a2b3c4d5e6f",   # from `mm context projects list`
-})  # dry-run preview; the footer names the flags apply will need
-
-mem_do(action="context_artifact_transfer", params={
-    "asset_type": "agents", "name": "reviewer", "mode": "copy",
-    "to_project_scope_id": "p-1a2b3c4d5e6f",
-    "apply": True, "confirm_project_shared": True,
-})
-```
-
-The MCP surface is deliberately stricter than the CLI (ADR-0023 §13):
-destinations are registered `scope_id`s only (no path valve), paused
-**and** never-enrolled destinations refuse with the remediation
-command, and a `user`-tier landing — a host write outside any project
-root — needs `allow_host_writes=True` in addition to `apply=True`.
-Refusals come back prefixed (`error:` / `refused:` /
-`needs confirmation:` / `privacy block:`) so agents can branch.
+`move` and `copy` run from the CLI or the web transfer route, and `migrate`
+from the CLI; none has an MCP tool. A transfer can land in the user tier, from
+which a user-scope `mm context sync` copies it into the agents' own
+configuration, and a consent flag an agent passes as a tool argument is not the
+person's consent. An agent with a shell runs the `mm context` command instead,
+which goes through the client's own command approval.
 
 ---

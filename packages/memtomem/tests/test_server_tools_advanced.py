@@ -13,7 +13,7 @@ from uuid import uuid4
 import pytest
 
 from helpers import make_chunk
-from memtomem.models import Chunk, ChunkMetadata
+from memtomem.models import Chunk, ChunkMetadata, NamespaceFilter
 from memtomem.tools.auto_tag import AutoTagStats, auto_tag_storage, extract_tags_keyword
 from memtomem.tools.export_import import ExportBundle, _chunk_to_dict, export_chunks
 
@@ -253,7 +253,9 @@ class TestEntities:
             ],
         )
 
-        results = await storage.search_entities(namespace="ns1")
+        results = await storage.search_entities(
+            namespace_filter=NamespaceFilter(namespaces=("ns1",))
+        )
         assert len(results) == 1
         assert results[0]["entity_value"] == "concept-1"
 
@@ -1026,9 +1028,9 @@ class TestDedup:
         scanner = DedupScanner(storage=storage)
         # Only the exact phase: these rows carry vectors of a width the
         # fixture store may not share, which the near phase would search with.
-        all_chunks = await scanner._get_all_chunks(max_count=100)
+        all_chunks = (await scanner._select_pool(100)).chunks
         seen: set[frozenset] = set()
-        exact = scanner._find_exact_duplicates(all_chunks, seen)
+        exact = scanner._find_exact_duplicates(all_chunks, seen, set())
 
         assert len(exact) == 1
         assert exact[0].exact is True
@@ -1043,7 +1045,7 @@ class TestDedup:
         await storage.upsert_chunks([c1, c2])
 
         scanner = DedupScanner(storage=storage)
-        all_chunks = await scanner._get_all_chunks(max_count=100)
+        all_chunks = (await scanner._select_pool(100)).chunks
         seen: set[frozenset] = set()
-        exact = scanner._find_exact_duplicates(all_chunks, seen)
+        exact = scanner._find_exact_duplicates(all_chunks, seen, set())
         assert len(exact) == 0

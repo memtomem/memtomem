@@ -1,0 +1,36 @@
+name: Linked PR notice
+
+# When someone outside the maintainers has commented on an issue that an open pull
+# request will close, post one notice naming that pull request, so a second fix is not
+# started for work already under review.
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  # Every comment on an issue runs the job, a maintainer's or a bot's too: the script
+  # decides from all of the issue's comments, so whichever run is left in the queue
+  # below answers for the ones it replaced.
+  notice:
+    if: ${{ !github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    # One run per issue at a time, so two quick comments cannot both post a notice.
+    concurrency:
+      group: linked-pr-notice-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Point to the open pull request
+        run: python3 .github/linked-pr-notice.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

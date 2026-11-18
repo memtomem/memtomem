@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from memtomem.storage.base import WRITER_WAIT_S
+
 
 class ScratchMixin:
     """Mixin providing scratchpad methods. Requires self._get_db()."""
@@ -25,7 +27,9 @@ class ScratchMixin:
             self._commit_if_standalone(db)
 
     async def scratch_get(self, key: str) -> dict | None:
-        db = self._get_db()
+        # Writer reads in this mixin wait for another task's transaction
+        # rather than being refused at once (#3182).
+        db = await self._get_db_after_wait(wait=WRITER_WAIT_S)
         row = db.execute(
             "SELECT key, value, session_id, created_at, expires_at, promoted FROM working_memory WHERE key = ?",
             (key,),
@@ -42,7 +46,7 @@ class ScratchMixin:
         }
 
     async def scratch_list(self, session_id: str | None = None) -> list[dict]:
-        db = self._get_db()
+        db = await self._get_db_after_wait(wait=WRITER_WAIT_S)
         if session_id:
             rows = db.execute(
                 "SELECT key, value, session_id, created_at, expires_at, promoted FROM working_memory WHERE session_id = ? ORDER BY created_at",

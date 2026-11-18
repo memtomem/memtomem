@@ -32,6 +32,9 @@ from memtomem.errors import (
     ConfigError,
     EmbeddingDimensionMismatchError,
     EmbeddingError,
+    EvalCaseError,
+    EvalCaseNotFoundError,
+    EvalCaseValidationError,
     NamespaceMutationBusyError,
     NamespaceResolutionError,
     SchemaDowngradeError,
@@ -47,6 +50,14 @@ def _message_of(exc: Exception) -> str:
     return info.value.format_message()
 
 
+def _wrapped(cause: sqlite3.OperationalError) -> StorageError:
+    """A ``StorageError`` raised from ``cause``, as ``transaction()`` raises it."""
+    try:
+        raise StorageError(f"transaction() could not take the write lock: {cause}") from cause
+    except StorageError as exc:
+        return exc
+
+
 _HINT_CASES = [
     (sqlite3.OperationalError("database is locked"), "another process is writing"),
     (sqlite3.OperationalError("no such table: chunks"), "run `mm init`"),
@@ -57,6 +68,10 @@ _HINT_CASES = [
     (EmbeddingError("model not found"), "docs/guides/embeddings.md"),
     (ConfigError("bad json"), "mm config show"),
     (StorageError("disk I/O error"), "run `mm status`"),
+    # Another process kept ``BEGIN IMMEDIATE`` busy inside ``transaction()``
+    # (#3173): the lock hint, by the cause, not by the wrapper's text.
+    (_wrapped(sqlite3.OperationalError("database is locked")), "another process is writing"),
+    (_wrapped(sqlite3.OperationalError("disk I/O error")), "run `mm status`"),
     # The open-time lock gets the lock hint, not "run `mm status`" — which
     # would be the advice inside `mm status` itself (#2589).
     (StorageStartupError(reason_code="storage_locked", stage="open"), "another process is writing"),
@@ -97,6 +112,22 @@ class TestHintMapping:
         # never attach a misleading remediation.
         message = _message_of(sqlite3.OperationalError("disk I/O error"))
         assert message == "disk I/O error"
+        assert "Hint:" not in message
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            EvalCaseNotFoundError("eval case 'x' not found"),
+            EvalCaseValidationError("invalid case name"),
+            EvalCaseError("eval case name 'x' already exists"),
+        ],
+    )
+    def test_eval_case_errors_get_no_storage_hint(self, exc: Exception) -> None:
+        # ``EvalCaseError`` subclasses ``StorageError``, but an unknown case or
+        # run is an input problem: "run `mm status`" would point at a healthy
+        # database. The message names the problem on its own.
+        message = _message_of(exc)
+        assert message == str(exc)
         assert "Hint:" not in message
 
     def test_empty_message_falls_back_to_class_name(self) -> None:

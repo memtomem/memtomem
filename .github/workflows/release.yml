@@ -7,6 +7,10 @@ name: Publish
 #   v0.1.0          → PyPI                (production)
 #   test-v0.1.0a1   → TestPyPI            (dry run)
 #
+# The workspace's other PyPI distribution, langchain-memtomem, has its own
+# tags (langchain-v*, test-langchain-v*), publisher and environment:
+# release-langchain.yml.
+#
 # Both paths share the same `pypi` GitHub environment, gated to tag
 # pushes matching `v*` and `test-v*` only.
 #
@@ -79,7 +83,9 @@ on:
       - "test-v[0-9]*"   # TestPyPI dry-run
 
 # Pin the uv toolchain for reproducible release builds. Keep in lockstep with
-# the same pin in ci.yml (Dependabot can't bump a `with:` input).
+# the same pin in ci.yml, release-langchain.yml, release-sbom.yml and
+# release-langchain-sbom.yml
+# (Dependabot can't bump a `with:` input).
 env:
   UV_VERSION: "0.11.16"
 
@@ -99,7 +105,7 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ env.UV_VERSION }}
-      - name: Validate tag, package, lock, changelog, registry-record and Hermes plugin versions
+      - name: Validate tag, package, lock, changelog, registry-record and pinned plugin versions
         id: contract
         run: >-
           uv run --no-project --python 3.12 python tools/release_preflight.py contract

@@ -76,6 +76,10 @@ def _ollama_available() -> bool:
     return shutil.which("ollama") is not None
 
 
+def _claude_cli_found() -> bool:
+    return shutil.which("claude") is not None
+
+
 def _ollama_running() -> bool:
     try:
         if sys.platform == "win32":
@@ -456,6 +460,17 @@ def _y_refuse_hint(flag: str, extra: str) -> str:
     )
 
 
+def _echo_openai_embedding_notice() -> None:
+    """What choosing OpenAI embeddings sends, and to whom."""
+    from memtomem.inference_endpoints import OPENAI_DEFAULT_BASE_URL, classify_url
+
+    host = classify_url("embedding", "openai", OPENAI_DEFAULT_BASE_URL).host
+    click.secho(f"  OpenAI embeddings send your note text to {host}:", fg="yellow")
+    click.echo("    - the text of every chunk when it is indexed")
+    click.echo("    - every search query")
+    click.echo("  Keyword search [1] and Local ONNX [2] keep embedding on this machine.")
+
+
 # ── Step functions ────────────────────────────────────────────────────
 
 
@@ -628,6 +643,15 @@ def _step_embedding(state: dict) -> None:
         # dependency); the ``openai`` PyPI client is NOT imported, so it is not
         # required. The real precondition is an API key, collected below /
         # via ``--api-key``.
+
+        # Disclose before asking for anything: this is the choice that makes
+        # note text leave the machine. Declining re-runs the step from the
+        # provider picker (``run_steps`` re-invokes on ``StepRetry``).
+        _echo_openai_embedding_notice()
+        if not nav_confirm("  Send note text to OpenAI for embedding?", default=False):
+            click.echo("  Choose another provider.")
+            raise StepRetry()
+        click.echo()
 
         click.echo("  Available models:")
         click.echo("    [1] text-embedding-3-small — balanced (1536d)")
@@ -1142,7 +1166,17 @@ def _step_settings(state: dict) -> None:
         # (ADR-0010 §3) instead of loading config — loading would mask
         # the wizard's own write. Users can flip the scope post-install
         # via ``mm config set hooks.target_scope …`` and re-run sync.
-        results = generate_all_settings(project_root, scope="user")
+        from memtomem.context.privacy_scan import PrivacyScanError
+
+        try:
+            results = generate_all_settings(project_root, scope="user", surface="cli_init_settings")
+        except PrivacyScanError as exc:
+            # A pre-existing canonical with a secret in it: Gate A refused the
+            # fan-out before writing anything (#3343). Report it and move on to
+            # the next wizard step instead of aborting the wizard.
+            click.secho(f"  {exc.message}", fg="red")
+            click.echo()
+            return
         for name, r in results.items():
             if r.status == "ok":
                 click.secho(f"  Merged → {r.target}", fg="green")
@@ -1176,7 +1210,11 @@ def _step_mcp(state: dict) -> None:
         return
     step_header(state, "Connect to AI Editor")
     click.echo("  How do you want to connect memtomem?")
-    click.echo("    [1] Claude Code (run 'claude mcp add' automatically)")
+    claude_found = _claude_cli_found()
+    if claude_found:
+        click.echo("    [1] Claude Code (run 'claude mcp add' automatically)")
+    else:
+        click.echo("    [1] Claude Code (claude CLI not found on PATH)")
     click.echo("    [2] Generate .mcp.json here (Claude Code project scope;")
     click.echo("        copy into your editor's config file for Cursor / Windsurf / others)")
     click.echo("    [3] Skip — I'll configure it manually")
@@ -1184,7 +1222,8 @@ def _step_mcp(state: dict) -> None:
     click.echo("        it already bundles the server, and a manual entry would run a")
     click.echo("        second copy against the same store)")
     click.echo("    [4] Kimi Code (write ~/.kimi-code/mcp.json or $KIMI_CODE_HOME/mcp.json)")
-    state["mcp_choice"] = nav_prompt("  Select", type=click.IntRange(1, 4), default=1)
+    default = 1 if claude_found else 3
+    state["mcp_choice"] = nav_prompt("  Select", type=click.IntRange(1, 4), default=default)
     click.echo()
 
 
@@ -1515,6 +1554,7 @@ async def _check_embedding_mismatch(state: dict, *, interactive: bool) -> None:
         embedding_provider=state["provider"],
         embedding_model=state["model"],
         strict_dim_check=False,
+        fts_tokenizer=state.get("tokenizer") or "unicode61",
     )
     await storage.initialize()
     try:
@@ -1625,18 +1665,22 @@ def _workspace_python(state: dict) -> Path | None:
     profile = state["_profile"]
     if profile.workspace_venv_path is None:
         return None
-    py = profile.workspace_venv_path / "bin" / "python"
-    return py if py.exists() else None
+    for relative in (("bin", "python"), ("Scripts", "python.exe")):
+        py = profile.workspace_venv_path.joinpath(*relative)
+        if py.exists():
+            return py
+    return None
 
 
 def _probe_workspace_extras(py: Path) -> set[str] | None:
     """Ask a foreign Python which of ``fastembed`` / ``fastapi`` / ``uvicorn``
     are importable. Returns the importable subset, or ``None`` on subprocess
-    failure (missing binary, timeout, non-zero rc, bad JSON). Callers treat
-    ``None`` as "unknown — fall back to the in-process probe"."""
+    failure (a binary that is missing or cannot run, timeout, non-zero rc, bad
+    JSON). ``None`` means unknown: :func:`_collect_missing_extras` falls back to the
+    in-process probe, and :func:`_onnx_preset_will_work` counts it as missing."""
     try:
         result = _run([str(py), "-c", _PROBE_EXTRAS_CODE], timeout=5)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
         return None
@@ -1663,6 +1707,22 @@ def _inproc_have_extras() -> tuple[bool, bool]:
     from memtomem.cli.web import _missing_web_deps
 
     return (_have_module("fastembed"), _missing_web_deps() is None)
+
+
+def _onnx_preset_will_work(state: dict) -> bool:
+    """True only when the ``onnx`` extra is known to be importable where memtomem will run.
+
+    Decides what pressing Enter at the preset picker selects, so unknown counts as
+    missing: unlike :func:`_collect_missing_extras`, a workspace whose interpreter
+    is absent or cannot be probed does not fall back to the running interpreter."""
+    profile = state.get("_profile")
+    if profile is None or profile.cwd_install_type not in ("source", "project"):
+        return _have_module("fastembed")
+    workspace_python = _workspace_python(state)
+    if workspace_python is None:
+        return False
+    importable = _probe_workspace_extras(workspace_python)
+    return importable is not None and "fastembed" in importable
 
 
 def _workspace_needs_sync(state: dict) -> bool:
@@ -2243,13 +2303,69 @@ def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
         fg="yellow",
         bold=True,
     )
+    embeds_with_onnx = state.get("provider") == "onnx"
     if "onnx" in missing and "web" in missing:
-        click.echo("      'mm index' (embeddings) and 'mm web' (UI) will fail until installed.")
+        if embeds_with_onnx:
+            click.echo(
+                "      'mm add', 'mm search', 'mm index' (embeddings) and 'mm web' (UI) "
+                "will fail until installed."
+            )
+        else:
+            click.echo(
+                "      Reranking keeps the original order and 'mm web' (UI) will fail "
+                "until installed."
+            )
     elif "onnx" in missing:
-        click.echo("      'mm index' will fail to embed until installed.")
+        if embeds_with_onnx:
+            click.echo("      'mm add', 'mm search' and 'mm index' will fail until installed.")
+        else:
+            click.echo("      Reranking keeps the original order until installed.")
     elif "web" in missing:
         click.echo("      'mm web' will fail to start until installed.")
     click.echo(f"      → {_extra_install_hint(missing, state)}")
+
+
+def _emit_remote_inference_summary(config_path: Path, *, to_stderr: bool) -> None:
+    """List the remote inference endpoints the written config puts in effect.
+
+    Uses the loader the server uses (defaults, env, ``config.d``,
+    ``config.json``). Silent when there are none, and when *config_path* is not
+    the file that loader reads (a caller writing elsewhere), since the loader's
+    view would then describe a different config.
+    """
+    from memtomem.config import _override_path
+    from memtomem.config_signature import build_fresh_config
+    from memtomem.inference_endpoints import NOT_COVERED, remote_endpoints
+
+    try:
+        if config_path.resolve() != _override_path().resolve():
+            return
+        cfg = build_fresh_config(
+            migrate=False, strict_overrides=False, quiet=True, validate_profile=False
+        )
+    except (OSError, ValueError) as exc:
+        click.secho(
+            f"  Could not check for remote inference endpoints: {exc}",
+            fg="yellow",
+            err=to_stderr,
+        )
+        return
+    endpoints = remote_endpoints(cfg.embedding, cfg.llm, cfg.rerank)
+    if not endpoints:
+        return
+    click.echo(err=to_stderr)
+    click.secho(
+        "  Remote inference endpoints — note text leaves this machine:",
+        fg="yellow",
+        bold=True,
+        err=to_stderr,
+    )
+    for ep in endpoints:
+        click.echo(
+            f"    - {ep.component} ({ep.provider}) -> {ep.host}: sends {ep.sends}",
+            err=to_stderr,
+        )
+    click.secho(f"  {NOT_COVERED}", dim=True, err=to_stderr)
 
 
 def _write_config_and_summary(
@@ -2660,6 +2776,12 @@ def _write_config_and_summary(
             else:
                 _emit_missing_extras_warning(missing, state)
 
+    # Before anything is indexed: which configured endpoints will receive note
+    # text. Read from the merged effective config, not the wizard's choices,
+    # so a preserved remote LLM, a kept custom base_url or an env override
+    # shows up too.
+    _emit_remote_inference_summary(config_path, to_stderr=bool(state.get("non_interactive")))
+
     # Offer to seed the initial index inline. Both small and large cases
     # now prompt (TTY-only, default No), with a visible progress bar and
     # Ctrl-C resume hint so long runs don't look hung. Large-case adds a
@@ -2857,15 +2979,18 @@ def _step_preset_picker(state: dict) -> None:
     click.echo()
 
     ordered: list[str] = ["minimal", "english", "korean"]
+    onnx_will_work = _onnx_preset_will_work(state)
     for i, name in enumerate(ordered, start=1):
         spec = PRESETS[name]  # type: ignore[index]
-        click.echo(f"    [{i}] {spec.label}")
+        needs_extra = spec.provider == "onnx" and not onnx_will_work
+        click.echo(f"    [{i}] {spec.label}{' — needs memtomem[onnx]' if needs_extra else ''}")
         click.echo(f"        {spec.description}")
     advanced_idx = len(ordered) + 1
     click.echo(f"    [{advanced_idx}] Advanced — full 10-step wizard (all options)")
     click.echo()
 
-    choice = nav_prompt("  Select", type=click.IntRange(1, advanced_idx), default=2)
+    default = ordered.index("english" if onnx_will_work else "minimal") + 1
+    choice = nav_prompt("  Select", type=click.IntRange(1, advanced_idx), default=default)
     click.echo()
 
     if choice == advanced_idx:
@@ -3129,19 +3254,35 @@ def _model_dimension(provider: str | None, model: str, fallback: int) -> int:
     "legacy_yes",
     is_flag=True,
     help=(
-        "Accepted and ignored; `mm init` has no confirmation prompt to "
-        "skip. It was a deprecated alias for --non-interactive through "
+        "Accepted and ignored; it does not answer `mm init`'s prompts. "
+        "It was a deprecated alias for --non-interactive through "
         "0.4.x; use --non-interactive in scripts."
     ),
 )
-@click.option("--provider", type=click.Choice(["none", "onnx", "ollama", "openai"]), default=None)
+@click.option(
+    "--provider",
+    type=click.Choice(["none", "onnx", "ollama", "openai"]),
+    default=None,
+    help=(
+        "Embedding provider: none (keyword search only, no embeddings), "
+        "onnx (local), ollama (an Ollama server), or openai (cloud; see --api-key)."
+    ),
+)
 @click.option("--model", default=None, help="Embedding model name")
 @click.option("--memory-dir", default=None, help="Memory directory path")
 @click.option("--db-path", default=None, help="SQLite DB path")
 @click.option("--namespace", default=None, help="Default namespace")
 @click.option("--auto-ns", is_flag=True, default=False, help="Auto-assign namespace from folder")
 @click.option("--top-k", default=None, type=int, help="Results per search")
-@click.option("--tokenizer", type=click.Choice(["unicode61", "kiwipiepy"]), default=None)
+@click.option(
+    "--tokenizer",
+    type=click.Choice(["unicode61", "kiwipiepy"]),
+    default=None,
+    help=(
+        "Keyword-search tokenizer: unicode61 (English and most languages) "
+        "or kiwipiepy (Korean word splitting; needs the kiwipiepy package)."
+    ),
+)
 @click.option("--decay", is_flag=True, default=False, help="Enable time-decay")
 @click.option("--api-key", default=None, help="OpenAI API key")
 @click.option(
@@ -3149,6 +3290,11 @@ def _model_dimension(provider: str | None, model: str, fallback: int) -> int:
     "mcp_mode",
     type=click.Choice(["claude", "kimi", "json", "skip"]),
     default=None,
+    help=(
+        "Connect an editor: claude (runs `claude mcp add`, user scope), "
+        "json (writes ./.mcp.json in the current directory), "
+        "kimi (writes Kimi Code's mcp.json), or skip."
+    ),
 )
 @click.option(
     "--include-provider",
@@ -3245,15 +3391,16 @@ def init(
 
     if legacy_yes:
         # #1616/#1631 stage 3 (v0.5.0): `-y` no longer implies
-        # --non-interactive. It is accepted and ignored, matching every other
-        # `mm` command where -y skips a confirmation prompt — init has none.
+        # --non-interactive. It is accepted and ignored: unlike other `mm`
+        # commands, init does not let -y answer its prompts (the OpenAI
+        # egress confirmation must be answered by a person).
         # The notice stays (rather than going silent) because the flip is
         # breaking for `-y`-only scripts: they now get the wizard, and a
         # script that reached here in 0.4.x needs to be told why.
         click.secho(
             "  Note: `-y` is accepted but ignored on `mm init` — it no longer "
             "implies --non-interactive (deprecated through 0.4.x, changed in "
-            "0.5.0). `mm init` has no confirmation prompt to skip; use "
+            "0.5.0) and does not answer `mm init`'s prompts; use "
             "--non-interactive in scripts. (#1631)",
             fg="yellow",
             err=True,
@@ -3314,7 +3461,8 @@ def init(
             click.secho(
                 "  Note: --non-interactive without --preset applies the "
                 "'minimal' preset (BM25 keyword search only, no embeddings); "
-                "the interactive wizard defaults to 'english'. Pass --preset "
+                "the interactive wizard defaults to 'english' when the onnx extra "
+                "is installed and to 'minimal' otherwise. Pass --preset "
                 "minimal|english|korean to choose explicitly, or run "
                 "`mm init` for the wizard.",
                 fg="yellow",
@@ -3424,5 +3572,6 @@ def init(
                 mcp_mode=mcp_mode,
             )
 
+    state["non_interactive"] = non_interactive
     _write_config_and_summary(state, fresh=fresh)
     _maybe_offer_embedding_reset(state, interactive=not non_interactive)

@@ -57,9 +57,10 @@ def _repo(
         '  "idna>=3.15",\n'
         '  "pyjwt>=2.13.0",\n'
         '  "python-multipart>=0.0.27",\n'
+        '  "opentelemetry-api>=1.45.2",\n'
         "]\n\n"
         "[project.optional-dependencies]\n"
-        f'onnx = ["fastembed>=0.8,<0.9", "urllib3{urllib3}"]\n'
+        f'onnx = ["fastembed>=0.9.1,<0.10", "urllib3{urllib3}"]\n'
         f'langfuse = ["langfuse>=4.0", "urllib3{urllib3}"]\n'
         'all = ["memtomem[onnx,langfuse]"]\n',
         encoding="utf-8",
@@ -105,6 +106,7 @@ def _metadata(
         "idna>=3.15",
         "pyjwt>=2.13.0",
         "python-multipart>=0.0.27",
+        "opentelemetry-api>=1.45.2",
         f'urllib3{urllib3}; extra == "all"',
         f'urllib3{urllib3}; extra == "onnx"',
         f'urllib3{urllib3}; extra == "langfuse"',
@@ -524,16 +526,20 @@ class _Pkg(NamedTuple):
 
 _PLUGIN_PKG = _Pkg("packages/memtomem-hermes-plugin", "plugin.json", "hermes_version")
 _MEMORY_PKG = _Pkg("packages/memtomem-hermes-memory", "plugin.yaml", "hermes_memory_version")
+# Its manifest sits one directory down, so the fixture writes a nested path.
+_OPENCLAW_PKG = _Pkg(
+    "packages/memtomem-openclaw-bundle", ".codex-plugin/plugin.json", "openclaw_version"
+)
 _HERMES = _PLUGIN_PKG.path
 
 
-@pytest.fixture(params=[_PLUGIN_PKG, _MEMORY_PKG], ids=lambda pkg: pkg.manifest)
+@pytest.fixture(params=[_PLUGIN_PKG, _MEMORY_PKG, _OPENCLAW_PKG], ids=lambda pkg: pkg.manifest)
 def pkg(request: pytest.FixtureRequest) -> _Pkg:
     return request.param
 
 
 def _manifest_text(pkg: _Pkg, version: object) -> str:
-    if pkg.manifest == "plugin.json":
+    if pkg.manifest.endswith(".json"):
         manifest: dict[str, object] = {"name": "memtomem"}
         if version is not None:
             manifest["version"] = version
@@ -573,6 +579,7 @@ def _write_hermes(
 ) -> None:
     package = repo / pkg.path
     (package / "skills").mkdir(parents=True, exist_ok=True)
+    (package / pkg.manifest).parent.mkdir(parents=True, exist_ok=True)
     (package / pkg.manifest).write_text(_manifest_text(pkg, version), encoding="utf-8")
     (package / "skills" / "SKILL.md").write_text(skill, encoding="utf-8")
 
@@ -609,7 +616,7 @@ def test_the_checked_packages_are_the_repos_hermes_packages() -> None:
         (root / "packages/memtomem-plugin-assets/contract.toml").read_text(encoding="utf-8")
     )
     checked = [(p.path, p.manifest, p.contract_key) for p in rp._HERMES_PACKAGES]
-    assert checked == [tuple(_PLUGIN_PKG), tuple(_MEMORY_PKG)]
+    assert checked == [tuple(_PLUGIN_PKG), tuple(_MEMORY_PKG), tuple(_OPENCLAW_PKG)]
     for package in rp._HERMES_PACKAGES:
         raw = (root / package.path / package.manifest).read_text(encoding="utf-8")
         assert package.read_version(raw) == contract["plugins"][package.contract_key]
@@ -677,6 +684,18 @@ def test_each_package_is_judged_on_its_own(tmp_path: Path) -> None:
     _write_hermes(repo, "0.1.1", skill="changed", pkg=_PLUGIN_PKG)
     _commit(repo, "provider bumped, plugin changed, not bumped")
     with pytest.raises(rp.ReleaseCheckError, match=r"bump \[plugins\] hermes_version "):
+        rp.validate_hermes_version_bump("v0.6.8", repo)
+
+
+def test_the_openclaw_bundle_is_judged_apart_from_the_hermes_plugin(tmp_path: Path) -> None:
+    """Both render the same user-scope skills, so one bump must not stand in for the other."""
+    repo = _hermes_repo(tmp_path)
+    _write_hermes(repo, "0.1.0", pkg=_OPENCLAW_PKG)
+    _commit(repo, "bundle released", "v0.6.7")
+    _write_hermes(repo, "0.1.2", skill="changed", pkg=_PLUGIN_PKG)
+    _write_hermes(repo, "0.1.0", skill="changed", pkg=_OPENCLAW_PKG)
+    _commit(repo, "same skill change, only the Hermes plugin bumped")
+    with pytest.raises(rp.ReleaseCheckError, match=r"bump \[plugins\] openclaw_version "):
         rp.validate_hermes_version_bump("v0.6.8", repo)
 
 
@@ -1218,6 +1237,44 @@ def test_artifacts_reject_missing_floor(tmp_path: Path) -> None:
     body = _metadata().replace(b"Requires-Dist: starlette>=1.3.1\n", b"")
     with pytest.raises(rp.ReleaseCheckError, match="direct floors"):
         rp.validate_artifacts(_dist(tmp_path, metadata=body), "0.3.6", repo)
+
+
+@pytest.mark.parametrize("name", sorted(rp._SECURITY_DIRECT_NAMES))
+def test_every_security_floor_is_required_of_the_project_and_the_artifacts(
+    tmp_path: Path, name: str
+) -> None:
+    """Each name in the set is a floor memtomem declares for a dependency it
+    could otherwise get transitively, so dropping one from ``pyproject.toml``
+    or from the built metadata must stop a release, whichever name it is."""
+    repo = _repo(tmp_path)
+    pyproject = repo / "packages" / "memtomem" / "pyproject.toml"
+    declared = pyproject.read_text(encoding="utf-8")
+    lines = [line for line in declared.splitlines(keepends=True) if f'"{name}>' in line]
+    assert len(lines) == 1, lines
+
+    built = _metadata()
+    requires = [
+        line
+        for line in built.splitlines(keepends=True)
+        if line.startswith(f"Requires-Dist: {name}>".encode())
+    ]
+    assert len(requires) == 1, requires
+    with pytest.raises(rp.ReleaseCheckError, match="direct floors"):
+        rp.validate_artifacts(
+            _dist(tmp_path, metadata=built.replace(requires[0], b"")), "0.3.6", repo
+        )
+
+    pyproject.write_text(declared.replace(lines[0], ""), encoding="utf-8")
+    with pytest.raises(rp.ReleaseCheckError, match="security-sensitive direct dependencies"):
+        rp.security_metadata_contract(repo)
+
+
+def test_the_real_project_is_held_to_the_opentelemetry_api_floor() -> None:
+    """The contract is derived from the checkout's own ``pyproject.toml`` and
+    the registered names. The floor dropped or lowered there, or the name
+    taken out of the set, fails here and not first at release time."""
+    direct, _ = rp.security_metadata_contract(_ROOT)
+    assert "opentelemetry-api>=1.45.2" in direct
 
 
 def test_artifacts_reject_missing_extra_marker(tmp_path: Path) -> None:

@@ -23,6 +23,7 @@ These guards protect invariants that code cannot enforce directly:
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
@@ -78,6 +79,7 @@ _CONTEXT_GATEWAY = _GUIDES / "context-gateway.md"
 _UNINSTALL_GUIDE = _GUIDES / "uninstall.md"
 _PLUGIN_CONTRACT = _REPO_ROOT / "packages" / "memtomem-plugin-assets" / "contract.toml"
 _VIBE_GUIDE = _GUIDES / "vibe-coding-getting-started-ko.md"
+_PLUGIN_QUICKSTART = _GUIDES / "plugin-quickstart.md"
 _SRC = _REPO_ROOT / "packages" / "memtomem" / "src" / "memtomem"
 _AUTOMATION_HOOKS_JSON = (
     _REPO_ROOT / "packages" / "memtomem-claude-automation-plugin" / "hooks" / "hooks.json"
@@ -714,6 +716,7 @@ class TestPluginManualCoexistenceCallout:
         for path in (
             _PLUGIN_README,
             _VIBE_GUIDE,
+            _PLUGIN_QUICKSTART,
             _INTEGRATIONS / "claude-code.md",
             *plugin_guidance,
         ):
@@ -1308,9 +1311,75 @@ def _markdown_link_targets(text: str) -> set[str]:
     return targets
 
 
-class TestVibeCodingQuickstart:
-    def test_public_entrypoints_link_quickstart(self) -> None:
-        relative = "vibe-coding-getting-started-ko.md"
+class _QuickstartLocale(typing.NamedTuple):
+    """The localized strings one quickstart pins; the commands are shared."""
+
+    path: Path
+    preparation: str
+    round_trip: str
+    new_session: str
+    memory: str
+    codex_remember: str
+    claude_search: str
+    codex_search: str
+    skill_count: str
+    required: tuple[str, ...]
+
+
+_QUICKSTARTS = (
+    _QuickstartLocale(
+        path=_PLUGIN_QUICKSTART,
+        preparation="check the one tool you use",
+        round_trip="Save your first memory",
+        new_session="Find it again in a new session",
+        memory=(
+            "In every project, keep explanations short and quote code identifiers "
+            "exactly as written."
+        ),
+        codex_remember="Use the $memtomem-remember skill to save this personal preference: ",
+        claude_search="/memtomem:search code identifiers exactly",
+        codex_search=(
+            'Use the $memtomem-search skill to find "code identifiers exactly" and show the source.'
+        ),
+        skill_count="show {} skills, including `status`",
+        required=("BM25-only", "cloud sync", "API key", "explicitly"),
+    ),
+    _QuickstartLocale(
+        path=_VIBE_GUIDE,
+        preparation="평소 쓰는 도구",
+        round_trip="첫 기억을 저장",
+        new_session="새 세션에서 다시 찾기",
+        memory="모든 프로젝트에서 설명은 한국어로 받고, 코드 식별자는 원문 표기를 유지한다.",
+        codex_remember="$memtomem-remember 스킬로 다음 개인 선호를 저장해줘: ",
+        claude_search="/memtomem:search 코드 식별자는 원문",
+        codex_search='$memtomem-search 스킬로 "코드 식별자는 원문"을 찾고 출처도 보여줘.',
+        skill_count="`status`를 포함한 스킬 {}개",
+        required=("BM25-only", "클라우드 동기화", "API key", "명시적"),
+    ),
+)
+_QUICKSTART_IDS = [locale.path.name for locale in _QUICKSTARTS]
+
+
+def _fenced_commands(text: str) -> list[str]:
+    """Lines of the ``bash`` fences, trailing comments dropped — the copy-pasted part."""
+    commands: list[str] = []
+    for block in re.findall(r"^```bash\n(.*?)^```", text, re.MULTILINE | re.DOTALL):
+        for line in block.splitlines():
+            command = line.partition(" #")[0].strip()
+            if command:
+                commands.append(command)
+    return commands
+
+
+class TestPluginQuickstarts:
+    """The English plugin quickstart and its Korean counterpart.
+
+    The two are written separately, not generated, so the localized prose is
+    pinned per guide and the shared parts are pinned as parity: a command added
+    to one guide alone fails here rather than leaving the other a step behind.
+    """
+
+    def test_public_entrypoints_link_both_quickstarts(self) -> None:
         entrypoints = (
             _README,
             _PYPI_README,
@@ -1322,17 +1391,54 @@ class TestVibeCodingQuickstart:
             _PLUGIN_README,
             _CODEX_PLUGIN_README,
         )
-        for entrypoint in entrypoints:
-            targets = _markdown_link_targets(_read(entrypoint))
-            assert any(target.endswith(relative) for target in targets), (
-                f"{entrypoint.relative_to(_REPO_ROOT)} must link the Korean vibe-coding quickstart"
-            )
-        assert (
-            f"https://github.com/memtomem/memtomem/blob/main/docs/guides/{relative}"
-        ) in _markdown_link_targets(_read(_PYPI_README))
+        for locale in _QUICKSTARTS:
+            relative = locale.path.name
+            for entrypoint in entrypoints:
+                targets = _markdown_link_targets(_read(entrypoint))
+                assert any(
+                    target.endswith(f"/{relative}") or target == relative for target in targets
+                ), f"{entrypoint.relative_to(_REPO_ROOT)} must link {relative}"
+            assert (
+                f"https://github.com/memtomem/memtomem/blob/main/docs/guides/{relative}"
+            ) in _markdown_link_targets(_read(_PYPI_README))
 
-    def test_plugin_install_commands_match_supported_public_flow(self) -> None:
-        guide = _read(_VIBE_GUIDE)
+    def test_the_two_quickstarts_link_each_other(self) -> None:
+        english, korean = (_read(locale.path) for locale in _QUICKSTARTS)
+        assert _VIBE_GUIDE.name in _markdown_link_targets(english)
+        assert _PLUGIN_QUICKSTART.name in _markdown_link_targets(korean)
+
+    def test_the_two_quickstarts_run_the_same_commands(self) -> None:
+        english, korean = (_fenced_commands(_read(locale.path)) for locale in _QUICKSTARTS)
+        assert english, "the English quickstart lost its bash blocks"
+        assert english == korean
+
+    def test_the_two_quickstarts_invoke_the_same_workflows(self) -> None:
+        """The slash commands and Codex skills live in ``text`` fences and prose.
+
+        Those are localized around the workflow name, so the bash parity above
+        does not see them; the sequence of workflow names is what both share.
+        """
+        workflow = re.compile(r"/memtomem:[a-z-]+|\$memtomem-[a-z-]+")
+        english, korean = (workflow.findall(_read(locale.path)) for locale in _QUICKSTARTS)
+        assert english, "the English quickstart names no workflow"
+        assert english == korean
+
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_quickstart_states_the_shipped_skill_count(self, locale: _QuickstartLocale) -> None:
+        skills = [path for path in (_PLUGIN_README.parent / "skills").iterdir() if path.is_dir()]
+        assert locale.skill_count.format(len(skills)) in _read(locale.path)
+
+    def test_the_two_quickstarts_keep_the_same_outline(self) -> None:
+        english, korean = (
+            re.findall(r"^(#{2,3}) ", _read(locale.path), re.MULTILINE) for locale in _QUICKSTARTS
+        )
+        assert english == korean
+
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_plugin_install_commands_match_supported_public_flow(
+        self, locale: _QuickstartLocale
+    ) -> None:
+        guide = _read(locale.path)
         commands = (
             "claude plugin marketplace add memtomem/memtomem",
             "claude plugin install memtomem@memtomem --scope project",
@@ -1350,7 +1456,8 @@ class TestVibeCodingQuickstart:
         )
         status = f"uvx --from 'memtomem[onnx]=={version}' mm status"
 
-        for path in (_VIBE_GUIDE, _PLUGIN_README, _CODEX_PLUGIN_README):
+        guides = tuple(locale.path for locale in _QUICKSTARTS)
+        for path in (*guides, _PLUGIN_README, _CODEX_PLUGIN_README):
             text = _read(path)
             name = path.relative_to(_REPO_ROOT)
             assert text.count(bootstrap) == 1, f"{name} must keep exactly one shared bootstrap"
@@ -1364,7 +1471,6 @@ class TestVibeCodingQuickstart:
                         f"{name} documents an `mm init` without `--mcp skip`: {line!r}"
                     )
 
-        guide = _read(_VIBE_GUIDE)
         claude_flow = (
             bootstrap,
             status,
@@ -1383,23 +1489,30 @@ class TestVibeCodingQuickstart:
             "$memtomem-remember",
             "$memtomem-search",
         )
-        for flow in (claude_flow, codex_flow):
-            positions = [guide.index(step) for step in flow]
-            assert positions == sorted(positions), f"vibe guide onboarding order drifted: {flow}"
+        for path in guides:
+            guide = _read(path)
+            for flow in (claude_flow, codex_flow):
+                positions = [guide.index(step) for step in flow]
+                assert positions == sorted(positions), (
+                    f"{path.name} onboarding order drifted: {flow}"
+                )
 
-    def test_mixed_beginner_path_links_official_client_install_docs(self) -> None:
-        preparation = _vibe_section(_read(_VIBE_GUIDE), "평소 쓰는 도구")
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_mixed_beginner_path_links_official_client_install_docs(
+        self, locale: _QuickstartLocale
+    ) -> None:
+        preparation = _vibe_section(_read(locale.path), locale.preparation)
         targets = _markdown_link_targets(preparation)
         assert "https://code.claude.com/docs/en/quickstart" in targets
         assert "https://learn.chatgpt.com/docs/codex/cli" in targets
 
-    def test_first_round_trip_uses_user_scope_and_exact_keyword_search(self) -> None:
-        guide = _read(_VIBE_GUIDE)
-        round_trip = _vibe_section(guide, "첫 기억을 저장")
-        new_session = _vibe_section(guide, "새 세션에서 다시 찾기")
-        memory = "모든 프로젝트에서 설명은 한국어로 받고, 코드 식별자는 원문 표기를 유지한다."
-        claude_search = "/memtomem:search 코드 식별자는 원문"
-        codex_search = '$memtomem-search 스킬로 "코드 식별자는 원문"을 찾고 출처도 보여줘.'
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_first_round_trip_uses_user_scope_and_exact_keyword_search(
+        self, locale: _QuickstartLocale
+    ) -> None:
+        guide = _read(locale.path)
+        round_trip = _vibe_section(guide, locale.round_trip)
+        new_session = _vibe_section(guide, locale.new_session)
 
         # The first save targets the default user scope — no project-tier init
         # inside the round trip or the new-session verification.
@@ -1407,22 +1520,27 @@ class TestVibeCodingQuickstart:
             assert "mm mem init" not in section
             assert "project_local" not in section
 
-        assert f"/memtomem:remember {memory}" in round_trip
-        assert f"$memtomem-remember 스킬로 다음 개인 선호를 저장해줘: {memory}" in round_trip
-        assert round_trip.index("/memtomem:remember") < round_trip.index(claude_search)
-        assert round_trip.index("$memtomem-remember") < round_trip.index(codex_search)
+        assert f"/memtomem:remember {locale.memory}" in round_trip
+        assert f"{locale.codex_remember}{locale.memory}" in round_trip
+        assert round_trip.index("/memtomem:remember") < round_trip.index(locale.claude_search)
+        assert round_trip.index("$memtomem-remember") < round_trip.index(locale.codex_search)
+
+        # The search keywords are a verbatim run of the stored sentence: BM25
+        # matches words, so a paraphrase would make the first check fail.
+        keywords = locale.claude_search.removeprefix("/memtomem:search ")
+        assert keywords in locale.memory
+        assert f'"{keywords}"' in locale.codex_search
 
         # The new-session check repeats the exact stored keywords for both clients.
-        assert claude_search in new_session
-        assert codex_search in new_session
+        assert locale.claude_search in new_session
+        assert locale.codex_search in new_session
 
         # Project-tier init is introduced only after the round trip succeeds.
-        assert guide.index("mm mem init --scope project_local") > guide.index(
-            "새 세션에서 다시 찾기"
-        )
+        assert guide.index("mm mem init --scope project_local") > guide.index(locale.new_session)
 
-    def test_first_success_workflows_match_plugin_contract(self) -> None:
-        guide = _read(_VIBE_GUIDE)
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_first_success_workflows_match_plugin_contract(self, locale: _QuickstartLocale) -> None:
+        guide = _read(locale.path)
         workflows = {row["id"]: row for row in _plugin_contract()["workflows"]}
         for workflow_id in ("status", "remember", "search"):
             row = workflows[workflow_id]
@@ -1433,9 +1551,12 @@ class TestVibeCodingQuickstart:
         assert workflows["status"]["effect"] == "read"
         assert workflows["search"]["effect"] == "read"
 
-    def test_public_quickstart_keeps_beginner_scope_and_safety_boundaries(self) -> None:
-        guide = _read(_VIBE_GUIDE)
-        for required in ("BM25-only", "클라우드 동기화", "API key", "명시적"):
+    @pytest.mark.parametrize("locale", _QUICKSTARTS, ids=_QUICKSTART_IDS)
+    def test_public_quickstart_keeps_beginner_scope_and_safety_boundaries(
+        self, locale: _QuickstartLocale
+    ) -> None:
+        guide = _read(locale.path)
+        for required in locale.required:
             assert required in guide
         for advanced_or_private in (
             "docs/reports/",
@@ -1514,6 +1635,43 @@ _PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
         "from 0.7.2 and earlier writes no `env`",
         "last release whose mm init wrote no MEMTOMEM_EXTRA_TOOLS (#2970)",
     ),
+    (
+        "docs/guides/integrations/kimi-code.md",
+        "`0.7.3` and later (the entry below",
+        "first release whose mm init writes MEMTOMEM_EXTRA_TOOLS (#2970)",
+    ),
+    (
+        "packages/langchain-memtomem/README.md",
+        "`memtomem>=0.7.9,<0.8`",
+        "langchain-memtomem's floor: first release whose create_components takes its options",
+    ),
+    # The langchain package's own release log, on the same floor.
+    *(
+        ("packages/langchain-memtomem/CHANGELOG.md", fragment, reason)
+        for fragment, reason in (
+            ("`memtomem>=0.7.9,<0.8`", "the floor its next release declares"),
+            ("memtomem 0.7.9 adds; against", "first release with the create_components options"),
+            (
+                "would be. memtomem 0.7.9",
+                "release that narrowed the BM25 path fallback (#3208)",
+            ),
+            (
+                "memtomem 0.7.9, which adds the `create_components` keyword",
+                "first release with bm25_path_fallback",
+            ),
+            ("Needs memtomem 0.7.9 as well", "first release with chunk_source_labels"),
+        )
+    ),
+    (
+        "packages/memtomem-hermes-memory/README.md",
+        "memtomem 0.7.8 or newer",
+        "floor for Hermes mirroring: first release with hermes_mirror_apply",
+    ),
+    (
+        "packages/memtomem-hermes-plugin/README.md",
+        "0.7.8 and earlier also offered them",
+        "last release with the context write tools on MCP",
+    ),
     # The update workflow's tool-absent stop, in its source and every rendered skill.
     *(
         (path, "memtomem 0.7.2 or later", "floor for mem_update_coverage")
@@ -1523,6 +1681,7 @@ _PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
             "plugins/memtomem/skills/memtomem-update/SKILL.md",
             "packages/memtomem-kimi-skills/skills/memtomem-update/SKILL.md",
             "packages/memtomem-antigravity-plugin/skills/memtomem-update/SKILL.md",
+            "packages/memtomem-cursor-plugin/skills/memtomem-update/SKILL.md",
         )
     ),
 )
@@ -1587,7 +1746,7 @@ class TestRegistryAndInstallDocs:
             f"MCP table drifted; missing={sorted(current - documented)}, "
             f"extra={sorted(documented - current)}"
         )
-        assert len(current) == 102
+        assert len(current) == 94
         assert len(_CORE_TOOLS) == 9
         standard = set(_CORE_TOOLS) | {
             f"mem_{name}" for name, info in ACTIONS.items() if info.category in _STANDARD_PACKS
@@ -1636,6 +1795,8 @@ class TestRegistryAndInstallDocs:
             _REPO_ROOT / "packages" / "memtomem-claude-automation-plugin" / "README.md",
             _REPO_ROOT / "packages" / "opencode-memtomem" / "README.md",
             _REPO_ROOT / "packages" / "memtomem-antigravity-plugin" / "README.md",
+            _REPO_ROOT / "packages" / "memtomem-cursor-plugin" / "README.md",
+            _REPO_ROOT / "packages" / "memtomem-openclaw-bundle" / "README.md",
             _REPO_ROOT / "examples" / "onboarding" / "retry-policy" / "README.md",
             # Workflow sources and every rendered skill: the renderer copies a
             # stale pin verbatim, so its own check passes on a missed bump.
@@ -2906,3 +3067,413 @@ class TestManualRegistrationsExposeTheUpdateTool:
         broken_json = '{"mcpServers": {"memtomem": {"command": "x",}}}'
         assert _block_registrations(broken_json, "V") == [("json", None)]
         assert _block_registrations("[mcp_servers.memtomem]\ncommand = ", "V") == [("toml", None)]
+
+
+def test_remote_inference_docs_name_every_classified_provider() -> None:
+    """The "What leaves your machine" section names every network provider id
+    the endpoint classifier knows, and points at the status block it feeds."""
+    from memtomem.inference_endpoints import _KNOWN_NETWORK_PROVIDERS
+
+    text = _read(_REPO_ROOT / "docs" / "guides" / "configuration.md")
+    start = text.index("## What leaves your machine")
+    section = text[start : text.index("\n## ", start + 1)]
+    providers = set().union(*_KNOWN_NETWORK_PROVIDERS.values())
+    missing = sorted(p for p in providers if f"`{p}`" not in section and f"={p}`" not in section)
+    assert missing == []
+    assert "Remote inference endpoints" in section
+
+
+class TestRecallUntilBoundaryDocs:
+    """A date-only ``until`` includes the period it names; only a datetime is exclusive.
+
+    ``_parse_recall_date(..., end_of_period=True)`` advances ``2026-10-23`` to
+    ``2026-10-24T00:00Z`` before the ``created_at < until`` comparison, so a
+    surface calling every ``until`` "exclusive" leads an agent to pass the day
+    after the range it means and silently get one extra day (#3070). The CLI
+    help is pinned in ``test_cli.py``; these pin the other two surfaces.
+    """
+
+    def test_reference_table_row_describes_both_boundaries(self) -> None:
+        text = _read(_GUIDES / "reference" / "core-memory-tools.md")
+        start = text.index("### `mem_recall`")
+        section = text[start : text.index("\n## ", start)]
+        description = _table_row(section, "until")[1]
+        assert description == (
+            "End date. A date-only value includes that whole period (UTC); "
+            "a full datetime is exclusive"
+        )
+
+    def test_mem_recall_docstring_describes_both_boundaries(self) -> None:
+        from memtomem.server.tools.recall import mem_recall
+
+        doc = mem_recall.__doc__ or ""
+        lines = [line.strip() for line in doc.splitlines() if line.strip().startswith("until:")]
+        assert lines == ["until: Date-only includes UTC period; full datetime exclusive"]
+
+
+# ── shared daemon guide ↔ source (#3381) ─────────────────────────────────────
+
+_SHARED_GUIDE = _GUIDES / "shared-daemon.md"
+_ANY = ".+"
+
+
+def _source_tree(relative: str) -> ast.Module:
+    return ast.parse(_read(_SRC / relative))
+
+
+def _evaluated(node: ast.expr) -> object:
+    """A literal, a tuple of literals or a product of numbers; ``ValueError`` otherwise."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float, str)):
+        return node.value
+    if isinstance(node, ast.Tuple):
+        return tuple(_evaluated(element) for element in node.elts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        left, right = _evaluated(node.left), _evaluated(node.right)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            return left * right
+    raise ValueError(ast.dump(node))
+
+
+def _constant(tree: ast.Module, name: str) -> object:
+    """The value of the one module-level ``name = <literal>`` assignment."""
+    values = [
+        _evaluated(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and [t.id for t in node.targets if isinstance(t, ast.Name)] == [name]
+    ]
+    assert len(values) == 1, f"{len(values)} module-level assignments to {name}"
+    return values[0]
+
+
+def _numbers(tree: ast.Module) -> dict[str, int | float]:
+    found: dict[str, int | float] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                try:
+                    value = _evaluated(node.value)
+                except ValueError:
+                    continue
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    found[target.id] = value
+    return found
+
+
+def _pattern(node: ast.expr, numbers: dict[str, int | float]) -> str:
+    """A regex for the text *node* builds: literal parts escaped, the rest ``.+``.
+
+    A placeholder that formats a module-level number is rendered with its
+    value, so a documented ``10 s`` is compared, not waved through.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return re.escape(node.value)
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant):
+                parts.append(re.escape(str(value.value)))
+                continue
+            assert isinstance(value, ast.FormattedValue)
+            inner = value.value
+            if isinstance(inner, ast.Name) and inner.id.isupper():
+                # A constant the message formats has to be one this module
+                # assigns as a number; anything else would match any text.
+                assert inner.id in numbers, f"{inner.id} is not a module-level number"
+                spec = ""
+                if isinstance(value.format_spec, ast.JoinedStr):
+                    spec = "".join(
+                        str(p.value)
+                        for p in value.format_spec.values
+                        if isinstance(p, ast.Constant)
+                    )
+                parts.append(re.escape(format(numbers[inner.id], spec)))
+            else:
+                parts.append(_ANY)
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _pattern(node.left, numbers) + _pattern(node.right, numbers)
+    return _ANY
+
+
+def _fstring_pattern(tree: ast.Module, anchor: str) -> str:
+    """The pattern of the one f-string in *tree* whose literal text contains *anchor*."""
+    numbers = _numbers(tree)
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            literal = "".join(str(v.value) for v in node.values if isinstance(v, ast.Constant))
+            if anchor in literal:
+                found.add(_pattern(node, numbers))
+    assert len(found) == 1, f"{len(found)} f-strings contain {anchor!r}"
+    return found.pop()
+
+
+def _guide_section(heading: str) -> str:
+    text = _read(_SHARED_GUIDE)
+    start = text.index(f"\n## {heading}\n")
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end != -1 else len(text)]
+
+
+def _first_cells(section: str) -> list[str]:
+    """The first cell of every body row of the one table in *section*."""
+    rows = [line for line in section.splitlines() if line.startswith("|")]
+    assert len(rows) >= 3, "no table with a body row"
+    assert set(rows[1].replace("|", "").strip()) <= {"-", " ", ":"}, rows[1]
+    return [row.strip().strip("|").split("|")[0].strip() for row in rows[2:]]
+
+
+def _code_span(cell: str) -> str:
+    assert cell.startswith("`") and cell.endswith("`") and cell.count("`") == 2, cell
+    return cell[1:-1]
+
+
+def _unmatched(patterns: list[str], texts: list[str]) -> tuple[list[str], list[str]]:
+    """Patterns no text matches, and texts no pattern matches."""
+    no_text = [p for p in patterns if not any(re.fullmatch(p, t) for t in texts)]
+    no_pattern = [t for t in texts if not any(re.fullmatch(p, t) for p in patterns)]
+    return no_text, no_pattern
+
+
+def _option_keyword(tree: ast.Module, option: str, keyword: str) -> list[ast.expr]:
+    """The *keyword* argument of every ``add_argument(option, ...)`` call in *tree*."""
+    return [
+        kw.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == option
+        for kw in node.keywords
+        if kw.arg == keyword
+    ]
+
+
+class TestSharedDaemonGuideMatchesSource:
+    """``docs/guides/shared-daemon.md`` quotes numbers, field names and messages.
+
+    Each is read out of the guide and compared with the value the source
+    holds, taken from the source text so the comparison does not depend on
+    what the platform can import. Messages are compared as templates: the
+    literal text must agree, and a formatted value may be anything unless it
+    is a module-level number, which is rendered.
+    """
+
+    def test_every_reason_a_session_does_not_join_has_a_row_and_the_reverse(self) -> None:
+        bridge = _source_tree("_bridge.py")
+        numbers = _numbers(bridge)
+        produced: list[ast.expr] = [
+            node.args[0]
+            for node in ast.walk(bridge)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_Fallback"
+        ]
+        for function in bridge.body:
+            if isinstance(function, ast.FunctionDef) and function.name in (
+                "run_bridge",
+                "_config_error",
+            ):
+                produced.extend(
+                    node.value
+                    for node in ast.walk(function)
+                    if isinstance(node, ast.Return) and node.value is not None
+                )
+        patterns = [_pattern(node, numbers) for node in produced]
+        # Reasons built elsewhere and passed on. Each is accounted for below;
+        # a new one has to be classified here before the guide can be right.
+        passed_on = {ast.unparse(n) for n, p in zip(produced, patterns) if p == _ANY}
+        assert passed_on == {"exc.summary", "_config_error(exc)", "str(exc)"}
+        direct = [p for p in patterns if p != _ANY]
+        assert len(direct) >= 12, "the collection found too few reasons to be right"
+
+        store = _source_tree("_store_identity.py")
+        raised = [
+            node
+            for node in ast.walk(store)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "StoreNotShareable"
+        ]
+        summaries = [_pattern(call.args[1], {}) for call in raised if len(call.args) == 2]
+        assert len(summaries) == 3
+        assert _ANY not in summaries, "a summary that is not a literal would match any row"
+        # The one call without a summary re-raises a relative-path refusal that
+        # only a daemon turns on; a bridge checks relative paths itself, first.
+        assert [len(call.args) for call in raised].count(1) == 1
+
+        expected = direct + summaries
+        section = _guide_section("Why a session did not join")
+        rows = [_code_span(cell) for cell in _first_cells(section)]
+        no_row, no_source = _unmatched(expected, rows)
+        assert not no_row, f"reasons with no row in the guide: {no_row}"
+        assert not no_source, f"guide rows no source produces: {no_source}"
+        assert len(rows) == len(expected)
+
+    def test_the_compared_fields_are_the_admission_fields(self) -> None:
+        admission = _source_tree("_admission.py")
+        section = _guide_section("What has to match")
+        cells = _first_cells(section)
+        assert tuple(_code_span(cell) for cell in cells) == _constant(admission, "FIELDS")
+        env_row = _table_row(section, "env")[1]
+        prefixes = _constant(admission, "_ENV_PREFIXES")
+        assert isinstance(prefixes, tuple) and prefixes
+        assert re.findall(r"`([A-Z]+_)\*`", env_row) == [str(p).upper() for p in prefixes]
+
+    def test_the_idle_timeout_is_the_daemons_default(self) -> None:
+        daemon = _source_tree("server/daemon.py")
+        default = _constant(daemon, "DEFAULT_IDLE_TIMEOUT_S")
+        assert isinstance(default, float) and default == int(default)
+        seconds = str(int(default))
+        bound = _option_keyword(daemon, "--idle-timeout", "default")
+        assert [ast.unparse(node) for node in bound] == ["DEFAULT_IDLE_TIMEOUT_S"]
+
+        stated = re.findall(r"(?i)after (\d+) seconds with no connection", _read(_SHARED_GUIDE))
+        assert stated and set(stated) == {seconds}
+        reference = " ".join(_read(_GUIDES / "reference" / "data-config-cli.md").split())
+        assert re.findall(r"idle timeout (\d+) s by default", reference) == [seconds]
+        helps = _option_keyword(_source_tree("_server_entry.py"), "--idle-timeout", "help")
+        assert len(helps) == 1 and isinstance(helps[0], ast.Constant)
+        assert re.findall(r"default (\d+);", str(helps[0].value)) == [seconds]
+
+    def test_the_two_size_limits_are_the_bridges_and_the_daemons(self) -> None:
+        limits = _guide_section("Limits")
+        mib = 1024 * 1024
+        buffer_limit = _constant(_source_tree("_bridge.py"), "BUFFER_LIMIT")
+        frame_limit = _constant(_source_tree("server/daemon.py"), "FRAME_LIMIT")
+        assert isinstance(buffer_limit, int) and buffer_limit % mib == 0
+        assert isinstance(frame_limit, int) and frame_limit % mib == 0
+        assert re.findall(r"\*\*More than (\d+) MiB waiting in either direction", limits) == [
+            str(buffer_limit // mib)
+        ]
+        assert re.findall(r"One message from the client larger than (\d+) MiB", limits) == [
+            str(frame_limit // mib)
+        ]
+
+    def test_the_name_rule_is_the_name_pattern(self) -> None:
+        compiled = [
+            node.value.args[0].value
+            for node in _source_tree("_daemon_paths.py").body
+            if isinstance(node, ast.Assign)
+            and [t.id for t in node.targets if isinstance(t, ast.Name)] == ["NAME_PATTERN"]
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.args[0], ast.Constant)
+        ]
+        assert len(compiled) == 1
+        shape = re.fullmatch(r"\[a-z0-9\]\[a-z0-9-\]\{0,(\d+)\}", compiled[0])
+        assert shape is not None, compiled[0]
+        stated = re.findall(
+            r"is 1 to (\d+) characters from `a-z`, `0-9` and `-`, starting with a letter or\s+"
+            r"digit",
+            _read(_SHARED_GUIDE),
+        )
+        assert stated == [str(1 + int(shape.group(1)))]
+
+    def test_the_status_lines_have_the_shapes_mem_status_prints(self) -> None:
+        status = _source_tree("server/tools/status_config.py")
+        templates = [
+            _fstring_pattern(status, " connection(s))"),
+            _fstring_pattern(status, " not joined ("),
+        ]
+        # Both lines open with the daemon's name; the guide's daemon is ``main``,
+        # so the name is compared too instead of matching any text.
+        assert all(template.startswith(_ANY) for template in templates)
+        shapes = [template.replace(_ANY, "main", 1) for template in templates]
+        widths = {
+            node.args[0].value
+            for node in ast.walk(status)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "ljust"
+            and isinstance(node.func.value, ast.Constant)
+            and node.func.value.value == "Shared daemon:"
+            and isinstance(node.args[0], ast.Constant)
+        }
+        assert len(widths) == 1
+        key = "Shared daemon:".ljust(widths.pop())
+        lines = [
+            line
+            for line in _guide_section("Check that a session joined").splitlines()
+            if line.startswith("Shared daemon:")
+        ]
+        assert len(lines) == 2 and all(line.startswith(key) for line in lines)
+        no_line, no_shape = _unmatched(shapes, [line[len(key) :] for line in lines])
+        assert not no_line and not no_shape, (no_line, no_shape)
+
+    @pytest.mark.parametrize(
+        ("module", "anchor", "quotation"),
+        [
+            (
+                "cli/doctor_cmd.py",
+                " shared daemon(s) running: ",
+                r"`(\d+ shared daemon\(s\) running: [^`]+)`",
+            ),
+            (
+                "cli/doctor_cmd.py",
+                " bridge(s))",
+                r"running: (main \(pid \d+, \d+ bridge\(s\)\))`",
+            ),
+            ("cli/daemon_cmd.py", "stopped  pid=", r"prints `(stopped [^`]+)`"),
+            ("cli/daemon_cmd.py", "  started=", r"\n(main  running  pid=\S+  started=\S+)\n"),
+            (
+                "cli/_liveness.py",
+                " is running; stop it with ",
+                r"\n  (Shared daemon .+ is running; stop it with .+)\n",
+            ),
+        ],
+    )
+    def test_quoted_command_output_has_the_shape_the_command_prints(
+        self, module: str, anchor: str, quotation: str
+    ) -> None:
+        found = re.findall(quotation, _read(_SHARED_GUIDE))
+        assert len(found) == 1, f"{len(found)} quotations in the guide"
+        shape = _fstring_pattern(_source_tree(module), anchor)
+        assert re.fullmatch(shape, found[0]), (shape, found[0])
+
+    def test_the_grace_default_is_the_commands(self) -> None:
+        daemon = _CLI.commands["daemon"]
+        assert isinstance(daemon, click.Group)
+        defaults = [p.default for p in daemon.commands["stop"].params if p.name == "grace"]
+        assert len(defaults) == 1 and defaults[0] == int(defaults[0])
+        stated = re.findall(r"after `--grace` seconds \(default (\d+)\)", _read(_SHARED_GUIDE))
+        assert stated == [str(int(defaults[0]))]
+
+    def test_the_usage_errors_are_the_parsers(self) -> None:
+        entry = _source_tree("_server_entry.py")
+        errors = [
+            _pattern(node.args[0], {})
+            for node in ast.walk(entry)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "error"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "parser"
+        ]
+        about_sharing = [
+            p for p in errors if any(o in p for o in ("shared", "daemon", "idle\\-timeout"))
+        ]
+        assert len(about_sharing) == 4
+        section = _guide_section("Usage errors")
+        bullets = re.findall(r"^- `(--[^`]+)`$", section, flags=re.MULTILINE)
+        no_bullet, no_error = _unmatched(about_sharing, bullets)
+        assert not no_bullet and not no_error, (no_bullet, no_error)
+        quoted = re.findall(r"^- a name that .*\(`([^`]+)`\)$", section, flags=re.MULTILINE)
+        assert len(quoted) == 1
+        # The quoted words are part of the one message the name check raises.
+        assert _fstring_pattern(entry, f" {quoted[0]}: ")
+
+    def test_every_server_command_line_in_the_guide_parses(self) -> None:
+        from memtomem._server_entry import parse_server_args
+
+        blocks = re.findall(r"```bash\n(.*?)```", _read(_SHARED_GUIDE), flags=re.DOTALL)
+        parsed = []
+        for line in "".join(blocks).splitlines():
+            words = shlex.split(line, comments=True)
+            if "memtomem-server" in words:
+                parsed.append(parse_server_args(words[words.index("memtomem-server") + 1 :]))
+        assert [(args.shared, args.daemon, args.idle_timeout) for args in parsed] == [
+            ("main", None, None),
+            (None, "main", 0.0),
+        ]

@@ -4,6 +4,7 @@ import pytest
 from helpers import make_chunk
 
 from memtomem.errors import StorageError
+from memtomem.models import NamespaceFilter
 
 
 class TestEntityMixin:
@@ -162,9 +163,68 @@ class TestEntityMixin:
             str(c2.id), [{"entity_type": "person", "entity_value": "Bob"}]
         )
 
-        results = await storage.search_entities(namespace="work")
+        results = await storage.search_entities(
+            namespace_filter=NamespaceFilter(namespaces=("work",))
+        )
         assert len(results) == 1
         assert results[0]["entity_value"] == "Alice"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("query", "literal", "lookalike"),
+        [("foo_bar", "foo_bar", "fooXbar"), ("50%", "50%", "50x off")],
+    )
+    async def test_search_by_value_is_literal(self, storage, query, literal, lookalike):
+        """``_`` and ``%`` in ``value`` match themselves, not one/any character."""
+        chunk = make_chunk("wildcards")
+        await storage.upsert_chunks([chunk])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "technology", "entity_value": literal},
+                {"entity_type": "technology", "entity_value": lookalike},
+            ],
+        )
+
+        results = await storage.search_entities(value=query)
+
+        assert [r["entity_value"] for r in results] == [literal]
+
+    @pytest.mark.asyncio
+    async def test_search_by_namespace_filter_forms(self, storage):
+        """Default exclusion, explicit system namespace, glob and comma list."""
+        names = {
+            "default": "Dana",
+            "work": "Wren",
+            "proj:alpha": "Pia",
+            "archive:summary": "Arlo",
+            "agent-runtime:planner": "Ravi",
+        }
+        for ns, person in names.items():
+            chunk = make_chunk(f"{person} notes", namespace=ns)
+            await storage.upsert_chunks([chunk])
+            await storage.upsert_entities(
+                str(chunk.id), [{"entity_type": "person", "entity_value": person}]
+            )
+
+        async def people(ns_filter):
+            rows = await storage.search_entities(entity_type="person", namespace_filter=ns_filter)
+            return sorted(r["entity_value"] for r in rows)
+
+        prefixes = ("archive:", "agent-runtime:")
+        assert await people(NamespaceFilter.parse(None, system_prefixes=prefixes)) == [
+            "Dana",
+            "Pia",
+            "Wren",
+        ]
+        assert await people(NamespaceFilter.parse("archive:summary", system_prefixes=prefixes)) == [
+            "Arlo"
+        ]
+        assert await people(NamespaceFilter.parse("proj:*", system_prefixes=prefixes)) == ["Pia"]
+        assert await people(NamespaceFilter.parse("work,default", system_prefixes=prefixes)) == [
+            "Dana",
+            "Wren",
+        ]
 
     @pytest.mark.asyncio
     async def test_entity_type_counts(self, storage):

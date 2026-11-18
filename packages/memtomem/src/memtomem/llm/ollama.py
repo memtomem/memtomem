@@ -9,6 +9,7 @@ import httpx
 from memtomem.config import LLMConfig
 from memtomem.embedding.retry import with_retry
 from memtomem.errors import LLMError
+from memtomem.inference_endpoints import announce_url, llm_base_url, split_query
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,12 @@ class OllamaLLM:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
+            resolved = llm_base_url("ollama", self._config.base_url)
+            announce_url("llm", "ollama", resolved)
+            base, params = split_query(resolved)
             self._client = httpx.AsyncClient(
-                base_url=self._config.base_url,
+                base_url=base,
+                params=params,
                 timeout=self._config.timeout,
             )
         return self._client
@@ -37,6 +42,11 @@ class OllamaLLM:
             "model": self._config.model,
             "prompt": prompt,
             "stream": False,
+            # Ollama counts a thinking model's reasoning against ``num_predict``
+            # and returns it in a separate ``thinking`` field this provider does
+            # not read. Left on, it can use the whole budget and leave
+            # ``response`` empty.
+            "think": False,
             "options": {"num_predict": max_tokens},
         }
         if system:

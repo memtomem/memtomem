@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from helpers import make_chunk
 
-from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
+from memtomem.models import CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.consolidation_engine import (
     DEFAULT_SUMMARY_NAMESPACE,
@@ -37,6 +37,7 @@ from memtomem.tools.temporal import (
     TimelineBucket,
     build_timeline,
     format_activity,
+    format_source_name,
     format_timeline,
 )
 
@@ -487,8 +488,8 @@ class TestPolicyEngine:
     async def test_auto_archive_namespace_filter(self, storage):
         """Only chunks in the specified namespace should be considered."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
-        c1 = make_chunk("work stuff", namespace="work")
-        c2 = make_chunk("personal stuff", namespace="personal")
+        c1 = make_chunk("work stuff", namespace="work", source="c1.md")
+        c2 = make_chunk("personal stuff", namespace="personal", source="c2.md")
         await storage.upsert_chunks([c1, c2])
         db = storage._get_db()
         db.execute("UPDATE chunks SET created_at = ?", [old_time])
@@ -504,9 +505,9 @@ class TestPolicyEngine:
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
         recent_time = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
 
-        c_null = make_chunk("null last_access")
-        c_recent = make_chunk("recent last_access")
-        c_old = make_chunk("old last_access")
+        c_null = make_chunk("null last_access", source="c_null.md")
+        c_recent = make_chunk("recent last_access", source="c_recent.md")
+        c_old = make_chunk("old last_access", source="c_old.md")
         await storage.upsert_chunks([c_null, c_recent, c_old])
 
         db = storage._get_db()
@@ -537,8 +538,8 @@ class TestPolicyEngine:
         """min_access_count excludes chunks accessed more than the threshold."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
 
-        c_cold = make_chunk("never accessed")
-        c_hot = make_chunk("accessed a lot")
+        c_cold = make_chunk("never accessed", source="c_cold.md")
+        c_hot = make_chunk("accessed a lot", source="c_hot.md")
         await storage.upsert_chunks([c_cold, c_hot])
 
         db = storage._get_db()
@@ -559,8 +560,8 @@ class TestPolicyEngine:
         """max_importance_score excludes chunks above the threshold."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
 
-        c_low = make_chunk("low priority")
-        c_high = make_chunk("high priority")
+        c_low = make_chunk("low priority", source="c_low.md")
+        c_high = make_chunk("high priority", source="c_high.md")
         await storage.upsert_chunks([c_low, c_high])
 
         db = storage._get_db()
@@ -581,8 +582,8 @@ class TestPolicyEngine:
         """archive_namespace_template expands {first_tag} per chunk."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
 
-        c_dec = make_chunk("a decision", tags=("decisions", "important"))
-        c_tech = make_chunk("a tech note", tags=("tech",))
+        c_dec = make_chunk("a decision", tags=("decisions", "important"), source="c_dec.md")
+        c_tech = make_chunk("a tech note", tags=("tech",), source="c_tech.md")
         await storage.upsert_chunks([c_dec, c_tech])
 
         db = storage._get_db()
@@ -663,9 +664,9 @@ class TestPolicyEngine:
         """All new rule fields combine with AND semantics."""
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
 
-        c_match = make_chunk("matches everything", tags=("misc",))
-        c_hot = make_chunk("access count too high", tags=("misc",))
-        c_important = make_chunk("importance too high", tags=("misc",))
+        c_match = make_chunk("matches everything", tags=("misc",), source="c_match.md")
+        c_hot = make_chunk("access count too high", tags=("misc",), source="c_hot.md")
+        c_important = make_chunk("importance too high", tags=("misc",), source="c_important.md")
         await storage.upsert_chunks([c_match, c_hot, c_important])
 
         db = storage._get_db()
@@ -740,10 +741,6 @@ class TestPolicyEngine:
             [old_time, str(chunk.id)],
         )
         db.commit()
-        await storage.hold_source(chunk.metadata.source_file, "source_missing")
-        # The hold checks compare the path as stored; ``/tmp`` is stored resolved.
-        stored = Path(norm_path(chunk.metadata.source_file))
-        assert await storage.is_source_held(stored)
 
         result = await execute_auto_expire(
             storage, {"max_age_days": 90}, namespace=None, dry_run=False
@@ -753,7 +750,31 @@ class TestPolicyEngine:
 
         row = db.execute("SELECT id FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
         assert row is None  # deleted
-        assert not await storage.is_source_held(stored)
+
+    async def test_auto_expire_keeps_held_sources(self, storage):
+        """A held source's rows are retained for recovery, however old (#3110)."""
+        old_time = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+        chunk = make_chunk("retained content")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute(
+            "UPDATE chunks SET created_at = ?, access_count = 0 WHERE id = ?",
+            [old_time, str(chunk.id)],
+        )
+        db.commit()
+        await storage.hold_source(chunk.metadata.source_file, "source_missing")
+        # The hold checks compare the path as stored; ``/tmp`` is stored resolved.
+        stored = Path(norm_path(chunk.metadata.source_file))
+        assert await storage.is_source_held(stored)
+
+        result = await execute_auto_expire(
+            storage, {"max_age_days": 90}, namespace=None, dry_run=False
+        )
+        assert result.affected_count == 0
+
+        row = db.execute("SELECT id FROM chunks WHERE id = ?", [str(chunk.id)]).fetchone()
+        assert row is not None
+        assert await storage.is_source_held(stored)
 
     async def test_auto_expire_keeps_accessed(self, storage):
         """Chunks with access_count > 0 should not be expired even if old."""
@@ -846,9 +867,9 @@ class TestPolicyEngine:
 
     async def test_auto_promote_prefix_matches_subnamespaces(self, storage):
         """source_prefix should match archive:* subnamespaces."""
-        c1 = make_chunk("decisions", namespace="archive:decisions")
-        c2 = make_chunk("tech", namespace="archive:tech")
-        c3 = make_chunk("notes", namespace="notes")
+        c1 = make_chunk("decisions", namespace="archive:decisions", source="c1.md")
+        c2 = make_chunk("tech", namespace="archive:tech", source="c2.md")
+        c3 = make_chunk("notes", namespace="notes", source="c3.md")
         await storage.upsert_chunks([c1, c2, c3])
         db = storage._get_db()
         db.execute("UPDATE chunks SET access_count = 5")
@@ -864,8 +885,8 @@ class TestPolicyEngine:
 
     async def test_auto_promote_namespace_filter_override(self, storage):
         """namespace param should override source_prefix with exact match."""
-        c1 = make_chunk("in archive", namespace="archive")
-        c2 = make_chunk("in archive:tech", namespace="archive:tech")
+        c1 = make_chunk("in archive", namespace="archive", source="c1.md")
+        c2 = make_chunk("in archive:tech", namespace="archive:tech", source="c2.md")
         await storage.upsert_chunks([c1, c2])
         db = storage._get_db()
         db.execute("UPDATE chunks SET access_count = 5")
@@ -881,8 +902,8 @@ class TestPolicyEngine:
 
     async def test_auto_promote_min_importance_score(self, storage):
         """min_importance_score filters via AND with min_access_count."""
-        c_high = make_chunk("high importance", namespace="archive")
-        c_low = make_chunk("low importance", namespace="archive")
+        c_high = make_chunk("high importance", namespace="archive", source="c_high.md")
+        c_low = make_chunk("low importance", namespace="archive", source="c_low.md")
         await storage.upsert_chunks([c_high, c_low])
         db = storage._get_db()
         db.execute("UPDATE chunks SET access_count = 5")
@@ -903,9 +924,9 @@ class TestPolicyEngine:
         recent_time = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
         old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
 
-        c_recent = make_chunk("recent access", namespace="archive")
-        c_old = make_chunk("old access", namespace="archive")
-        c_null = make_chunk("null access", namespace="archive")
+        c_recent = make_chunk("recent access", namespace="archive", source="c_recent.md")
+        c_old = make_chunk("old access", namespace="archive", source="c_old.md")
+        c_null = make_chunk("null access", namespace="archive", source="c_null.md")
         await storage.upsert_chunks([c_recent, c_old, c_null])
 
         db = storage._get_db()
@@ -2136,7 +2157,9 @@ class TestAutoConsolidate:
             # The policy's own hold check runs after the summary is generated and
             # before apply_consolidation opens its transaction: commit the agent's
             # edge there, once, outside any transaction.
-            if not raced:
+            # The summary path's own hold check runs earlier (#3120); fire on the
+            # source's check after generation, the phase this test is about.
+            if not raced and not str(path).endswith(CONSOLIDATED_SUFFIX):
                 raced.append(True)
                 await storage.add_relation(late.id, racing.id, "consolidated_into")
             return await real_held(path)
@@ -2170,7 +2193,9 @@ class TestAutoConsolidate:
         raced: list[bool] = []
 
         async def both_land_meanwhile(path):
-            if not raced:
+            # The summary path's own hold check runs earlier (#3120); fire on the
+            # source's check after generation, the phase this test is about.
+            if not raced and not str(path).endswith(CONSOLIDATED_SUFFIX):
                 raced.append(True)
                 await storage.upsert_chunks([squatter])
                 await storage.add_relation(chunks[0].id, racing.id, "consolidated_into")
@@ -2282,13 +2307,13 @@ class TestMemConsolidateApplyIntegration:
         from datetime import datetime, timedelta, timezone
 
         from memtomem.server.tools.consolidation import mem_consolidate_apply
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         # Build a realistic source file with 3 real entries + index it so we
         # have real chunk ids to hand to mem_consolidate_apply.
         source_file = memory_dir / "apr-standup.md"
         for i in range(3):
-            append_entry(
+            append_judged(
                 source_file,
                 f"Agenda item {i}: standup note with enough text to survive chunking.",
                 title=f"Item {i}",
@@ -2436,11 +2461,11 @@ class TestSystemNamespacePrefixFilter:
     async def test_default_search_excludes_archive_summary(self, components, memory_dir):
         """End-to-end: an archive:summary chunk is NOT returned by a
         bare search (no namespace), but IS returned when explicitly asked."""
-        from memtomem.tools.memory_writer import append_entry
+        from helpers import append_judged
 
         # 1. Index a user-facing chunk in the default namespace.
         user_file = memory_dir / "normal.md"
-        append_entry(
+        append_judged(
             user_file,
             "A regular memory about Python async context managers and their lifecycle.",
             title="Regular Entry",
@@ -2654,6 +2679,37 @@ class TestTemporal:
         for s in buckets[0].sources:
             assert "/" not in s
 
+    async def test_build_timeline_windows_source_paths(self):
+        """Windows native paths should be stripped to bare filenames without drive or directories."""
+        chunks = [
+            {
+                "content": "Windows path memory 1",
+                "created_at": "2025-05-01T00:00:00+00:00",
+                "source_file": r"C:\Users\Ada Lovelace\memories\default.md",
+                "tags": [],
+                "score": 0.5,
+            },
+            {
+                "content": "Windows path memory 2",
+                "created_at": "2025-05-01T00:00:00+00:00",
+                "source_file": r"D:\workspace\project\docs\notes.md",
+                "tags": [],
+                "score": 0.5,
+            },
+        ]
+        buckets = build_timeline(chunks, granularity="week")
+        assert len(buckets) == 1
+        assert set(buckets[0].sources) == {"default.md", "notes.md"}
+        for s in buckets[0].sources:
+            assert "\\" not in s
+            assert ":" not in s
+
+        # Verify format_timeline output doesn't contain Windows path fragments
+        formatted = format_timeline("test", buckets)
+        assert "C:\\" not in formatted
+        assert "default.md" in formatted
+        assert "notes.md" in formatted
+
     async def test_format_timeline_empty(self):
         result = format_timeline("Python", [])
         assert "No memories found" in result
@@ -2754,3 +2810,225 @@ class TestTemporal:
         ]
         buckets = build_timeline(chunks, granularity="month")
         assert buckets[0].period_label < buckets[1].period_label
+
+
+class TestWindowsSourcePathFormatting:
+    """Tests for format_source_name and Windows-shaped source path rendering across surfaces (#2932, #3028)."""
+
+    @pytest.mark.parametrize(
+        ("input_path", "expected"),
+        [
+            (r"C:\Users\Ada Lovelace\memories\default.md", "default.md"),
+            (r"D:\workspace\project\docs\notes.md", "notes.md"),
+            (r"\\server\share\docs\plan.md", "plan.md"),
+            ("/tmp/notes.md", "notes.md"),
+            ("sub/dir/nested.md", "nested.md"),
+            (r"sub\dir\nested.md", "nested.md"),
+            ("bare_file.md", "bare_file.md"),
+            (Path(r"C:\Users\test\memory.md"), "memory.md"),
+            ("", ""),
+            (None, ""),
+            ("C:\\", "C:\\"),
+            ("/", "/"),
+        ],
+    )
+    def test_format_source_name_helper(self, input_path, expected):
+        assert format_source_name(input_path) == expected
+
+    def test_surface_render_search_results_windows_path(self, capsys):
+        """render_search_results (smart/markdown) outputs bare default.md without Windows backslashes (#3028)."""
+        from memtomem.cli.search import SearchPayload, render_search_results
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+        from memtomem.search.pipeline import RetrievalStats
+        from uuid import uuid4
+
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        chunk = Chunk(
+            content="Deploy note content",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        res = SearchResult(chunk=chunk, score=0.95, rank=1, source="fused")
+        payload = SearchPayload(results=[res], stats=RetrievalStats(), hints=[], empty_message="")
+        render_search_results(query="deploy", fmt="smart", payload=payload)
+        out = capsys.readouterr().out
+        assert "**default.md**" in out
+        assert "C:\\" not in out
+
+    async def test_surface_shell_cmd_ask_windows_path(self, capsys, monkeypatch):
+        """_cmd_ask in mm shell outputs bare default.md without Windows path prefixes (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from memtomem.cli.shell import _cmd_ask
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+        import memtomem.server.tools.search as search_tools
+
+        monkeypatch.setattr(search_tools, "_resolve_project_context_root", lambda comp: None)
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        chunk = Chunk(
+            content="Answer content here",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        res = SearchResult(chunk=chunk, score=0.9, rank=1, source="fused")
+        comp = MagicMock()
+        comp.search_pipeline.search = AsyncMock(return_value=([res], MagicMock()))
+
+        await _cmd_ask(comp, ["how", "to", "deploy?"])
+        out = capsys.readouterr().out
+        assert "default.md (0.90)" in out
+        assert "C:\\" not in out
+
+    async def test_surface_shell_cmd_recall_windows_path(self, capsys, monkeypatch):
+        """_cmd_recall in mm shell outputs bare default.md for recent memories (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from memtomem.cli.shell import _cmd_recall
+        from memtomem.models import Chunk, ChunkMetadata
+        import memtomem.server.tools.search as search_tools
+
+        monkeypatch.setattr(search_tools, "_resolve_project_context_root", lambda comp: None)
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        chunk = Chunk(
+            content="Recent memory snippet",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        comp = MagicMock()
+        comp.storage.recall_chunks = AsyncMock(return_value=[chunk])
+
+        await _cmd_recall(comp, [])
+        out = capsys.readouterr().out
+        assert "default.md" in out
+        assert "C:\\" not in out
+
+    async def test_surface_mem_ask_windows_path(self, monkeypatch):
+        """mem_ask MCP tool outputs bare default.md in its memory heading (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+        from memtomem.search.pipeline import RetrievalStats
+        from memtomem.server.tools.ask import mem_ask
+
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        chunk = Chunk(
+            content="Grounded memory text",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        res = SearchResult(chunk=chunk, score=0.88, rank=1, source="fused")
+        stats = RetrievalStats()
+        app = MagicMock()
+        app.webhook_manager.fire = AsyncMock()
+        monkeypatch.setattr(
+            "memtomem.server.tools.ask._get_app_initialized", AsyncMock(return_value=app)
+        )
+        monkeypatch.setattr(
+            "memtomem.server.tools.ask.run_search", AsyncMock(return_value=([res], stats, []))
+        )
+
+        out = await mem_ask(question="what is this?", ctx=None)
+        assert "### [1] default.md (relevance: 0.88)" in out
+        assert "### [1] C:\\" not in out
+
+    async def test_surface_mem_reflect_windows_path(self, monkeypatch):
+        """mem_reflect frequently accessed topics output bare default.md (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from memtomem.server.tools.reflection import mem_reflect
+
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        app = MagicMock()
+        app.storage.get_frequently_accessed = AsyncMock(
+            return_value=[{"hierarchy": [], "source_file": win_path, "total_access": 7}]
+        )
+        app.storage.get_tag_counts = AsyncMock(return_value=[])
+        app.storage.get_knowledge_gaps = AsyncMock(return_value=[])
+        app.storage.get_agent_sessions = AsyncMock(return_value=[])
+        app.storage.get_health_metrics = AsyncMock(return_value=None)
+        app.storage.get_most_connected = AsyncMock(return_value=[])
+        app.storage.get_chunk_factors = AsyncMock(return_value=[])
+        app.storage.get_activity_days = AsyncMock(return_value=[])
+        app.search_pipeline.flush_observation = AsyncMock()
+        monkeypatch.setattr(
+            "memtomem.server.tools.reflection._get_app_initialized", AsyncMock(return_value=app)
+        )
+
+        out = await mem_reflect(ctx=None)
+        assert "7x — default.md" in out
+        assert "C:\\" not in out
+
+    async def test_surface_mem_procedure_list_windows_path(self, monkeypatch):
+        """mem_procedure_list outputs bare default.md when heading hierarchy is absent (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+        from memtomem.server.tools.procedure import mem_procedure_list
+
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        chunk = Chunk(
+            content="Step 1: run deploy",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset(["procedure"])
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        res = SearchResult(chunk=chunk, score=0.9, rank=1, source="fused")
+        app = MagicMock()
+        app.search_pipeline.search = AsyncMock(return_value=([res], None))
+        monkeypatch.setattr(
+            "memtomem.server.tools.procedure._get_app_initialized", AsyncMock(return_value=app)
+        )
+
+        out = await mem_procedure_list(ctx=None)
+        assert "  default.md" in out
+        assert "C:\\" not in out
+
+    async def test_surface_mem_related_windows_path(self, monkeypatch):
+        """mem_related outputs bare default.md for related memory chunks (#3028)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from memtomem.models import Chunk, ChunkMetadata
+        from memtomem.server.tools.cross_ref import mem_related
+
+        win_path = r"C:\Users\Ada Lovelace\memories\default.md"
+        source_chunk = Chunk(
+            content="Primary concept",
+            metadata=ChunkMetadata(
+                source_file=Path("root.md"), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        related_chunk = Chunk(
+            content="Related concept note",
+            metadata=ChunkMetadata(
+                source_file=Path(win_path), heading_hierarchy=(), tags=frozenset()
+            ),
+            id=uuid4(),
+            embedding=[],
+        )
+        app = MagicMock()
+        app.storage.get_chunk = AsyncMock(
+            side_effect=lambda cid, **kw: source_chunk if cid == source_chunk.id else related_chunk
+        )
+        app.storage.get_related = AsyncMock(return_value=[(related_chunk.id, "related")])
+        monkeypatch.setattr(
+            "memtomem.server.tools.cross_ref._get_app_initialized", AsyncMock(return_value=app)
+        )
+
+        out = await mem_related(str(source_chunk.id), ctx=None)
+        assert "(default.md)" in out
+        assert "C:\\" not in out

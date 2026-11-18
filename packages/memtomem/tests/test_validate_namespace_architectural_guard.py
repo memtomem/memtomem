@@ -116,6 +116,11 @@ DELEGATED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         # reports which of the two sources answered).
         ("_provenance.py", "capture_session_and_namespace", "namespace"),
         ("_provenance.py", "capture_session_and_namespace_split", "namespace"),
+        # The Notion and Obsidian tools' shared indexing step and their result
+        # renderer receive the namespace the tool already passed through
+        # ``writable_namespace_arg`` (or its fixed default) (#3168).
+        ("importers.py", "_index_imported", "namespace"),
+        ("importers.py", "_render_import", "namespace"),
     }
 )
 
@@ -161,6 +166,10 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         # ``services.tag_management`` and SQLite ``chunks.tags`` JSON; no
         # namespace gate applies.
         ("tag_management.py", "mem_tag_merge", "target"),
+        # ``target`` is a Hermes built-in memory target (``memory`` / ``user``),
+        # validated against a fixed grammar and used as a file name; the mirror
+        # file is indexed through the engine's own namespace rules.
+        ("hermes_mirror.py", "mem_hermes_mirror_apply", "target"),
         # ``target`` here is the *file path* being written to, not a
         # namespace — the parameter-name heuristic catches it, but these two
         # #2005 helpers take a ``Path`` the caller already validated

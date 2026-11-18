@@ -323,6 +323,7 @@ async def run_search(
     record: bool = True,
     project_context_root: Path | None = None,
     origin: SearchOrigin,
+    deadline_ms: int | None = None,
 ) -> tuple[list[SearchResult], RetrievalStats, list[str]]:
     """Run a hybrid search and assemble the result-derived hints.
 
@@ -335,6 +336,8 @@ async def run_search(
         as_of: ``YYYY-MM-DD`` / ``YYYY-QN`` temporal bound, or ``None``.
         record: ``False`` runs the query as a background read — see
             ``SearchPipeline.search`` for what that suppresses.
+        deadline_ms: Server-processing budget, forwarded only when given; see
+            ``SearchPipeline.search``. Expiry raises ``SearchDeadlineExceeded``.
         project_context_root: ADR-0011 scope anchor; resolve it on the
             caller's side (``runtime.project_context``).
         origin: Call-origin label recorded with the query run.
@@ -383,6 +386,7 @@ async def run_search(
         rerank=rerank,
         record=record,
         origin=origin,
+        deadline_ms=deadline_ms,
     )
 
     # Trust-UX hints shared across formats. The archive notice is emitted

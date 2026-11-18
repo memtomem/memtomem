@@ -8,7 +8,6 @@ parser-less chunks: ``mm index <file>`` answered ``receipt_hit`` while
 """
 
 import ast
-import os
 import re
 import subprocess
 import sys
@@ -19,6 +18,7 @@ from unittest.mock import Mock
 import pytest
 
 import memtomem
+from _subprocess_env import subprocess_env
 from memtomem.indexing import source_receipt
 
 CHUNKING = Path(memtomem.__file__).parent / "chunking"
@@ -183,8 +183,7 @@ print(engine._CHUNKER_VERSIONS["tree-sitter"])
 
 def test_engine_takes_the_chunker_versions_once_at_import():
     """A fresh interpreter, because this process has already imported the engine."""
-    src = str(Path(memtomem.__file__).parents[1])
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join([src, os.environ.get("PYTHONPATH", "")])}
+    env = subprocess_env()
     result = subprocess.run(
         [sys.executable, "-c", _SNAPSHOT_PROBE],
         capture_output=True,

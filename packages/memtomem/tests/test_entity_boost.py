@@ -68,6 +68,37 @@ class TestExtractQueryEntities:
         assert extract_query_entities("digit parsing", ["technology"]) == []
         assert extract_query_entities("git rebase", ["technology"]) == [("technology", "git")]
 
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ("sqlite를 쓰는 법", "sqlite"),
+            ("redis에서 캐시", "redis"),
+            ("postgresql의 인덱스", "postgresql"),
+            ("dockerで動かす", "docker"),
+            ("用python写", "python"),
+        ],
+    )
+    def test_technology_next_to_a_cjk_character_is_a_whole_word(self, query, expected):
+        # A Hangul particle or a kana/hanzi neighbour is not part of the Latin
+        # term. Plain Unicode ``\w`` treated it as one and dropped the entity.
+        assert extract_query_entities(query, ["technology"]) == [("technology", expected)]
+
+    @pytest.mark.parametrize(
+        ("query", "rejected"),
+        [
+            ("digit parsing", "git"),
+            ("sqlite_vec setup", "sqlite"),
+            ("github로 푸시", "git"),  # Hangul after "github" does not free "git"
+            ("resté ici", "rest"),  # accented Latin letters are part of the word
+            ("ragù alla", "rag"),
+            ("gité", "git"),
+            ("git١", "git"),  # a non-ASCII digit is still a word character
+        ],
+    )
+    def test_technology_inside_a_longer_word_is_rejected(self, query, rejected):
+        keys = extract_query_entities(query, ["technology"])
+        assert ("technology", rejected) not in keys
+
     def test_values_are_lowercased(self):
         keys = extract_query_entities("SQLite migration", ["technology"])
         assert keys == [("technology", "sqlite")]

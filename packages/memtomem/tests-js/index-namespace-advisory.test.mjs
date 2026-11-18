@@ -108,6 +108,32 @@ describe('Index result namespace advisory', () => {
     expect(toasts.some((toast) => toast.message.includes('4'))).toBe(true);
   });
 
+  // ADR-0043: day files whose name did not give their namespace back.
+  it('names the day files whose namespace could not be read from the name', () => {
+    const { row, text } = render(indexResult({ day_file_names_undecoded: 2 }));
+    expect(row.hidden).toBe(false);
+    expect(text).toContain('2');
+    expect(text).toContain('--namespace');
+  });
+
+  it('names the files whose namespace came back from the name', () => {
+    const { row, text } = render(indexResult({ namespaces_restored_from_name: 5 }));
+    expect(row.hidden).toBe(false);
+    expect(text).toContain('5');
+    expect(text).toContain('day-file name');
+  });
+
+  it('toasts a restore-only run as information, not a warning', () => {
+    expect(window.indexAdvisoryToast(indexResult({ namespaces_restored_from_name: 2 }))).toBe(true);
+    expect(toasts).toEqual([expect.objectContaining({ type: 'info' })]);
+    expect(toasts[0].message).toContain('2');
+  });
+
+  it('toasts the undecoded day-file names through the shared reporter', () => {
+    expect(window.indexAdvisoryToast(indexResult({ day_file_names_undecoded: 3 }))).toBe(true);
+    expect(toasts.some((toast) => toast.message.includes('3'))).toBe(true);
+  });
+
   it('reports both advisories when a run carries both', () => {
     const { text } = render(
       indexResult({ namespaces_preserved_against_rules: 2, chunks_missing_vectors: 9 }),
@@ -147,6 +173,25 @@ describe('Sources panel advisory consumers', () => {
 
     // 2 + 3: the per-root counters have to be summed, not read off the first.
     expect(toasts.some((toast) => toast.message.includes('5'))).toBe(true);
+  });
+
+  it('sums the day-file name counters across roots', async () => {
+    window.api = async () => ({
+      errors: [],
+      results: [
+        { indexed_chunks: 1, day_file_names_undecoded: 4, namespaces_restored_from_name: 10 },
+        { indexed_chunks: 1, day_file_names_undecoded: 3, namespaces_restored_from_name: 1 },
+      ],
+    });
+
+    await window.mdReindexAll(null);
+
+    expect(toasts.some((toast) => toast.type === 'warning' && toast.message.includes('7'))).toBe(
+      true,
+    );
+    expect(toasts.some((toast) => toast.type === 'info' && toast.message.includes('11'))).toBe(
+      true,
+    );
   });
 
   it('sums nothing into a toast when no root preserved against its rules', async () => {

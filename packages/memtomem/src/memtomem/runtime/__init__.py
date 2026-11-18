@@ -9,6 +9,9 @@ all three roots (``mcp``, ``memtomem.server``, ``memtomem.web``).
 
 ``memtomem.server.component_factory`` remains as a backward-compatible
 alias for the names re-exported here.
+
+:mod:`memtomem.runtime.files` is the public home of the sidecar lock and the
+atomic-write helpers for a host process that writes files memtomem indexes.
 """
 
 from __future__ import annotations

@@ -771,7 +771,7 @@ class TestMissingExtrasWarning:
 
         from memtomem.cli.init_cmd import _emit_missing_extras_warning
 
-        _emit_missing_extras_warning(["onnx", "web"], {})
+        _emit_missing_extras_warning(["onnx", "web"], {"provider": "onnx"})
         out = unstyle(capsys.readouterr().out)
         assert "Missing extras: onnx, web" in out
         assert "mm index" in out
@@ -7311,6 +7311,32 @@ class TestNonInteractivePresetNotice:
         assert "Accepted and ignored" in normalized
         assert "deprecated alias for --non-interactive through 0.4.x" in normalized
 
+    def test_help_documents_provider_tokenizer_and_mcp(self) -> None:
+        """#3245: --provider, --tokenizer and --mcp each carry a help text.
+
+        Asserts phrases that only the new help contains (bare choice names
+        already appear in the ``[none|onnx|...]`` part of the output, so they
+        would pass with no help text at all).
+        """
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        result = CliRunner().invoke(cli, ["init", "--help"])
+
+        assert result.exit_code == 0
+        # Normalize whitespace — click re-wraps help text, splitting words
+        # across lines.
+        normalized = " ".join(result.output.split())
+        # --provider: none means keyword search with no embeddings.
+        assert "keyword search only" in normalized
+        # --tokenizer: kiwipiepy is the Korean tokenizer (capital K — the
+        # --preset help already says "korean" in lower case).
+        assert "Korean" in normalized
+        # --mcp: claude runs `claude mcp add`; json writes ./.mcp.json.
+        assert "claude mcp add" in normalized
+        assert ".mcp.json" in normalized
+
 
 class TestStepHeaderPosition:
     """(#420) ``step_header`` reads its step number from
@@ -7469,6 +7495,7 @@ class TestStepHeaderPosition:
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
         )
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr("memtomem.cli.init_cmd._claude_cli_found", lambda: True)
 
         runner = CliRunner()
         memory_dir = tmp_path / "memories"
@@ -7667,6 +7694,7 @@ class TestPresetMcpFlagPreAnswer:
 
         set_home(monkeypatch, tmp_path)
         monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr("memtomem.cli.init_cmd._claude_cli_found", lambda: True)
         monkeypatch.setattr(
             "memtomem.config._detect_provider_dirs",
             lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
@@ -8067,8 +8095,9 @@ class TestStepEmbeddingOpenAIGuard:
             except WizardCancel as exc:
                 captured["exc"] = exc
 
-        # choice=4 (OpenAI) → model 1 → fake-key → "Continue anyway?" N
-        result = CliRunner().invoke(cmd, [], input="4\n1\nfake-key\nN\n")
+        # choice=4 (OpenAI) → egress confirm y → model 1 → fake-key →
+        # "Continue anyway?" N
+        result = CliRunner().invoke(cmd, [], input="4\ny\n1\nfake-key\nN\n")
         assert "API key test failed" in result.output
         assert isinstance(captured["exc"], WizardCancel)
 
@@ -8097,11 +8126,63 @@ class TestStepEmbeddingOpenAIGuard:
         def cmd() -> None:
             run_steps([init_cmd._step_embedding, sentinel_next_step])
 
-        result = CliRunner().invoke(cmd, [], input="4\n1\nfake-key\nN\n")
+        result = CliRunner().invoke(cmd, [], input="4\ny\n1\nfake-key\nN\n")
         assert "Wizard cancelled" in result.output
         assert next_step_called == []
         # ``run_steps`` exits 0 on WizardCancel (was 1 under SystemExit(1)).
         assert result.exit_code == 0
+
+
+class TestStepEmbeddingOpenAIEgressConfirm:
+    """Choosing OpenAI says what leaves the machine and asks first; default No."""
+
+    @staticmethod
+    def _run(monkeypatch: pytest.MonkeyPatch, answers: str):
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import run_steps
+
+        monkeypatch.setattr(init_cmd, "_have_module", lambda mod: True)
+        monkeypatch.setattr(init_cmd, "_test_openai_key", lambda key: True)
+        result_state: dict = {}
+
+        @click.command()
+        def cmd() -> None:
+            result_state.update(run_steps([init_cmd._step_embedding]))
+
+        return CliRunner().invoke(cmd, [], input=answers), result_state
+
+    def test_notice_names_host_and_what_is_sent_before_any_prompt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result, state = self._run(monkeypatch, "4\ny\n1\nsk-test\n")
+        assert result.exit_code == 0, result.output
+        out = result.output
+        notice = out.index("OpenAI embeddings send your note text to api.openai.com:")
+        assert out.index("- the text of every chunk when it is indexed") > notice
+        assert out.index("- every search query") > notice
+        assert out.index("Send note text to OpenAI for embedding? [y/N]") > notice
+        assert out.index("Available models:") > out.index("Send note text to OpenAI")
+        assert (state["provider"], state["api_key"]) == ("openai", "sk-test")
+
+    @pytest.mark.parametrize("decline", ["n\n", "\n"], ids=["n", "enter-defaults-to-no"])
+    def test_decline_returns_to_picker_and_keeps_openai_out(
+        self, monkeypatch: pytest.MonkeyPatch, decline: str
+    ) -> None:
+        # Decline, then pick [1] keyword search at the re-shown picker.
+        result, state = self._run(monkeypatch, "4\n" + decline + "1\n")
+        assert result.exit_code == 0, result.output
+        assert "Choose another provider." in result.output
+        assert result.output.count("Choose how to generate embeddings:") == 2
+        assert "OpenAI API key" not in result.output
+        assert (state["provider"], state["api_key"]) == ("none", "")
+
+    def test_back_and_quit_still_work_at_the_confirm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        result, _ = self._run(monkeypatch, "4\nq\n")
+        assert "Wizard cancelled" in result.output
+        assert "OpenAI API key" not in result.output
 
 
 class TestStepMemoryDirFsGuards:

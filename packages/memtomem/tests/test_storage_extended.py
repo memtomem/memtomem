@@ -1305,11 +1305,11 @@ class TestSetNamespaceMetaAtomicity:
         """None means "leave as is" — the upsert must not clobber an existing
         field the caller did not pass."""
         storage = components.storage
-        await storage.set_namespace_meta("shared", description="keep me", color="blue")
-        await storage.set_namespace_meta("shared", color="red")
+        await storage.set_namespace_meta("shared", description="keep me", color="#0000ff")
+        await storage.set_namespace_meta("shared", color="#ff0000")
         meta = await storage.get_namespace_meta("shared")
         assert meta["description"] == "keep me"
-        assert meta["color"] == "red"
+        assert meta["color"] == "#ff0000"
 
 
 class TestDeleteByNamespaceMetadata:

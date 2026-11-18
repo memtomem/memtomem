@@ -294,7 +294,8 @@ async def _ensure_dest_local_gitignored(dst_root: Path) -> str:
     the ``.git``-required precondition stay byte-identical across surfaces.
 
     Returns the helper's status code (``appended`` / ``already_present`` /
-    ``no_git_repo_pyproject_only`` / ``no_project_signal``) for the
+    ``no_git_repo_pyproject_only`` / ``no_project_signal`` /
+    ``gitignore_is_link``) for the
     response, and logs the non-write skips at WARNING so a dropped marker
     is never silent (mirrors the warnings the CLI/MCP surfaces emit).
     """
@@ -316,6 +317,13 @@ async def _ensure_dest_local_gitignored(dst_root: Path) -> str:
             "— .gitignore marker not written; the local tier is not git-protected.",
             dst_root,
         )
+    elif msg == "gitignore_is_link":
+        logger.warning(
+            "transfer: project_local landing at %s has a .gitignore that is a symbolic "
+            "link or junction — nothing written through it; the local tier is not "
+            "git-protected (replace the link with a regular file).",
+            dst_root,
+        )
     # ``already_present`` is the quiet, idempotent case (marker already on disk).
     return msg
 
@@ -333,7 +341,7 @@ async def transfer_context_artifact(
         description=(
             "Preview the transfer without touching disk: returns the engine's "
             "dry-run plan (status='plan') regardless of confirmation flags. "
-            "Mirrors the import routes' dry_run."
+            "Mirrors the pull routes' dry_run."
         ),
     ),
 ) -> dict:

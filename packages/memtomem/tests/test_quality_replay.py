@@ -14,6 +14,7 @@ import asyncio
 import pytest
 from helpers import make_chunk as _make_chunk
 
+from memtomem import __version__
 from memtomem.errors import EvalCaseError
 from memtomem.quality import replay as replay_module
 from memtomem.quality.replay import replay_cases, resolve_case_ids, serialize_report
@@ -85,6 +86,7 @@ class TestDeterminism:
         r1 = await replay_cases(storage, pipeline, comp.config, as_of_unix=1_784_500_000)
         r2 = await replay_cases(storage, pipeline, comp.config, as_of_unix=1_784_500_000)
         assert serialize_report(r1) == serialize_report(r2)
+        assert r1["memtomem_version"] == __version__
         assert r1["deterministic"] is True
         assert r1["nondeterministic_stages"] == []
 

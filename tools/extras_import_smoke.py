@@ -48,6 +48,7 @@ EXTRA_PROBES: dict[str, dict[str, str]] = {
         "urllib3": "urllib3",
         "tokenizers": "tokenizers",
         "huggingface-hub": "huggingface_hub",
+        "pillow": "PIL",
     },
     # Compatibility names that install nothing (#2353).
     "ollama": {},

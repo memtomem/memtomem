@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from memtomem.inference_endpoints import announce_url, rerank_base_url
+
 if TYPE_CHECKING:
     from httpx import AsyncClient
 
@@ -31,6 +33,7 @@ class CohereReranker:
         if self._client is None:
             import httpx
 
+            announce_url("rerank", "cohere", rerank_base_url("cohere"))
             self._client = httpx.AsyncClient(timeout=30.0)
         return self._client
 
@@ -47,7 +50,7 @@ class CohereReranker:
 
         try:
             resp = await client.post(
-                "https://api.cohere.ai/v1/rerank",
+                f"{rerank_base_url('cohere')}/v1/rerank",
                 json={
                     "model": self._config.model,
                     "query": query,

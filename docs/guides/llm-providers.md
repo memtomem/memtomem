@@ -2,6 +2,15 @@
 
 memtomem can optionally use an LLM to enhance several features. LLM is **disabled by default** — all core functionality (search, indexing, tagging) works without it.
 
+> **A hosted LLM receives your note text.** When the configured endpoint is a hosted service
+> (Anthropic, OpenAI, OpenRouter, or any server not on your machine), the features below send
+> queries and chunk text to it. Session summaries are on by default, so once an LLM is enabled,
+> `mem_session_end` without a `summary` sends the session's chunks; when its write provenance is
+> missing or incomplete, that means its namespace and time window. An endpoint on `localhost`
+> (Ollama, vLLM, LM Studio) keeps this on your machine unless a proxy or the local server
+> forwards it. See
+> [What leaves your machine](configuration.md#what-leaves-your-machine).
+
 ## Quick Start
 
 The simplest path — local Ollama:
@@ -18,7 +27,7 @@ export MEMTOMEM_LLM__PROVIDER=ollama
 > change without a deprecation window. The heuristic modes beside it are
 > supported. See [Stability](../../README.md#stability).
 
-Enabling an LLM upgrades four features. Each degrades gracefully — if a call fails, the heuristic fallback (the "disabled" column) runs automatically:
+Enabling an LLM upgrades four features. Each degrades gracefully — if a call fails, the heuristic fallback (the "disabled" column) runs automatically. For entity extraction and auto-tagging an empty answer from the model is a failed call:
 
 | Feature | LLM enabled | LLM disabled (default) |
 |---------|-------------|------------------------|
@@ -48,6 +57,11 @@ export MEMTOMEM_LLM__MODEL=gemma4:e2b      # default when empty
 export MEMTOMEM_LLM__BASE_URL=http://localhost:11434
 ```
 
+Every request to Ollama carries `think: false`. Ollama counts a thinking model's reasoning
+against the token limit of the call, and `gemma4:e2b` is a thinking model, so with thinking
+on it could use the whole limit and answer with nothing. There is no setting to turn it
+back on.
+
 ### OpenAI (cloud)
 
 ```bash
@@ -70,6 +84,9 @@ export MEMTOMEM_LLM__API_KEY=sk-ant-...
 ## OpenAI-Compatible Endpoints
 
 The `openai` provider works with **any server** that implements `/v1/chat/completions` — not just OpenAI's cloud API. Set `MEMTOMEM_LLM__PROVIDER=openai` and point `MEMTOMEM_LLM__BASE_URL` at your server.
+memtomem adds the `/v1/chat/completions` path itself, so give the server's root; an address
+ending in `/v1`, as these servers print it, also works, because memtomem drops that one
+trailing `/v1` before adding its own path.
 
 ### LM Studio
 

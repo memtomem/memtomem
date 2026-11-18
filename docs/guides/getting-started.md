@@ -185,8 +185,8 @@ mm init --non-interactive --preset korean --mcp skip
 not an automation entry point.
 
 `-y` was a deprecated alias for `--non-interactive` through 0.4.x. Since
-v0.5.0 it is accepted and ignored — `mm init` has no confirmation prompt to
-skip — so scripts must pass `--non-interactive`. `mm init --advanced` and
+v0.5.0 it is accepted and ignored — it does not answer `mm init`'s prompts —
+so scripts must pass `--non-interactive`. `mm init --advanced` and
 `mm init --preset <name>` are interactive: without a terminal they refuse
 rather than run their prompts against EOF.
 
@@ -238,9 +238,11 @@ mm search "a phrase from those notes"
 See [Core memory tools](reference/core-memory-tools.md) for incremental
 indexing, filters, namespaces, redaction, and force-reindex behavior.
 
-Indexing leaves an empty `.<name>.lock` file next to each indexed file. Those
+Indexing a directory you registered as a memory directory leaves an empty
+`.<name>.lock` file next to each indexed file. Those
 are cross-process lock sidecars, they are meant to stay, and they belong in
-your `.gitignore` — see
+your `.gitignore`. A one-off `mm index` of a path outside your memory
+directories, like the one above, leaves none — see
 [Configuration → Lock sidecars](configuration.md#lock-sidecars-namelock).
 
 ### 5. Organise memories with namespaces
@@ -279,7 +281,7 @@ which the plugins' `update` workflow needs outside `topic` mode (see
 
 This reuses the persistent `memtomem[all]` environment installed above. For a
 one-off setup without a persistent install, use `uvx --isolated --from
-"memtomem[all]==0.7.3" memtomem-server`. Claude Code users can instead
+"memtomem[all]==0.7.11" memtomem-server`. Claude Code users can instead
 install the [memtomem plugin](integrations/claude-code.md#mcp-server-setup),
 which provides an exact-pinned MCP server and nine focused workflows. Automatic
 indexing hooks are supplied only by the separate `memtomem-automation` plugin.
@@ -415,6 +417,7 @@ database or remove client registrations and project artifacts.
 
 - [Coding-agent sample](../../examples/onboarding/retry-policy/README.md) — recover a decision and its ADR source.
 - [Model-free LangGraph notebooks](../../examples/notebooks/README.md) — two self-contained Korean beginner labs, without API keys.
+- [Claude Code & Codex CLI plugin quickstart](plugin-quickstart.md) — save and find your first memory through the plugin instead of the CLI.
 - [한국어 바이브코딩 빠른 시작](vibe-coding-getting-started-ko.md) — Claude Code·Codex CLI 플러그인으로 첫 기억을 저장·검색하세요.
 - [MCP Client Setup](mcp-clients.md) — connect an editor.
 - [Core memory tools](reference/core-memory-tools.md) — index and search real data.

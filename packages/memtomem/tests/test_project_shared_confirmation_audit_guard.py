@@ -118,10 +118,6 @@ _EMIT_NAME = "emit_project_shared_confirmation"
 # and its caller decides), so there is nothing to check.
 DELEGATED_GATES: frozenset[tuple[str, str, str | None]] = frozenset(
     {
-        # Pre-check → shared impl. Forwards confirm_project_shared into
-        # cli/context_cmd._memory_migrate_run, which carries Gate B for both
-        # surfaces; without the forwarded name it would record the CLI's.
-        ("server/tools/context.py", "mem_context_memory_migrate", "mcp_context_memory_migrate"),
         # Pre-check → shared core. Forwards into memory_crud._mem_add_core,
         # which re-gates on the same derived scope; without the forwarded
         # name the consent would be filed under mem_add.
@@ -137,13 +133,12 @@ DELEGATED_GATES: frozenset[tuple[str, str, str | None]] = frozenset(
 _DELEGATED_KEYS: frozenset[tuple[str, str]] = frozenset((rel, fn) for rel, fn, _ in DELEGATED_GATES)
 
 # ``(path relative to src/memtomem, function)`` whose POSITIVE-form
-# conditionals on the flag are not consent gates. Both entries are the same
-# kind: an argument-validation error that refuses on the flag's *presence*
+# conditionals on the flag are not consent gates. The entry is an
+# argument-validation error that refuses on the flag's *presence*
 # ("--confirm-project-shared requires --to"), authorising nothing and
 # therefore having no consent to record.
 NOT_A_GATE: frozenset[tuple[str, str]] = frozenset(
     {
-        ("server/tools/context.py", "mem_context_artifact_migrate"),
         ("cli/context_bundle_cmd.py", "migrate_cmd"),
     }
 )
@@ -524,7 +519,7 @@ def test_detector_rejects_emit_placed_before_the_gate() -> None:
 
 
 def test_detector_requires_one_emit_per_gate_in_sibling_branches() -> None:
-    """``mem_context_version``'s shape: two gates, two consents."""
+    """A function with two gates records two consents."""
     offenses = _snippet_offenses("""
         def f(action, scope, confirm_project_shared):
             if action == "enable":

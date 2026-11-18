@@ -253,6 +253,52 @@ class TestContextVersionCliInline:
         assert r.exit_code != 0, r.output
         assert not (adir / "versions" / "v1.md").exists()  # refused before write
 
+    def _user_tier_agent(self, tmp_path, monkeypatch, body: str) -> tuple[Path, CliRunner]:
+        from memtomem.cli import _bootstrap
+
+        home = tmp_path / "home"
+        home.mkdir()
+        project = tmp_path / "project"
+        project.mkdir()
+        _seed_project(project)
+        set_home(monkeypatch, home)
+        monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
+        monkeypatch.chdir(project)
+        adir = home / ".memtomem" / "agents" / "tiered"
+        adir.mkdir(parents=True)
+        (adir / "agent.md").write_text(body, encoding="utf-8")
+        return adir, CliRunner()
+
+    def test_version_create_at_the_user_tier_lands_under_home(self, tmp_path, monkeypatch):
+        adir, runner = self._user_tier_agent(
+            tmp_path, monkeypatch, "---\nname: tiered\ndescription: d\n---\n\nbody\n"
+        )
+
+        r = runner.invoke(
+            cli, ["context", "version", "create", "agents", "tiered", "--scope", "user"]
+        )
+
+        assert r.exit_code == 0, r.output
+        assert (adir / "versions" / "v1.md").is_file()
+
+    def test_version_create_at_the_user_tier_keeps_a_secret(self, tmp_path, monkeypatch):
+        # Gate A is permissive on the user tier: nothing there is git-tracked, so
+        # the snapshot is taken even with a secret in the working canonical,
+        # unlike the project_shared refusal above.
+        adir, runner = self._user_tier_agent(
+            tmp_path,
+            monkeypatch,
+            "---\nname: tiered\ndescription: d\n---\n\napi_key=AKIA1234567890ABCDEF\n",
+        )
+
+        r = runner.invoke(
+            cli, ["context", "version", "create", "agents", "tiered", "--scope", "user"]
+        )
+
+        assert r.exit_code == 0, r.output
+        snapshot = (adir / "versions" / "v1.md").read_text(encoding="utf-8")
+        assert snapshot == (adir / "agent.md").read_text(encoding="utf-8")
+
     def test_command_version_roundtrip(self, tmp_path, monkeypatch):
         # Commands have distinct parse/render paths — pin the CLI version flow
         # for them too (Codex review).

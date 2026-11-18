@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -25,6 +26,8 @@ from pathlib import Path
 
 import httpx
 import pytest
+
+from _subprocess_env import subprocess_env
 
 pytestmark = pytest.mark.browser
 
@@ -57,21 +60,31 @@ def xss_dev_server() -> Iterator[str]:
     Ingest stays additive across the parametrized cases — each uses a
     unique MARKER token in the content so the BM25 search matches only
     its own chunk.
+
+    The server runs on the interpreter running pytest, from a directory
+    inside the temp home: ``uv run`` from the caller's checkout would sync
+    a ``.venv`` there (and fetch a Python into the temp ``HOME``) when the
+    checkout has none, and test a different environment from the suite.
+    The package pytest imported goes first on the child's ``PYTHONPATH``, so
+    a relative entry inherited from the caller cannot resolve against the
+    new working directory and pick up another checkout.
     """
     with tempfile.TemporaryDirectory(prefix="memtomem-xss-") as home:
-        env = os.environ.copy()
-        env["HOME"] = home
-        env["USERPROFILE"] = home
-        env["TMPDIR"] = str(Path(home) / "tmp")
-        env["MEMTOMEM_WEB__CSRF_ENFORCE"] = "0"
+        env = subprocess_env(
+            HOME=home,
+            USERPROFILE=home,
+            TMPDIR=str(Path(home) / "tmp"),
+            MEMTOMEM_WEB__CSRF_ENFORCE="0",
+        )
         (Path(home) / "tmp").mkdir(parents=True, exist_ok=True)
         os.chmod(Path(home) / "tmp", 0o700)
+        project = Path(home) / "project"
+        project.mkdir()
+        cli = [sys.executable, "-c", "from memtomem.cli import cli; cli()"]
 
         subprocess.run(
             [
-                "uv",
-                "run",
-                "mm",
+                *cli,
                 "init",
                 "--non-interactive",
                 "--provider",
@@ -81,6 +94,7 @@ def xss_dev_server() -> Iterator[str]:
                 "--mcp",
                 "skip",
             ],
+            cwd=project,
             env=env,
             check=True,
             capture_output=True,
@@ -90,9 +104,7 @@ def xss_dev_server() -> Iterator[str]:
         url = f"http://127.0.0.1:{port}"
         proc = subprocess.Popen(
             [
-                "uv",
-                "run",
-                "memtomem",
+                *cli,
                 "web",
                 "--dev",
                 "--port",
@@ -100,6 +112,7 @@ def xss_dev_server() -> Iterator[str]:
                 "--host",
                 "127.0.0.1",
             ],
+            cwd=project,
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -113,6 +126,7 @@ def xss_dev_server() -> Iterator[str]:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait(timeout=5)
 
 
 XSS_PAYLOADS = [

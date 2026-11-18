@@ -49,12 +49,15 @@ from memtomem.context._canonical_txn import (
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import (
+    linked_runtime_reads,
+    relinked_skip,
     DiffRow,
     runtime_artifact_listing,
     runtime_fanout_root,
 )
 from memtomem.context._sync_atomic import AtomicSyncAdapter
 from memtomem.context._names import is_internal_artifact_dir
+from memtomem.memory_scope import ProjectEntryRelinked
 from memtomem.context.scope_resolver import (
     ArtifactKind,
     ContextScopeError,
@@ -102,7 +105,7 @@ def resolve_artifact_under_root(
     has_flat = flat_target.is_file()
     if has_dir and has_flat:
         logger.warning(
-            "%s/%s: reverse-sync updates dir layout (%s/%s); the flat "
+            "%s/%s: pull updates dir layout (%s/%s); the flat "
             "file (%s.md) is now silently divergent. Remove it or run "
             "`mm context migrate` (PR-D).",
             artifact_label,
@@ -292,6 +295,10 @@ def import_passthrough_runtime(
         runtime_dir = runtime_fanout_root(artifact_label, runtime, scope, project_root)
     except KeyError:
         return
+    except ProjectEntryRelinked as exc:
+        # Nothing is copied from behind a link into the canonical store.
+        skipped.append(relinked_skip(runtime, runtime, exc))
+        return
     if runtime_dir is None or not runtime_dir.is_dir():
         return
     runtime_label = f"{runtime} ({runtime_dir})"
@@ -403,7 +410,7 @@ def import_passthrough_runtime(
                     content_bytes,
                     resolve_target=_resolve,
                     overwrite=overwrite,
-                    snapshot_note=f"pre-overwrite snapshot (import from {runtime})",
+                    snapshot_note=f"pre-overwrite snapshot (pull from {runtime})",
                     lock_timeout=None if lock_remaining is None else lock_remaining(),
                 )
             except TimeoutError:
@@ -457,6 +464,7 @@ def import_passthrough_runtime(
             source_runtimes[name] = runtime
 
 
+@linked_runtime_reads()
 def diff_atomic_artifact(
     adapter: AtomicSyncAdapter[T],
     project_root: Path,

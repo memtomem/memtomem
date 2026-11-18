@@ -25,7 +25,10 @@ variable, and it can override an exported upper-case one. Every other key is lef
 logged once at INFO, so the unprefixed variables above have no effect in
 `.env`: set them in the real environment or in your MCP client's `env` block
 ([MCP client setup](mcp-clients.md#11-environment-variable-overrides)).
-`PYTHON_DOTENV_DISABLED=1` turns the file off.
+`PYTHON_DOTENV_DISABLED=1` turns the file off; the Hermes plugin's bundled
+server entry sets it, so under Hermes a `.env` does not configure that server.
+The same entry sets `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` and holds `huggingface-hub` at 1.20 or
+later, so under Hermes model downloads use neither a saved Hugging Face login nor `HF_TOKEN`.
 
 ```bash
 # Example: switch from Ollama to OpenAI
@@ -40,6 +43,7 @@ For interactive setup, run `mm init` instead of editing env vars by hand.
 **On this page**
 
 - [Precedence and merge behaviour](#precedence-and-merge-behaviour)
+- [What leaves your machine](#what-leaves-your-machine)
 - [Storage](#storage)
 - [Embedding](#embedding)
 - [Reset Flow](#reset-flow)
@@ -312,6 +316,48 @@ previous state is recoverable.
 If the web UI is running, restart it after `--fresh` so its
 in-memory cache doesn't re-pin the dropped values on the next save.
 
+## What leaves your machine
+
+The memtomem server runs on your machine, and its database and Markdown files
+stay there. With the defaults (BM25-only search, no LLM, no reranker) the
+server sends none of your note text anywhere. The local ONNX and fastembed
+models download their weights once and then run in-process.
+
+Some optional providers send text to an outside service. Each one is off until
+you configure it:
+
+| Setting | Text sent | When |
+|---------|-----------|------|
+| `embedding.provider=openai` | Each chunk's text with its heading path, when it is indexed; search queries that use dense retrieval; the text checked by `mem_conflict_check`; a pending candidate's text when `mem_candidate_evidence` gathers evidence; LangGraph store queries and record text | Indexing (`mem_add`, `mm index`, the file watcher, Web UI uploads, imports), dense searches, and those tool calls. Sent to `api.openai.com`, or to `embedding.base_url` when set |
+| `embedding.provider=ollama` with a non-local `base_url` | The same text as the OpenAI row | The same events as the OpenAI row. Sent to `embedding.base_url` |
+| `llm.enabled=true` with `openai`, `anthropic`, or a non-local `base_url` | The query (`strategy="llm"` expansion); chunk text (`mem_auto_tag`, `mem_entity_scan`, consolidation including scheduled policy runs, source summaries, chunk context); a session's written chunks (session summaries; when a session's write provenance is missing or cannot be used completely, the summary falls back to the chunks of its namespace and time window, which can include another session's writes) | Per feature, see [LLM Providers](llm-providers.md#what-llm-powers). Session summaries are on by default once an LLM is enabled |
+| `rerank.enabled=true` with `rerank.provider=cohere` | The query and the full text of every candidate chunk in the rerank pool (sized as described in [Rerank](#rerank-cross-encoder)) | Every reranked search |
+| `session_trace.langfuse_enabled=true` | Session command traces. In every `payload_mode`, the trace metadata carries the command line of `mm session wrap` and the summary text given to `mm session end`; full inputs and outputs are added in `redacted` and `full` mode. `redacted` masks secret-looking fields, not ordinary prose | Each traced `mm session` command. With no host configured, the Langfuse SDK sends to its default, `https://cloud.langfuse.com` |
+| `webhook` URLs | The query for search events, the question for ask events, the file path for add events | Each matching event |
+
+What decides the destination is the endpoint each provider actually calls,
+not the provider's name: an `openai` provider pointed at a local vLLM or LM
+Studio server stays local, and an `ollama` provider pointed at another host
+does not. A `base_url` on `localhost`, `127.0.0.1`, or `::1` keeps the request
+on your machine, unless your environment routes HTTP through a proxy
+(memtomem's HTTP clients honor the standard proxy environment variables) or
+the local server itself forwards requests to a hosted model. The `openai` LLM provider with no `base_url` set uses the LLM
+default, `http://localhost:11434`. The `anthropic` provider replaces that exact
+value with `https://api.anthropic.com`, even when you set it explicitly.
+
+To see which endpoints your configuration sends text to, run `mm status` (or
+call `mem_status`): its "Remote inference endpoints" block lists each configured
+embedding, LLM, and reranker endpoint that is not on a loopback address. The
+server also logs a warning the first time it connects to one, and `mm init`
+lists them after writing the config. That list covers these inference
+endpoints only, not Langfuse, webhooks, or what the MCP client does with the
+results it receives.
+
+Separately from all of the above, the MCP tools return note text to the AI
+client that called them, such as Claude Code, Codex, or Claude Desktop. That
+client sends it to its own model provider as part of the conversation, under
+that client's terms; memtomem does not control that step.
+
 ## Storage
 
 | Variable | Default | Description |
@@ -324,7 +370,7 @@ in-memory cache doesn't re-pin the dropped values on the next save.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_EMBEDDING__PROVIDER` | `none` | `none` (BM25 only), `onnx` (local), `ollama` (local server), or `openai` (cloud) |
+| `MEMTOMEM_EMBEDDING__PROVIDER` | `none` | `none` (BM25 only), `onnx` (local), `ollama` (local server), or `openai` (cloud; sends note text and queries to the configured endpoint, OpenAI by default, see [What leaves your machine](#what-leaves-your-machine)) |
 | `MEMTOMEM_EMBEDDING__MODEL` | _(empty)_ | Embedding model name (depends on provider) |
 | `MEMTOMEM_EMBEDDING__DIMENSION` | `0` | Vector dimension (must match the model; 0 = BM25 only) |
 | `MEMTOMEM_EMBEDDING__BASE_URL` | _(empty)_ | API endpoint URL (Ollama defaults to `http://localhost:11434` when unset) |
@@ -532,6 +578,8 @@ Chunks in system namespaces (e.g. `archive:*` and the per-agent `agent-runtime:*
 
 The `llm` strategy uses an LLM to generate semantic synonyms (requires `MEMTOMEM_LLM__ENABLED=true`). Other strategies use index metadata and do not need LLM. See [LLM Providers](llm-providers.md).
 
+Tag and heading expansion respect the search's scope, project and namespace boundaries: a `scope="user"` search inside a project does not draw terms from that project's tiers, and a default search does not draw them from hidden system namespaces. The search's other filters (source, tag, time) do not constrain expansion.
+
 ## Context Window
 
 | Variable | Default | Description |
@@ -550,6 +598,15 @@ regardless of which chunk id it is given, so expanding a chunk in a hidden
 namespace returns that chunk with little or no context — reach for
 `mem_search(namespace=...)` instead. Selection filters — `tag_filter`, chunk types, created-date
 bounds — apply only to the matched result, not to what surrounds it.
+
+A search also leaves out the context rows it would not return as results
+because of their source: rows of a file it holds back (for example because the
+file went missing or could not be read) or that is waiting for a check, and
+consolidation summaries whose original note is in that state.
+`mem_do(action="expand", ...)` still shows those rows, because it reads by chunk
+id and they stay readable that way for recovery. The one exception is a file
+held because its content was refused for a secret: its rows are hidden from
+both.
 
 ## Indexing
 
@@ -640,8 +697,8 @@ What refuses, and what does not:
 - **`mm memory doctor --fix`** skips a protected root and exits non-zero,
   since repairing a provider index means rewriting it. The root is still
   *inspected* and reported.
-- **Not covered**, deliberately: anything where you name the destination
-  yourself, such as the path you hand `mem_export`; the canonical artifact
+- **Not covered**, deliberately: memtomem's own export directory
+  (`~/.memtomem/exports/`, where `mem_export` writes); the canonical artifact
   Store that `mm context` manages; and the host-global wiki
   (`~/.memtomem-wiki`). Those are separate stores with their own roots and
   their own commands — read-only governs memtomem's *memory* writes, not
@@ -710,6 +767,7 @@ is no in-place retarget.
 | `MEMTOMEM_INDEXING__RETAIN_MISSING_DIRS` | `[]` | Directories whose files, once missing on disk, stay searchable instead of being held; see below |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
 | `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override. A running MCP server applies a change on its next memory operation |
+| `MEMTOMEM_INDEXING__WATCHER_POLL_INTERVAL_MS` | `10000` | How often the polling backend rescans the watched directories, 100–60000 ms; the native backend ignores it. A shorter interval picks an edit up sooner and costs more CPU while idle, in every server process that watches. A change that is undone again between two scans (a file created and deleted, or edited in place and restored with the same size and modification time) is not seen. Read when the watcher builds its observer: restart the server to apply a change |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Approximate packing preference; use the hard limit for an exact ceiling |
 | `MEMTOMEM_INDEXING__HARD_MAX_CHUNK_TOKENS` | `0` | Exact body ceiling (`0` disables); requires a matching local tokenizer |
 | `MEMTOMEM_INDEXING__CHUNK_TOKENIZER_PATH` | empty | Local embedding-model `tokenizer.json`; no model download |
@@ -791,8 +849,9 @@ inode mid-operation, and every lock held on the old inode goes stale. The
 sidecar is never replaced, so its inode is stable.
 
 The sidecar sits beside the **resolved** file, so a symlinked source is locked
-next to its target — which may be outside the tree you indexed. That is also
-what makes a symlink and its target share one lock instead of two.
+next to its target. That is also what makes a symlink and its target share one
+lock instead of two. A target outside the directories listed below gets no
+sidecar; see "Outside those directories" further down.
 
 These files are created with mode `0600`, stay empty, and are **left in place
 on purpose**. memtomem never deletes them: removing a sidecar while any
@@ -808,9 +867,12 @@ path and both believe they hold it.
 > creating the sidecar fails first. A *refused* write leaves nothing behind;
 > this is about indexing, which is supposed to happen.
 
-You will see them in any tree you index — a registered `memory_dirs` folder,
-a `mm index <path>` run, or a Reindex from the Web UI — including your own
-source repositories. A directory scan leaves one next to each file it selects
+You will see them in the directories memtomem keeps memory files in: a
+registered `memory_dirs` folder, a project's memory tier, a
+`read_only_memory_dirs` root and the upload directory, however the file was
+indexed (the watcher, `mm index <path>`, a Reindex from the Web UI). That
+includes a source repository you registered as one of them. A directory scan
+there leaves one next to each file it selects
 for indexing, which is the overlap between `indexing.supported_extensions` and
 the extensions a chunker is registered for. With the default settings that
 overlap is the whole default list, `.md`, `.json`, `.yaml`, `.yml`, `.toml`,
@@ -825,6 +887,27 @@ a directory. The defaults above remain unchanged.
 
 Sidecars are never indexed themselves:
 `.lock` is not a supported extension.
+
+**Outside those directories, indexing creates no sidecar.** `mm index <path>`
+and the MCP `mem_index` tool accept any path, and renaming or assigning a
+namespace locks whichever files its chunks came from. For a file outside every
+configured root and the upload directory, those operations write nothing next
+to it. The lock they take for such a file is an empty file under the per-user
+runtime directory, named by a digest of the file's resolved path:
+`/tmp/memtomem-<euid>/source-locks/` on POSIX, `source-locks\` under
+`<LocalAppData>\Temp\memtomem-0\` on Windows (the directory
+[Uninstall](uninstall.md) describes).
+
+If a sidecar is already beside such a file, it is still locked as well, never
+recreated, and a symlink at that name is not followed. One can be there from
+an earlier memtomem version, or from something that writes the file under
+memtomem's lock, which still creates one: the LangGraph store's
+`add(file=...)` is an example.
+
+Two limits of the runtime-directory lock: every memtomem process must see the
+same `/tmp` (a service with a private `/tmp` does not share it), and a cleanup
+job that deletes files there while a memtomem process holds one breaks that
+one lock.
 
 **Keep them out of version control.** Add the pattern to the repository's
 `.gitignore`, or to your global excludes file
@@ -1093,23 +1176,23 @@ any leftover source the exclude rules don't cover, remove it directly with
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_RERANK__ENABLED` | `false` | Enable cross-encoder reranking after fusion |
-| `MEMTOMEM_RERANK__PROVIDER` | `fastembed` | `fastembed` (local ONNX), `cohere` (cloud), or `local` (sentence-transformers) |
+| `MEMTOMEM_RERANK__PROVIDER` | `fastembed` | `fastembed` (local ONNX), `cohere` (cloud; sends the query and candidate chunk text to Cohere), or `local` (sentence-transformers) |
 | `MEMTOMEM_RERANK__MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Reranker model name (provider-specific — see below) |
 | `MEMTOMEM_RERANK__OVERSAMPLE` | `2.0` | Candidate-pool multiplier applied to response `top_k` |
 | `MEMTOMEM_RERANK__MIN_POOL` | `20` | Lower bound on the candidate pool (floor for small queries) |
-| `MEMTOMEM_RERANK__MAX_POOL` | `200` | Upper bound on the candidate pool (cost cap for large queries) |
+| `MEMTOMEM_RERANK__MAX_POOL` | `200` | Ceiling of the oversampled candidate pool (cost cap on oversampling); a larger response `top_k` overrides it |
 | `MEMTOMEM_RERANK__API_KEY` | _(empty)_ | API key (required for Cohere) |
 | `MEMTOMEM_RERANK__TIMEOUT_S` | `30.0` | Wall-clock bound on one rerank call; on timeout the search falls back to the fused order (read at load time — restart to change) |
 
 Reranking runs as Stage 3b in the search pipeline — after BM25 + dense fusion, before the source filter. (The tag filter is not a post-fusion stage: it is applied at retrieval, so the pool the reranker sees already carries the tag.) The candidate pool passed to the cross-encoder is
 
 ```
-pool = max(min_pool, min(max_pool, int(oversample * response_top_k)))
+pool = max(response_top_k, min_pool, min(max_pool, int(oversample * response_top_k)))
 ```
 
-so the pool scales with the caller's requested `top_k` while staying bounded by both the floor (rescues small queries) and the cap (controls cost on large ones). The reranker then returns the caller's `top_k` — pool sizing only controls how many items it gets to choose from. If reranking fails with a runtime error the pipeline falls back to the original fused order, trimmed to the caller's `top_k`, with a warning; configuration errors (unsupported model name, missing fastembed install) surface directly so the misconfiguration is visible.
+so the pool scales with the caller's requested `top_k` while the floor rescues small queries and the cap limits how far large ones are oversampled. The pool is never smaller than the request: neither a `top_k` above `max_pool` nor an `oversample` below 1 can size it below `top_k` (`min_pool` can still raise it), so the reranker always has `top_k` candidates to choose from when that many are retrieved, and reranking cost grows with `top_k` past `max_pool`. The reranker then returns up to the caller's `top_k` — pool sizing only controls how many items it gets to choose from. If reranking fails with a runtime error the pipeline falls back to the original fused order, trimmed to the caller's `top_k`, with a warning; configuration errors (unsupported model name, missing fastembed install) surface directly so the misconfiguration is visible.
 
-`rerank.enabled`, `rerank.oversample`, `rerank.min_pool`, and `rerank.max_pool` are runtime-tunable via `mm config set` or the Web UI Settings panel — no restart required. `rerank.provider` / `rerank.model` / `rerank.api_key` are load-time only because the reranker instance is cached on startup.
+`rerank.enabled`, `rerank.oversample`, `rerank.min_pool`, and `rerank.max_pool` take effect without a restart when you change them in the running process: through the MCP `mem_config` tool, or the Web UI Settings panel. Turning `rerank.enabled` off applies to searches that start afterwards; a search already running finishes with the reranker it started with. `mm config set` only writes `config.json`: `mm web` applies the change the next time its Settings panel loads or saves the configuration, while a running MCP server reads it at its next start. `rerank.provider` / `rerank.model` / `rerank.api_key` cannot be changed through `mem_config` or the Settings panel; edit `config.json` instead, which `mm web` applies the same way and a running MCP server at its next start.
 
 Latency-bounded callers can also skip reranking **per call** without touching server config: pass `rerank=false` to `mem_search` or `mem_context_compose` (MCP), or `--no-rerank` to `mm search` / `mm pinned compose` (CLI). The call then skips the cross-encoder stage and collapses the candidate pool to `top_k` — trading rerank precision for an un-reranked search that typically finishes in well under a second. Omitting the parameter (or passing `true`) follows the server config; `true` cannot enable reranking on a server that has it disabled.
 
@@ -1172,7 +1255,7 @@ factor = 1.0 + (max_boost - 1.0) × (matched entities / query entities)
 So a query mentioning `sqlite` and `@alice` boosts a chunk carrying both by the
 full `max_boost`, one carrying only `sqlite` by half of it, and leaves a chunk
 carrying neither untouched. Runs as Stage 7b in the search pipeline (after the
-importance boost, before context-window expansion).
+importance boost, before MMR).
 
 **Populated at index time.** The indexer extracts entities for every chunk it
 writes (`indexing.extract_entities`, on by default), and rewrites them whenever
@@ -1235,6 +1318,10 @@ PascalCase technology guesses (0.5) while keeping known-term matches (0.9).
 > drops obvious duplicates, with negligible cost. memtomem does not dedup
 > at index time — see also `mem_dedup_scan` / `mem_dedup_merge`
 > ([Reference](reference.md)) for a manual pass on accumulated overlap.
+
+MMR runs after time decay and the access, importance and entity-match boosts,
+so it diversifies over the boosted scores and the order it picks is the order
+returned.
 
 ## Namespace
 
@@ -1522,7 +1609,7 @@ gate wins.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_LLM__ENABLED` | `false` | Enable LLM provider (required for LLM-powered features) |
-| `MEMTOMEM_LLM__PROVIDER` | `ollama` | `ollama` (local), `openai` (cloud/compatible), or `anthropic` |
+| `MEMTOMEM_LLM__PROVIDER` | `ollama` | `ollama` (local), `openai` (cloud/compatible), or `anthropic` (cloud). A cloud provider receives note text, see [What leaves your machine](#what-leaves-your-machine) |
 | `MEMTOMEM_LLM__MODEL` | _(empty)_ | Model name (empty uses provider default: ollama→gemma4:e2b, openai→gpt-4.1-mini, anthropic→claude-haiku-4-5-20251001) |
 | `MEMTOMEM_LLM__BASE_URL` | `http://localhost:11434` | API endpoint URL |
 | `MEMTOMEM_LLM__API_KEY` | _(empty)_ | API key (required for OpenAI/Anthropic/OpenRouter) |
@@ -1585,10 +1672,10 @@ The keys may come either from the config surface above or from the Langfuse SDK'
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (39 incl. `mem_do`), `full` (102 tools) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (39 incl. `mem_do`), `full` (94 tools) |
 | `MEMTOMEM_EXTRA_TOOLS` | *(unset)* | Comma-separated registered tool names exposed individually on top of the mode (no effect in `full`). A deployment that launches the server lists the tool its skill needs, so the skill's own allowlist can name it instead of being granted `mem_do`; the plugins' bundled server configurations set `mem_update_coverage`, which their `update` workflow needs outside `topic` mode, and so does every registration `mm init --mcp` writes (the `mm init` of memtomem 0.7.2 and earlier did not); a hand-written entry, or one an older `mm init` wrote, has to add it. If you also set it in the environment your MCP client inherits, use the same combined list (your names plus `mem_update_coverage`) in both places, or unset the inherited one and keep the combined list in the entry. Deployment configuration, not an authorization boundary: an unknown name is logged and ignored, and the surface only ever gains registered names. |
 
-In `core` mode, use `mem_do(action="...", params={...})` to access any of the 95 non-core actions. Fewer tools means less context usage for AI agents.
+In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action; `mem_do(action="help")` lists them. Fewer tools means less context usage for AI agents.
 
 ## Web UI Mode
 
@@ -1652,6 +1739,12 @@ registry and stores local absolute paths.
 |----------|---------|-------------|
 | `MEMTOMEM_HOOKS__TARGET_SCOPE` | `user` | Tier that `mm context` writes memtomem-managed Claude Code hook rules into: `user` (`~/.claude/settings.json`), `project_shared` (`<project>/.claude/settings.json`), or `project_local` (`<project>/.claude/settings.local.json`). See ADR-0010 §3. |
 
+## Maintenance
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_MAINTENANCE__EXPERIMENTAL_DUPLICATE_BRIEF` | `false` | [Experimental](../../README.md#stability). When `true`, `mem_dedup_scan` prints, under each member of a candidate pair, what the store holds about it: heading, namespace, scope, tags, validity window, the stored read-only flag, where it sits in its source, and its relations and links. One more line names the fields the two members differ on. These are facts for whoever judges the pair, not a recommendation: the scan still selects and orders pairs the same way and still changes nothing. Each member is shown as the store holds it when the brief is written, which is a second read after the scan: a heading or line number that changed in between shows its new value, and a near pair keeps the score the scan computed. A pair is left out, and counted in a closing line, when that second read does not return one of its members (it was deleted, or it sits on a path the scan's listing hides: a held source, a pending source check, or the path of a policy summary whose parent is either) or when the two bodies of an exact pair do not match. Stored values (headings, tags, namespaces, scopes, paths, the preview) are printed in double quotes with quotes, backslashes and non-printable characters escaped; in the preview a line feed is shown as a space, as the plain scan shows it. A validity bound is printed to the second in UTC, or as `unix <seconds>` when it lies outside the years 1 to 9999. Output is about three times as long per pair. Set it in `config.json` (`{"maintenance": {"experimental_duplicate_brief": true}}`) or with this variable; `mm config set` and `mem_config` do not change it |
+
 ## Advanced / operator environment variables
 
 These are read directly from the process environment (not the layered
@@ -1678,6 +1771,10 @@ mem_config(key="search.default_top_k")            # Query a single value
 mem_config(key="search.default_top_k", value="20")  # Change for this server process
 mem_config(key="search.default_top_k", value="20", persist=True)  # Persist to config.json
 ```
+
+`mem_config` reads `session_trace.*` but does not change it, and its `persist=True` saves do not
+change what the `session_trace` section of `config.json` sets: whether session traces are
+recorded, and where they go, is set with `mm config set session_trace.<field> <value>`.
 
 ### CPU ONNX profiles
 

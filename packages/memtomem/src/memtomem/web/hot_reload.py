@@ -396,8 +396,9 @@ async def apply_runtime_config_changes(
 ) -> None:
     """Propagate runtime-mutable config changes to live components.
 
-    * ``search.tokenizer`` changed → re-register global tokenizer + run
-      ``storage.rebuild_fts()`` (backgrounded when there is an ``app``).
+    * ``search.tokenizer`` changed → switch *storage*'s tokenizer
+      (``set_fts_tokenizer``) + run ``storage.rebuild_fts()`` (backgrounded
+      when there is an ``app``).
     * ``rerank`` changed → rebuild the live reranker attached to the search
       pipeline.
     * ``embedding.onnx_batch_size`` changed → publish it to the live ONNX
@@ -420,7 +421,7 @@ async def apply_runtime_config_changes(
     # Deliberately *not* offloaded, unlike the pre-commit validation in
     # ``reload_if_stale``. This call runs after the caller installed the new
     # config, and the head of this function — ``configure_chunk_budget`` (no
-    # await inside it), the ONNX batch publish, ``set_tokenizer`` — must reach
+    # await inside it), the ONNX batch publish, ``set_fts_tokenizer`` — must reach
     # the runtime without yielding: a suspension here lets a second reload
     # commit and run its own fanout in between, after which neither ordering is
     # recoverable (the loser's values land on top, or are dropped while the
@@ -448,9 +449,7 @@ async def apply_runtime_config_changes(
         publish_onnx_batch_size(embedder, new_cfg.embedding.onnx_batch_size)
 
     if tokenizer_changed and storage is not None:
-        from memtomem.storage.fts_tokenizer import set_tokenizer
-
-        set_tokenizer(new_cfg.search.tokenizer)
+        storage.set_fts_tokenizer(new_cfg.search.tokenizer)
         await _schedule_fts_rebuild(storage, new_cfg.search.tokenizer, app=app)
 
     if search_pipeline is not None:
@@ -539,6 +538,28 @@ async def _close_reranker_safely(reranker: object) -> None:
     await close_reranker_safely(reranker)
 
 
+def fts_rebuild_fallback_warning(storage: SqliteBackend) -> str | None:
+    """Say so when the rebuild that just returned did not use the tokenizer it was asked for.
+
+    Call it right after ``rebuild_fts()`` returns. A ``kiwipiepy`` rebuild in a
+    process where the extra cannot be imported falls back to ``unicode61``
+    mid-pass and still succeeds, so the row count alone reads the same as a
+    real Kiwi rebuild. Both names come from the live backend, not from the
+    value a caller queued: each rebuild attempt tokenizes with the backend's
+    current tokenizer, so a queued value is scheduling history once another
+    change has superseded it. Mirrors ``mm config set`` and ``mem_config``.
+    """
+    requested = storage.fts_tokenizer
+    built = storage.fts_tokenizer_effective
+    if built == requested:
+        return None
+    return (
+        f"{requested} is unavailable (not installed), so this rebuild and every query in "
+        f"this server fall back to {built}. Install it, restart the server, and rebuild "
+        f"for a {requested} index."
+    )
+
+
 async def _schedule_fts_rebuild(
     storage: SqliteBackend,
     tokenizer: str,
@@ -568,9 +589,18 @@ async def _schedule_fts_rebuild(
     async def _run_one(target: str) -> None:
         try:
             count = await storage.rebuild_fts()
-            logger.info("FTS index rebuilt with tokenizer=%s (%d chunks)", target, count)
         except Exception:
             logger.warning("FTS rebuild after tokenizer change failed", exc_info=True)
+            return
+        # ``target`` is only what was queued; name what the rows were built with.
+        built = storage.fts_tokenizer_effective
+        warning = fts_rebuild_fallback_warning(storage)
+        if warning is None:
+            logger.info("FTS index rebuilt with tokenizer=%s (%d chunks)", built, count)
+        else:
+            logger.warning(
+                "FTS index rebuilt with tokenizer=%s (%d chunks): %s", built, count, warning
+            )
 
     if app is None:
         await _run_one(tokenizer)

@@ -8,12 +8,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import click
 
 from croniter import croniter  # type: ignore[import-untyped]
 
-from memtomem.scheduler.jobs import JOB_KINDS, run_outcome
+from memtomem.scheduler.jobs import JOB_KINDS, run_job, run_outcome, validate_new_params
+
+
+class _JobChoice(click.Choice):
+    """Dynamic click.Choice reflecting available JOB_KINDS at command execution time.
+
+    Avoids freezing choices at module import time when JOB_KINDS is patched in tests (#3439).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(choices=(), case_sensitive=True)
+
+    @property
+    def choices(self) -> tuple[Any, ...]:
+        from memtomem.scheduler import jobs
+
+        return tuple(sorted(jobs.JOB_KINDS))
+
+    @choices.setter
+    def choices(self, _value: object) -> None:
+        pass
 
 
 @click.group()
@@ -21,13 +42,32 @@ def schedule() -> None:
     """Scheduled jobs — register, list, run, and delete cron schedules (UTC)."""
 
 
-@schedule.command("add")
+# The ``\b`` line stops Click from rewrapping the examples into one paragraph.
+# Click adds its own two columns to the epilog, on top of the two-space indent of
+# the example lines below, so the longest one (dedup_scan) renders at exactly 80
+# columns. That is why its --params JSON has no space after the colon.
+SCHEDULE_ADD_EPILOG = """\
+Cron times are UTC. Schedules fire only while an MCP server is running with
+scheduler.enabled and health_watchdog.enabled both true (both default to false);
+run-now runs one immediately.
+
+Examples:
+
+\b
+  mm schedule add --cron "0 3 * * 0" --job compaction
+  mm schedule add --cron "0 4 1 * *" --job importance_decay
+  mm schedule add --cron "30 2 * * 1" --job dedup_scan --params '{"limit":20}'
+  mm schedule run-now <id>
+"""
+
+
+@schedule.command("add", epilog=SCHEDULE_ADD_EPILOG)
 @click.option("--cron", "cron_expr", required=True, help="5-field cron expression (UTC)")
 @click.option(
     "--job",
     "job_kind",
     required=True,
-    type=click.Choice(sorted(JOB_KINDS)),
+    type=_JobChoice(),
     help="Job kind to run",
 )
 @click.option("--params", "params_json", default=None, help="JSON-encoded params dict")
@@ -42,9 +82,11 @@ def schedule_add(cron_expr: str, job_kind: str, params_json: str | None) -> None
     if not isinstance(params, dict):
         raise click.ClickException("--params must decode to a JSON object")
 
-    spec = JOB_KINDS[job_kind]
+    from memtomem.scheduler import jobs
+
+    spec = jobs.JOB_KINDS[job_kind]
     try:
-        spec.params_model.model_validate(params)
+        validate_new_params(spec, params)
     except Exception as exc:
         raise click.ClickException(f"invalid params: {exc}") from exc
 
@@ -78,6 +120,7 @@ def schedule_list(as_json: bool) -> None:
         click.echo("No schedules registered.  Use 'mm schedule add' to create one.")
         return
 
+    blocked = 0
     for r in rows:
         status = r.get("last_run_status") or "—"
         reason = (r.get("last_run_result") or {}).get("skipped_reason")
@@ -85,9 +128,22 @@ def schedule_list(as_json: bool) -> None:
             status = f"skipped: {reason}"
         last = r.get("last_run_at") or "never"
         enabled = "on" if r["enabled"] else "off"
+        cron_error = r.get("cron_error")
+        marker = ""
+        if cron_error and cron_error.startswith("unchecked: "):
+            marker = "  (cron check failed)"
+        elif cron_error:
+            marker = "  (automatic runs blocked: cron not accepted)"
+            blocked += 1
         click.echo(
             f"  {r['id']}  [{enabled}]  {r['cron_expr']:<15}  "
-            f"{r['job_kind']:<24}  last={last} ({status})"
+            f"{r['job_kind']:<24}  last={last} ({status}){marker}"
+        )
+    if blocked:
+        click.echo(
+            f"\n{blocked} schedule(s) are not run automatically: their cron expression cannot "
+            "be scheduled (see cron_error in 'mm schedule list --json'). Replace each with "
+            "'mm schedule add', then remove it with 'mm schedule delete <id>'."
         )
 
 
@@ -181,12 +237,14 @@ async def _run_now(sched_id: str) -> dict:
         timeout = _run_now_timeout(app)
 
         try:
-            result = await asyncio.wait_for(
-                spec.runner(app, **validated.model_dump()),
+            result, state_update = await asyncio.wait_for(
+                run_job(spec, app, validated, sched.get("state")),
                 timeout=timeout,
             )
             status, recorded = run_outcome(result)
-            await app.storage.schedule_mark_run(sched_id, status, result=recorded)
+            await app.storage.schedule_mark_run(
+                sched_id, status, result=recorded, state=state_update
+            )
             return {"ok": True, "reason": "ran", "result": result}
         except asyncio.TimeoutError:
             reason = f"exceeded {timeout}s"

@@ -5,9 +5,9 @@ from __future__ import annotations
 import ast
 import dataclasses
 import multiprocessing
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -24,6 +24,15 @@ def _hold_sidecar_in_child(lock_path: str, ready, release) -> None:
     with _file_lock(Path(lock_path)):
         ready.send(True)
         release.recv()
+
+
+def _managed(_source: Path) -> bool:
+    """Every source in this file sits where memtomem keeps memory files.
+
+    The other answer, and the locks it leads to, is
+    ``test_unmanaged_source_lock_location.py``.
+    """
+    return True
 
 
 def _candidate(source: Path, namespace: str = "old") -> NamespaceChunkCandidate:
@@ -44,6 +53,7 @@ class TestNamespaceCoordinator:
         candidate_a = _candidate(source_a)
         candidate_b = _candidate(source_b)
         storage = AsyncMock()
+        storage.transaction = MagicMock(side_effect=lambda **_: nullcontext())
         storage.list_namespace_chunk_candidates = AsyncMock(
             side_effect=[
                 [candidate_b],
@@ -68,7 +78,9 @@ class TestNamespaceCoordinator:
 
         monkeypatch.setattr(namespace_management, "async_file_lock", fake_lock)
 
-        result = await namespace_management.rename_namespace(storage, "old", "new")
+        result = await namespace_management.rename_namespace(
+            storage, "old", "new", is_managed_source=_managed
+        )
 
         assert result is expected
         lock_a = _lock_path_for(source_a.resolve())
@@ -96,6 +108,7 @@ class TestNamespaceCoordinator:
         candidates = [_candidate(tmp_path / f"{name}.md") for name in "abcd"]
         snapshots = [candidates[:1], candidates[:2], candidates[:3], candidates[:4]]
         storage = AsyncMock()
+        storage.transaction = MagicMock(side_effect=lambda **_: nullcontext())
         storage.list_namespace_chunk_candidates = AsyncMock(side_effect=snapshots)
         storage.rename_namespace = AsyncMock()
 
@@ -107,7 +120,9 @@ class TestNamespaceCoordinator:
         monkeypatch.setattr(namespace_management, "async_file_lock", fake_lock)
 
         with pytest.raises(NamespaceMutationBusyError, match="3 attempt"):
-            await namespace_management.rename_namespace(storage, "old", "new")
+            await namespace_management.rename_namespace(
+                storage, "old", "new", is_managed_source=_managed
+            )
 
         storage.rename_namespace.assert_not_awaited()
         assert storage.list_namespace_chunk_candidates.await_count == 4
@@ -118,13 +133,16 @@ class TestNamespaceCoordinator:
         source = tmp_path / "removed" / "source.md"
         candidate = _candidate(source)
         storage = AsyncMock()
+        storage.transaction = MagicMock(side_effect=lambda **_: nullcontext())
         storage.list_namespace_chunk_candidates = AsyncMock(side_effect=[[candidate], [candidate]])
         expected = NamespaceRenameResult(1, False, False)
         storage.rename_namespace = AsyncMock(return_value=expected)
         lock = AsyncMock()
         monkeypatch.setattr(namespace_management, "async_file_lock", lock)
 
-        result = await namespace_management.rename_namespace(storage, "old", "new")
+        result = await namespace_management.rename_namespace(
+            storage, "old", "new", is_managed_source=_managed
+        )
 
         assert result is expected
         assert not source.parent.exists()
@@ -162,7 +180,9 @@ class TestNamespaceCoordinator:
             )
 
             with pytest.raises(NamespaceMutationBusyError, match="nothing.*changed"):
-                await namespace_management.rename_namespace(storage, "old", "new")
+                await namespace_management.rename_namespace(
+                    storage, "old", "new", is_managed_source=_managed
+                )
 
             remaining = await storage.get_chunk(chunk.id)
             assert remaining is not None

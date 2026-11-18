@@ -29,6 +29,12 @@ from memtomem.web.deps import (
     get_search_pipeline,
     get_storage,
 )
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_NOTHING_CHANGED_DETAIL,
+    WRITER_BUSY_READ_DETAIL,
+    wait_for_writer,
+    writer_busy_as_503,
+)
 from memtomem.web.schemas.quality import (
     EvalCaseListResponse,
     EvalCaseSummary,
@@ -83,15 +89,21 @@ async def promote_quality_case(
     # the background (#2183): without this, promoting a fresh run could 404
     # instead of reporting the real state (usually "no feedback yet").
     await pipeline.flush_observation(body.run_id)
-    fingerprints, _ = current_fingerprints(storage, config)
     try:
-        case = await storage.promote_search_run(
-            body.run_id,
-            name=name,
-            fingerprints=fingerprints,
-            allow_unreplayable_filters=body.allow_unreplayable_filters,
-            project_context_root=project_context_root,
-        )
+        # Both waits for another task's transaction come before the
+        # promotion writes anything (#3182).
+        # ``current_fingerprints`` reads the writer synchronously, so it
+        # follows the wait with no ``await`` in between.
+        await wait_for_writer(storage, detail=WRITER_BUSY_NOTHING_CHANGED_DETAIL)
+        fingerprints, _ = current_fingerprints(storage, config)
+        with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+            case = await storage.promote_search_run(
+                body.run_id,
+                name=name,
+                fingerprints=fingerprints,
+                allow_unreplayable_filters=body.allow_unreplayable_filters,
+                project_context_root=project_context_root,
+            )
     except EvalCaseError as exc:
         raise _eval_case_http(exc) from exc
     return PromoteCaseOut(
@@ -110,12 +122,14 @@ async def run_quality_replay(
 ) -> dict:
     """Replay evaluation cases into a deterministic report (no side effects)."""
     try:
-        return await replay_cases(
-            storage,
-            pipeline,
-            config,
-            case_ids=body.cases or None,
-            as_of_unix=body.as_of_unix,
-        )
+        # Replay writes nothing, so a timed-out writer wait is only a busy read.
+        with writer_busy_as_503(WRITER_BUSY_READ_DETAIL):
+            return await replay_cases(
+                storage,
+                pipeline,
+                config,
+                case_ids=body.cases or None,
+                as_of_unix=body.as_of_unix,
+            )
     except EvalCaseError as exc:
         raise _eval_case_http(exc) from exc

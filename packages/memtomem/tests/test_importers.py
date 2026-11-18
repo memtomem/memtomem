@@ -1,17 +1,21 @@
 """Tests for Notion and Obsidian importers."""
 
+import sys
+import unicodedata
 import zipfile
+from pathlib import Path
 
 import pytest
 from memtomem.indexing import importers
 from memtomem.indexing.importers import (
+    NotionImportCollisionError,
     UnsafeArchiveError,
+    _build_notion_output_mapping,
     _clean_notion_filename,
     _clean_notion_markdown,
     _convert_obsidian_syntax,
     import_notion,
     import_obsidian,
-    safe_extract_zip,
 )
 
 
@@ -29,6 +33,10 @@ class TestNotionFilename:
         # 32-char hex only
         result = _clean_notion_filename("abcdef01234567890123456789012345")
         assert result == "abcdef01234567890123456789012345"
+
+    def test_uppercase_hex_not_stripped(self):
+        name = "My Page ABC123DEF4567890123456789ABCDEF0"
+        assert _clean_notion_filename(name) == name
 
 
 class TestNotionMarkdown:
@@ -48,6 +56,23 @@ class TestNotionMarkdown:
         cleaned = _clean_notion_markdown(content)
         assert "Heading" in cleaned
         assert "paragraph" in cleaned
+
+    def test_link_with_fragment_and_mapping(self):
+        content = "[Section](Page%20a1b2c3d4e5f607182930415263748596.md#heading)"
+        mapping = {(Path("."), "Page a1b2c3d4e5f607182930415263748596.md"): "Page (a1b2c3d4).md"}
+        cleaned = _clean_notion_markdown(content, rel_parent=Path("."), link_mapping=mapping)
+        assert cleaned == "[Section](Page (a1b2c3d4).md#heading)"
+
+    def test_link_with_query_and_mapping(self):
+        content = "[Section](Page%20a1b2c3d4e5f607182930415263748596.md?ref=docs#heading)"
+        mapping = {(Path("."), "Page a1b2c3d4e5f607182930415263748596.md"): "Page (a1b2c3d4).md"}
+        cleaned = _clean_notion_markdown(content, rel_parent=Path("."), link_mapping=mapping)
+        assert cleaned == "[Section](Page (a1b2c3d4).md?ref=docs#heading)"
+
+    def test_external_link_ending_in_md_unchanged(self):
+        content = "[Doc](https://example.com/Page a1b2c3d4e5f607182930415263748596.md)"
+        cleaned = _clean_notion_markdown(content)
+        assert cleaned == "[Doc](https://example.com/Page a1b2c3d4e5f607182930415263748596.md)"
 
 
 class TestObsidianSyntax:
@@ -132,6 +157,393 @@ class TestImportNotion:
         imported = await import_notion(zip_path, output)
         assert len(imported) == 1
 
+    @pytest.mark.asyncio
+    async def test_notion_sibling_pages_collision_directory(self, tmp_path):
+        """Notion sibling pages sharing a title disambiguate with UUID prefixes (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Meeting Notes 1\nContent 1",
+            encoding="utf-8",
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Meeting Notes 2\nContent 2",
+            encoding="utf-8",
+        )
+
+        output = tmp_path / "out"
+        imported = await import_notion(export_dir, output)
+
+        assert len(imported) == 2
+        assert len(set(imported)) == 2
+        assert all(p.exists() for p in imported)
+
+        f1 = output / "Meeting Notes (a1b2c3d4).md"
+        f2 = output / "Meeting Notes (f0e1d2c3).md"
+        plain = output / "Meeting Notes.md"
+        assert f1.exists()
+        assert f2.exists()
+        assert not plain.exists()
+        assert "Content 1" in f1.read_text(encoding="utf-8")
+        assert "Content 2" in f2.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_notion_sibling_pages_collision_zip(self, tmp_path):
+        """Notion sibling pages in a ZIP archive disambiguate with UUID prefixes (#3113)."""
+        zip_path = tmp_path / "export.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md", "# First")
+            zf.writestr("Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md", "# Second")
+
+        output = tmp_path / "out"
+        imported = await import_notion(zip_path, output)
+
+        assert len(imported) == 2
+        assert len(set(imported)) == 2
+        f1 = output / "Meeting Notes (a1b2c3d4).md"
+        f2 = output / "Meeting Notes (f0e1d2c3).md"
+        plain = output / "Meeting Notes.md"
+        assert f1.exists()
+        assert f2.exists()
+        assert not plain.exists()
+        assert "# First" in f1.read_text(encoding="utf-8")
+        assert "# Second" in f2.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_notion_sibling_pages_unique_page_plain_name(self, tmp_path):
+        """A non-colliding page next to colliding siblings keeps its plain name (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Meeting Notes 1", encoding="utf-8"
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Meeting Notes 2", encoding="utf-8"
+        )
+        (export_dir / "Project Plan 11223344556677889900aabbccddeeff.md").write_text(
+            "# Project Plan", encoding="utf-8"
+        )
+
+        output = tmp_path / "out"
+        imported = await import_notion(export_dir, output)
+
+        assert len(imported) == 3
+        assert (output / "Meeting Notes (a1b2c3d4).md").exists()
+        assert (output / "Meeting Notes (f0e1d2c3).md").exists()
+        assert (output / "Project Plan.md").exists()
+        assert not (output / "Project Plan (11223344).md").exists()
+
+    @pytest.mark.asyncio
+    async def test_notion_reimport_updates_in_place_no_duplicate(self, tmp_path):
+        """Re-importing the same export updates existing files in place (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        file1 = export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md"
+        file2 = export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md"
+        file1.write_text("# Initial 1", encoding="utf-8")
+        file2.write_text("# Initial 2", encoding="utf-8")
+
+        output = tmp_path / "out"
+        imported_run1 = await import_notion(export_dir, output)
+        assert len(imported_run1) == 2
+
+        # Edit content in export
+        file1.write_text("# Updated 1", encoding="utf-8")
+
+        imported_run2 = await import_notion(export_dir, output)
+        assert len(imported_run2) == 2
+        assert set(imported_run1) == set(imported_run2)
+
+        f1 = output / "Meeting Notes (a1b2c3d4).md"
+        assert "Updated 1" in f1.read_text(encoding="utf-8")
+        assert len(list(output.glob("*.md"))) == 2
+
+    @pytest.mark.asyncio
+    async def test_notion_links_resolve_colliding_siblings_and_nested(self, tmp_path):
+        """Relative links to colliding siblings, plain pages, and nested folders resolve correctly (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        sub_dir = export_dir / "Subfolder"
+        sub_dir.mkdir()
+
+        (export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Sibling 1", encoding="utf-8"
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Sibling 2", encoding="utf-8"
+        )
+        (export_dir / "Project Plan 11223344556677889900aabbccddeeff.md").write_text(
+            "# Plan", encoding="utf-8"
+        )
+        (sub_dir / "Nested Note 22334455667788990011223344556677.md").write_text(
+            "# Nested 1", encoding="utf-8"
+        )
+        (sub_dir / "Nested Note 8899aabbccddeeff0011223344556677.md").write_text(
+            "# Nested 2", encoding="utf-8"
+        )
+
+        index_content = (
+            "# Index\n\n"
+            "- [First](Meeting%20Notes%20a1b2c3d4e5f60718293a4b5c6d7e8f90.md)\n"
+            "- [Second](Meeting%20Notes%20f0e1d2c3b4a5968778695a4b3c2d1e0f.md)\n"
+            "- [Plan](Project%20Plan%2011223344556677889900aabbccddeeff.md)\n"
+            "- [Nested](Subfolder/Nested%20Note%2022334455667788990011223344556677.md)\n"
+        )
+        (export_dir / "Index 99999999999999999999999999999999.md").write_text(
+            index_content, encoding="utf-8"
+        )
+
+        output = tmp_path / "out"
+        await import_notion(export_dir, output)
+
+        index_text = (output / "Index.md").read_text(encoding="utf-8")
+        assert "[First](Meeting Notes (a1b2c3d4).md)" in index_text
+        assert "[Second](Meeting Notes (f0e1d2c3).md)" in index_text
+        assert "[Plan](Project Plan.md)" in index_text
+        assert "[Nested](Subfolder/Nested Note (22334455).md)" in index_text
+
+    @pytest.mark.asyncio
+    async def test_notion_add_third_sibling_preserves_existing_names(self, tmp_path):
+        """Adding a third sibling later does not rename existing disambiguated siblings (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting Notes a1b2c3d4e5f60718293a4b5c6d7e8f90.md").write_text(
+            "# Sibling 1", encoding="utf-8"
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Sibling 2", encoding="utf-8"
+        )
+
+        output = tmp_path / "out"
+        await import_notion(export_dir, output)
+
+        assert (output / "Meeting Notes (a1b2c3d4).md").exists()
+        assert (output / "Meeting Notes (f0e1d2c3).md").exists()
+
+        # Add third sibling
+        (export_dir / "Meeting Notes 1234567890abcdef1234567890abcdef.md").write_text(
+            "# Sibling 3", encoding="utf-8"
+        )
+
+        await import_notion(export_dir, output)
+
+        assert (output / "Meeting Notes (a1b2c3d4).md").exists()
+        assert (output / "Meeting Notes (f0e1d2c3).md").exists()
+        assert (output / "Meeting Notes (12345678).md").exists()
+
+    @pytest.mark.asyncio
+    async def test_notion_siblings_prefix_collision_uses_full_uuid(self, tmp_path):
+        """Siblings sharing the same 8-hex prefix fall back to full 32-hex UUIDs (#3113)."""
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        (export_dir / "Meeting Notes a1b2c3d4111111111111111111111111.md").write_text(
+            "# Sibling A", encoding="utf-8"
+        )
+        (export_dir / "Meeting Notes a1b2c3d4222222222222222222222222.md").write_text(
+            "# Sibling B", encoding="utf-8"
+        )
+        (export_dir / "Meeting Notes f0e1d2c3b4a5968778695a4b3c2d1e0f.md").write_text(
+            "# Sibling C", encoding="utf-8"
+        )
+
+        output = tmp_path / "out"
+        imported = await import_notion(export_dir, output)
+
+        assert len(imported) == 3
+        assert (output / "Meeting Notes (a1b2c3d4111111111111111111111111).md").exists()
+        assert (output / "Meeting Notes (a1b2c3d4222222222222222222222222).md").exists()
+        assert (output / "Meeting Notes (f0e1d2c3).md").exists()
+
+
+_UA = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+_UB = "f0e1d2c3b4a5968778695a4b3c2d1e0f"
+_UC = "0123456789abcdef0123456789abcdef"
+
+
+def _fold(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _sources(*names: str) -> list:
+    """Mapping-input tuples for files in the export root, or under 'dir/'."""
+    out = []
+    for name in names:
+        rel = Path(name)
+        out.append((rel, rel.name, ""))
+    return out
+
+
+class TestNotionCollisionKey:
+    """#3141 — titles that differ only by case or normalization collide too.
+
+    These call the mapping directly, so they hold on every platform regardless
+    of whether the test machine's filesystem folds case.
+    """
+
+    def test_case_only_siblings_get_prefixes_in_their_own_spelling(self):
+        mapping = _build_notion_output_mapping(
+            _sources(f"Meeting notes {_UA}.md", f"Meeting Notes {_UB}.md")
+        )
+        assert mapping[(Path("."), f"Meeting notes {_UA}.md")] == "Meeting notes (a1b2c3d4).md"
+        assert mapping[(Path("."), f"Meeting Notes {_UB}.md")] == "Meeting Notes (f0e1d2c3).md"
+
+    def test_nfc_and_nfd_titles_collide(self):
+        nfc = unicodedata.normalize("NFC", "Café notes")
+        nfd = unicodedata.normalize("NFD", "Café notes")
+        assert nfc != nfd
+        mapping = _build_notion_output_mapping(_sources(f"{nfc} {_UA}.md", f"{nfd} {_UB}.md"))
+        names = set(mapping.values())
+        assert names == {f"{nfc} (a1b2c3d4).md", f"{nfd} (f0e1d2c3).md"}
+
+    def test_uuidless_case_only_pair_gets_stable_hash_suffixes(self):
+        sources = _sources("notes.md", "Notes.md")
+        first = _build_notion_output_mapping(sources)
+        again = _build_notion_output_mapping(list(reversed(sources)))
+        assert first == again
+        lower, upper = first[(Path("."), "notes.md")], first[(Path("."), "Notes.md")]
+        assert lower.startswith("notes (") and upper.startswith("Notes (")
+        assert _fold(lower) != _fold(upper)
+
+    def test_single_uuidless_page_in_a_colliding_group_keeps_plain_name(self):
+        mapping = _build_notion_output_mapping(_sources("notes.md", f"Notes {_UA}.md"))
+        assert mapping[(Path("."), "notes.md")] == "notes.md"
+        assert mapping[(Path("."), f"Notes {_UA}.md")] == "Notes (a1b2c3d4).md"
+
+    def test_case_only_pair_sharing_a_prefix_gets_full_uuids(self):
+        ua, ub = "a1b2c3d4" + "1" * 24, "a1b2c3d4" + "2" * 24
+        mapping = _build_notion_output_mapping(_sources(f"X {ua}.md", f"x {ub}.md"))
+        assert set(mapping.values()) == {f"X ({ua}).md", f"x ({ub}).md"}
+
+    def test_folders_differing_only_by_case_group_together(self):
+        # Only a crafted ZIP has two folders with one UUID; a genuine export's
+        # folder UUIDs are its page UUIDs.
+        mapping = _build_notion_output_mapping(
+            _sources(f"Folder {_UC}/X {_UA}.md", f"folder {_UC}/x {_UB}.md")
+        )
+        assert mapping[(Path(f"Folder {_UC}"), f"X {_UA}.md")] == "X (a1b2c3d4).md"
+        assert mapping[(Path(f"folder {_UC}"), f"x {_UB}.md")] == "x (f0e1d2c3).md"
+
+    def test_same_folded_name_in_different_folders_is_not_a_collision(self):
+        mapping = _build_notion_output_mapping(_sources(f"one/Page {_UA}.md", f"two/page {_UB}.md"))
+        assert set(mapping.values()) == {"Page.md", "page.md"}
+
+    def test_title_spelled_like_a_generated_name_is_refused(self):
+        sources = _sources(f"X {_UA}.md", f"x {_UB}.md", f"X (a1b2c3d4) {_UC}.md")
+        with pytest.raises(NotionImportCollisionError, match=r"X \(a1b2c3d4\)\.md"):
+            _build_notion_output_mapping(sources)
+
+    def test_duplicated_source_is_refused_not_collapsed(self):
+        # A ZIP may carry one member name twice. Both entries share a mapping
+        # key, so the check must see each source before any dict collapses them.
+        with pytest.raises(NotionImportCollisionError):
+            _build_notion_output_mapping(_sources(f"X {_UA}.md", f"X {_UA}.md"))
+
+    def test_same_uuid_folders_differing_by_case_are_refused(self):
+        # On Windows these parents are one Path key; on every platform they
+        # are one folder to a case-insensitive filesystem.
+        with pytest.raises(NotionImportCollisionError):
+            _build_notion_output_mapping(_sources(f"Folder/X {_UA}.md", f"folder/X {_UA}.md"))
+
+    def test_exact_title_siblings_are_named_as_before(self):
+        mapping = _build_notion_output_mapping(
+            _sources(f"Meeting Notes {_UA}.md", f"Meeting Notes {_UB}.md", f"Plan {_UC}.md")
+        )
+        assert set(mapping.values()) == {
+            "Meeting Notes (a1b2c3d4).md",
+            "Meeting Notes (f0e1d2c3).md",
+            "Plan.md",
+        }
+
+
+class TestImportNotionCaseCollision:
+    """#3141 through ``import_notion``: one file per page, each with its own text."""
+
+    @staticmethod
+    def _assert_one_file_per_page(imported, output):
+        folded = {_fold(p.relative_to(output).as_posix()) for p in imported}
+        assert len(folded) == len(imported)
+
+    @pytest.mark.asyncio
+    async def test_directory_export(self, tmp_path):
+        export = tmp_path / "export"
+        export.mkdir()
+        (export / f"Meeting notes {_UA}.md").write_text("# lower body", encoding="utf-8")
+        (export / f"Meeting Notes {_UB}.md").write_text("# Upper body", encoding="utf-8")
+        (export / f"Index {_UC}.md").write_text(
+            f"[a](Meeting%20notes%20{_UA}.md) [b](Meeting%20Notes%20{_UB}.md)",
+            encoding="utf-8",
+        )
+        output = tmp_path / "out"
+
+        imported = await import_notion(export, output)
+
+        assert len(imported) == 3
+        self._assert_one_file_per_page(imported, output)
+        lower = output / "Meeting notes (a1b2c3d4).md"
+        upper = output / "Meeting Notes (f0e1d2c3).md"
+        assert "lower body" in lower.read_text(encoding="utf-8")
+        assert "Upper body" in upper.read_text(encoding="utf-8")
+        index = (output / "Index.md").read_text(encoding="utf-8")
+        assert "[a](Meeting notes (a1b2c3d4).md)" in index
+        assert "[b](Meeting Notes (f0e1d2c3).md)" in index
+
+    @pytest.mark.asyncio
+    async def test_zip_export(self, tmp_path):
+        zip_path = tmp_path / "export.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(f"Meeting notes {_UA}.md", "# lower body")
+            zf.writestr(f"Meeting Notes {_UB}.md", "# Upper body")
+            zf.writestr("notes.md", "# uuidless lower")
+            zf.writestr("Notes.md", "# uuidless upper")
+        output = tmp_path / "out"
+
+        imported = await import_notion(zip_path, output)
+
+        assert len(imported) == 4
+        self._assert_one_file_per_page(imported, output)
+        texts = sorted(p.read_text(encoding="utf-8").splitlines()[-1] for p in imported)
+        assert texts == ["# Upper body", "# lower body", "# uuidless lower", "# uuidless upper"]
+
+    @pytest.mark.asyncio
+    async def test_refused_export_writes_nothing(self, tmp_path):
+        export = tmp_path / "export"
+        export.mkdir()
+        for name in (f"X {_UA}.md", f"x {_UB}.md", f"X (a1b2c3d4) {_UC}.md"):
+            (export / name).write_text(f"# {name}", encoding="utf-8")
+        output = tmp_path / "out"
+
+        with pytest.raises(NotionImportCollisionError):
+            await import_notion(export, output)
+
+        assert not output.exists()
+
+    @pytest.mark.asyncio
+    async def test_tool_indexes_each_page_once(self, bm25_only_components, tmp_path):
+        """Measured on main before the fix: one file on disk, two source keys."""
+        from helpers import StubCtx
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools import importers as importer_tools
+
+        comp, _ = bm25_only_components
+        export = tmp_path / "export"
+        export.mkdir()
+        (export / f"Meeting notes {_UA}.md").write_text(
+            "# lower\n\nlower page body text\n", encoding="utf-8"
+        )
+        (export / f"Meeting Notes {_UB}.md").write_text(
+            "# Upper\n\nupper page body text\n", encoding="utf-8"
+        )
+        ctx = StubCtx(AppContext.from_components(comp))
+
+        out = await importer_tools.mem_import_notion(str(export), ctx=ctx)
+
+        assert "Files imported: 2" in out, out
+        sources = await comp.storage.get_all_source_files()
+        assert len(sources) == 2
+        assert len({_fold(p.name) for p in sources}) == 2
+        bodies = sorted(p.read_text(encoding="utf-8").splitlines()[-1] for p in sources)
+        assert bodies == ["lower page body text", "upper page body text"]
+
 
 class TestImportObsidian:
     @pytest.mark.asyncio
@@ -173,100 +585,144 @@ class TestImportObsidian:
         assert imported[0].name == "real-note.md"
 
 
-class TestSafeExtractZip:
-    """Resource + traversal caps on ZIP extraction (decompression-bomb defense)."""
+# Every name here must refuse the whole archive on every host. A name rooted
+# without a drive or drive-relative used to pass on Windows and join outside the
+# output directory (#3299). Names with a colon or a part made only of dots and
+# spaces are refused because Windows may reinterpret them, not because an escape
+# through each was shown; ``sub/./x.md`` stays inside and is refused with them.
+_HOSTILE_MEMBER_NAMES = [
+    "../escape.md",
+    "/abs_escape.md",
+    "\\abs\\evil.md",
+    "D:evil/page.md",
+    "C:evil/page.md",
+    "C:/abs/evil.md",
+    "//srv/share/x.md",
+    "\\\\?\\C:\\x.md",
+    "sub/..\\up.md",
+    "sub/.. /x.md",
+    "sub/.../x.md",
+    "sub/. /x.md",
+    "sub/./x.md",
+    ".",
+    "x/a:b.md",
+    "..::$INDEX_ALLOCATION/x.md",
+]
 
-    @staticmethod
-    def _make_zip(path, entries):
-        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for name, data in entries:
-                zf.writestr(name, data)
-        return path
 
-    def test_extracts_normal_zip(self, tmp_path):
-        z = self._make_zip(tmp_path / "ok.zip", [("a.md", "hi"), ("sub/b.md", "yo")])
-        dest = tmp_path / "out"
-        dest.mkdir()
-        safe_extract_zip(z, dest)
-        assert (dest / "a.md").read_text() == "hi"
-        assert (dest / "sub" / "b.md").read_text() == "yo"
+def _make_zip(path, entries):
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries:
+            zf.writestr(name, data)
+    return path
 
-    def test_rejects_parent_traversal_member(self, tmp_path):
-        z = self._make_zip(tmp_path / "trav.zip", [("../escape.md", "x")])
-        dest = tmp_path / "out"
-        dest.mkdir()
+
+@pytest.fixture
+def no_hostile_write(monkeypatch):
+    """Replace the importer's writer so a refused archive cannot reach the disk.
+
+    Even against a regressed check, a hostile member name is recorded here
+    instead of being written (an absolute or drive-relative target would
+    otherwise land outside ``tmp_path``).
+    """
+    written: list[Path] = []
+    monkeypatch.setattr(
+        importers, "atomic_write_text", lambda target, *a, **k: written.append(Path(target))
+    )
+    return written
+
+
+class TestImportNotionArchiveLimits:
+    """The ZIP checks ``import_notion`` runs, driven through ``import_notion``."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", _HOSTILE_MEMBER_NAMES)
+    async def test_refuses_member_name(self, tmp_path, no_hostile_write, name):
+        z = _make_zip(tmp_path / "bad.zip", [("ok.md", "fine"), (name, "x")])
+        with pytest.raises(UnsafeArchiveError, match="has an unsafe name"):
+            await import_notion(z, tmp_path / "out")
+        assert no_hostile_write == []
+
+    @pytest.mark.asyncio
+    async def test_non_markdown_member_with_bad_name_refuses_archive(
+        self, tmp_path, no_hostile_write
+    ):
+        z = _make_zip(tmp_path / "bad.zip", [("ok.md", "fine"), ("D:evil/image.png", "x")])
         with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
-        assert not (tmp_path / "escape.md").exists()
+            await import_notion(z, tmp_path / "out")
+        assert no_hostile_write == []
 
-    def test_rejects_absolute_member(self, tmp_path):
-        z = self._make_zip(tmp_path / "abs.zip", [("/abs_escape.md", "x")])
-        dest = tmp_path / "out"
-        dest.mkdir()
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("constant", "value", "entries"),
+        [
+            ("_ZIP_MAX_ENTRIES", 1, [("a.md", "x"), ("b.md", "y")]),
+            ("_ZIP_MAX_TOTAL_BYTES", 10, [("a.md", "x" * 100)]),
+            ("_ZIP_MAX_MEMBER_BYTES", 10, [("a.md", "x" * 100)]),
+        ],
+    )
+    async def test_refuses_archive_over_cap(
+        self, tmp_path, monkeypatch, no_hostile_write, constant, value, entries
+    ):
+        monkeypatch.setattr(importers, constant, value)
+        z = _make_zip(tmp_path / "big.zip", entries)
         with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
+            await import_notion(z, tmp_path / "out")
+        assert no_hostile_write == []
 
-    def test_rejects_too_many_entries(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(importers, "_ZIP_MAX_ENTRIES", 1)
-        z = self._make_zip(tmp_path / "many.zip", [("a.md", "x"), ("b.md", "y")])
-        dest = tmp_path / "out"
-        dest.mkdir()
-        with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
-
-    def test_rejects_oversize_aggregate(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(importers, "_ZIP_MAX_TOTAL_BYTES", 10)
-        z = self._make_zip(tmp_path / "big.zip", [("a.md", "x" * 100)])
-        dest = tmp_path / "out"
-        dest.mkdir()
-        with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
-
-    def test_rejects_oversize_member(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(importers, "_ZIP_MAX_MEMBER_BYTES", 10)
-        z = self._make_zip(tmp_path / "bigm.zip", [("a.md", "x" * 100)])
-        dest = tmp_path / "out"
-        dest.mkdir()
-        with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
-
-    def test_rejects_compression_bomb_ratio(self, tmp_path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_refuses_compression_bomb_ratio(self, tmp_path, monkeypatch, no_hostile_write):
         # Floor to 0 so the small fixture is ratio-checked; cap at 5:1. A
         # highly repetitive payload deflates far past that.
         monkeypatch.setattr(importers, "_ZIP_RATIO_FLOOR_BYTES", 0)
         monkeypatch.setattr(importers, "_ZIP_MAX_RATIO", 5)
-        z = self._make_zip(tmp_path / "bomb.zip", [("a.md", "A" * 100_000)])
-        dest = tmp_path / "out"
-        dest.mkdir()
+        z = _make_zip(tmp_path / "bomb.zip", [("a.md", "A" * 100_000)])
         with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(z, dest)
+            await import_notion(z, tmp_path / "out")
+        assert no_hostile_write == []
 
-    def test_member_filter_skips_unmatched_members(self, tmp_path, monkeypatch):
-        # A would-be-oversized attachment is neither size-checked nor written
-        # when the filter excludes it; the matched markdown still extracts.
-        # (This is how import_notion ignores large Notion attachments instead
-        # of extracting them or rejecting the whole export.)
+    @pytest.mark.asyncio
+    async def test_large_attachment_is_ignored(self, tmp_path, monkeypatch):
+        # The size caps count markdown members only: an oversized attachment is
+        # neither size-checked nor written, and the page beside it imports.
         monkeypatch.setattr(importers, "_ZIP_MAX_MEMBER_BYTES", 50)
-        z = self._make_zip(
-            tmp_path / "mixed.zip",
-            [("note.md", "hello"), ("big.bin", "x" * 1000)],
-        )
-        dest = tmp_path / "out"
-        dest.mkdir()
-        safe_extract_zip(z, dest, member_filter=lambda n: n.lower().endswith(".md"))
-        assert (dest / "note.md").read_text() == "hello"
-        assert not (dest / "big.bin").exists()  # attachment skipped, not extracted
+        z = _make_zip(tmp_path / "mixed.zip", [("note.md", "hello"), ("big.bin", "x" * 1000)])
+        out = tmp_path / "out"
+        imported = await import_notion(z, out)
+        assert [p.name for p in imported] == ["note.md"]
+        assert (out / "note.md").read_text(encoding="utf-8").rsplit("\n\n", 1)[1] == "hello"
+        assert not (out / "big.bin").exists()
 
-    def test_rejects_root_entry_member(self, tmp_path):
-        # A file member naming the extraction root itself (e.g. ".") is rejected
-        # as UnsafeArchiveError, not a late zipfile error.
-        zpath = tmp_path / "root.zip"
-        with zipfile.ZipFile(zpath, "w") as zf:
-            zf.writestr(zipfile.ZipInfo("."), "x")
-        dest = tmp_path / "out"
-        dest.mkdir()
-        with pytest.raises(UnsafeArchiveError):
-            safe_extract_zip(zpath, dest)
+    @pytest.mark.asyncio
+    async def test_ordinary_names_import(self, tmp_path):
+        entries = [
+            ("a.md", "body-a"),
+            ("sub/b.md", "body-b"),
+            ("c//d.md", "body-d"),
+            ("sub/Notes... e.md", "body-e"),
+        ]
+        z = _make_zip(tmp_path / "ok.zip", entries)
+        out = tmp_path / "out"
+        imported = await import_notion(z, out)
+        written = {p.relative_to(out).as_posix(): p.read_text(encoding="utf-8") for p in imported}
+        # Each page keeps its own body after the import header.
+        assert {rel: text.rsplit("\n\n", 1)[1] for rel, text in written.items()} == {
+            "a.md": "body-a",
+            "sub/b.md": "body-b",
+            "c/d.md": "body-d",
+            "sub/Notes... e.md": "body-e",
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.platform != "win32", reason="judges the host's own WindowsPath")
+    async def test_refuses_windows_names_with_the_host_path(self, tmp_path, no_hostile_write):
+        # The parametrized test above already judges these names on every host;
+        # this one runs them where ``Path`` is ``WindowsPath``, as a user's would.
+        for name in ("\\abs\\evil.md", "D:evil/page.md", "sub/.. /x.md"):
+            z = _make_zip(tmp_path / "bad.zip", [(name, "x")])
+            with pytest.raises(UnsafeArchiveError):
+                await import_notion(z, tmp_path / "out")
+        assert no_hostile_write == []
 
 
 def _chunk(path):

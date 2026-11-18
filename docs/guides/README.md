@@ -8,6 +8,8 @@ guides are organized by outcome rather than by feature name.
 
 1. **[Getting Started](getting-started.md)** — install memtomem, run setup,
    save one memory, and find it again in under five minutes.
+   - **Plugin-first path:** [Claude Code & Codex CLI plugin quickstart](plugin-quickstart.md)
+     — save and find a memory from Claude Code or Codex CLI in 10–15 minutes.
    - **Korean plugin-first path:** [한국어 바이브코딩 빠른 시작](vibe-coding-getting-started-ko.md)
      — Claude Code 또는 Codex CLI에서 10~15분 안에 기억을 저장·검색합니다.
 2. **[MCP Client Setup](mcp-clients.md)** — connect Claude Code, Cursor,
@@ -72,6 +74,9 @@ guides are organized by outcome rather than by feature name.
 - **[Operations & troubleshooting](reference/operations.md)** — run the Web
   UI, diagnose indexing/search issues, audit historical content, and recover
   safely.
+- **[Share one server between sessions](shared-daemon.md)** — opt in to one
+  background server for several client sessions on macOS and Linux, check
+  that a session joined, and stop it.
 - **[Uninstalling memtomem](uninstall.md)** — remove the runtime while keeping
   or deleting stored data explicitly.
 - **[Refreshing AnyIO](anyio-security-update.md)** — update an existing

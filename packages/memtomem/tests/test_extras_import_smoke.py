@@ -443,3 +443,28 @@ class TestCompatibilityExtras:
             {"web": ["fastapi>=0.115"], "openai": [], "all": ["memtomem[web,openai]"]},
         )
         assert smoke.check_coverage(root) == 0
+
+
+class TestOnnxExtraSecurityFloor:
+    """The ``onnx`` extra floors pillow itself (#3246).
+
+    fastembed accepts pillow 12, whose advisories are fixed only in 13, so
+    without this floor an upgraded install keeps the pillow it already has.
+    """
+
+    def _onnx_requirements(self) -> dict[str, object]:
+        from packaging.requirements import Requirement
+
+        parsed = [Requirement(text) for text in smoke._optional_dependencies(_ROOT)["onnx"]]
+        return {requirement.name: requirement.specifier for requirement in parsed}
+
+    def test_pillow_12_is_excluded(self) -> None:
+        specifier = self._onnx_requirements()["pillow"]
+        assert "12.3.0" not in specifier  # type: ignore[operator]
+        assert "13.0.0" in specifier  # type: ignore[operator]
+
+    def test_fastembed_range_admits_only_releases_that_allow_pillow_13(self) -> None:
+        specifier = self._onnx_requirements()["fastembed"]
+        assert "0.9.0" not in specifier  # type: ignore[operator]
+        assert "0.9.1" in specifier  # type: ignore[operator]
+        assert "0.10.0" not in specifier  # type: ignore[operator]

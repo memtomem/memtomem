@@ -12,7 +12,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from memtomem.embedding.probe import embed_document_probe
 from memtomem.errors import NamespaceResolutionError
 from memtomem.indexing.scope_guard import scope_held_notice
+from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter
 from memtomem.search.visibility import resolve_visible_chunk
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_visibility import source_hidden
 from memtomem.server.tools.search import _resolve_project_context_from_dirs
 from memtomem.services import tag_management as tag_svc
@@ -24,13 +26,22 @@ from memtomem.source_provenance import (
     ExcludedSourceError,
     SourceMissingError,
     ReadOnlySourceError,
+    UNMANAGED_SOURCE_DETAIL,
+    UnmanagedSourceError,
     StaleSourceProvenanceError,
+    excluded_after_write_notice,
+    relinked_after_write_notice,
 )
 from memtomem.tools.memory_writer import (
+    EditBaseMismatchError,
+    IndexedBase,
+    SourceBase,
     SourceChangedError,
     SourceRemovedError,
     SourceReplacedError,
+    WrittenSource,
     read_pre_image,
+    read_with_source_key,
     remove_lines,
     replace_chunk_body,
     restore_pre_image_quietly,
@@ -43,6 +54,11 @@ from memtomem.web.deps import (
     get_storage,
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_NOTHING_CHANGED_DETAIL,
+    WRITER_BUSY_REFUSED_NOTHING_CHANGED_DETAIL,
+    writer_busy_as_503,
+)
 from memtomem.web.routes._errors import (
     DEGRADED_SOURCE_EDIT_DETAIL,
     NAMESPACE_LOOKUP_UNAVAILABLE_DETAIL,
@@ -60,6 +76,8 @@ from memtomem.web.schemas.core import (
 from memtomem.web.schemas.search import SimilarChunksResponse
 from memtomem.web.schemas.sources import (
     ChunkEditNeedsConfirmation,
+    ChunkFrontmatterOut,
+    ChunkSourceOut,
     ChunksListResponse,
     EditRequest,
 )
@@ -144,6 +162,127 @@ async def get_chunk(
     return chunk_to_out(chunks[0])
 
 
+@router.get("/{chunk_id}/source", response_model=ChunkSourceOut)
+async def get_chunk_source(
+    chunk_id: UUID,
+    storage=Depends(get_storage),
+    index_engine=Depends(get_index_engine),
+    config=Depends(get_config),
+) -> ChunkSourceOut:
+    """The span's source text an edit replaces, with the hash the edit must carry.
+
+    The text the editor shows is the file's, not the indexed content: indexed
+    content is a projection of the span (#3071), and saving an edit of it
+    rewrote the span from text that did not hold all of its lines.
+    """
+    import asyncio
+
+    from memtomem.source_provenance import source_span_hash
+    from memtomem.tools.memory_writer import chunk_source_text, source_text_hash
+    from memtomem.web.routes.sources import resolve_readable_source
+
+    # Screened like ``GET /{id}`` (ADR-0036) before anything about the source
+    # is answered.
+    chunks = await storage.recall_chunks(
+        chunk_ids=(chunk_id,),
+        limit=1,
+        project_context_root=_boundary(config),
+    )
+    if not chunks:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    meta = chunks[0].metadata
+    if meta.redaction_count:
+        raise HTTPException(status_code=409, detail="masked_projection_read_only")
+    if meta.source_read_only or index_engine.is_read_only_source(meta.source_file):
+        raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+    # This route serves the editor, and the edit of such a source is refused.
+    if not index_engine.is_managed_source(meta.source_file, meta):
+        raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
+    if index_engine.is_excluded(meta.source_file):
+        raise HTTPException(status_code=409, detail=EXCLUDED_SOURCE_DETAIL)
+    # The raw-text gates ``GET /api/sources/content`` applies, on the stored
+    # spelling: this serves a slice of the same text that route serves whole.
+    path = await resolve_readable_source(storage, str(meta.source_file))
+    try:
+        text = await asyncio.to_thread(path.read_text, encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=409, detail=STALE_SOURCE_PROVENANCE_DETAIL) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Cannot read file.") from exc
+    lines = text.splitlines()
+    # The span must still be the one indexed; the edit re-checks this under the
+    # source lock, so this only keeps a stale span's lines from being offered.
+    if meta.source_span_hash is None or (
+        source_span_hash(lines, meta.start_line, meta.end_line) != meta.source_span_hash
+    ):
+        raise HTTPException(status_code=409, detail=STALE_SOURCE_PROVENANCE_DETAIL)
+    source = chunk_source_text(lines, meta.start_line, meta.end_line)
+    return ChunkSourceOut(
+        text=source,
+        base_hash=source_text_hash(source),
+        start_line=meta.start_line,
+        end_line=meta.end_line,
+    )
+
+
+@router.get("/{chunk_id}/frontmatter", response_model=ChunkFrontmatterOut)
+async def get_chunk_frontmatter(
+    chunk_id: UUID,
+    storage=Depends(get_storage),
+    config=Depends(get_config),
+) -> ChunkFrontmatterOut:
+    """Whether the chunk's content opens with its file's YAML frontmatter.
+
+    The detail view shows that block as metadata instead of handing it to the
+    Markdown renderer, which reads ``---`` as a rule and ``key: value`` above
+    the closing ``---`` as a heading (#3030). Indexed content cannot tell a
+    frontmatter-led chunk from a file that opens ``# Topic``, ``---``, a line,
+    ``---``; the file can. Only one bit about content the caller already holds
+    is answered, so read-only sources are answered too, and every refusal past
+    screening is the same ``False`` as "no frontmatter".
+    """
+    import asyncio
+
+    from memtomem.chunking.markdown import MARKDOWN_EXTENSIONS, leading_frontmatter
+    from memtomem.web.routes.sources import resolve_readable_source
+
+    chunk = await _screened_chunk(storage, chunk_id, config)
+    meta = chunk.metadata
+    content = chunk.content
+    if (
+        meta.start_line != 1
+        or Path(meta.source_file).suffix not in MARKDOWN_EXTENSIONS
+        or meta.redaction_count
+        or not content.startswith("---\n")
+    ):
+        return ChunkFrontmatterOut(leading=False)
+    # The raw-text gates, unchanged: they judge visibility on the file a read
+    # reaches, which a parent directory retargeted since indexing can move.
+    try:
+        path = await resolve_readable_source(storage, str(meta.source_file))
+    except (HTTPException, OSError):
+        # ``OSError``: the resolver's own filesystem checks, e.g. a source
+        # removed between its ``exists()`` and ``stat()``.
+        return ChunkFrontmatterOut(leading=False)
+
+    def _read() -> str:
+        # As the indexer reads (``IndexEngine`` file read), so the span below is
+        # the one the chunker saw.
+        try:
+            return path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return path.read_text(encoding="utf-8", errors="replace")
+
+    try:
+        text = await asyncio.to_thread(_read)
+    except OSError:
+        return ChunkFrontmatterOut(leading=False)
+    span = leading_frontmatter(text)
+    if span is None:
+        return ChunkFrontmatterOut(leading=False)
+    return ChunkFrontmatterOut(leading=content == span.rstrip("\n") or content.startswith(span))
+
+
 @router.patch("/{chunk_id}", response_model=ChunkOut | ChunkEditNeedsConfirmation)
 async def edit_chunk(
     chunk_id: UUID,
@@ -165,6 +304,10 @@ async def edit_chunk(
     # chunk, which is what covers a concurrent migrate re-scoping it.
     if index_engine.is_read_only_source(chunk.metadata.source_file):
         raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+    # Before the lock for the same reason: no sidecar beside a file memtomem
+    # was only asked to read.
+    if not index_engine.is_managed_source(chunk.metadata.source_file, chunk.metadata):
+        raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
 
     from memtomem import privacy
     from memtomem.tools.memory_mutation import locked_source_chunk, mutate_source_and_reindex
@@ -191,10 +334,17 @@ async def edit_chunk(
             # The helper refused before acquiring, so nothing was created beside
             # the source. Same 409 and same vocabulary as this route's own gates.
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+        if reason == "unmanaged":
+            # Refused before acquiring as well.
+            raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
         if reason == "locked":
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."
             )
+        if reason == "writer_busy":
+            # Refused before the route judged or changed anything; the sidecar
+            # lock file the helper took is lock infrastructure, not memory data.
+            raise HTTPException(status_code=503, detail=WRITER_BUSY_NOTHING_CHANGED_DETAIL)
         if not cross_process_held:
             # #2346: the source's directory was gone when the lock was taken,
             # so this span holds no cross-process exclusion. An edit rewrites
@@ -229,6 +379,10 @@ async def edit_chunk(
         # asked us to stop writing editable in the meantime.
         if index_engine.is_read_only_source(meta.source_file):
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+        # Asked again on the fresh chunk, as the read-only question is: the
+        # roots can be reloaded while the lock was awaited.
+        if not index_engine.is_managed_source(meta.source_file, meta):
+            raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
 
         inferred_scope = meta.scope or "user"
 
@@ -314,14 +468,19 @@ async def edit_chunk(
             )
 
         try:
-            # ``replace_chunk_body`` keeps the heading + section-leading
-            # blockquote header (``> created:`` / ``> tags:``) intact when the
-            # caller passes body-only ``new_content``. The Web UI editor
-            # surfaces ``chunk.content`` (already header-stripped by the
-            # chunker), so saving without preservation would silently erase
-            # the metadata header on disk. Prefix ``new_content`` with ``## ``
-            # to override the heading explicitly. The helper asks the engine about
-            # the file before writing and rolls it back on a reindex failure.
+            # The SPA edits the span's source text (``GET /{id}/source``) and
+            # sends its hash, so the edit replaces exactly the text it showed.
+            # Without a hash the request edits the indexed content, which
+            # ``replace_chunk_body`` accepts only where that content is the
+            # span's body (heading + blockquote header kept, ``## `` overrides
+            # them); a projection of the span is refused with its source text.
+            # The helper asks the engine about the file before writing and
+            # rolls it back on a reindex failure.
+            edit_base = (
+                SourceBase(body.base_hash)
+                if body.base_hash is not None
+                else IndexedBase(fresh.content)
+            )
             stats = await mutate_source_and_reindex(
                 index_engine,
                 meta.source_file,
@@ -333,10 +492,12 @@ async def edit_chunk(
                     meta.start_line,
                     meta.end_line,
                     body.new_content,
+                    base=edit_base,
                     expected_source_span_hash=meta.source_span_hash,
                     expected_identity=pre.identity,
                 ),
                 force_unsafe=guard.decision == "bypassed",
+                stored=meta,
             )
             # #2141, the web twin of ``memory_crud._mutate_file_and_reindex``:
             # the edit rewrote chunk text (or only its tags / line ranges,
@@ -358,6 +519,21 @@ async def edit_chunk(
             # web runtime hot-reloads it, ``web/hot_reload.py``). Also a pure
             # refusal — nothing read, nothing written, nothing to invalidate.
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL) from exc
+        except UnmanagedSourceError as exc:
+            # The same window, and likewise nothing read or written.
+            raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL) from exc
+        except EditBaseMismatchError as exc:
+            # Raised inside the rewrite before a byte was written, after every
+            # gate above passed: the edit was based on text the span no longer
+            # (or never) held. Return what it holds so the editor can rebase.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "detail": "edit_base_mismatch",
+                    "text": exc.text,
+                    "base_hash": exc.body_hash,
+                },
+            ) from exc
         except StaleSourceProvenanceError as exc:
             # Normally a pure refusal. Invalidate conservatively: if this type
             # came from a later stage, the helper still ran its normal rollback.
@@ -432,10 +608,19 @@ async def edit_chunk(
     # write falls back rather than returning a row the caller may not read.
     updated = await resolve_visible_chunk(storage, chunk_id, project_context_root=_boundary(config))
     out = chunk_to_out(updated if updated is not None else chunk)
-    if stats.scope_held:
+    if stats.relinked_files:
+        # Replaced by a symlink while the edit ran: the re-index held the
+        # file's rows and indexed nothing through the link, so the echo is the
+        # retained pre-edit row (#3172).
+        out.warning = relinked_after_write_notice("edit", str(meta.source_file))
+    elif stats.scope_held:
         # The tier was unregistered while the edit ran (#2923): the edit is on
         # disk and the source is held rather than re-indexed as another scope.
         out.warning = scope_held_notice("edit")
+    elif stats.excluded_files:
+        # Excluded while the edit ran: the re-index removed the file's chunks,
+        # so ``updated`` is gone and the echo is the pre-edit row (#3163).
+        out.warning = excluded_after_write_notice("edit")
     return out
 
 
@@ -468,6 +653,10 @@ async def delete_chunk(
     # chunk, which is what covers a concurrent migrate re-scoping it.
     if index_engine.is_read_only_source(preflight.metadata.source_file):
         raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+    # Before the lock for the same reason: no sidecar beside a file memtomem
+    # was only asked to read.
+    if not index_engine.is_managed_source(preflight.metadata.source_file, preflight.metadata):
+        raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
 
     import asyncio
 
@@ -495,10 +684,17 @@ async def delete_chunk(
             # The helper refused before acquiring, so nothing was created beside
             # the source. Same 409 and same vocabulary as this route's own gates.
             raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+        if reason == "unmanaged":
+            # Refused before acquiring as well.
+            raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
         if reason == "locked":
             raise HTTPException(
                 status_code=503, detail="Memory file is locked by another writer; try again."
             )
+        if reason == "writer_busy":
+            # Refused before the route judged or changed anything; the sidecar
+            # lock file the helper took is lock infrastructure, not memory data.
+            raise HTTPException(status_code=503, detail=WRITER_BUSY_NOTHING_CHANGED_DETAIL)
         if fresh is None:
             raise HTTPException(status_code=409, detail="Chunk state changed; retry.")
         meta = fresh.metadata
@@ -530,7 +726,12 @@ async def delete_chunk(
             try:
                 remaining = await storage.get_chunk(chunk_id)
                 if remaining is not None:
-                    await storage.delete_chunks([chunk_id])
+                    # Waits for another task's transaction (#3181). Inside one,
+                    # only ``finalize_emptied`` keeps the emptied-source cleanup
+                    # the standalone delete runs. The check after it reads the
+                    # pool, so it runs once this has committed.
+                    async with storage.transaction(wait=WRITER_WAIT_S):
+                        await storage.delete_chunks([chunk_id], finalize_emptied=True)
                     remaining = await storage.get_chunk(chunk_id)
             except Exception as exc:
                 logger.error("Index cleanup failed for deleted chunk %s", chunk_id, exc_info=True)
@@ -640,7 +841,9 @@ async def delete_chunk(
         # drops the LLM query-expansion cache, so flushing on a pure refusal
         # would be pointless churn.
         mutation_attempted = False
+        relinked = False
         scope_held = False
+        excluded = False
         try:
             if source_exists:
                 if meta.source_read_only or meta.redaction_count:
@@ -658,6 +861,10 @@ async def delete_chunk(
                 # flag unset. ``remove_lines`` below writes the file.
                 if index_engine.is_read_only_source(source):
                     raise HTTPException(status_code=409, detail=SOURCE_READ_ONLY_DETAIL)
+                # This route's copy of the helper's other refusal, for the
+                # reason it copies the two above.
+                if not index_engine.is_managed_source(source, meta):
+                    raise HTTPException(status_code=409, detail=UNMANAGED_SOURCE_DETAIL)
                 if meta.start_line < 1 or meta.end_line < meta.start_line:
                     raise HTTPException(
                         status_code=409,
@@ -747,14 +954,21 @@ async def delete_chunk(
                 from memtomem.indexing.engine import PrivacyRejection
                 from memtomem.tools.memory_mutation import outcome_after_restore
 
-                pre_image = await asyncio.to_thread(read_pre_image, source)
+                pre_image, source_path = await asyncio.to_thread(
+                    read_with_source_key, read_pre_image, source
+                )
                 preflight = await asyncio.to_thread(
-                    index_engine.preflight_mutation, source, pre_image.data
+                    index_engine.preflight_mutation,
+                    source,
+                    pre_image.data,
+                    source_path=source_path,
                 )
                 if preflight.rejection is not None:
                     mutation_attempted = True  # the hold changes what search may serve
                     rejection = await index_engine.refuse_mutation(source, preflight)
                     raise privacy_index_blocked_http(rejection, "delete")
+                if preflight.relinked:
+                    await index_engine.hold_relinked_mutation(source, preflight)
                 blocker = preflight.blocker("delete", source.name, needs_valve=False)
                 if blocker is not None:
                     raise index_blocked_http(blocker)
@@ -841,11 +1055,19 @@ async def delete_chunk(
                         # No ``namespace=``: see the pre-flight above. The engine
                         # preserves the file's stored namespace in-lock, which is both
                         # the correct value and a fresher one than anything read here.
+                        # The purge covers an exclusion installed since the guard
+                        # above: the sibling chunks would otherwise keep their
+                        # pre-delete line ranges (#3163). A path that stopped
+                        # holding the rewritten file since the write is held,
+                        # not indexed as this delete (#3172): the engine reads
+                        # the file the rewrite went through (#3320).
                         stats = await index_engine.index_file(
                             source,
                             force=True,
                             ingress_guarded=True,
                             lock_held=True,
+                            purge_if_excluded=True,
+                            written_source=WrittenSource(source_path, pre_image.identity),
                         )
                     except PrivacyRejection as exc:
                         # Removing the line made the rest of the file refusable
@@ -867,7 +1089,9 @@ async def delete_chunk(
                                 chunk_id,
                                 "; ".join(stats.errors),
                             )
+                        relinked = bool(stats.relinked_files)
                         scope_held = stats.scope_held
+                        excluded = bool(stats.excluded_files)
 
                     # A single-file index can report an error in IndexingStats instead
                     # of raising (for example, an embedding failure), or can finish with
@@ -883,7 +1107,14 @@ async def delete_chunk(
             if mutation_attempted:
                 search_pipeline.invalidate_cache()
 
-    return DeleteResponse(deleted=1, warning=scope_held_notice("delete") if scope_held else None)
+    warning = None
+    if relinked:
+        warning = relinked_after_write_notice("delete", str(source))
+    elif scope_held:
+        warning = scope_held_notice("delete")
+    elif excluded:
+        warning = excluded_after_write_notice("delete")
+    return DeleteResponse(deleted=1, warning=warning)
 
 
 @router.patch("/{chunk_id}/tags", response_model=TagsUpdateResponse)
@@ -902,13 +1133,16 @@ async def update_chunk_tags(
     ``upsert_chunks`` call could race against an in-flight bulk rewrite
     and leave search-result tag filters cached against stale tags.
     """
-    updated = await tag_svc.replace_chunk_tags(
-        storage,
-        chunk_id,
-        body.tags,
-        project_context_root=_boundary(config),
-        search_pipeline=search_pipeline,
-    )
+    # The service does not wait for another task's transaction (see its
+    # docstring); its refusal comes before the write, so it answers 503 (#3182).
+    with writer_busy_as_503(WRITER_BUSY_REFUSED_NOTHING_CHANGED_DETAIL):
+        updated = await tag_svc.replace_chunk_tags(
+            storage,
+            chunk_id,
+            body.tags,
+            project_context_root=_boundary(config),
+            search_pipeline=search_pipeline,
+        )
     if updated is None:
         raise HTTPException(status_code=404, detail="Chunk not found")
     return TagsUpdateResponse(id=str(chunk_id), tags=list(updated.metadata.tags))
@@ -918,11 +1152,29 @@ async def update_chunk_tags(
 async def similar_chunks(
     chunk_id: UUID,
     top_k: int = Query(5, ge=1, le=50),
+    namespace: str | None = Query(
+        None, description="Namespace filter for the neighbours; omitted hides system namespaces"
+    ),
     storage=Depends(get_storage),
     embedder=Depends(get_embedder),
     config=Depends(get_config),
 ) -> SimilarChunksResponse:
-    """Find chunks semantically similar to the given chunk using dense search."""
+    """Find chunks semantically similar to the given chunk using dense search.
+
+    The neighbours are read the way a default search reads: without
+    ``namespace`` the system namespaces stay hidden, even when the chunk asked
+    about lives in one (#3117). Reading that chunk by its id is allowed
+    (ADR-0036); the other chunks it brings back are a search result.
+    """
+    # A blank value names no namespace, as in ``GET /api/search``: parsed as
+    # given it would be an exact namespace ``""`` that matches no row.
+    try:
+        ns_filter = NamespaceFilter.parse(
+            namespace or None,
+            system_prefixes=tuple(config.search.system_namespace_prefixes),
+        )
+    except InvalidFilterSyntaxError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     chunk = await _screened_chunk(storage, chunk_id, config)
 
     # Search with the vector the chunk is stored with. Re-embedding cannot be
@@ -952,9 +1204,16 @@ async def similar_chunks(
     # ``project_context_root`` as out-of-project. The chunk we're
     # comparing IS the project context for "similar chunks under the
     # same scope".
+    #
+    # One extra row makes room for the chunk itself, dropped by id below, but
+    # only when the filter lets it through. Otherwise the extra row can only be
+    # filled by another neighbour, and when the nearest candidates are mostly
+    # filtered out, asking for it makes ``dense_search`` widen its KNN pass.
+    source_passes = ns_filter is None or ns_filter.matches(chunk.metadata.namespace)
     raw = await storage.dense_search(
         embedding,
-        top_k=top_k + 1,
+        top_k=top_k + 1 if source_passes else top_k,
+        namespace_filter=ns_filter,
         project_context_root=chunk.metadata.project_root,
     )
 

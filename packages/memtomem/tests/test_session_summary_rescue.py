@@ -21,7 +21,7 @@ import pytest
 
 import memtomem.search.pipeline as pipeline_module
 from memtomem.config import SearchConfig, SessionSummaryConfig
-from memtomem.models import Chunk, ChunkLink, ChunkMetadata, SearchResult
+from memtomem.models import Chunk, ChunkLink, ChunkMetadata, NamespaceFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.pipeline import SearchPipeline
 from memtomem.server.formatters import _format_structured_results
@@ -141,7 +141,7 @@ def _async_storage() -> AsyncMock:
     s.get_importance_scores = AsyncMock(return_value={})
     s.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
     s.get_chunks_shared_from_batch = AsyncMock(return_value={})
-    s.get_chunks_batch = AsyncMock(return_value={})
+    s.recall_chunks = AsyncMock(return_value=[])
     return s
 
 
@@ -206,9 +206,7 @@ class TestBoostSourcesHelper:
                 ]
             }
         )
-        storage.get_chunks_batch = AsyncMock(
-            return_value={target1.id: target1, target2.id: target2}
-        )
+        storage.recall_chunks = AsyncMock(return_value=[target1, target2])
 
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         sources = await pipeline._session_summary_boost_sources("q")
@@ -259,7 +257,7 @@ class TestBoostSourcesHelper:
         )
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         assert await pipeline._session_summary_boost_sources("q") == set()
-        storage.get_chunks_batch.assert_not_called()
+        storage.recall_chunks.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_links_yields_empty(self):
@@ -356,7 +354,7 @@ class TestPipelineEndToEndRescue:
                 ]
             }
         )
-        storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
+        storage.recall_chunks = AsyncMock(return_value=[rescued])
 
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         results, _stats = await pipeline.search("q", top_k=10)
@@ -413,7 +411,7 @@ class TestPipelineEndToEndRescue:
                 ]
             }
         )
-        storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
+        storage.recall_chunks = AsyncMock(return_value=[rescued])
 
         embedder = AsyncMock()
         embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
@@ -489,7 +487,7 @@ class TestPipelineEndToEndRescue:
                 ]
             }
         )
-        storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
+        storage.recall_chunks = AsyncMock(return_value=[rescued])
 
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         proj_root = Path(f"/{_CHUNK_SOURCE_BASE}/proj_pinned")
@@ -507,6 +505,8 @@ class TestPipelineEndToEndRescue:
         rescue_legs = [c for c in bm25_calls if c["namespace_pattern"] is None]
         assert rescue_legs, "rescue leg should have fired"
         assert all(c["project_context_root"] == proj_root for c in rescue_legs)
+        # The summary-target read is screened under the same context (#3108).
+        assert storage.recall_chunks.await_args.kwargs["project_context_root"] == proj_root
 
     @pytest.mark.asyncio
     async def test_rescue_dense_leg_threads_project_context(self):
@@ -569,7 +569,7 @@ class TestPipelineEndToEndRescue:
                 ]
             }
         )
-        storage.get_chunks_batch = AsyncMock(return_value={rescued.id: rescued})
+        storage.recall_chunks = AsyncMock(return_value=[rescued])
 
         # Need dense enabled on the pipeline to exercise the dense leg.
         embedder = AsyncMock()
@@ -814,6 +814,82 @@ class TestRescueSourceFilterPushdown:
         )
         assert dense_captured[1]["metadata_filter"] is outer
         assert dense_captured[1]["metadata_filter"].source_exact == ()
+
+    @pytest.mark.asyncio
+    async def test_both_legs_carry_the_namespace_filter(self):
+        """#3108: the rescue legs filter namespaces like the organic legs.
+        Pinned on each leg separately — the real-storage tests run BM25 only,
+        so nothing else would notice the dense leg dropping it."""
+        storage = _async_storage()
+        seen: dict[str, object] = {}
+
+        async def bm25_dispatch(query, top_k, namespace_filter=None, **kwargs):
+            seen["bm25"] = namespace_filter
+            return []
+
+        async def dense_dispatch(embedding, top_k, namespace_filter=None, **kwargs):
+            seen["dense"] = namespace_filter
+            return []
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        storage.dense_search = AsyncMock(side_effect=dense_dispatch)
+        pipeline = _make_pipeline(storage, session_summary_config=SessionSummaryConfig())
+        exclude = NamespaceFilter(exclude_prefixes=("archive:", "agent-runtime:"))
+
+        await pipeline._rescue_retrieval(
+            "q",
+            [0.1] * 8,
+            10,
+            {f"/{_CHUNK_SOURCE_BASE}/src/old_session.md"},
+            use_bm25=True,
+            use_dense=True,
+            namespace_filter=exclude,
+        )
+
+        assert seen == {"bm25": exclude, "dense": exclude}
+
+    @pytest.mark.asyncio
+    async def test_search_hands_its_namespace_filter_to_the_rescue(self):
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        summary_chunk = _chunk("summary body", namespace="archive:session:abc")
+        rescued = _chunk("rescued chunk", source="src/old_session.md")
+        storage = _async_storage()
+
+        async def bm25_dispatch(query, top_k, namespace_filter=None, **kwargs):
+            if getattr(namespace_filter, "pattern", None) == "archive:session:*":
+                return [_sr(summary_chunk, score=0.9, rank=1, source="bm25")]
+            return []
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        storage.get_chunks_shared_from_batch = AsyncMock(
+            return_value={
+                summary_chunk.id: [
+                    ChunkLink(
+                        target_id=rescued.id,
+                        link_type="summarizes",
+                        namespace_target="default",
+                        created_at=datetime.now(timezone.utc),
+                        source_id=summary_chunk.id,
+                    )
+                ]
+            }
+        )
+        storage.recall_chunks = AsyncMock(return_value=[rescued])
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+        rescue_kwargs: dict = {}
+        real_rescue = pipeline._rescue_retrieval
+
+        async def capture_rescue(*args, **kwargs):
+            rescue_kwargs.update(kwargs)
+            return await real_rescue(*args, **kwargs)
+
+        pipeline._rescue_retrieval = capture_rescue
+
+        await pipeline.search("q", top_k=10)
+
+        target_read = storage.recall_chunks.await_args.kwargs["namespace_filter"]
+        assert target_read is not None and target_read.exclude_prefixes
+        assert rescue_kwargs["namespace_filter"] == target_read
 
     @pytest.mark.asyncio
     async def test_disjoint_outer_source_pin_skips_rescue_without_storage_call(self):

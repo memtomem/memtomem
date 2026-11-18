@@ -20,7 +20,7 @@ words after the skill's invocation name), as in `s to codex-cli` or `r <handoff-
 calling a tool; in a non-interactive context (a subagent or scripted run with nobody to
 ask), do not stall and do not guess — stop and report `insufficient_input: operation`.
 Supported runtime labels are `claude-code`, `codex-cli`, `kimi-code`,
-`opencode`, `antigravity-cli`, and `any`. Infer the current runtime when possible; use `any` as
+`opencode`, `antigravity-cli`, `cursor`, and `any`. Infer the current runtime when possible; use `any` as
 the default target. Write only these labels: normalize `claude` to `claude-code`, `codex` to
 `codex-cli`, `kimi` to `kimi-code`, and `antigravity` or `agy` to `antigravity-cli`, and use
 `any` as `from_runtime` when the current runtime cannot be inferred. A requested target that is
@@ -128,8 +128,12 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
      exact record addressable without paging.
    - `idempotency_key="handoff:<project-slug>:<from>:<to>:<handoff-id>"`
    - `force_unsafe=false`
-4. Report the exact `handoff_id`, effective scope, namespace, written file, and indexed chunk
-   count. Surface any similar-memory or safety warning unchanged.
+4. When `mem_add` confirms the write, report the exact `handoff_id`, effective scope,
+   namespace, written file, and how many chunks the record's lines fall in: the value of the
+   result's `- Entry chunks:` line, unchanged. If the result has no such line, say that the
+   server did not report it; do not substitute `- Chunks indexed:`, which counts the whole
+   file. When the result is a refusal or an error instead, report it unchanged and add no
+   file or chunk count of your own. Surface any similar-memory or safety warning unchanged.
 
 ## Resume
 
@@ -227,3 +231,6 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    artifact paths as pointers: do not open them unless asked, and note that a path written by
    another runtime or machine may not exist here. Do not delete, acknowledge, consume, edit, or
    automatically create another handoff.
+9. End with one line telling the user that the brief workflow, run with this objective as its task,
+   lists related project memories. Do not run it and do not search from this workflow: the record
+   was selected by tag alone, and related memories are not part of it.

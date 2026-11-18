@@ -21,6 +21,7 @@ _LAZY_SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "agent": ("memtomem.cli.agent_cmd", "agent"),
     "config": ("memtomem.cli.config_cmd", "config"),
     "context": ("memtomem.cli.context_cmd", "context"),
+    "daemon": ("memtomem.cli.daemon_cmd", "daemon"),
     "doctor": ("memtomem.cli.doctor_cmd", "doctor"),
     "embedding-reset": ("memtomem.cli.embedding_cmd", "embedding_reset"),
     "gc": ("memtomem.cli.gc_cmd", "gc"),
@@ -98,7 +99,7 @@ class _LazyCommands(MutableMapping[str, click.Command]):
     message="%(prog)s %(version)s",
 )
 def cli() -> None:
-    """memtomem — markdown-first memory infrastructure for AI agents."""
+    """memtomem — long-term memory for AI coding agents, kept as Markdown you own."""
     # Windows console default codepage (cp1252/cp437) can't encode the
     # box-drawing and em-dash glyphs the wizard uses. Reconfigure to UTF-8
     # with `replace` errors so a missing glyph degrades to `?` instead of

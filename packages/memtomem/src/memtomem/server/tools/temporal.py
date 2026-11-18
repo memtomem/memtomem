@@ -16,6 +16,8 @@ from memtomem.services.search_service import validate_scope_vocabulary
 
 logger = logging.getLogger(__name__)
 
+_TIMELINE_MAX_LIMIT = 500
+
 
 @mcp.tool()
 @tool_handler
@@ -39,15 +41,18 @@ async def mem_timeline(
         since: Start date (YYYY, YYYY-MM, YYYY-MM-DD)
         until: End date
         namespace: Namespace scope
-        limit: Maximum chunks to analyze (default 50)
+        limit: Maximum memories in the timeline (default 50, max 500).
+            since/until select before this limit, so older or newer matches
+            do not take the slots. A closing note says when more matched
+            than limit; no note does not prove the period is complete.
         scope: ADR-0011 tier filter — value, comma list (``user,project_local``)
             or glob (``project_*``), not both. Omitted, the default merge
             applies: inside a project ``user`` + that project's tiers, outside
             one ``user`` only. Pass ``project_shared`` from outside a project to
             search across projects.
     """
-    if not 1 <= limit <= 500:
-        return f"Error: limit must be between 1 and 500, got {limit}."
+    if not 1 <= limit <= _TIMELINE_MAX_LIMIT:
+        return f"Error: limit must be between 1 and {_TIMELINE_MAX_LIMIT}, got {limit}."
 
     # Same pre-app validation mem_search does: a comma/glob mix or a value
     # outside the tier vocabulary is a caller mistake, and reporting it as an
@@ -59,6 +64,25 @@ async def mem_timeline(
     except InvalidFilterSyntaxError as e:
         return f"Error: {e}"
 
+    # Parse the window before app initialization and search: it selects at
+    # retrieval below, and a malformed bound must be reported even when
+    # nothing matches.
+    try:
+        since_dt = _parse_recall_date(since) if since else None
+        until_dt = _parse_recall_date(until, end_of_period=True) if until else None
+    except ValueError as exc:
+        return f"Error: {exc}"
+
+    if since_dt and until_dt and since_dt >= until_dt:
+        return "Error: 'since' must be earlier than 'until'."
+
+    # With date bounds forwarded, a blank query would turn into the pipeline's
+    # filter-only browse of the whole window. A timeline is about a topic, so
+    # keep the answer a blank topic always had. ``or ""``: ``mem_do`` does not
+    # type-check strings, and the pipeline normalizes ``None`` the same way.
+    if not (topic or "").strip():
+        return f"No memories found for topic '{topic}'."
+
     from memtomem.tools.temporal import build_timeline, format_timeline
 
     app = await _get_app_initialized(ctx)
@@ -69,29 +93,22 @@ async def mem_timeline(
     # project would silently drop project_shared / project_local rows.
     project_context_root = _resolve_project_context_root(app)
 
-    # Search for topic
+    # The window selects inside the retrievers, before the ``top_k`` cut:
+    # filtering afterwards let out-of-window matches fill the slots and drop
+    # an in-window memory ranked below them (#3005). One extra slot lets a
+    # returned surplus confirm that more matched than ``limit``.
     results, _stats = await app.search_pipeline.search(
         query=topic,
-        top_k=limit,
+        top_k=limit + 1,
         namespace=namespace,
         scope=scope,
         project_context_root=project_context_root,
+        created_from=since_dt,
+        created_before=until_dt,
     )
 
-    if not results:
-        return f"No memories found for topic '{topic}'."
-
-    # Parse date filters
-    try:
-        since_dt = _parse_recall_date(since) if since else None
-        until_dt = _parse_recall_date(until, end_of_period=True) if until else None
-    except ValueError as exc:
-        return f"Error: {exc}"
-
-    if since_dt and until_dt and since_dt >= until_dt:
-        return "Error: 'since' must be earlier than 'until'."
-
-    # Convert search results to dicts for timeline builder
+    # Convert search results to dicts for timeline builder. The date check
+    # repeats the retrieval bound for a backend or stub that does not apply it.
     chunks = []
     for r in results:
         chunk = r.chunk
@@ -116,8 +133,28 @@ async def mem_timeline(
             }
         )
 
-    buckets = build_timeline(chunks)
-    return format_timeline(topic, buckets)
+    overflow = len(chunks) > limit
+    buckets = build_timeline(chunks[:limit])
+    out = format_timeline(topic, buckets)
+    if overflow:
+        # Only a confirmed overflow is reported. Fewer results than ``limit``
+        # do not prove the period is complete: the rerank pool (``max_pool``),
+        # the validity filter after the ranked cut, and the dense leg can each
+        # hold matches back. Each dense search sees at most the
+        # ``VEC_MAX_KNN_K`` (4096) nearest embeddings before the window
+        # applies, so an in-window match outside that pool is found by BM25
+        # only.
+        if limit < _TIMELINE_MAX_LIMIT:
+            out += (
+                f"\n\nMore memories in this period match; showing the top {limit}. "
+                f"Raise limit (max {_TIMELINE_MAX_LIMIT}) to see more."
+            )
+        else:
+            out += (
+                f"\n\nMore memories in this period match; showing the top {limit}. "
+                "Try a narrower topic or since/until; the timeline may still be incomplete."
+            )
+    return out
 
 
 @mcp.tool()

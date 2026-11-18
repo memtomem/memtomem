@@ -29,6 +29,7 @@ import stat
 import sys
 import tempfile
 import time
+import unicodedata
 from collections.abc import Sequence
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
@@ -50,12 +51,15 @@ __all__ = [
     "COPY_SKIP_NAMES",
     "DIRTY_SKIP_SUFFIXES",
     "StrictTreeError",
+    "async_detached_source_lock",
+    "async_existing_memory_file_lock",
     "async_file_lock",
     "async_memory_file_lock",
     "atomic_write_bytes",
     "atomic_write_text",
     "copy_tree_atomic",
     "copy_tree_strict",
+    "detached_source_lock_key",
     "fsync_dir",
     "hardlink_tree_strict",
     "installed_at_from_dest",
@@ -367,6 +371,50 @@ def memory_lock_path(data_path: Path) -> Path:
 #       it classifies MEMORY_L2.
 #   L4  storage / embedder / LLM — leaves; must never acquire L0–L3.
 #
+# L2 for a source outside every managed directory. ``index_file`` accepts any
+# path, and the namespace service locks whatever source its rows name, so both
+# reach files memtomem was only asked to read. Creating ``.<name>.lock`` there
+# is a write into a directory memtomem keeps nothing in, and ``O_CREAT``
+# follows a link planted at that name. For a source
+# ``IndexEngine.is_managed_source`` answers no for, ``IndexEngine._locked_index``
+# and ``namespace_management._coordinated_mutation`` therefore take, in this
+# order:
+#
+#   L2d the detached lock — ``async_detached_source_lock``, a file in the
+#       per-user runtime directory named by a digest of the resolved path.
+#       Always. It is what serialises those two functions against each other
+#       and themselves across processes when the source has no sidecar.
+#   L2  the adjacent sidecar, ONLY IF IT IS ALREADY THERE —
+#       ``async_existing_memory_file_lock``: never created, and a link at its
+#       name is never locked through. Every other acquirer of that file takes
+#       the adjacent sidecar and creates it, whichever acquirer that is, so one
+#       that exists keeps excluding these two functions the way it always did.
+#
+# Order: L2d sits directly below L2. Only those two functions take it, and a
+# holder of an adjacent sidecar never takes it afterwards. The indexer holds
+# L2d(f) then L2(f); the namespace service holds every L2d it needs (sorted by
+# key), then its adjacent sidecars in the one order every multi-acquirer of
+# them uses. ``lock_held=True`` callers hold the sidecar they created and enter
+# at L3, as before.
+#
+# What the pair does not exclude:
+#   * A writer in ANOTHER process that creates the sidecar of such a file for
+#     the first time while one of the two functions is already running on it.
+#     Once per file. Within one loop the in-process layer of the existing-only
+#     acquire covers it, but only when both sides spell the resolved path the
+#     same way: that layer keys on the literal lock path (see
+#     ``async_memory_file_lock``).
+#   * A link at the sidecar's name is not locked through. A creating acquirer
+#     follows it and locks its target, which nothing here contends for.
+#   * Where the platform has no ``O_NOFOLLOW`` (Windows), a sidecar swapped for
+#     a link between the existing-only acquire's ``stat`` and its open is
+#     opened through, read-write and without ``O_CREAT``, then closed unlocked
+#     when the descriptor turns out not to be the name. Nothing is created or
+#     locked there; the open itself is not prevented.
+#   * The runtime directory's own limits (``_runtime_paths``): peers must see
+#     one ``/tmp`` mount, and a cleaner that unlinks a held lock file lets a
+#     second process lock a new inode.
+#
 # Disjoint domains (config.json sidecar, web _gateway_lock/_config_lock) never
 # nest with this memory-file domain.
 #
@@ -533,6 +581,155 @@ async def async_memory_file_lock(data_path: Path, *, timeout: float) -> AsyncIte
         yield cross_process_held
 
 
+_DETACHED_LOCK_DIRNAME = "source-locks"
+
+
+def detached_source_lock_key(data_path: Path) -> str:
+    """Name of the detached lock for *data_path*: a digest of its resolved path.
+
+    The adjacent sidecar needs no folding, because two spellings of one file
+    open one inode. A name derived from the path text has no inode to share,
+    so the text is folded before it is hashed: Unicode NFC, then ``casefold``,
+    on every platform. On a volume that keeps case or the Unicode forms apart
+    this gives two distinct files one lock, which costs them a wait; it never
+    gives one file two locks. ``AppContext.memory_file_lock_key`` folds case
+    for the same reason.
+
+    Two sources can share a key. A caller that takes several of these locks
+    takes each KEY once: the lock is not reentrant.
+    """
+    resolved = str(resolve_path(data_path.expanduser()))
+    folded = unicodedata.normalize("NFC", resolved).casefold()
+    return hashlib.sha256(folded.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _detached_lock_path(data_path: Path) -> Path:
+    from memtomem._runtime_paths import runtime_dir
+
+    name = f"{detached_source_lock_key(data_path)}.lock"
+    return runtime_dir() / _DETACHED_LOCK_DIRNAME / name
+
+
+def _prepare_detached_lock_dir() -> None:
+    """Make sure the detached locks' directory exists and is a real directory.
+
+    Runs inside the acquire, after the wait for the in-process guard, so what
+    it finds is what the open that follows uses. The runtime directory comes
+    from ``ensure_runtime_dir`` alone, which validates an existing one and
+    creates a missing one with its own checks; nothing here creates a parent.
+    The leaf gets the redirect checks the runtime directory gets: a symlink or
+    a junction keeps a directory's place and would move every lock under it.
+    """
+    from memtomem._runtime_paths import ensure_runtime_dir
+
+    target = ensure_runtime_dir() / _DETACHED_LOCK_DIRNAME
+    try:
+        os.mkdir(target, 0o700)
+    except FileExistsError:
+        pass
+    else:
+        # ``mkdir``'s mode passes through the umask; a restrictive one would
+        # leave a directory its own owner cannot enter.
+        os.chmod(target, 0o700)
+    if not stat.S_ISDIR(os.stat(target, follow_symlinks=False).st_mode) or target.is_junction():
+        raise NotADirectoryError(
+            errno.ENOTDIR, "detached lock directory is not a directory", str(target)
+        )
+
+
+@asynccontextmanager
+async def async_detached_source_lock(data_path: Path, *, timeout: float) -> AsyncIterator[None]:
+    """L2d: the lock for a source outside every managed directory.
+
+    See the lock-order block above for who takes it and in what order. Takes
+    the DATA path and names the lock file itself, like
+    :func:`async_memory_file_lock`.
+
+    Raises what :func:`async_file_lock` raises. An unusable runtime directory
+    is an ``OSError`` (``PermissionError`` with the directory's remediation
+    text when it fails validation): the caller's operation fails, and nothing
+    falls back to creating a sidecar beside the source.
+    """
+    async with _sidecar_lock(
+        _detached_lock_path(data_path),
+        timeout=timeout,
+        create_parent=False,
+        prepare=_prepare_detached_lock_dir,
+    ):
+        yield
+
+
+@asynccontextmanager
+async def async_existing_memory_file_lock(
+    data_path: Path, *, timeout: float
+) -> AsyncIterator[bool]:
+    """L2 for a source outside every managed directory: the sidecar, if there is one.
+
+    Never creates ``.<name>.lock``, and never locks through a link at that
+    name (:func:`_open_existing_sidecar` has the one case in which a link's
+    target is opened at all, and what happens to it).
+    Yields whether the cross-process half was taken. ``False`` means there was
+    no sidecar to take (absent, a link, or anything that is not a regular
+    file) and only the in-process layer for that sidecar path is held, the
+    layer a creating acquirer in this process takes first.
+
+    The caller holds :func:`async_detached_source_lock` for the same file
+    already; that one is what it relies on when this yields ``False``.
+    """
+    async with _sidecar_lock(
+        memory_lock_path(data_path),
+        timeout=timeout,
+        create_parent=False,
+        existing_only=True,
+    ) as cross_process_held:
+        yield cross_process_held
+
+
+def _open_existing_sidecar(lock_path: Path) -> int | None:
+    """Open the sidecar at *lock_path* if it is a regular file; ``None`` otherwise.
+
+    ``O_NOFOLLOW`` refuses a link where the platform has the flag. Where it
+    does not (Windows), a link swapped in between the ``stat`` and the open
+    is followed by the open, so the descriptor is compared with a second
+    no-follow ``stat`` of the path before anything locks it: a link has an
+    inode of its own, whatever it points at. The target was then opened
+    read-write, with no ``O_CREAT``, and is closed again untouched. Preventing
+    that open needs a reparse-point-aware ``CreateFileW``; the swap needs
+    another process writing in the source's directory at that instant.
+    """
+    try:
+        if not stat.S_ISREG(os.stat(lock_path, follow_symlinks=False).st_mode):
+            return None
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(lock_path, flags)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        # ``ELOOP`` is the usual answer to ``O_NOFOLLOW`` on a link; FreeBSD
+        # says ``EMLINK``.
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            return None
+        raise
+    try:
+        opened = os.fstat(fd)
+        try:
+            named = os.stat(lock_path, follow_symlinks=False)
+        except (FileNotFoundError, NotADirectoryError):
+            named = None
+        same = (
+            named is not None
+            and stat.S_ISREG(opened.st_mode)
+            and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
+        )
+    except BaseException:
+        os.close(fd)
+        raise
+    if not same:
+        os.close(fd)
+        return None
+    return fd
+
+
 @asynccontextmanager
 async def _sidecar_lock(
     lock_path: Path,
@@ -540,20 +737,31 @@ async def _sidecar_lock(
     timeout: float,
     create_parent: bool,
     degrade_on_missing_parent: bool = False,
+    prepare: Callable[[], None] | None = None,
+    existing_only: bool = False,
 ) -> AsyncIterator[bool]:
     """Shared body of :func:`async_file_lock` and :func:`async_memory_file_lock`.
 
     Yields whether the CROSS-PROCESS half was taken: ``True`` with the flock
     held, ``False`` on the degraded path.
 
-    Private on purpose: the two public entry points above are the whole
-    supported surface, and a third caller reaching in here would be choosing
+    Private on purpose: the public entry points above are the whole
+    supported surface, and another caller reaching in here would be choosing
     the parent policy without the lock-order paragraph that justifies it.
     ``test_context_c0_prelude_guard`` pins that no other module names it.
 
     ``create_parent`` and ``degrade_on_missing_parent`` are independent: the
     first says whether a missing parent should be created, the second whether
     a missing parent is an answer (hold layer 1 alone) rather than an error.
+
+    ``prepare`` runs once the in-process guard is held and before the open.
+    It is how a caller readies the lock's directory under that guard: the
+    guard is taken here and is not reentrant, so a caller that took it first
+    would wait for itself.
+
+    ``existing_only`` opens the lock file without creating it and without
+    following a link. No file there is an answer, not an error: layer 1 alone
+    is held and ``False`` is yielded.
     """
     deadline = time.monotonic() + timeout
     intra = _intra_async_lock_for(lock_path)
@@ -564,10 +772,20 @@ async def _sidecar_lock(
             f"could not acquire {lock_path} within {timeout:g}s (in-process contention)"
         ) from None
     try:
+        if prepare is not None:
+            prepare()
         if create_parent:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = _open_existing_sidecar(lock_path) if existing_only else None
+        if existing_only and existing is None:
+            yield False
+            return
         try:
-            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            fd = (
+                existing
+                if existing is not None
+                else os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            )
         except (FileNotFoundError, NotADirectoryError):
             # Deciding here rather than on a prior ``is_dir()`` is what keeps
             # this race-free in the direction that matters: nothing is ever

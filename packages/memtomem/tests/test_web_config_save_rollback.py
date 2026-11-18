@@ -117,8 +117,6 @@ async def test_failed_multi_section_patch_discards_reranker_without_fanout(
     candidate.close = AsyncMock()
     monkeypatch.setattr("memtomem.web.routes.system.create_reranker", lambda _: candidate)
     monkeypatch.setattr("memtomem.web.routes.system._validate_reranker_ready", AsyncMock())
-    set_tokenizer = MagicMock()
-    monkeypatch.setattr("memtomem.storage.fts_tokenizer.set_tokenizer", set_tokenizer)
     publish_batch = MagicMock()
     monkeypatch.setattr("memtomem.web.routes.system.publish_onnx_batch_size", publish_batch)
 
@@ -151,7 +149,7 @@ async def test_failed_multi_section_patch_discards_reranker_without_fanout(
     app.state.search_pipeline.swap_reranker.assert_not_called()
     app.state.search_pipeline.invalidate_cache.assert_not_called()
     app.state.storage.rebuild_fts.assert_not_called()
-    set_tokenizer.assert_not_called()
+    app.state.storage.set_fts_tokenizer.assert_not_called()
     publish_batch.assert_not_called()
     assert hot_reload.get_reload_error(app) is not None
 

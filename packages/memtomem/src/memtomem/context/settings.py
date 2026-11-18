@@ -47,10 +47,13 @@ Merge semantics
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
+import stat
 import time
 import tomllib
 from dataclasses import dataclass, field
@@ -66,6 +69,7 @@ from memtomem.context._host_homes import (
     pinned_host_homes,
 )
 from memtomem.context.error_redact import redact_secret_value
+from memtomem.context.privacy_scan import FileScan, PrivacyBlockedError, scan_text_content
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +238,9 @@ class SettingsSyncResult:
     reason: str = ""
     warnings: list[str] = field(default_factory=list)
     target: Path | None = None
+    #: Machine-readable cause for a refusal row, so a surface can localize it
+    #: without parsing ``reason``. Only ``"privacy_blocked"`` is set today.
+    reason_code: str | None = None
 
 
 # ── Generators ──────────────────────────────────────────────────────
@@ -1422,6 +1429,74 @@ def _safe_load_json(path: Path) -> dict | object:
     return raw if isinstance(raw, dict) else _MALFORMED
 
 
+def _load_canonical_settings(path: Path) -> tuple[str, dict] | object:
+    """Read the canonical once, returning its text and the object parsed from it.
+
+    Same failure contract as :func:`_safe_load_json` (:data:`_MALFORMED`), but
+    the text is kept so Gate A scans the exact buffer that was parsed. A scan
+    of a re-serialized value would miss what parsing drops, such as a secret in
+    a duplicate key that a later key of the same name shadows.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+        raw = json.loads(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _MALFORMED
+    return (text, raw) if isinstance(raw, dict) else _MALFORMED
+
+
+def _scan_canonical_settings(
+    text: str,
+    *,
+    canonical_path: Path,
+    project_root: Path,
+    surface: str,
+) -> FileScan | None:
+    """Gate A over the canonical's text; return the blocking scan, or ``None``.
+
+    The scope is ``project_shared`` whatever ``hooks.target_scope`` is: the
+    canonical is tracked by git for every target tier, so the fan-out is a
+    backstop for that file, like the skills / commands / agents and MCP server
+    fan-outs (ADR-0011 §5). There is no ``force_unsafe`` valve.
+    """
+    scan = scan_text_content(
+        text,
+        source_path=canonical_path,
+        surface=surface,
+        scope="project_shared",
+        project_root=project_root,
+    )
+    if scan.decision in ("blocked", "blocked_project_shared"):
+        return scan
+    return None
+
+
+def _settings_privacy_block_message(hits: int) -> str:
+    """Path-free refusal text for a canonical that Gate A blocked before any write."""
+    return (
+        f"Gate A: {CANONICAL_SETTINGS_FILE} contains {hits} privacy pattern hit(s); the "
+        f"settings fan-out was refused and no runtime settings file was written. The "
+        f"canonical is tracked by git, so there is no force bypass at any target tier "
+        f"(ADR-0011 §5).\n"
+        f"  Remove the secret from {CANONICAL_SETTINGS_FILE}, then re-run "
+        f"`mm context sync --include=settings`."
+    )
+
+
+def _settings_privacy_refusal_row(hits: int) -> SettingsSyncResult:
+    """Result row for a target refused because the canonical changed mid-sync to a blocked one."""
+    return SettingsSyncResult(
+        status="error",
+        reason=(
+            f"Gate A: {CANONICAL_SETTINGS_FILE} changed during this sync and now contains "
+            f"{hits} privacy pattern hit(s); this target was not written. There is no force "
+            f"bypass (ADR-0011 §5). Remove the secret from {CANONICAL_SETTINGS_FILE}, then "
+            f"re-run `mm context sync --include=settings`."
+        ),
+        reason_code="privacy_blocked",
+    )
+
+
 def _read_with_mtime(path: Path) -> tuple[dict | None | object, int]:
     """Read JSON + capture mtime in nanoseconds for concurrent-write guard.
 
@@ -1470,6 +1545,57 @@ def _write_settings_target(name: str, path: Path, data: dict) -> None:
     _write_json(path, data)
 
 
+class _SettingsLinkError(Exception):
+    """A symlinked settings target that cannot be written through."""
+
+
+def _settings_write_destination(path: Path) -> Path:
+    """The file a write to *path* must replace so that a symlink survives it.
+
+    ``atomic_write_text`` renames a tempfile onto the path it is given, and a
+    rename replaces whatever directory entry is there: a symlink at *path*
+    would be swapped for a regular file, and the file it pointed to (often a
+    dotfiles copy under version control) would never see the change (#3021).
+    Writing to the link's destination instead keeps the link and updates the
+    file it names.
+
+    A non-link *path* is returned unchanged, so regular targets keep exactly
+    today's behavior. Only the final component matters: a symlinked parent
+    directory is already followed by the rename itself.
+
+    A link is written through only when the kernel can follow it to a regular
+    file (``os.stat`` on the link), and the destination is then named by
+    ``os.path.realpath(strict=True)``. The kernel check is what the runtime
+    reading the link will see; realpath alone is not enough on POSIX, where it
+    walks links itself instead of asking the kernel: on 3.12 it folds
+    ``regular-file/..`` textually and names a file no open() through the link
+    would reach, and it walks chains longer than the kernel will follow. Once
+    the kernel has followed the link, realpath has no such case left to get
+    wrong. A loop fails both (``Path.resolve(strict=False)`` would not do: it
+    returns a looping link unchanged on 3.13).
+
+    Raises :class:`_SettingsLinkError` otherwise: a dangling, looping or
+    unreachable link, or one that reaches a directory or other non-regular
+    file. A dangling link is refused rather than created through, since the
+    file it would create is exactly what the textual folding above can get
+    wrong.
+    """
+    if not os.path.islink(path):
+        return path
+    try:
+        reached = os.stat(path)
+        destination = Path(os.path.realpath(path, strict=True))
+    except FileNotFoundError:
+        raise _SettingsLinkError("it points at a file that does not exist") from None
+    except OSError as exc:
+        raise _SettingsLinkError(
+            f"it could not be followed: {exc.strerror or type(exc).__name__}"
+        ) from exc
+    if not stat.S_ISREG(reached.st_mode):
+        raise _SettingsLinkError("it points at a directory or another non-regular file")
+    return destination
+
+
 def _normalize_settings_target(name: str, data: dict) -> str:
     if name == "kimi_settings":
         payload = data.get(_KIMI_TOML_TEXT_KEY)
@@ -1485,6 +1611,7 @@ def generate_all_settings(
     *,
     scope: str,
     allow_host_writes: bool = False,
+    surface: str = "cli_context_sync",
 ) -> dict[str, SettingsSyncResult]:
     """Fan out ``.memtomem/settings.json`` to registered runtimes.
 
@@ -1514,8 +1641,24 @@ def generate_all_settings(
     target still short of that last check comes back ``status="aborted"``
     rather than being written behind the failed response (#2218). At most one
     target — the one already past its check — can still write.
+
+    Gate A scans the canonical's text (ADR-0011 §5, #3343) at two points.
+    Before the first target that would take a lock, a hit raises
+    :class:`~memtomem.context.privacy_scan.PrivacyBlockedError`: nothing has
+    been written and no sidecar lock created, and every surface translates it
+    (*surface* names the caller in the privacy audit record). The canonical is
+    re-read under each target's lock (#1281) and that text is scanned again,
+    since it is what gets merged; a hit there means the canonical changed
+    mid-sync, so targets already written stay written and this target and
+    every later one come back ``status="error"`` with
+    ``reason_code="privacy_blocked"``. This is fail-fast on the initial state,
+    not a transaction across concurrent edits.
     """
     results: dict[str, SettingsSyncResult] = {}
+    # Hit count of the first under-lock Gate A block; every later target is
+    # refused with it, without scanning or locking again.
+    privacy_refused_hits: int | None = None
+    preflight_done = False
 
     def _abandoned() -> SettingsSyncResult:
         return SettingsSyncResult(
@@ -1548,6 +1691,9 @@ def generate_all_settings(
         if _sync_is_abandoned():
             results[name] = _abandoned()
             continue
+        if privacy_refused_hits is not None:
+            results[name] = _settings_privacy_refusal_row(privacy_refused_hits)
+            continue
 
         if not gen.is_available(project_root):
             results[name] = SettingsSyncResult(
@@ -1564,15 +1710,15 @@ def generate_all_settings(
             )
             continue
 
-        raw = _safe_load_json(canonical_path)
-        if raw is _MALFORMED:
+        loaded = _load_canonical_settings(canonical_path)
+        if loaded is _MALFORMED:
             results[name] = SettingsSyncResult(
                 status="error",
                 reason=f"{canonical_path} is not valid JSON (or not a JSON object). "
                 f"Fix the file manually.",
             )
             continue
-        contributions: dict = raw  # type: ignore[assignment]
+        canonical_text, contributions = loaded  # type: ignore[misc]
 
         target_path = gen.target_file(project_root, scope)
         if target_path is None:
@@ -1581,7 +1727,15 @@ def generate_all_settings(
                 reason=f"{name} has no fan-out target for scope {scope!r}",
             )
             continue
-        if not allow_host_writes and not _is_under_project_root(target_path, project_root):
+        # The file this target's write will land on: the target itself, or the
+        # destination of a symlink at it (#3021). The gate judges it, and its
+        # sidecar is locked beside the target's. A link that cannot be written
+        # through falls back to the target here and is reported under the lock.
+        try:
+            planned_path = _settings_write_destination(target_path)
+        except _SettingsLinkError:
+            planned_path = target_path
+        if not allow_host_writes and not _is_under_project_root(planned_path, project_root):
             results[name] = SettingsSyncResult(
                 status="needs_confirmation",
                 reason=(
@@ -1592,24 +1746,52 @@ def generate_all_settings(
             )
             continue
 
-        # Steps 0-4 run under a per-target cross-process lock so a separate
+        # Gate A preflight, once, on the first target that gets this far: every
+        # earlier target took an early exit above, so raising here leaves every
+        # settings file untouched and no sidecar created. It scans the same text
+        # this iteration parsed.
+        if not preflight_done:
+            blocked = _scan_canonical_settings(
+                canonical_text,
+                canonical_path=canonical_path,
+                project_root=project_root,
+                surface=surface,
+            )
+            if blocked is not None:
+                raise PrivacyBlockedError(
+                    _settings_privacy_block_message(blocked.hits_count),
+                    blocked=blocked,
+                    scope="project_shared",
+                    kind="hook rule",
+                    artifact_name=None,
+                )
+            preflight_done = True
+
+        # Steps 0-4 run under cross-process sidecar locks so a separate
         # process (a CLI ``mm context sync`` / the MCP server) or the Web UI
         # cannot land a write between the mtime recheck (Step 3) and the atomic
         # rename inside ``_write_json`` (Step 4) and silently drop a concurrent
         # writer's hook rule (issue #1123 B3-3). This is the same sidecar-file
         # ``portalocker`` primitive skills uses; ``_write_json`` →
         # ``atomic_write_text`` is itself lock-free, so calling it under the held
-        # lock does not self-deadlock. Exactly one lock is held per iteration and
-        # released before the next target, so there is no cross-generator
-        # lock-ordering cycle. The ``st_mtime_ns`` recheck is KEPT as a second
+        # lock does not self-deadlock. The target's own sidecar is the key every
+        # other writer of that path takes; a symlinked target also takes its
+        # destination's, which is the key a writer configured with the
+        # destination path takes, so two paths aliasing one file still exclude
+        # each other. Both are taken in sorted order, as the two-file writers
+        # (settings-copy, settings-migrate) take theirs, and released before
+        # the next target. The ``st_mtime_ns`` recheck is KEPT as a second
         # layer: it still catches a non-gateway direct disk edit that bypasses
         # the sidecar lock entirely.
+        lock_paths = sorted({_lock_path_for(target_path), _lock_path_for(planned_path)}, key=str)
         try:
-            # Wait only the time left on the shared budget (not a fresh bound
-            # per target). A 0.0 here means the budget is spent → one
-            # non-blocking attempt: acquire iff instantly free, else abort.
-            lock_timeout = max(0.0, lock_deadline - time.monotonic())
-            with _file_lock(_lock_path_for(target_path), timeout=lock_timeout):
+            # Every acquire waits only the time left on the shared budget (not
+            # a fresh bound per target or per lock). A 0.0 means the budget is
+            # spent → one non-blocking attempt: acquire iff free, else abort.
+            with contextlib.ExitStack() as held_locks:
+                for lock_path in lock_paths:
+                    lock_timeout = max(0.0, lock_deadline - time.monotonic())
+                    held_locks.enter_context(_file_lock(lock_path, timeout=lock_timeout))
                 # Waiting for this lock is the longest a target can take, so
                 # it is where a caller most plausibly gave up. ``continue``
                 # releases the lock on the way out (#2218).
@@ -1637,18 +1819,56 @@ def generate_all_settings(
                         reason="no canonical source (.memtomem/settings.json)",
                     )
                     continue
-                raw_locked = _safe_load_json(canonical_path)
-                if raw_locked is _MALFORMED:
+                loaded_locked = _load_canonical_settings(canonical_path)
+                if loaded_locked is _MALFORMED:
                     results[name] = SettingsSyncResult(
                         status="error",
                         reason=f"{canonical_path} is not valid JSON (or not a JSON object). "
                         f"Fix the file manually.",
                     )
                     continue
-                contributions = raw_locked  # type: ignore[assignment]
+                canonical_text, contributions = loaded_locked  # type: ignore[misc]
+                # Gate A on the text this target merges. The preflight passed,
+                # so a hit means the canonical changed while this sync ran.
+                blocked = _scan_canonical_settings(
+                    canonical_text,
+                    canonical_path=canonical_path,
+                    project_root=project_root,
+                    surface=surface,
+                )
+                if blocked is not None:
+                    privacy_refused_hits = blocked.hits_count
+                    results[name] = _settings_privacy_refusal_row(privacy_refused_hits)
+                    continue
+
+                # The file Steps 1-4 read, recheck and write, taken again
+                # under the locks: a link repointed while this sync waited
+                # names a file whose sidecar it does not hold and the gate did
+                # not judge, so that target is aborted. The reason names only
+                # the configured path: the destination can sit anywhere, and
+                # the web surface does not scrub paths outside HOME.
+                try:
+                    write_path = _settings_write_destination(target_path)
+                except _SettingsLinkError as exc:
+                    results[name] = SettingsSyncResult(
+                        status="error",
+                        reason=f"{target_path} is a symbolic link that cannot be "
+                        f"written through: {exc}. The link and the file it points "
+                        f"to were left untouched. Fix or remove the link, then "
+                        f"re-run `mm context sync --include=settings`.",
+                    )
+                    continue
+                if write_path != planned_path:
+                    results[name] = SettingsSyncResult(
+                        status="aborted",
+                        reason=f"{target_path} was repointed while this sync waited "
+                        f"for its lock; nothing was written. Re-run "
+                        f"`mm context sync --include=settings` to retry.",
+                    )
+                    continue
 
                 # Step 1: read existing + capture mtime (ns)
-                existing_raw, existing_mtime_ns = _read_settings_target(name, target_path)
+                existing_raw, existing_mtime_ns = _read_settings_target(name, write_path)
                 if existing_raw is _MALFORMED:
                     syntax_label = "TOML" if name == "kimi_settings" else "JSON"
                     results[name] = SettingsSyncResult(
@@ -1674,7 +1894,7 @@ def generate_all_settings(
                     continue
 
                 # Step 3: mtime check (concurrent-write guard)
-                if target_path.is_file() and target_path.stat().st_mtime_ns != existing_mtime_ns:
+                if write_path.is_file() and write_path.stat().st_mtime_ns != existing_mtime_ns:
                     results[name] = SettingsSyncResult(
                         status="aborted",
                         reason=f"{target_path} was modified by another "
@@ -1693,7 +1913,7 @@ def generate_all_settings(
                     continue
 
                 # Step 4: write
-                _write_settings_target(name, target_path, merged)
+                _write_settings_target(name, write_path, merged)
                 results[name] = SettingsSyncResult(
                     status="ok",
                     warnings=warnings,

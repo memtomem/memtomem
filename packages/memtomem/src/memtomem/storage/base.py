@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import AsyncIterator, Protocol, Sequence
 from uuid import UUID
 
-from memtomem.models import Chunk, ChunkLink, NamespaceFilter, ScopeFilter, SearchResult
+from memtomem.models import (
+    Chunk,
+    ChunkLink,
+    ChunkTopology,
+    NamespaceFilter,
+    ScopeFilter,
+    SearchResult,
+)
 
 
 @dataclass(frozen=True)
@@ -37,15 +44,20 @@ class ContextWindowRows:
     """One anchor's context window, from :meth:`StorageBackend.get_context_windows`.
 
     ``before`` / ``after`` are the anchor's *physical* neighbours in
-    ``(start_line, rowid)`` order, unfiltered: adjacency is physical, and the
-    caller screens them with
-    :func:`memtomem.search.visibility.neighbor_visible` so a hidden neighbour
-    shrinks the window rather than being replaced by a distant one.
+    ``(start_line, rowid)`` order. Storage drops only the source-hold rows
+    from them: a row withheld by a redaction hold always, and with
+    ``hide_unavailable`` a row under any other source hold or a pending check
+    (#3114). It drops them after choosing the physical window, so a dropped
+    row shrinks the window rather than being replaced by a distant one. The
+    other visibility rules (namespace, scope, validity) are left to the
+    caller, which screens the rows with
+    :func:`memtomem.search.visibility.neighbor_visible` to the same effect.
 
     The two counts are the visibility-screened accounting the caller reports,
-    and both **exclude the anchor itself** — the caller adds it back
-    unconditionally, because a chunk that is being returned is part of the set
-    the position describes even when the neighbour rules would hide it (#2236).
+    source-hold screen included, and both **exclude the anchor itself** — the
+    caller adds it back unconditionally, because a chunk that is being returned
+    is part of the set the position describes even when the neighbour rules
+    would hide it (#2236).
     Keeping the anchor out of the SQL count is what makes that carve-out
     arithmetic rather than a second opinion: nothing can double-count it, and
     the Python predicate never has to agree with the SQL about the anchor.
@@ -80,6 +92,21 @@ class ChunkKeyRow:
     start_line: int
     scope: str = "user"
     project_root: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VisiblePool:
+    """One bounded read of the visible chunks in ascending id order.
+
+    Returned by :meth:`StorageBackend.list_visible_chunks_by_id`. The three
+    fields describe one snapshot.
+    """
+
+    chunks: list[Chunk]
+    visible: int  # visible chunks in the store
+    # Visible chunks with an id above the cursor the read was given: all of
+    # them without a cursor. Never fewer than ``len(chunks)``.
+    above_cursor: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,8 +229,13 @@ class StorageBackend(Protocol):
     # window) for hash-matched chunks without touching content, vectors or
     # timestamps (#2124, #2140).
     async def update_chunk_metadata(self, chunks: Sequence[Chunk]) -> int: ...
+    # ``read_writer=True`` reads the writer connection once no other task owns
+    # it (FIFO wait of at most ``WRITER_WAIT_S``, then ``TransactionOwnedError``);
+    # a task that owns ``transaction()`` reads its own uncommitted state. For a
+    # read that decides a write it guards: a pool connection can still serve a
+    # snapshot from before a commit (#3202).
     async def get_chunk(
-        self, chunk_id: UUID, *, exclude_withheld: bool = False
+        self, chunk_id: UUID, *, exclude_withheld: bool = False, read_writer: bool = False
     ) -> Chunk | None: ...
     async def get_chunks_batch(
         self, chunk_ids: Sequence[UUID], *, exclude_withheld: bool = False
@@ -240,7 +272,9 @@ class StorageBackend(Protocol):
     async def is_source_pending(self, source_file: Path) -> bool: ...
     async def source_visibility_epoch(self) -> int: ...
     async def source_hold_generation(self, source_file: Path) -> int: ...
-    async def source_hold_snapshot(self, source_file: Path) -> int | None: ...
+    async def source_hold_snapshot(
+        self, source_file: Path, *, as_stored: bool = False
+    ) -> int | None: ...
     def queue_source_check_sync(self, source_file: Path) -> bool: ...
     async def get_pending_source_checks(self) -> list[Path]: ...
     # The stored key a caller's path string names, matched as a string (#2835).
@@ -279,6 +313,8 @@ class StorageBackend(Protocol):
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
         source_filter: str | None = None,
+        *,
+        deadline: float | None = None,
     ) -> list[SearchResult]: ...
     async def dense_search(
         self,
@@ -291,6 +327,8 @@ class StorageBackend(Protocol):
         source_filter: str | None = None,
         *,
         exhaustive: bool = False,
+        escalate: bool = True,
+        deadline: float | None = None,
     ) -> list[SearchResult]: ...
 
     # Metadata
@@ -309,6 +347,13 @@ class StorageBackend(Protocol):
     ) -> dict[str, list[ChunkKeyRow]]: ...
     async def get_stats(self) -> dict[str, int]: ...
     async def get_all_source_files(self) -> set[Path]: ...
+    # The first ``limit`` chunks in ascending id order with an id above
+    # ``after`` (the stored id text; from the start without one), and the
+    # counts they were taken from, all under the path-level hold rule and from
+    # one snapshot.
+    async def list_visible_chunks_by_id(
+        self, limit: int, after: str | None = None
+    ) -> VisiblePool: ...
     async def get_orphan_candidate_source_files(self) -> set[Path]: ...
     async def search_source_files_by_content(
         self, query: str, limit: int = 10000
@@ -350,6 +395,13 @@ class StorageBackend(Protocol):
     # neighbours are a seek, and the counts are aggregates, so neither grows
     # with the file. Returns one entry per requested anchor; ``None`` means
     # that id is not a row of ``source_file`` (deleted, or re-indexed away).
+    #
+    # ``hide_unavailable`` has no default because it names the surface. Search
+    # passes true: a neighbour under any source hold or a pending source check,
+    # including a policy summary whose parent is, is neither returned nor
+    # counted, as ranked search hides it (#3114). ``mem_expand`` passes false:
+    # it reads by id, where only a redaction hold makes a row unreadable. A
+    # row withheld by a redaction hold is left out either way.
     async def get_context_windows(
         self,
         source_file: Path,
@@ -361,6 +413,8 @@ class StorageBackend(Protocol):
         scope_filter: ScopeFilter | None,
         project_context_root: Path | None,
         as_of_unix: int | None,
+        hide_unavailable: bool,
+        deadline: float | None = None,
     ) -> dict[UUID, ContextWindowRows | None]: ...
     # ``recall_chunks``'s ``chunk_ids`` restricts the recall to an explicit id
     # set while keeping every other filter this method applies — notably the
@@ -422,7 +476,10 @@ class StorageBackend(Protocol):
     async def count_chunks_by_namespace(self, namespace: str) -> int: ...
     async def count_chunks_by_ns_prefix(self, prefixes: Sequence[str]) -> int: ...
     async def count_chunks_by_ns_prefix_detail(
-        self, prefixes: Sequence[str]
+        self,
+        prefixes: Sequence[str],
+        *,
+        boundary: tuple[ScopeFilter | None, Path | None] | None = None,
     ) -> tuple[int, dict[str, int]]: ...
     async def delete_by_namespace(self, namespace: str) -> int: ...
     async def list_namespace_chunk_candidates(
@@ -443,7 +500,11 @@ class StorageBackend(Protocol):
 
     # Tags
     async def get_tag_counts(
-        self, *, project_context_root: Path | None = None
+        self,
+        *,
+        project_context_root: Path | None = None,
+        scope_filter: ScopeFilter | None = None,
+        namespace_filter: NamespaceFilter | None = None,
     ) -> list[tuple[str, int]]: ...
     async def list_chunks_by_tag(self, tag: str, limit: int = 10) -> list[Chunk]: ...
     async def count_chunks_by_tag(self, tag: str) -> int: ...
@@ -486,6 +547,11 @@ class StorageBackend(Protocol):
     ) -> list[tuple[UUID, UUID, str]]: ...
     async def insert_relations(self, edges: Sequence[tuple[UUID, UUID, str]]) -> int: ...
     async def delete_relation(self, source_id: UUID, target_id: UUID) -> bool: ...
+    # The current row and topology of each id a duplicate scan would list now,
+    # in one statement. A hidden path's chunks are absent, as a missing id is.
+    async def get_chunks_with_topology(
+        self, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, tuple[Chunk, ChunkTopology]]: ...
 
     # Share lineage (chunk_links)
     async def add_chunk_link(
@@ -672,7 +738,12 @@ class StorageBackend(Protocol):
     # Namespace metadata
     async def get_namespace_meta(self, namespace: str) -> dict | None: ...
     async def set_namespace_meta(
-        self, namespace: str, description: str | None = None, color: str | None = None
+        self,
+        namespace: str,
+        description: str | None = None,
+        color: str | None = None,
+        *,
+        surface: str = "storage",
     ) -> None: ...
     async def list_namespace_meta(self) -> list[dict]: ...
     async def assign_namespace(

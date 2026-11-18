@@ -19,6 +19,7 @@ from memtomem.web.deps import (
 )
 from memtomem.web.source_visibility import load_source_visibility
 from memtomem.web.routes._confirm import needs_confirmation_envelope
+from memtomem.web.routes._writer_wait import writer_transaction
 from memtomem.web.schemas.core import DeleteResponse
 from memtomem.web.schemas.sources import (
     ChunkSizeBucket,
@@ -352,49 +353,61 @@ async def delete_source(
     if request_path is None:
         raise HTTPException(status_code=403, detail="Path is not an indexed source file.")
 
-    # Gate-B: a bulk source delete that would take project_shared chunks with
-    # it needs consent first. The probe is re-read below rather than trusted
-    # from a caller-supplied hint — the flag says the user consented, it does
-    # not say what they consented to.
-    scopes = await storage.list_scopes_by_source(request_path, as_stored=True)
-    if "project_shared" in scopes and not confirm_project_shared:
-        logger.info(
-            "delete_source rejected project_shared source without confirmation",
-            extra={"scopes": sorted(scopes)},
-        )
-        return needs_confirmation_envelope(
-            (
-                "This source holds project_shared chunks that are shared with the "
-                "repository. Deleting it removes them for everyone using this "
-                "project. Source deletes are all-or-nothing."
-            ),
-            confirm="confirm_project_shared",
-            scopes=sorted(scopes),
-        )
+    # The probe, the consent decision and the delete share one transaction
+    # that waits for another task's (#3182). Nothing can commit while this
+    # request holds the writer, so the scopes the probe reads are the ones the
+    # delete removes; a wait between them would let a policy job make the
+    # source project_shared after the probe said it was not. The probe reads
+    # the writer inside the transaction, not a pool connection, which can still
+    # hold a snapshot from before that commit.
+    async with writer_transaction(storage):
+        # Gate-B: a bulk source delete that would take project_shared chunks with
+        # it needs consent first. The probe is re-read below rather than trusted
+        # from a caller-supplied hint — the flag says the user consented, it does
+        # not say what they consented to.
+        scopes = await storage.list_scopes_by_source(request_path, as_stored=True)
+        if "project_shared" in scopes and not confirm_project_shared:
+            logger.info(
+                "delete_source rejected project_shared source without confirmation",
+                extra={"scopes": sorted(scopes)},
+            )
+            return needs_confirmation_envelope(
+                (
+                    "This source holds project_shared chunks that are shared with the "
+                    "repository. Deleting it removes them for everyone using this "
+                    "project. Source deletes are all-or-nothing."
+                ),
+                confirm="confirm_project_shared",
+                scopes=sorted(scopes),
+            )
 
-    # ADR-0011 §5 Gate B consent (#2306). Mirrors the gate's predicate: the
-    # probe, not the caller's scope hint, decides whether consent was needed.
-    if "project_shared" in scopes:
-        from memtomem import privacy
+        # ADR-0011 §5 Gate B consent (#2306). Mirrors the gate's predicate: the
+        # probe, not the caller's scope hint, decides whether consent was needed.
+        if "project_shared" in scopes:
+            from memtomem import privacy
 
-        privacy.emit_project_shared_confirmation(
-            surface="web_api_source_delete",
-            mechanism="request",
-            action="delete",
-            audit_context={"scopes": len(scopes)},
-        )
+            privacy.emit_project_shared_confirmation(
+                surface="web_api_source_delete",
+                mechanism="request",
+                action="delete",
+                audit_context={"scopes": len(scopes)},
+            )
 
-    deleted = await storage.delete_by_source(request_path, as_stored=True)
+        deleted = await storage.delete_by_source(request_path, as_stored=True)
     search_pipeline.invalidate_cache()
     return DeleteResponse(deleted=deleted).model_dump()
 
 
-@router.get("/content")
-async def source_content(
-    path: str = Query(..., description="Absolute path of the source file"),
-    storage=Depends(get_storage),
-):
-    """Return the raw text content of an indexed source file (max 1 MB)."""
+MAX_SOURCE_READ_BYTES = 1_048_576
+
+
+async def resolve_readable_source(storage, path: str) -> Path:
+    """The on-disk file behind indexed source *path*, if its raw text may be served.
+
+    The gates every route that hands out a source's raw text shares; each
+    refusal is an ``HTTPException``. *path* is the caller's spelling of a stored
+    source key (for a chunk, its stored ``source_file``).
+    """
     # The stored key the request names, matched as a string as the other
     # per-source routes do (#2898). The checks below and the read go through
     # the file that key resolves to on disk.
@@ -435,10 +448,19 @@ async def source_content(
     if any(c.metadata.redaction_count for c in chunks):
         raise HTTPException(status_code=409, detail="masked_projection_read_only")
 
-    size = request_path.stat().st_size
-    if size > 1_048_576:
+    if request_path.stat().st_size > MAX_SOURCE_READ_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 1 MB).")
+    return request_path
 
+
+@router.get("/content")
+async def source_content(
+    path: str = Query(..., description="Absolute path of the source file"),
+    storage=Depends(get_storage),
+):
+    """Return the raw text content of an indexed source file (max 1 MB)."""
+    request_path = await resolve_readable_source(storage, path)
+    size = request_path.stat().st_size
     try:
         text = request_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:

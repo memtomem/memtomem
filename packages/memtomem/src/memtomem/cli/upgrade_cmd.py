@@ -280,6 +280,10 @@ def _complete_inventory_problems(
     """Combine pid-lock and registry evidence into one mutation gate."""
     problems = _inventory_problems(server_states, web_state)
     problems.extend(_registry_inventory_problems(registry, server_states, web_state))
+    # The stop loop refuses these groups; the plan and the dry run refuse them too.
+    for pid, group in _group_by_pid(_upgrade_server_stops(server_states)):
+        if (problem := _group_generation_problem(pid, group)) is not None:
+            problems.append(problem)
     if is_windows:
         for state in _upgrade_server_stops(server_states):
             if state.alive and state.probe_error is None:
@@ -408,25 +412,14 @@ def _reprobe_process_state(state: ServerState) -> ServerState:
     return probe_pid_file(state.pid_file)
 
 
-def _stop_server(
-    state: ServerState,
-    grace: float,
-    *,
-    warnings_to_stderr: bool = False,
-) -> tuple[list[int], list[Path], ServerState, str | None]:
-    """SIGTERM the live pid-file holder, escalate to SIGKILL after ``grace`` seconds.
+def _terminate_pid(pid: int | None, grace: float) -> tuple[list[int], str | None]:
+    """SIGTERM *pid*, escalate to SIGKILL after ``grace`` seconds; ``(killed, error)``.
 
-    Works on any :class:`ServerState` — the MCP server and ``mm web``
-    both hold their pid file with the same flock contract. Returns
-    ``(killed_pids, removed_pid_files, post_stop_state, error)``. Returning
-    errors keeps partial kill/unlink accounting available to both human and
-    JSON callers. Caller is responsible for skipping this on Windows / when
-    ``state.alive`` is False.
+    One call per process: a process that holds several lock files (a shared
+    daemon holds its lifetime lock and its store's pid lock, #3381) is
+    signalled once, and :func:`_retire_pid_file` then cleans each file.
     """
     killed: list[int] = []
-    removed: list[Path] = []
-
-    pid = state.pid
     if pid is not None:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -435,12 +428,7 @@ def _stop_server(
             # Already gone between probe and kill.
             pid = None
         except PermissionError as exc:
-            return (
-                killed,
-                removed,
-                state,
-                f"cannot signal pid {pid}: {exc}. Stop the process manually and retry.",
-            )
+            return killed, f"cannot signal pid {pid}: {exc}. Stop the process manually and retry."
 
         # Poll for exit. server's ``_install_sigterm_handler`` (#439)
         # unlinks its own pid file on a clean SIGTERM, so the file may
@@ -466,6 +454,21 @@ def _stop_server(
             # try to unlink the lock file.
             time.sleep(0.5)
 
+    return killed, None
+
+
+def _retire_pid_file(
+    state: ServerState,
+    pid: int | None,
+    *,
+    warnings_to_stderr: bool = False,
+) -> tuple[list[Path], ServerState, str | None]:
+    """Remove *state*'s pid file once its holder has been stopped.
+
+    Returns ``(removed_pid_files, post_stop_state, error)``. *pid* is the pid
+    that was signalled, for the messages.
+    """
+    removed: list[Path] = []
     # Clean the stale pid file. Clean SIGTERM teardown usually removes it
     # itself, but the SIGKILL path leaves it behind. The re-probe reports a
     # writer that respawned at the same path during the SIGKILL settle window
@@ -476,11 +479,10 @@ def _stop_server(
         recheck = _reprobe_process_state(state)
         if recheck.probe_error is not None:
             return (
-                killed,
                 removed,
                 recheck,
                 f"cannot verify {_format_path(state.pid_file)} after stopping pid "
-                f"{state.pid}: {recheck.probe_error}",
+                f"{pid}: {recheck.probe_error}",
             )
         skipped = "is now held by" if recheck.alive else None
         if skipped is None:
@@ -488,7 +490,6 @@ def _stop_server(
                 outcome = unlink_stale_pid_file(state.pid_file)
             except (OSError, UnsafeProbePathError, BarrierTimeout) as exc:
                 return (
-                    killed,
                     removed,
                     recheck,
                     f"failed to remove stale pid file {state.pid_file}: {exc}",
@@ -505,11 +506,10 @@ def _stop_server(
                 recheck = _reprobe_process_state(state)
                 if recheck.probe_error is not None:
                     return (
-                        killed,
                         removed,
                         recheck,
                         f"cannot verify {_format_path(state.pid_file)} after stopping pid "
-                        f"{state.pid}: {recheck.probe_error}",
+                        f"{pid}: {recheck.probe_error}",
                     )
         if skipped is not None:
             click.secho(
@@ -522,7 +522,65 @@ def _stop_server(
     else:
         recheck = ServerState(alive=False, pid=None, pid_file=None)
 
-    return killed, removed, recheck, None
+    return removed, recheck, None
+
+
+def _stop_server(
+    state: ServerState,
+    grace: float,
+    *,
+    warnings_to_stderr: bool = False,
+) -> tuple[list[int], list[Path], ServerState, str | None]:
+    """Stop one pid-file holder and remove its file: :func:`_terminate_pid`, then
+    :func:`_retire_pid_file`.
+
+    Works on any :class:`ServerState` — the MCP server and ``mm web``
+    both hold their pid file with the same flock contract. Returns
+    ``(killed_pids, removed_pid_files, post_stop_state, error)``. Returning
+    errors keeps partial kill/unlink accounting available to both human and
+    JSON callers. Caller is responsible for skipping this on Windows / when
+    ``state.alive`` is False.
+    """
+    killed, error = _terminate_pid(state.pid, grace)
+    if error is not None:
+        return killed, [], state, error
+    removed, recheck, error = _retire_pid_file(
+        state, state.pid, warnings_to_stderr=warnings_to_stderr
+    )
+    return killed, removed, recheck, error
+
+
+def _group_by_pid(states: list[ServerState]) -> list[tuple[int, list[ServerState]]]:
+    """Group signalable states by pid, in first-seen order.
+
+    States with a probe error or no pid are dropped, as the stop loop always
+    dropped them: neither names a process to signal.
+    """
+    groups: dict[int, list[ServerState]] = {}
+    for state in states:
+        if state.probe_error is not None or state.pid is None:
+            continue
+        groups.setdefault(state.pid, []).append(state)
+    return list(groups.items())
+
+
+def _group_generation_problem(pid: int, group: list[ServerState]) -> str | None:
+    """Why lock files that record one pid cannot be treated as one process.
+
+    One file is one process. Several (a shared daemon's lifetime lock and its
+    store's pid lock) are one process only when every file records the same
+    start stamp; a missing or different stamp could be a recycled pid.
+    """
+    if len(group) < 2:
+        return None
+    stamps = [_started_at(state) for state in group]
+    if any(stamp is None for stamp in stamps) or len(set(stamps)) != 1:
+        files = ", ".join(_format_path(state.pid_file) for state in group if state.pid_file)
+        return (
+            f"pid {pid} holds several lock files ({files}) that do not record the same "
+            "start time; not stopping it. Stop the process manually and retry."
+        )
+    return None
 
 
 def _stop_process_snapshot(
@@ -546,24 +604,43 @@ def _stop_process_snapshot(
     removed: list[Path] = []
     problems: list[str] = []
     remaining_servers: list[ServerState] = []
-    for state in _upgrade_server_stops(server_states):
-        if state.probe_error is not None or state.pid is None:
+    for pid, group in _group_by_pid(_upgrade_server_stops(server_states)):
+        error = _group_generation_problem(pid, group)
+        # A group that passed records one stamp, so its files agree on the generation.
+        if (
+            error is None
+            and installed_at is not None
+            and _is_new_generation(group[0], installed_at)
+        ):
+            remaining_servers.extend(group)
             continue
-        if installed_at is not None and _is_new_generation(state, installed_at):
-            remaining_servers.append(state)
-            continue
-        stopped, cleaned, recheck, error = _stop_server(
-            state,
-            grace=grace,
-            warnings_to_stderr=warnings_to_stderr,
-        )
-        killed.extend(stopped)
-        removed.extend(cleaned)
         if error is not None:
             problems.append(error)
-        if recheck.alive:
-            remaining_servers.append(recheck)
-        if error is not None and not continue_on_error:
+            remaining_servers.extend(group)
+            if not continue_on_error:
+                break
+            continue
+        # One signal per process, then each of its lock files (#3381).
+        stopped, error = _terminate_pid(pid, grace)
+        killed.extend(stopped)
+        if error is not None:
+            problems.append(error)
+            remaining_servers.extend(group)
+            if not continue_on_error:
+                break
+            continue
+        for state in group:
+            cleaned, recheck, error = _retire_pid_file(
+                state, pid, warnings_to_stderr=warnings_to_stderr
+            )
+            removed.extend(cleaned)
+            if error is not None:
+                problems.append(error)
+            if recheck.alive:
+                remaining_servers.append(recheck)
+            if error is not None and not continue_on_error:
+                break
+        if problems and not continue_on_error:
             break
 
     remaining_web = ServerState(alive=False, pid=None, pid_file=None)
@@ -662,7 +739,7 @@ def _build_install_cmd(version: str | None, extras: list[str]) -> list[str]:
     if extras:
         pkg = f"memtomem[{','.join(extras)}]"
     if version:
-        if not _VERSION_PATTERN.match(version):
+        if not _VERSION_PATTERN.fullmatch(version):
             raise click.BadParameter(
                 f"{version!r} is not a bare PEP 440 release (e.g. 0.1.30, 0.1.30rc1). "
                 "Pass a literal version, not a specifier like '>=0.1.30'.",
@@ -774,11 +851,17 @@ def upgrade(
             labeled_states = [(server, "server") for server in server_stops]
             if web_state.alive:
                 labeled_states.append((web_state, "web UI"))
+            planned_pids: set[int] = set()
             for live, label in labeled_states:
                 pid_repr = live.pid if live.pid is not None else "?"
                 pid_file_repr = _format_path(live.pid_file) if live.pid_file else "?"
-                click.echo(f"  Stop running {label} (pid {pid_repr}, lock {pid_file_repr})")
-                click.echo(f"  Wait up to {grace:g}s for graceful exit, then SIGKILL")
+                # One stop per process; a second lock file of the same pid only
+                # needs removing (a shared daemon holds two, #3381).
+                if live.pid is None or live.pid not in planned_pids:
+                    click.echo(f"  Stop running {label} (pid {pid_repr}, lock {pid_file_repr})")
+                    click.echo(f"  Wait up to {grace:g}s for graceful exit, then SIGKILL")
+                if live.pid is not None:
+                    planned_pids.add(live.pid)
                 click.echo(f"  Remove stale {pid_file_repr}")
         else:
             click.echo("  No running server or web UI detected — reinstall only")
@@ -803,7 +886,9 @@ def upgrade(
                 "ok": not initial_problems,
                 "dry_run": True,
                 "inventory_complete": not initial_problems,
-                "would_kill": [s.pid for s in planned_stops if s.pid is not None],
+                "would_kill": list(
+                    dict.fromkeys(s.pid for s in planned_stops if s.pid is not None)
+                ),
                 "would_remove": [str(s.pid_file) for s in planned_stops if s.pid_file is not None],
                 "would_install": install_cmd,
                 "extras": extras,

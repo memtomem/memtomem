@@ -68,6 +68,7 @@ async def mem_search(
     scope: str | None = None,
     rerank: bool | None = None,
     record: bool = True,
+    deadline_ms: int | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Search across indexed memory files using hybrid BM25 + semantic search.
@@ -89,8 +90,7 @@ async def mem_search(
         dense_weight: RRF weight for meaning matches (default 1.0). Both must be
             finite and >= 0, not both zero; 0 disables that leg
         context_window: Expand each result with ±N adjacent chunks (0 = off).
-            Neighbours follow the namespace/scope/validity visibility rules,
-            not the tag/type/date filters
+            Neighbours obey visibility rules, not tag/type/date filters
         verbose: Deprecated — use output_format="verbose"
         output_format: "compact" (default), "verbose" (adds UUID / pipeline stats),
             or "structured" (JSON). A non-default value overrides ``verbose``.
@@ -102,11 +102,12 @@ async def mem_search(
         rerank: ``false`` skips the cross-encoder stage and collapses the pool
             to ``top_k`` — the fast path for latency-bounded callers, so it
             narrows recall as well as changing the score scale. Omitted/``true``
-            follows server config; ``true`` cannot enable reranking a server has
-            disabled.
+            follows server config.
         record: ``false`` = background read, for fan-out callers: no
             access-count increments, no query history, caches neither read
             nor filled — so results can differ from a cached answer.
+        deadline_ms: Server processing budget in ms; past it, a retryable
+            error instead of results.
 
     A count below ``top_k`` can mean filters excluded candidates or the index
     holds no more. Raising ``top_k`` widens the request; it does not promise
@@ -115,8 +116,7 @@ async def mem_search(
     ``output_format="structured"`` adds a top-level ``score_scale`` naming the
     scale ``score`` is on: ``rerank`` (model-dependent range; ``reranker`` names
     the model), ``rrf``, ``bm25``/``dense``, or ``none`` (filter-only — no
-    relevance scale). Compare scores only within one scale, and only across
-    servers with the same optional modifier stages enabled.
+    relevance scale). Compare scores only within one scale.
     """
     if not query.strip():
         return "Error: query cannot be empty."
@@ -124,6 +124,8 @@ async def mem_search(
         return f"Error: query too long (max 10,000 characters, got {len(query)})."
     if not 1 <= top_k <= 100:
         return f"Error: top_k must be between 1 and 100, got {top_k}."
+    if deadline_ms is not None and (isinstance(deadline_ms, bool) or deadline_ms < 1):
+        return f"Error: deadline_ms must be a positive integer, got {deadline_ms}."
 
     # Resolve effective format: output_format takes precedence over verbose
     effective_format = output_format
@@ -173,6 +175,7 @@ async def mem_search(
         record=record,
         project_context_root=project_context_root,
         origin="mcp",
+        deadline_ms=deadline_ms,
     )
 
     # The dimension-mismatch notice is per-process announcement state, not a
@@ -354,6 +357,8 @@ async def mem_expand(
     rather than surfacing. The chunk id does not widen that — expanding a
     chunk in a hidden namespace returns the chunk with little or no context.
     Use mem_search(namespace=..., context_window=N) to read around one.
+    Unlike mem_search, a neighbour whose source is held for anything but a
+    redaction hold, or pending a check, is shown; a redaction hold hides it.
 
     The addressed chunk must itself be inside the caller's project boundary
     (ADR-0011); an id from another project reads as not-found, and so does a
@@ -381,8 +386,12 @@ async def mem_expand(
     spec = _expand_visibility_spec(app)
     # The neighbours are read after the anchor; storage leaves out any row a
     # redaction hold withholds at that read, so one committed in between stops
-    # at the anchor already read while it was readable (#2777).
-    windows = await app.storage.get_context_windows(source_file, [uid], window, **spec)
+    # at the anchor already read while it was readable (#2777). The flag stays
+    # out of ``spec``, which ``neighbor_visible`` also takes: this is the id
+    # surface, where only a redaction hold makes a row unreadable (#3114).
+    windows = await app.storage.get_context_windows(
+        source_file, [uid], window, **spec, hide_unavailable=False
+    )
     rows = windows.get(uid)
     if rows is None:
         return f"Chunk {chunk_id} not found in source file listing."

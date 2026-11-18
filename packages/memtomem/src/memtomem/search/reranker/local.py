@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from memtomem._settlement import settle_shielded
+from memtomem.embedding.hub_locks import prepare_hub_locks
 from memtomem.embedding.hub_telemetry import hub_telemetry_off
 
 if TYPE_CHECKING:
@@ -16,6 +19,55 @@ if TYPE_CHECKING:
     from memtomem.models import SearchResult
 
 logger = logging.getLogger(__name__)
+
+
+def _sentence_transformers_cache_dirs() -> list[str]:
+    """Every directory a ``CrossEncoder(model)`` download may go to, unresolved.
+
+    Which one depends on the sentence-transformers release. 6.3.0 reads
+    ``SENTENCE_TRANSFORMERS_HOME`` when no ``cache_folder`` is passed (memtomem
+    passes none) and keeps an empty value, which the Hub resolves to the current
+    directory. In 5.2.2, 4.1.0 and 3.4.1 ``CrossEncoder`` does not read the
+    variable and downloads into the Hub's default cache. Both are returned rather than the
+    release being detected: probing a directory the load does not use costs at
+    most the shared store, and probing too few can leave a download that never
+    ends.
+    """
+    dirs = []
+    home = os.environ.get("SENTENCE_TRANSFORMERS_HOME")
+    if home is not None:
+        dirs.append(home)
+    try:
+        from huggingface_hub import constants
+    except ImportError:
+        return dirs
+    dirs.append(constants.HF_HUB_CACHE)
+    return dirs
+
+
+def _prepare_sentence_transformers_cache(model: str) -> None:
+    """Run the #3261 lock guard on each cache a cold ``CrossEncoder`` load may download into."""
+    # A local model directory is loaded without the Hub, as sentence-transformers decides it.
+    if os.path.isdir(model):
+        return
+    for raw in _sentence_transformers_cache_dirs():
+        # Resolved as the Hub resolves ``cache_dir``: ``prepare_hub_locks`` probes
+        # each spelling once, so a relative one would not be probed again after a
+        # ``chdir``.
+        try:
+            cache_dir = Path(raw).expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            # No HOME to expand, for one: the load decides what that means.
+            logger.debug("Skipping the hub lock probe of %r for %s: %s", raw, model, exc)
+            continue
+        # The probe needs the directory, and a first install has none yet; the Hub
+        # creates it on download anyway. If it cannot be made, the probe fails and
+        # the shared store is turned off, the side that cannot hang.
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        prepare_hub_locks(cache_dir)
 
 
 class LocalReranker:
@@ -63,7 +115,9 @@ class LocalReranker:
                 if model is None:
                     from sentence_transformers import CrossEncoder
 
-                    # A cache miss downloads from the Hub inside this constructor (#2556).
+                    # A cache miss downloads from the Hub inside this constructor (#2556),
+                    # which can wait forever where the cache cannot flock (#3266).
+                    _prepare_sentence_transformers_cache(self._config.model)
                     with hub_telemetry_off():
                         model = CrossEncoder(self._config.model)
                     # Publish-then-verify: close() does not take this lock,

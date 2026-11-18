@@ -22,7 +22,7 @@ from collections.abc import (
 )
 from pathlib import Path
 from uuid import UUID
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import IO, TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 import pathspec
 
@@ -43,20 +43,32 @@ from memtomem.errors import (
     EmbeddingError,
     NamespaceResolutionError,
     RetryableError,
+    StorageError,
     TransactionOwnedError,
 )
 from memtomem.generation import ComponentGeneration
 from memtomem.indexing.differ import DiffResult, compute_diff
+from memtomem.indexing.append_attribution import AppendRegion, Attribution, attribute_append
 from memtomem.indexing.redaction_exemption import declared_exemption, indexer_text
 from memtomem.indexing.source_receipt import chunker_versions, code_fingerprint, digest
-from memtomem.models import Chunk, IndexingStats, stored_namespace
+from memtomem.memory_scope import project_tier_dir, project_tier_is_relinked
+from memtomem.models import Chunk, ChunkMetadata, IndexingStats, stored_namespace
 from memtomem.storage.base import WRITER_WAIT_S
-from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
+from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD, RELINKED_HOLD
+from memtomem.storage.sqlite_helpers import fold_path_form
+from memtomem.source_provenance import UPLOAD_DIR
 from memtomem.storage.sqlite_helpers import is_under_any_root as _is_under_any_root
-from memtomem.storage.sqlite_helpers import norm_path
+from memtomem.storage.sqlite_helpers import leaf_names_own_key, norm_path, own_leaf_key
+from memtomem.storage.sqlite_helpers import resolves_under_any_root as _resolves_under_any_root
 from memtomem.storage.sqlite_helpers import resolve_path
 from memtomem.storage.orphan_detect import RetainRule
 from memtomem.tools.entity_sync import sync_entities_for_chunks
+from memtomem.tools.memory_writer import (
+    SourceRemovedError,
+    SourceReplacedError,
+    WrittenSource,
+    open_written,
+)
 from memtomem.indexing.dir_stats import (  # noqa: F401
     IndexRoots,
     WorktreeMemo,
@@ -101,6 +113,7 @@ from memtomem.indexing.privacy_gate import (  # noqa: F401
 
 if TYPE_CHECKING:
     from memtomem.embedding.base import EmbeddingProvider
+    from memtomem.indexing.privacy_projection import IndexProjection
     from memtomem.llm.base import LLMProvider
     from memtomem.storage.base import StorageBackend
     from memtomem.storage.sqlite_backend import SqliteBackend
@@ -232,6 +245,152 @@ def _exclude_match_keys(
     return keys
 
 
+class SourceRelinkedError(RetryableError):
+    """The path being indexed names another source than the one its content was read from (#3180).
+
+    Raised between the read and a write, never for a path that was already a
+    link when it was read: that one is indexed through the link, as before.
+    """
+
+
+def _decision_path(file_path: Path) -> Path:
+    """One resolution of ``file_path``: the path a pass judges a file under and takes its key from.
+
+    Unfolded, so it compares with registered roots and manifest keys as they
+    are written. The key a pass captures from it is
+    ``fold_path_form(str(path))``, which is ``norm_path(file_path)``, fallback
+    included: a resolution that raises ``OSError`` gives ``file_path`` as
+    given. It is the key the pass checks, not a promise about the rows: the
+    store resolves a chunk's source path itself when it writes (#3305).
+    """
+    try:
+        return resolve_path(file_path)
+    except OSError:
+        return file_path
+
+
+def _require_same_source(file_path: Path, source_key: str) -> None:
+    """Stop a pass whose path names another source than the one it read (#3173, #3180).
+
+    ``source_key`` is taken with the content read. Every ``await`` after it
+    (namespace resolution, the writer waits, enrichment, the embedding) leaves
+    time for the path to be replaced by a link to another indexed source, and
+    the writes resolve the path again, so they would file this content under
+    that source's key. Called after the last ``await`` before an access that
+    resolves the path: a commit, whose writes then either used this key or roll
+    back with the raise, or a read that has no transaction to roll back.
+
+    Not seen: a swap and swap back between the read and the check, and a swap
+    between ``read_text`` and the resolution taken right after it.
+    """
+    if norm_path(file_path) != source_key:
+        raise SourceRelinkedError("Source path now names another file than the one read; retry")
+
+
+def _sqlite_busy(exc: BaseException) -> bool:
+    """Whether ``exc`` is SQLite's busy/locked error, bare or as a ``StorageError``'s cause."""
+    cause = exc if isinstance(exc, sqlite3.OperationalError) else exc.__cause__
+    if not isinstance(cause, sqlite3.OperationalError):
+        return False
+    text = str(cause).lower()
+    return "locked" in text or "busy" in text
+
+
+def _opened_text(opened: IO[bytes], name: str) -> str:
+    """The text ``Path.read_text`` would give for the file behind ``opened``, which is closed.
+
+    For a re-index that reads the file its caller wrote off a descriptor
+    (``written_source``, #3320). One read, decoded as the path read decodes:
+    UTF-8 with universal newlines, invalid bytes replaced after a warning.
+    Closed at once rather than when the pass ends, because an open handle
+    keeps Windows from renaming or deleting the file.
+    """
+    with opened:
+        data = opened.read()
+    return _decoded_source(data, name)
+
+
+def _decoded_source(data: bytes, name: str) -> str:
+    """Decode a source's bytes as ``index_file`` reads its text, for a content hash to match."""
+    try:
+        return indexer_text(data)
+    except UnicodeDecodeError:
+        logger.warning("Non-UTF-8 content in %s, replacing invalid bytes", name)
+        return indexer_text(data, errors="replace")
+
+
+class StoredSourceRead(TypedDict):
+    """What :func:`read_stored_source` found at a stored key."""
+
+    content_hash: str
+    device: int
+    inode: int
+    links: int
+
+
+def read_stored_source(source_key: str) -> StoredSourceRead | str:
+    """Hash the text ``index_file`` would read at ``source_key``, or say why it cannot.
+
+    For checking a source against its index receipt: the hash is the one the
+    receipt's ``source_hash`` was computed with. Opened ``O_NONBLOCK`` so a
+    FIFO at the key cannot block the open; ``fstat`` on the same descriptor
+    refuses anything but a regular file, and the read is bounded by the size
+    ``index_file`` skips above, so nothing larger is read into memory. The
+    identity and link count come from that descriptor too. Blocking; async
+    callers run it in a thread. A string return is the reason for a refusal.
+    """
+    from memtomem.indexing.source_receipt import content_hash
+
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(source_key, flags)
+    except (OSError, ValueError) as exc:
+        return f"cannot be opened ({type(exc).__name__})"
+    try:
+        info = os.fstat(descriptor)
+        if not stat_module.S_ISREG(info.st_mode):
+            return "is not a regular file"
+        if info.st_size > _MAX_INDEX_FILE_BYTES:
+            return "is larger than the indexer reads"
+        chunks: list[bytes] = []
+        remaining = _MAX_INDEX_FILE_BYTES + 1
+        while remaining > 0:
+            block = os.read(descriptor, min(remaining, 1 << 20))
+            if not block:
+                break
+            chunks.append(block)
+            remaining -= len(block)
+    except OSError as exc:
+        return f"cannot be read ({type(exc).__name__})"
+    finally:
+        os.close(descriptor)
+    data = b"".join(chunks)
+    if len(data) > _MAX_INDEX_FILE_BYTES:
+        return "is larger than the indexer reads"
+    return {
+        "content_hash": content_hash(_decoded_source(data, Path(source_key).name)),
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "links": info.st_nlink,
+    }
+
+
+def _leaf_relinked(own_key: str, work_path: Path) -> bool:
+    """True when the path being indexed is no longer the regular file at ``own_key``.
+
+    Either the leaf is a symlink now, or ``work_path`` (the resolution taken
+    before the locks) names another file: the leaf was a link then, and was
+    replaced by a regular file while the call waited (#3164). Case is compared
+    the way the platform compares it, because Windows' ``resolve()`` takes the
+    leaf's on-disk case. A parent moved and linked back changes ``work_path``
+    only if the move landed between the two resolutions, both taken before the
+    locks; one made while the call waits is not seen (#3172).
+    """
+    if Path(own_key).is_symlink():
+        return True
+    return not leaf_names_own_key(own_key, work_path)
+
+
 def _path_is_excluded(
     file_path: Path,
     memory_dirs: Iterable[str | Path] | IndexRoots,
@@ -294,6 +453,10 @@ class _IndexFileBase(TypedDict):
 
 class IndexFileResult(_IndexFileBase, total=False):
     new_chunk_ids: list[UUID]
+    # The chunks an ``append_region`` caller's append became, and how cleanly
+    # (#3292). Present only on the success return of such a call.
+    appended_chunk_ids: list[UUID]
+    appended_attribution: Attribution
     # Ordered same-string subset of ``errors`` whose underlying exception is
     # typed retryable. Optional so every historical zero/permanent return shape
     # remains valid.
@@ -317,6 +480,13 @@ class IndexFileResult(_IndexFileBase, total=False):
     # bypassable with force_unsafe) — aggregated into
     # ``IndexingStats.blocked_project_shared_files``.
     blocked_project_shared: int
+    # True when the exclude guard skipped the file. Aggregated into
+    # ``IndexingStats.excluded_files``; ``deleted`` counts the rows the opt-in
+    # ``purge_key`` delete removed (#3158).
+    excluded: bool
+    # True when the opt-in ``relink_key`` check found the leaf replaced by a
+    # symlink; the rows under that key were held, not indexed (#3164).
+    relinked: bool
     # 1 when the file carried a frontmatter ``redaction: documents-patterns``
     # declaration the guard honoured (#2076). Set only on the success return,
     # after the chunk transaction commits: an exempted file whose embedding or
@@ -348,6 +518,38 @@ class IndexFileResult(_IndexFileBase, total=False):
     # True when the source was held instead of re-indexed because its project
     # rows would have changed scope or project root (#2923).
     scope_held: bool
+    # True on the three returns after which the file's stored chunks describe
+    # the content this call read: the committed write, the receipt hit, and the
+    # emptied file whose rows were removed. Aggregated into
+    # ``IndexingStats.current_files`` by ``index_file`` (#3168).
+    current: bool
+    # The stored key the content was read and committed under, on a receipt
+    # hit or a completed write. The hold release compares it to the key it
+    # snapshotted (#3180).
+    source_key: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class WriteTargetSnapshot:
+    """The engine's write-target questions, answered against one fixed config.
+
+    Built by :meth:`IndexEngine.write_target_snapshot` for work that runs on a
+    worker thread (#3124). The live predicates read ``IndexEngine._config`` on
+    every call, and another tool call can install new roots between two of a
+    worker's reads; this object holds the roots, read-only roots and exclude
+    spec from a single read, so every target of one run is judged against the
+    same configuration. Both predicates call the same helpers the live ones do.
+    """
+
+    roots: tuple[Path, ...]
+    read_only_roots: tuple[Path, ...]
+    user_spec: pathspec.GitIgnoreSpec
+
+    def is_excluded(self, file_path: Path) -> bool:
+        return _path_is_excluded(file_path, self.roots, self.user_spec)
+
+    def is_read_only_source(self, file_path: Path) -> bool:
+        return _is_under_any_root(file_path, self.read_only_roots)
 
 
 class IndexEngine:
@@ -355,6 +557,9 @@ class IndexEngine:
     # helper) that build an engine with ``IndexEngine.__new__`` and set only
     # ``_config`` still reach the exclusion checks.
     _user_exclude_cache: tuple[tuple[str, ...], pathspec.GitIgnoreSpec] | None = None
+    # Class-level for the same reason: whether bounded chunk descriptions carry
+    # the ``File:`` and ``Fragment`` lines (see ``bound_chunks``).
+    _chunk_source_labels: bool = True
 
     def __init__(
         self,
@@ -366,9 +571,15 @@ class IndexEngine:
         progress_threshold: int = 32,
         llm: "LLMProvider | None" = None,
         generation: ComponentGeneration | None = None,
+        *,
+        chunk_source_labels: bool = True,
     ) -> None:
         self._storage = storage
         self._embedder = embedder
+        # False for a caller whose file names are its own bookkeeping
+        # (langchain-memtomem's store): bounded descriptions are embedded and
+        # BM25-indexed, so ``File: <name>`` would make the name searchable (#3209).
+        self._chunk_source_labels = chunk_source_labels
         # The embedder/pipeline/engine generation this engine belongs to
         # (#2180); see the matching field on ``SearchPipeline``. Held for the
         # span of every entry point that can reach ``self._embedder``, so
@@ -767,9 +978,12 @@ class IndexEngine:
             blocked_project_shared_files=blocked_project_shared,
             exempted_files=len(exempted_paths),
             exempted_paths=tuple(exempted_paths),
+            excluded_files=sum(1 for r in file_results if r.get("excluded")),
             namespaces_preserved_against_rules=tally.preserved_against_rules,
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
+            namespaces_restored_from_name=tally.restored_from_name,
+            day_file_names_undecoded=tally.undecoded_names,
             chunks_missing_vectors=missing_vectors,
             mutated=any(r.get("mutated", False) for r in file_results),
             scope_held=any(r.get("scope_held", False) for r in file_results),
@@ -870,7 +1084,14 @@ class IndexEngine:
             return self._discover_files(path, recursive, index_roots=index_roots)
         return []
 
-    def chunk_content(self, file_path: Path, content: str, *, exempt: bool = False) -> list[Chunk]:
+    def chunk_content(
+        self,
+        file_path: Path,
+        content: str,
+        *,
+        exempt: bool = False,
+        projection: IndexProjection | None = None,
+    ) -> list[Chunk]:
         """Chunk ``content`` exactly as indexing would, post-processing included.
 
         Single source of truth for "which chunks would this file produce" — the
@@ -898,16 +1119,23 @@ class IndexEngine:
         make an explicit allow-this into a lossy write — the store would hold a
         masked projection while the audit log said "bypass", and that
         projection is read-only to ``mem_edit``.
+
+        ``projection`` is the one the gate in ``_index_file`` already judged
+        for this content. Passed, it is the text that gets chunked, so the
+        store holds what the gate passed; looked up here a second time, a leaf
+        replaced by a symlink meanwhile would select another manifest entry or
+        another scope (#3290). ``exempt`` wins over it: the gate computes a
+        projection even for content it then lets through verbatim. A caller
+        with no gate answer (the doctor, the budget audit) leaves it out, and
+        it is looked up from one resolution of ``file_path``.
         """
         from memtomem.indexing.privacy_projection import IndexProjection
 
         original_content = content
-        scope, _ = self._resolve_scope(file_path.resolve())
-        projection = (
-            IndexProjection(content, content)
-            if exempt
-            else self._prepare_index_projection(file_path, content, scope)
-        )
+        if exempt:
+            projection = IndexProjection(content, content)
+        elif projection is None:
+            _, _, _, projection = self._gate_inputs(_decision_path(file_path), content)
         content = projection.content
         chunks = self._chunk_projected_content(file_path, content)
         if projection.redaction_count:
@@ -989,7 +1217,15 @@ class IndexEngine:
             )
         # After the sweep: a copy dropped first would leave its twin owning
         # the shared lines alone, writable.
-        return _drop_storage_key_copies(chunks)
+        chunks = _drop_storage_key_copies(chunks)
+        # ADR-0043 §5: a chunk is dated by its entry's ``> created:`` line,
+        # carried here in metadata through merging and splitting. Only rows the
+        # store creates take it — the update path never writes ``created_at``,
+        # so a chunk whose id is reused keeps the time it was first stored.
+        for chunk in chunks:
+            if chunk.metadata.entry_created_at is not None:
+                chunk.created_at = chunk.metadata.entry_created_at
+        return chunks
 
     def _chunk_projected_content(self, file_path: Path, content: str) -> list[Chunk]:
         if self._config.hard_max_chunk_tokens and file_path.suffix.lower() in {
@@ -1002,11 +1238,15 @@ class IndexEngine:
         }:
             from memtomem.chunking.bounded import chunk_code
 
-            return chunk_code(file_path, content, self._config)
+            return chunk_code(
+                file_path, content, self._config, source_labels=self._chunk_source_labels
+            )
         if self._config.hard_max_chunk_tokens and file_path.suffix.lower() == ".json":
             from memtomem.chunking.bounded import chunk_json
 
-            return chunk_json(file_path, content, self._config)
+            return chunk_json(
+                file_path, content, self._config, source_labels=self._chunk_source_labels
+            )
         chunks = self._registry.chunk_file(file_path, content)
         # Post-processing: merge short chunks + add overlap
         chunks = _merge_short_chunks(
@@ -1020,7 +1260,7 @@ class IndexEngine:
         if self._config.hard_max_chunk_tokens:
             from memtomem.chunking.bounded import bound_chunks
 
-            chunks = bound_chunks(chunks, self._config)
+            chunks = bound_chunks(chunks, self._config, source_labels=self._chunk_source_labels)
         return chunks
 
     async def _validate_source_commit(self, file_path: Path) -> None:
@@ -1046,6 +1286,10 @@ class IndexEngine:
         engine_serialized: bool = True,
         walk_root: Path | None = None,
         index_roots: IndexRoots | None = None,
+        purge_key: str | None = None,
+        relink_key: str | None = None,
+        append_region: AppendRegion | None = None,
+        written_source: WrittenSource | None = None,
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
@@ -1093,7 +1337,56 @@ class IndexEngine:
             start = time.monotonic()
             # A new watcher delete may arrive while this file is being read.
             # Release only visibility rows that preceded this indexing pass.
-            hold_generation = await self._storage.source_hold_snapshot(path)
+            # Keyed here, before the pass, and released only if the pass read
+            # and committed this same key: a pass that read another source
+            # through a link validated that source, not this one (#3180).
+            written_key = None if written_source is None else written_source.key
+            hold_key = norm_path(path) if written_key is None else written_key
+            hold_generation = await self._storage.source_hold_snapshot(
+                Path(hold_key), as_stored=True
+            )
+
+            async def held_as_relinked(key: str) -> tuple[IndexFileResult, float]:
+                held = await self._hold_relinked_key(key)
+                relinked: IndexFileResult = {
+                    "total": 0,
+                    "indexed": 0,
+                    "skipped": 0,
+                    "deleted": 0,
+                    "errors": [],
+                    "mutated": held,
+                    "relinked": True,
+                }
+                return relinked, (time.monotonic() - start) * 1000
+
+            # A caller that wrote the file names it, and the open decides: what
+            # is read below is that file or nothing (#3320). Under the locks,
+            # with no ``await`` between this open and the read. Every outcome
+            # is keyed by the written file's key, never by a new resolution.
+            opened: IO[bytes] | None = None
+            if written_source is not None and written_key is not None:
+                try:
+                    opened = open_written(written_source)
+                except SourceReplacedError:
+                    return await held_as_relinked(written_key)
+                except SourceRemovedError:
+                    missing = await self._delete_missing_source(
+                        path, path_scope=path_scope, key=written_key
+                    )
+                    return missing, (time.monotonic() - start) * 1000
+                except OSError as exc:
+                    held = await self._hold_waiting(
+                        path, f"read_error:{exc.errno}", key=written_key
+                    )
+                    unread: IndexFileResult = {
+                        "total": 0,
+                        "indexed": 0,
+                        "skipped": 0,
+                        "deleted": 0,
+                        "errors": [],
+                        "mutated": held,
+                    }
+                    return unread, (time.monotonic() - start) * 1000
             try:
                 result = await self._index_file(
                     path,
@@ -1112,10 +1405,29 @@ class IndexEngine:
                     new_source_namespace=new_source_namespace,
                     walk_root=walk_root,
                     index_roots=index_roots,
+                    purge_key=purge_key,
+                    relink_key=relink_key,
+                    append_region=append_region,
+                    written_source=written_source,
+                    opened=opened,
                 )
             except PrivacyRejection as exc:
                 await self._hold_blocked_source(path, exc)
                 raise
+            except SourceRelinkedError:
+                # The pass rolled back its writes. A caller that wrote the
+                # file gets the hold it would have got had the swap come
+                # before the pass (#3164, #3180): under the written file's key
+                # (#3320), or under ``relink_key`` when the leaf is no longer
+                # that caller's regular file.
+                if written_key is not None:
+                    return await held_as_relinked(written_key)
+                if relink_key is None or not _leaf_relinked(relink_key, path):
+                    raise
+                return await held_as_relinked(relink_key)
+            finally:
+                if opened is not None:
+                    opened.close()
             # A held source is visible again only after the current contents
             # have been validated/indexed. Receipt hits take this path without
             # embedding; failed, excluded and unreadable paths keep the hold.
@@ -1123,17 +1435,27 @@ class IndexEngine:
                 hold_generation is not None
                 and not result.get("errors")
                 and (result["total"] or result["skipped"])
+                and result.get("source_key") == hold_key
             ):
+                # By the key the pass read and committed, never the path: the
+                # pass awaits past its commit (the AI summary), and so does
+                # this transaction, so the path may name another source by now
+                # (#3173, #3180).
                 try:
-                    released = await self._storage.release_source_hold(
-                        path, expected_generation=hold_generation
-                    )
-                except sqlite3.OperationalError as exc:
-                    if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
-                        raise
+                    async with self._storage.transaction(wait=WRITER_WAIT_S):
+                        released = await self._storage.release_source_hold(
+                            Path(hold_key), expected_generation=hold_generation, as_stored=True
+                        )
+                except TransactionOwnedError as exc:
+                    # Ahead of ``StorageError``, its base class.
                     logger.warning("Indexed %s but deferred hold release: %s", path, exc)
                     released = False
-                except TransactionOwnedError as exc:
+                except (sqlite3.OperationalError, StorageError) as exc:
+                    # Another process holding the write lock reaches here as a
+                    # bare ``OperationalError`` or, at ``transaction()``'s
+                    # ``BEGIN IMMEDIATE``, wrapped in a ``StorageError``.
+                    if not _sqlite_busy(exc):
+                        raise
                     logger.warning("Indexed %s but deferred hold release: %s", path, exc)
                     released = False
                 if released:
@@ -1167,6 +1489,7 @@ class IndexEngine:
                 lock_held=False,
                 engine_serialized=engine_serialized,
                 run=_run,
+                index_roots=index_roots,
             )
 
     async def _locked_index(
@@ -1176,6 +1499,7 @@ class IndexEngine:
         lock_held: bool,
         engine_serialized: bool,
         run: Callable[[], Awaitable[tuple[IndexFileResult, float]]],
+        index_roots: IndexRoots | None = None,
     ) -> tuple[IndexFileResult, float]:
         """L2 → L3 half of :meth:`_index_file_locked`, slot already held.
 
@@ -1191,6 +1515,8 @@ class IndexEngine:
         # a module-top ``from`` import would freeze the value.
         from memtomem.context._atomic import (
             _MEMORY_SIDECAR_LOCK_BUDGET_S,
+            async_detached_source_lock,
+            async_existing_memory_file_lock,
             async_file_lock,
             memory_lock_path,
         )
@@ -1211,14 +1537,28 @@ class IndexEngine:
         # which would otherwise hold no lock at all; a migrate sidecar for a
         # missing-parent path lives in that same missing parent, so no live
         # pair-op can be mid-flight.
-        if lock_path is None or not lock_path.parent.is_dir():
+        if path is None or lock_path is None or not lock_path.parent.is_dir():
             async with self._index_lock:
                 return await run()
         lock_started = time.monotonic()
-        async with async_file_lock(
-            lock_path,
-            timeout=_MEMORY_SIDECAR_LOCK_BUDGET_S,
-        ):
+        async with contextlib.AsyncExitStack() as held:
+            if self._source_dir_is_managed(lock_path.parent, index_roots):
+                await held.enter_async_context(
+                    async_file_lock(lock_path, timeout=_MEMORY_SIDECAR_LOCK_BUDGET_S)
+                )
+            else:
+                # Any path can be indexed. Outside the directories memtomem
+                # keeps memory files in, the sidecar is not created: the
+                # detached lock is taken, then the sidecar only if some writer
+                # already left one (the lock-order block in
+                # ``context/_atomic.py`` has the rule and what it leaves open).
+                await held.enter_async_context(
+                    async_detached_source_lock(path, timeout=_MEMORY_SIDECAR_LOCK_BUDGET_S)
+                )
+                remaining = _MEMORY_SIDECAR_LOCK_BUDGET_S - (time.monotonic() - lock_started)
+                await held.enter_async_context(
+                    async_existing_memory_file_lock(path, timeout=max(remaining, 0.0))
+                )
             logger.debug(
                 "source_index lock_acquired pid=%d lock_ms=%.1f",
                 os.getpid(),
@@ -1228,6 +1568,30 @@ class IndexEngine:
                 return await run()
             async with self._index_lock:
                 return await run()
+
+    def _source_dir_is_managed(self, directory: Path, index_roots: IndexRoots | None) -> bool:
+        """Whether files that resolve into ``directory`` are locked beside themselves.
+
+        :meth:`is_managed_source` asked of the source's resolved directory
+        rather than of the source. For a file the two agree: a path is under a
+        root exactly when the directory holding it is the root or under it.
+        Asking about the directory is what lets a walk ask once per directory,
+        not once per file; the predicate resolves every configured root each
+        time it is called (#2966).
+
+        A walk's memo is used only while the configured roots are the ones it
+        was built from, the rule the exclusion guard in :meth:`_index_file`
+        follows. That comparison is of the configured paths. It does not see a
+        root that is a link and was pointed elsewhere during the walk, nor one
+        path moved between ``memory_dirs`` and ``project_memory_dirs``: for the
+        rest of that walk a directory the memo already called managed keeps
+        its sidecars, as :class:`IndexRoots` keeps each root as first asked.
+        Seeing either would mean resolving the roots again for every file. A
+        call with no walk memo (one file, the watcher) always asks afresh.
+        """
+        if index_roots is not None and tuple(self._config.all_index_roots()) == index_roots.dirs:
+            return index_roots.managed_dir(directory, self.is_managed_source)
+        return self.is_managed_source(directory)
 
     def _get_user_exclude_spec(self) -> pathspec.GitIgnoreSpec:
         """The compiled ``exclude_patterns`` spec, rebuilt only when the patterns change.
@@ -1285,6 +1649,73 @@ class IndexEngine:
         """
         return _is_under_any_root(file_path, self._config.read_only_memory_dirs)
 
+    def is_managed_source(self, file_path: Path, stored: ChunkMetadata | None = None) -> bool:
+        """True when ``file_path`` resolves under a directory memtomem keeps memory files in.
+
+        Asked by the surfaces that edit or delete a chunk by id, beside
+        :meth:`is_read_only_source` and before they lock or write the chunk's
+        source. :meth:`index_file` accepts any path, so a chunk's
+        ``source_file`` can name a file memtomem was only asked to read: an
+        agent's settings, a script, another project's code. That file stays
+        indexed and searchable, and a by-id write to it is refused.
+
+        Three kinds of directory count. The configured index roots. The upload
+        directory, which is outside every root and whose files stay editable.
+        And, when ``stored`` is the chunk's metadata and the chunk was stored
+        as project memory, that project's own tier directory: its tier may be
+        unregistered by now, and a rewrite of such a row has its own refusal
+        (:meth:`rewrite_refusal`), which names how to register the tier again.
+        Answering no here would replace that refusal with this one.
+
+        A project tier directory that is a link counts for nothing, registered
+        or stored (:func:`~memtomem.memory_scope.project_tier_is_relinked`).
+        Roots are resolved before they are matched, so a tier a checkout
+        delivered as ``memories -> ..`` would make the whole project managed.
+        The roots in ``memory_dirs`` and ``read_only_memory_dirs`` come from
+        the user's own configuration and may be links, which is why the two
+        kinds are listed apart: a directory registered as both stays managed
+        through its user entry.
+
+        Not folded into :meth:`is_read_only_source`: that predicate is also
+        asked of new-file targets and of the upload directory, and it stamps
+        ``source_read_only`` on chunks at index time.
+
+        Only the resolved path counts
+        (:func:`~memtomem.storage.sqlite_helpers.resolves_under_any_root`): a
+        link inside one of these directories that points out of it is not
+        managed.
+        """
+        from memtomem.indexing.scope_guard import PROJECT_SCOPES
+
+        config = self._config
+        tiers = [Path(d) for d in config.project_memory_dirs]
+        if stored is not None and stored.scope in PROJECT_SCOPES and stored.project_root:
+            tiers.append(project_tier_dir(stored.scope, Path(stored.project_root)))
+        roots = [
+            *config.memory_dirs,
+            *config.read_only_memory_dirs,
+            UPLOAD_DIR,
+            *(tier for tier in tiers if not project_tier_is_relinked(tier)),
+        ]
+        return _resolves_under_any_root(file_path, roots)
+
+    def write_target_snapshot(self) -> WriteTargetSnapshot:
+        """Freeze :meth:`is_excluded` and :meth:`is_read_only_source` for a worker thread.
+
+        Call it on the event-loop thread, right before the hand-off. Reading the
+        config through one local reference does not make its three root lists one
+        read; what makes the snapshot coherent is that the code which replaces
+        them (the MCP root install and its rollback in ``server/context.py``, the
+        web hot reload) also runs on the loop, with no ``await`` between its
+        assignments.
+        """
+        config = self._config
+        return WriteTargetSnapshot(
+            roots=tuple(config.all_index_roots()),
+            read_only_roots=tuple(config.read_only_memory_dirs),
+            user_spec=self._get_user_exclude_spec(),
+        )
+
     async def index_file(
         self,
         file_path: Path,
@@ -1298,6 +1729,10 @@ class IndexEngine:
         path_scope: PathScope = "configured",
         reassign_namespaces: bool = False,
         new_source_namespace: str | None = None,
+        purge_if_excluded: bool = False,
+        hold_if_relinked: bool = False,
+        append_region: AppendRegion | None = None,
+        written_source: WrittenSource | None = None,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
 
@@ -1358,6 +1793,82 @@ class IndexEngine:
         the same pair, so a preview cannot describe an operation the write
         would reject).
 
+        ``purge_if_excluded=True`` is for a caller that has just written the
+        file itself: the importers, which replace it whole (#3158), and the
+        by-id edit and delete paths, which rewrite lines of it (#3163). If the
+        exclude guard skips the file, the chunks stored under ``file_path``'s
+        own key are deleted, because they describe bytes the caller has
+        already overwritten. The guard is judged once, under the file's locks.
+        The key is ``file_path``'s resolved
+        parent plus its name as given, so the leaf is never followed: a path
+        that has become a symbolic link loses its own rows and never its
+        target's. Like :func:`~memtomem.storage.sqlite_helpers.stored_key_for`,
+        it does not match another spelling of the leaf, so on Windows a path
+        whose case differs from the stored one purges nothing
+        (``deleted_chunks == 0``). Every other caller keeps the default, where
+        an excluded file's chunks stay until ``mm purge --matching-excluded``
+        (#3158).
+
+        ``hold_if_relinked=True`` is for a caller that has just written the
+        regular file at ``file_path`` and holds no identity for it: the
+        importers (#3164). The memory tools name the file they wrote instead
+        (``written_source``, below). If that file has been replaced by a symlink,
+        the rows stored under the path's own key are held with
+        ``source_relinked`` and nothing is indexed, so the link's target is
+        never indexed, namespaced or tagged as the caller's file. ``IndexingStats.relinked_files`` is then 1. It is
+        checked before the locks, so a link into a directory whose sidecar
+        cannot be taken is still held, and again under them, for a swap while
+        the call waits; it precedes the exclude guard, so such a file is held
+        rather than purged. A swap after the file was read is seen before the
+        write commits: the write rolls back and the key is held the same way
+        (#3180). Not covered: a swap between the check under the locks and the
+        read reads the target and writes its rows under the target's key, the
+        way any caller's index follows a link; and a swap while the call waits for
+        a pipeline slot, into a directory whose sidecar cannot be taken, raises
+        that ``OSError`` before the check under the locks. The watcher's relink
+        hold catches the leaf afterwards. A parent directory moved and linked
+        back is seen only when the move lands between the own key's resolution
+        and ``file_path``'s, both taken before the locks; before both, they
+        agree on the new location, and after both, the leaf is still a regular
+        file. A key stored before Unicode folding (macOS NFD) holds no rows,
+        since the hold uses the folded key, and ``relinked_files`` is 1 all the
+        same (#2907). Every other caller keeps the default and indexes through
+        the link (#3164).
+
+        ``written_source`` is for a memory tool that has just written the file
+        under its sidecar lock (``lock_held=True`` is required) and names the
+        file it wrote (``memory_writer.WrittenSource``, #3320). The pass then
+        reads that file or nothing. It opens ``written_source.source_path`` as
+        given, with no new resolution of ``file_path``, and the descriptor
+        must be the file the write went through; the content is read off that
+        descriptor, judged under that path and stored under its key, which is
+        also the key a purge deletes. If something else answers to the path —
+        a symlink put at the leaf, a parent directory replaced by a link,
+        another file saved over it — the rows under the written file's key
+        are held with ``source_relinked`` and nothing is indexed, so no other
+        file is indexed, namespaced or tagged as the caller's write;
+        ``IndexingStats.relinked_files`` is then 1. A file removed since the
+        write is held as any missing source is, under the same key. A path
+        that led through a symlink when the tool read it is indexed where the
+        write landed, wherever the link points now. Replaces
+        ``hold_if_relinked`` for these callers and cannot be combined with it.
+        Not covered: the path replaced after the open by another regular file
+        or by a link to itself resolves to the same key, so the written
+        content is stored under it; and the lookups the pass makes by path
+        after the read (stored chunk state, stored namespaces, exclusion, the
+        AI summary) resolve it again, as they do for every caller.
+
+        ``append_region`` is for a caller that has just appended to the file
+        under its sidecar lock and needs to know which chunks its append
+        became (#3292); build it with
+        :func:`~memtomem.indexing.append_attribution.append_region` from the
+        pre-image it read under that lock. ``new_chunk_ids`` cannot answer
+        that: it covers the whole file's re-index and misses a chunk that kept
+        an existing id. The answer is judged from the text this call read and
+        chunked, and only when that text is the expected one, so another
+        writer's bytes anywhere in the file make it ``unverified``. See
+        ``IndexingStats.appended_chunk_ids``.
+
         If ``file_path`` is missing or inaccessible, its existing chunks are
         held outside search until recovery or explicit cleanup (#2498). A
         present nonregular replacement is positively known to be no longer an
@@ -1374,8 +1885,32 @@ class IndexEngine:
         # ``exists``) is the right predicate — a same-named directory ``exists``
         # but is not indexable, and its old chunks must still be cleaned. (#1566)
         _reject_reassign_with_explicit_ns(namespace, reassign_namespaces, new_source_namespace)
+        if written_source is not None and (not lock_held or hold_if_relinked):
+            raise ValueError(
+                "written_source needs lock_held=True and cannot be combined with hold_if_relinked"
+            )
         force = force or reassign_namespaces
-        if self.is_excluded(file_path) and file_path.is_file():
+        # A purge decides inside the locks instead, from the same exclusion read
+        # that skips the file. Its key never follows the leaf, now or later: a
+        # leaf that is, or becomes, a symlink must not redirect the delete to
+        # its target's rows (#2835). Resolved parent plus the name matches the
+        # key the store wrote while the leaf was a regular file, when the leaf
+        # is spelled as it was stored (#2878). A caller that names the file it
+        # wrote purges that file's key: resolving the parent now would follow
+        # a directory replaced since the write (#3320).
+        purge_key: str | None = None
+        if purge_if_excluded:
+            purge_key = own_leaf_key(file_path) if written_source is None else written_source.key
+        # The relink check runs inside the locks too, so a hold-only call must
+        # not stop at the early exclusion return below (#3164).
+        relink_key = own_leaf_key(file_path) if hold_if_relinked else None
+        if (
+            purge_key is None
+            and relink_key is None
+            and written_source is None
+            and self.is_excluded(file_path)
+            and file_path.is_file()
+        ):
             logger.debug("Skipping excluded file %s", file_path)
             return IndexingStats(
                 total_files=0,
@@ -1385,10 +1920,33 @@ class IndexEngine:
                 deleted_chunks=0,
                 duration_ms=0.0,
                 new_chunk_ids=(),
+                excluded_files=1,
             )
+        # The written file's path is the resolution its caller's read took. It
+        # is not resolved again here: two resolutions taken now agree with each
+        # other about a parent directory replaced since the write (#3320).
+        work_path = (
+            resolve_path(file_path) if written_source is None else written_source.source_path
+        )
         with self._active_run():
+            # Before the locks: the sidecar is keyed on ``work_path``, which for a
+            # link is its target's, and a target whose sidecar cannot be taken
+            # must not keep the leaf's rows served (#3164).
+            if relink_key is not None and _leaf_relinked(relink_key, work_path):
+                held = await self._hold_relinked_key(relink_key)
+                return IndexingStats(
+                    total_files=0,
+                    total_chunks=0,
+                    indexed_chunks=0,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=0.0,
+                    new_chunk_ids=(),
+                    mutated=held,
+                    relinked_files=1,
+                )
             result, duration = await self._index_file_locked(
-                resolve_path(file_path),
+                work_path,
                 force,
                 namespace=namespace,
                 force_unsafe=force_unsafe,
@@ -1398,6 +1956,10 @@ class IndexEngine:
                 path_scope=path_scope,
                 reassign_namespaces=reassign_namespaces,
                 new_source_namespace=new_source_namespace,
+                purge_key=purge_key,
+                relink_key=relink_key,
+                append_region=append_region,
+                written_source=written_source,
             )
         tally = _NamespaceTally()
         decision = result.get("namespace_decision")
@@ -1428,10 +1990,48 @@ class IndexEngine:
             namespaces_preserved_against_rules=tally.preserved_against_rules,
             namespaces_reassigned=tally.reassigned,
             namespace_moves=tally.summary(),
+            namespaces_restored_from_name=tally.restored_from_name,
+            day_file_names_undecoded=tally.undecoded_names,
             chunks_missing_vectors=await self._count_missing_vectors(self._unchanged_ids([result])),
             mutated=result.get("mutated", False),
             scope_held=result.get("scope_held", False),
+            excluded_files=1 if result.get("excluded") else 0,
+            relinked_files=1 if result.get("relinked") else 0,
+            current_files=1 if result.get("current") else 0,
+            appended_chunk_ids=tuple(result.get("appended_chunk_ids", ())),
+            appended_attribution=result.get("appended_attribution", "unverified"),
         )
+
+    async def _hold_relinked_key(self, own_key: str) -> bool:
+        """Hold the rows stored under ``own_key``, a leaf that is now a symlink (#3164).
+
+        The key is held as stored, never resolved again: resolving it would
+        hold the link's target. A key with no rows holds nothing. The hold
+        waits for another task's write transaction the way the index's own
+        write does, rather than being refused at once.
+        """
+        async with self._storage.transaction(wait=WRITER_WAIT_S):
+            held = await self._storage.hold_source(Path(own_key), RELINKED_HOLD, as_stored=True)
+        if held:
+            logger.info(
+                "Held a written source whose path no longer holds it: %s", Path(own_key).name
+            )
+        return held
+
+    async def _hold_waiting(self, file_path: Path, reason: str, *, key: str | None = None) -> bool:
+        """Hold ``file_path``'s rows for ``reason``, waiting out another task's writer (#3173).
+
+        The key is ``norm_path(file_path)``, the one ``hold_source`` would
+        compute, but resolved before the transaction: these holds fire when
+        the path cannot be read or stat'ed, which is when a stale mount can
+        make that resolve block, and it must not block holding the writer.
+        Resolved after the wait, a path relinked meanwhile would hold another
+        source. ``key`` is a key the caller already resolved, held as given.
+        """
+        if key is None:
+            key = await asyncio.to_thread(norm_path, file_path)
+        async with self._storage.transaction(wait=WRITER_WAIT_S):
+            return await self._storage.hold_source(Path(key), reason, as_stored=True)
 
     async def is_duplicate(
         self,
@@ -1551,6 +2151,7 @@ class IndexEngine:
         |---|---|---|
         | explicit namespace | any | that namespace |
         | plain or ``force`` | one, unanimous | preserved |
+        | plain or ``force`` | none, day-file name decodes | the name's namespace (ADR-0043) |
         | plain or ``force`` | none | ``new_source_namespace`` if given, else rules → auto_ns → default |
         | plain (no force) | several | rules — only the *changed* chunks move, which is the pre-existing ADR-0032 ambiguity |
         | ``force`` | several | refused (:class:`NamespaceMixedUnderForceError`) — force rewrites *every* row, so one namespace would swallow the rest |
@@ -1604,18 +2205,10 @@ class IndexEngine:
             # several is the ambiguity #2005 is about, and there is no
             # per-line provenance to split it by.
             #
-            # Normalise the untagged carve-out back to ``None``: with the
-            # configured default at "default", ``_resolve_namespace`` answers
-            # ``None`` and the chunk model's own default stores the literal
-            # "default" — the same state by two names. Returning the stored
-            # spelling would make this resolver answer ``None`` before a file
-            # is written and "default" after, so the preview and the
-            # ``/api/index`` echo would disagree about a file that never moved.
-            target = (
-                None
-                if (stored[0] == "default" and self._ns_config.default_namespace == "default")
-                else stored[0]
-            )
+            # Normalise the untagged carve-out back to ``None`` (``_carve_out``):
+            # returning the stored spelling would make this resolver answer
+            # ``None`` before a file is written and "default" after.
+            target = self._carve_out(stored[0])
             # "Against the rules" requires a rule to have spoken. Without
             # ``rule_directed`` a stock config — no rules, no auto_ns — would
             # report every non-default file as one the rules disagree with,
@@ -1631,14 +2224,48 @@ class IndexEngine:
         if len(stored) > 1 and force:
             return NamespaceDecision(target=ruled, stored=stored, reason="mixed_force_refused")
 
+        undecoded_name = False
+        if not stored:
+            # A source the store has never seen, or one whose database is gone:
+            # a day file's name still says which namespace it was written for
+            # (ADR-0043). Above the session binding, so ``mem_index`` in a bound
+            # session rebuilds a tree into the namespaces it was written in;
+            # below stored rows, so a file whose rows were moved keeps the move.
+            from memtomem.memory_scope import day_file_declaration
+
+            declared, shaped = day_file_declaration(file_path)
+            if declared is not None:
+                return NamespaceDecision(
+                    target=self._carve_out(declared), reason="declared_by_name"
+                )
+            undecoded_name = shaped
+
         if not stored and new_source_namespace is not None:
             # The only place a bound namespace applies: a source the store has
             # never seen. Deliberately *below* the preserved and mixed-force
             # branches, so binding can neither move an indexed file nor slip
             # past the refusal a mixed file earns (#2104).
-            return NamespaceDecision(target=new_source_namespace, reason="bound_new_source")
+            return NamespaceDecision(
+                target=new_source_namespace,
+                reason="bound_new_source",
+                undecoded_name=undecoded_name,
+            )
 
-        return NamespaceDecision(target=ruled, stored=stored, reason="resolved")
+        return NamespaceDecision(
+            target=ruled, stored=stored, reason="resolved", undecoded_name=undecoded_name
+        )
+
+    def _carve_out(self, namespace: str) -> str | None:
+        """``namespace`` as the resolver answers it: ``None`` for the untagged default.
+
+        With the configured default at "default", ``_resolve_namespace`` answers
+        ``None`` and the chunk model stores the literal "default" — one state by
+        two names. A decision returning the literal would make the preview and
+        the ``/api/index`` echo disagree about a file that never moved.
+        """
+        if namespace == "default" and self._ns_config.default_namespace == "default":
+            return None
+        return namespace
 
     async def namespace_decision_for(
         self,
@@ -1881,7 +2508,7 @@ class IndexEngine:
         for the caller to retry rather than raised.
         """
         try:
-            held = await self._storage.hold_source(path, REDACTION_BLOCKED_HOLD)
+            held = await self._hold_waiting(path, REDACTION_BLOCKED_HOLD, key=exc.source_key)
         except Exception as hold_exc:
             exc.mark_unheld()
             logger.error(
@@ -1902,6 +2529,7 @@ class IndexEngine:
         *,
         path_scope: PathScope = "configured",
         absent: bool = True,
+        key: str | None = None,
     ) -> IndexFileResult:
         """Hold chunks for a source whose absence cannot prove deletion.
 
@@ -1914,11 +2542,20 @@ class IndexEngine:
         ``retain_missing_dirs`` is shown instead: its chunks are the archive
         the user asked to keep (#2833). A path that now holds a directory is
         not absent and is held as before.
+
+        ``key`` is the stored key of a source the caller already knows
+        (``written_source``, #3320): it is judged and held as given, where the
+        default resolves ``file_path``, which a path relinked since would
+        answer for another source.
         """
         if absent and self._config.retain_missing_dirs:
-            key = await asyncio.to_thread(self._retained_key, file_path)
-            if key is not None:
-                shown = await self._storage.release_absence_hold(key)
+            if key is None:
+                retained = await asyncio.to_thread(self._retained_key, file_path)
+            else:
+                retained = key if RetainRule.prepare(self._config).retains_key(key) else None
+            if retained is not None:
+                async with self._storage.transaction(wait=WRITER_WAIT_S):
+                    shown = await self._storage.release_absence_hold(retained)
                 return {
                     "total": 0,
                     "indexed": 0,
@@ -1927,7 +2564,7 @@ class IndexEngine:
                     "errors": [],
                     "mutated": shown,
                 }
-        held = await self._storage.hold_source(file_path, "source_missing")
+        held = await self._hold_waiting(file_path, "source_missing", key=key)
         if held:
             logger.warning("Source unavailable; holding indexed chunks: %s", file_path)
         return {
@@ -2060,11 +2697,39 @@ class IndexEngine:
         new_source_namespace: str | None = None,
         walk_root: Path | None = None,
         index_roots: IndexRoots | None = None,
+        purge_key: str | None = None,
+        relink_key: str | None = None,
+        append_region: AppendRegion | None = None,
+        written_source: WrittenSource | None = None,
+        opened: IO[bytes] | None = None,
     ) -> IndexFileResult:
+        # ``opened`` is the descriptor of the file ``written_source`` names,
+        # already checked to be that file (``_index_file_locked``, #3320). With
+        # it, the stat and the read below come off the descriptor, the pass is
+        # judged under ``written_source.source_path``, and every hold is keyed
+        # by ``written_key``: ``file_path`` is not resolved again for any of them.
+        written_key = None if written_source is None else written_source.key
+
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]), and resolved_namespace (str | None) when
         # at least one chunk was successfully upserted. Early/no-write paths
         # may omit the optional keys — consumers must tolerate their absence.
+
+        # A caller that wrote this file asks, under the locks, whether the leaf
+        # is still its regular file. Before the stat, so a dangling link or a
+        # link to a directory is held too, and before the exclude guard, so a
+        # relinked file is held rather than purged (#3164).
+        if relink_key is not None and _leaf_relinked(relink_key, file_path):
+            held = await self._hold_relinked_key(relink_key)
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": 0,
+                "errors": [],
+                "mutated": held,
+                "relinked": True,
+            }
 
         # Existence check FIRST — before the exclude guard. A source that is
         # missing must be held even if newly excluded, so old chunks cannot
@@ -2072,14 +2737,14 @@ class IndexEngine:
         # only metadata (no content), so statting an excluded file first is
         # safe — its content is still never read below. (#1566)
         try:
-            stat_result = file_path.stat()
+            stat_result = file_path.stat() if opened is None else os.fstat(opened.fileno())
         except (FileNotFoundError, NotADirectoryError):
             # File deleted/renamed away (NotADirectoryError: a parent component
             # was replaced by a file, so the path cannot exist) — purge its
             # stale chunks instead of a silent no-op.
             return await self._delete_missing_source(file_path, path_scope=path_scope)
         except OSError as exc:
-            held = await self._storage.hold_source(file_path, f"stat_error:{exc.errno}")
+            held = await self._hold_waiting(file_path, f"stat_error:{exc.errno}", key=written_key)
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2109,7 +2774,11 @@ class IndexEngine:
         # content read) and BEFORE the exclude guard, so an excluded file that
         # was swapped for a same-named directory is still cleaned up. (#1566)
         if not stat_module.S_ISREG(stat_result.st_mode):
-            deleted = await self._storage.delete_by_source(file_path)
+            # Keyed before the wait, next to the stat that judged it: a path
+            # relinked during the wait would delete the link target's rows.
+            gone_key = norm_path(file_path)
+            async with self._storage.transaction(wait=WRITER_WAIT_S):
+                deleted = await self._storage.delete_by_source(Path(gone_key), as_stored=True)
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2142,7 +2811,48 @@ class IndexEngine:
         )
         if _path_is_excluded(file_path, guard_roots, user_spec, walk_root=walk_root):
             logger.debug("Skipping excluded file %s", file_path)
-            return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
+            if written_key is not None and norm_path(file_path) != written_key:
+                # The exclusion helpers resolve the path themselves, so this
+                # answer is about whatever the path names now. If that is no
+                # longer the written file — a link to an excluded file put at
+                # the leaf since the open — it is a relink, not an exclusion:
+                # held, where the branches below would skip or purge (#3320).
+                held = await self._hold_relinked_key(written_key)
+                return {
+                    "total": 0,
+                    "indexed": 0,
+                    "skipped": 0,
+                    "deleted": 0,
+                    "errors": [],
+                    "mutated": held,
+                    "relinked": True,
+                }
+            if purge_key is None:
+                return {
+                    "total": 0,
+                    "indexed": 0,
+                    "skipped": 0,
+                    "deleted": 0,
+                    "errors": [],
+                    "excluded": True,
+                }
+            # The caller replaced this file, so its stored chunks describe bytes
+            # that are gone (#3158). Delete by the key captured before the locks:
+            # ``file_path`` may have become a link since, and a delete without
+            # ``as_stored`` would resolve it to the link's target. Like the chunk
+            # write, it waits out another task's write transaction instead of
+            # being refused at once and leaving those chunks searchable (#3171).
+            async with self._storage.transaction(wait=WRITER_WAIT_S):
+                deleted = await self._storage.delete_by_source(Path(purge_key), as_stored=True)
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": deleted,
+                "errors": [],
+                "mutated": deleted > 0,
+                "excluded": True,
+            }
 
         file_size = stat_result.st_size
         if file_size > _MAX_INDEX_FILE_BYTES:
@@ -2172,7 +2882,10 @@ class IndexEngine:
         # is that caller's job — see ``indexer_text`` for the one that has it.
         read_started = time.monotonic()
         try:
-            content = file_path.read_text(encoding="utf-8")
+            if opened is None:
+                content = file_path.read_text(encoding="utf-8")
+            else:
+                content = _opened_text(opened, file_path.name)
         except UnicodeDecodeError:
             logger.warning("Non-UTF-8 content in %s, replacing invalid bytes", file_path.name)
             content = file_path.read_text(encoding="utf-8", errors="replace")
@@ -2185,7 +2898,7 @@ class IndexEngine:
             # retain dir does not show it as an archive (#2833).
             return await self._delete_missing_source(file_path, path_scope=path_scope, absent=False)
         except OSError as exc:
-            held = await self._storage.hold_source(file_path, f"read_error:{exc.errno}")
+            held = await self._hold_waiting(file_path, f"read_error:{exc.errno}", key=written_key)
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2195,6 +2908,22 @@ class IndexEngine:
                 "mutated": held,
             }
 
+        # One resolution of the path just read, taken before any ``await``. It
+        # gives both this pass's key for the source (what ``norm_path`` returns,
+        # fallback included) and the path the gate judges under, so those two
+        # cannot name different files (#3290). The reads and writes below
+        # either use the key as stored or are checked against it by
+        # ``_require_same_source``: resolved again after an ``await``, a path
+        # relinked meanwhile names another source (#3173, #3180). Not covered:
+        # ``upsert_chunks`` resolves each chunk's source path itself when it
+        # writes, so a swap undone inside that call is stored under the link
+        # target's key (#3305).
+        # A written file is judged under the path its caller's preflight judged
+        # it under, and keyed by it: nothing is resolved here at all (#3320).
+        decision_path = (
+            _decision_path(file_path) if written_source is None else written_source.source_path
+        )
+        source_key = fold_path_form(str(decision_path))
         read_ms = (time.monotonic() - read_started) * 1000
         # Skip binary files (null bytes indicate non-text content)
         if "\x00" in content[:8192]:
@@ -2210,19 +2939,15 @@ class IndexEngine:
         # Adjudicate on the *canonical* path (#2076). ``classify_scope``
         # pattern-matches the path string and the two bulk paths disagree on
         # what they hand us — non-stream passes the discovered leaf as found
-        # (only the root was resolved), stream passes ``fp.resolve()``. That
+        # (only the root was resolved), stream passes ``resolve_path(fp)``. That
         # divergence was inert while every bypass needed an explicit
         # ``force_unsafe``; a file-declared exemption makes the scope decision
         # load-bearing on its own, so a user-dir symlink pointing at a
         # ``project_shared`` note must not be adjudicated as ``user``, and an
         # ``.md`` alias to a non-Markdown target must not claim a Markdown
-        # frontmatter declaration. Storage identity is deliberately NOT
-        # changed: chunks keep keying on ``file_path`` as before.
-        try:
-            decision_path = file_path.resolve()
-        except OSError:  # pragma: no cover - defensive: unreadable parent
-            decision_path = file_path
-
+        # frontmatter declaration. ``decision_path`` is the resolution this
+        # pass's key was taken from, above; the scope and manifest lookups
+        # below take it as given and resolve nothing again.
         if self._registry.get(decision_path.suffix) is None:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
@@ -2245,7 +2970,7 @@ class IndexEngine:
         # reaches every surface at once. The guard still decides: it honours
         # the declaration only for label-shaped hits, and hard-refuses it for
         # ``project_shared`` exactly as it does the valve.
-        scope_val, project_root = self._resolve_scope(decision_path)
+        scope_val, project_root, declared, projection = self._gate_inputs(decision_path, content)
         if force_unsafe and ingress_guarded and valve_text is None:
             # A memory tool's valve must say which bytes it covers; without
             # that it would cover whatever else the file holds by now.
@@ -2259,8 +2984,6 @@ class IndexEngine:
                 file_path.name,
             )
             force_unsafe = False
-        declared = declared_exemption(decision_path, content)
-        projection = self._prepare_index_projection(decision_path, content, scope_val)
         # Verbatim storage is the caller's explicit decision in two cases: a
         # file that declares its own frontmatter exemption, and the
         # ``force_unsafe`` valve. Carried out of this block so the chunker below
@@ -2293,6 +3016,7 @@ class IndexEngine:
                 hit_count=len(guard.hits),
                 scope=scope_val,
                 decision=guard.decision,
+                source_key=source_key,
             )
         if guard.decision not in ("pass", "bypassed", "exempted"):
             raise RuntimeError(f"unexpected enforce_write_guard decision: {guard.decision!r}")
@@ -2319,7 +3043,6 @@ class IndexEngine:
         # Namespace reassignment and trusted/bypassed ingress are never reused.
         from memtomem.indexing.source_receipt import content_hash, digest, reusable
         from memtomem.storage.sqlite_backend import SqliteBackend
-        from memtomem.storage.sqlite_helpers import norm_path
 
         # The source's stored scopes, read once under the lock and judged after
         # the diff below (#2923). Read here because a source held for losing
@@ -2329,7 +3052,26 @@ class IndexEngine:
         from memtomem.indexing.scope_guard import key_spellings, scope_change, scope_change_detail
         from memtomem.storage.source_holds import SCOPE_LOST_HOLD
 
-        stored_scopes = self._stored_scope_rows(key_spellings(norm_path(file_path)))
+        #
+        # Every index of an existing file reads here, so it waits out another
+        # task's write transaction instead of being refused at once (#3173).
+        # Writer reads below that follow it with no ``await`` in between (the
+        # embedding info, the receipt lookup and a receipt hit's chunk ids,
+        # and the diff state when enrichment is off) are covered by the same
+        # wait. A writer access after an ``await`` needs a wait of its own.
+        #
+        # The reads and writes below that would otherwise resolve the path
+        # again (scope rows, a receipt hit's chunk ids, the empty-file delete,
+        # the scope-loss hold) use ``source_key`` as stored.
+        scope_db = (
+            await self._storage._get_db_when_idle(wait=WRITER_WAIT_S)
+            if isinstance(self._storage, SqliteBackend)
+            else None
+        )
+        # The receipt lookup below resolves ``file_path`` again, with no
+        # ``await`` before it (#3173).
+        _require_same_source(file_path, source_key)
+        stored_scopes = self._stored_scope_rows(key_spellings(source_key), db=scope_db)
         held_scope_lost = any(r[3] == SCOPE_LOST_HOLD for r in stored_scopes)
 
         receipt_policy = ""
@@ -2349,6 +3091,9 @@ class IndexEngine:
             and not self._config.enrich_chunk_context
             and not self._config.auto_summarize
             and not held_scope_lost
+            # A receipt hit skips chunking, so it could not say which chunks
+            # an append became.
+            and append_region is None
         ):
             receipt_policy = digest(
                 {
@@ -2368,6 +3113,11 @@ class IndexEngine:
                     # which a chunker silently falls back from when absent.
                     "chunkers": _CHUNKER_VERSIONS,
                     "indexing": self._config.model_dump(mode="python"),
+                    # Not part of ``IndexingConfig`` but it changes every
+                    # bounded description, so a receipt written under the
+                    # other value must not let an unchanged source skip
+                    # re-chunking.
+                    "chunk_source_labels": self._chunk_source_labels,
                     "namespace": self._ns_config.model_dump(mode="python"),
                     "namespace_target": ns_decision.target,
                     # The whole effective projection, not just the guard input.
@@ -2401,8 +3151,34 @@ class IndexEngine:
                 self._embedder.dimension,
             )
             if reused is not None:
+                # Read with the receipt, under the scope read's wait: the
+                # checks below await, and nothing may suspend between them
+                # and the return, or the file could change after it was
+                # judged unchanged (#3173).
+                unchanged_chunk_ids = (
+                    [
+                        row[0]
+                        for row in receipt_storage._get_db()
+                        .execute(
+                            "SELECT id FROM chunks WHERE source_file=? ORDER BY id",
+                            (source_key,),
+                        )
+                        .fetchall()
+                    ]
+                    if self._embedder.dimension > 0
+                    else []
+                )
                 await self._validate_source_commit(file_path)
-                if not await self._source_unchanged(file_path, content):
+                # Identity before the content verdict, so a relink to another
+                # source reads as a relink however its bytes compare, or
+                # whether they can be read at all.
+                try:
+                    unchanged = await self._source_unchanged(file_path, content)
+                except OSError:
+                    _require_same_source(file_path, source_key)
+                    raise
+                _require_same_source(file_path, source_key)
+                if not unchanged:
                     raise RetryableError(
                         "Source changed during receipt validation; retry latest generation"
                     )
@@ -2421,23 +3197,17 @@ class IndexEngine:
                     "deleted": 0,
                     "errors": [],
                     "mutated": False,
+                    "current": True,
                     "exempted": int(exempted),
                     "namespace_decision": ns_decision,
                     "namespace_written": False,
-                    "unchanged_chunk_ids": [
-                        row[0]
-                        for row in receipt_storage._get_db()
-                        .execute(
-                            "SELECT id FROM chunks WHERE source_file=? ORDER BY id",
-                            (norm_path(file_path),),
-                        )
-                        .fetchall()
-                    ]
-                    if self._embedder.dimension > 0
-                    else [],
+                    "unchanged_chunk_ids": unchanged_chunk_ids,
+                    "source_key": source_key,
                 }
         index_started = time.monotonic()
-        new_chunks = self.chunk_content(file_path, content, exempt=masking_exempt)
+        new_chunks = self.chunk_content(
+            file_path, content, exempt=masking_exempt, projection=projection
+        )
         chunk_ms = (time.monotonic() - index_started) * 1000
 
         # Apply the namespace resolved above (explicit > preserved >
@@ -2467,7 +3237,8 @@ class IndexEngine:
             # emptied source writes no namespace, so there is nothing to
             # collapse, and refusing here would strand its rows as
             # permanently searchable content for a file with no content.
-            deleted = await self._storage.delete_by_source(file_path)
+            async with self._storage.transaction(wait=WRITER_WAIT_S):
+                deleted = await self._storage.delete_by_source(Path(source_key), as_stored=True)
             return {
                 "total": 0,
                 "indexed": 0,
@@ -2475,6 +3246,7 @@ class IndexEngine:
                 "deleted": deleted,
                 "errors": [],
                 "mutated": deleted > 0,
+                "current": True,
             }
 
         if ns_decision.reason == "mixed_force_refused":
@@ -2513,7 +3285,11 @@ class IndexEngine:
             from memtomem.indexing.chunk_context import enrich_context
 
             await enrich_context(
-                new_chunks, self._config, self._llm, cast("SqliteBackend", self._storage)
+                new_chunks,
+                self._config,
+                self._llm,
+                cast("SqliteBackend", self._storage),
+                check_source=lambda: _require_same_source(file_path, source_key),
             )
         existing_state = await self._storage.get_chunk_index_state(file_path)
         diff_result = compute_diff(existing_state, new_chunks)
@@ -2581,8 +3357,8 @@ class IndexEngine:
             # key. They keep their stored project scope, readable only there,
             # but stay searchable with the content they were indexed from; the
             # NFC/NFD key split behind that predates this check (#2926).
-            key = norm_path(file_path)
-            held = await self._storage.hold_source(file_path, SCOPE_LOST_HOLD)
+            key = source_key
+            held = await self._hold_waiting(file_path, SCOPE_LOST_HOLD, key=key)
             logger.warning(
                 "Refusing to re-index %s: its %s rows would become %s",
                 file_path.name,
@@ -2719,6 +3495,9 @@ class IndexEngine:
         # Wrap delete+upsert in a single transaction for atomicity. A busy
         # writer is waited out briefly rather than throwing away the embedding.
         async with self._storage.transaction(wait=WRITER_WAIT_S):
+            # Ahead of the guards below, which would otherwise report a relink
+            # during the embedding or the writer wait as their own refusal.
+            _require_same_source(file_path, source_key)
             await self._validate_source_commit(file_path)
             carried_sources = await self._summary_coverage_to_carry(
                 file_path, decision_path, existing_state, diff_result
@@ -2798,6 +3577,12 @@ class IndexEngine:
                     file_path, new_chunks, hash_matched, persisted_upserts, carried_sources
                 )
             await self._record_source_commit(file_path)
+            # After the transaction's last ``await``. The diff state, the
+            # upsert and the receipt resolve ``file_path``; if it now names
+            # another source, they wrote into that source's rows, and raising
+            # here rolls them back. Ahead of the content check below, so a
+            # relink reads as one whatever the target's bytes are (#3180).
+            _require_same_source(file_path, source_key)
             if receipt_policy and receipt_storage is not None:
                 from memtomem.indexing.source_receipt import record
 
@@ -2862,14 +3647,39 @@ class IndexEngine:
             "deleted": len(diff_result.to_delete),
             "errors": [],
             "mutated": mutated,
+            "current": True,
             "new_chunk_ids": [
                 chunk_id for chunk_id in truly_new_chunk_ids if chunk_id in persisted_upsert_ids
             ],
             "namespace_decision": ns_decision,
             "namespace_written": bool(persisted_upserts),
+            "source_key": source_key,
         }
         if unchanged_ids:
             result["unchanged_chunk_ids"] = unchanged_ids
+        if append_region is not None:
+            # Judged against the text that was chunked. ``chunk_content`` stamps
+            # every chunk of a masked projection with its redaction count, and
+            # masked chunks hold other text than ``content``, so the append
+            # stays unverified. Read from the chunks rather than ``projection``:
+            # they are what was chunked, whichever projection produced them.
+            # Only Markdown spans are judged: other chunkers decode virtual
+            # lines or keep a scalar's span for every fragment of it.
+            from memtomem.chunking.markdown import MarkdownChunker
+
+            appended_ids: tuple[UUID, ...] = ()
+            attribution: Attribution = "unverified"
+            if isinstance(self._registry.get(file_path.suffix), MarkdownChunker) and not any(
+                chunk.metadata.redaction_count for chunk in new_chunks
+            ):
+                committed = persisted_upsert_ids | {
+                    chunk.id for chunk in diff_result.unchanged + diff_result.metadata_only
+                }
+                appended_ids, attribution = attribute_append(
+                    content, append_region, new_chunks, committed
+                )
+            result["appended_chunk_ids"] = list(appended_ids)
+            result["appended_attribution"] = attribution
         if persisted_upserts:
             result["resolved_namespace"] = resolved_ns
         if exempted:
@@ -3044,13 +3854,16 @@ class IndexEngine:
             # Pre-compute per-file namespaces so the complete event surfaces
             # what was applied — single render across both stream and
             # non-stream paths (see ``_index_path_inner``). Resolved on the
-            # same ``fp.resolve()`` form the write below uses, so the
+            # same ``resolve_path(fp)`` form the write below uses, so the
             # preservation lookup and the write answer for the same path.
+            # ``resolve_path`` rather than ``Path.resolve()``: a non-recursive
+            # walk keeps a looping link, and 3.12's ``resolve()`` raises for
+            # it, which would abort the run before any file (#2906).
             # A store that cannot answer fails the run here, before any
             # write (issue #2018); the per-file runner still resolves inside
             # its own lock, and a failure there fails that file closed with
             # its type kept in ``retryable_errors``.
-            resolved_files = [fp.resolve() for fp in files]
+            resolved_files = [resolve_path(fp) for fp in files]
             prepass_namespaces = await self._resolve_namespaces_per_file(
                 resolved_files,
                 namespace,
@@ -3118,7 +3931,7 @@ class IndexEngine:
                         # below folds into this file's ``errors`` — the
                         # stream continues with the next file.
                         result, _ = await self._index_file_locked(
-                            fp.resolve(),
+                            resolve_path(fp),
                             force,
                             namespace=namespace,
                             on_chunk_progress=cb,
@@ -3257,6 +4070,8 @@ class IndexEngine:
                 "namespaces_preserved_against_rules": tally.preserved_against_rules,
                 "namespaces_reassigned": tally.reassigned,
                 "namespace_moves": list(tally.summary()),
+                "namespaces_restored_from_name": tally.restored_from_name,
+                "day_file_names_undecoded": tally.undecoded_names,
                 "chunks_missing_vectors": await self._count_missing_vectors(unchanged_ids),
             }
 
@@ -3312,33 +4127,69 @@ class IndexEngine:
             )
         return result
 
-    def _prepare_index_projection(self, path: Path, content: str, scope: str):
+    def _prepare_index_projection(
+        self, path: Path, content: str, scope: str, *, resolved: bool = False
+    ):
         from memtomem.indexing.reviewed_projection import prepare_reviewed_projection
         from memtomem.indexing.privacy_projection import prepare_index_content
 
         if self._config.index_masking_manifest_path:
             return prepare_reviewed_projection(
-                path, content, self._config.index_masking_manifest_path, scope=scope
+                path,
+                content,
+                self._config.index_masking_manifest_path,
+                scope=scope,
+                resolved=resolved,
             )
         return prepare_index_content(content, scope=scope)
 
-    def _judge_as_it_stands(self, file_path: Path, content: str, *, surface: str):
+    def _gate_inputs(
+        self, decision_path: Path, content: str
+    ) -> tuple[str, Path | None, str | None, IndexProjection]:
+        """What the redaction gate judges ``content`` with: scope, root, exemption, projection.
+
+        ``decision_path`` is one resolution of the file's path, the one a pass
+        takes its key from (:func:`_decision_path`). The scope and manifest
+        lookups take it as given, so a leaf replaced by a symlink after that
+        resolution is judged as the file that was read, not as the link's
+        target (#3191, #3290). The scope lookup still resolves the registered
+        project roots when it runs.
+
+        The gate, its two read-only twins and the chunker all get their answer
+        here, so they cannot disagree about a file.
+        """
+        scope_val, project_root = self._resolve_scope(decision_path, resolved=True)
+        declared = declared_exemption(decision_path, content)
+        projection = self._prepare_index_projection(
+            decision_path, content, scope_val, resolved=True
+        )
+        return scope_val, project_root, declared, projection
+
+    def _judge_as_it_stands(
+        self,
+        file_path: Path,
+        content: str,
+        *,
+        surface: str,
+        decision_path: Path | None = None,
+    ):
         """The gate's inputs for ``content`` at ``file_path``, and a recorder.
 
         Shared by the two read-only twins of the gate in ``_index_file`` —
-        :meth:`preview_redaction_decision` and :meth:`preflight_mutation` — so
-        they resolve the canonical path, scope, frontmatter exemption and
-        projection the same way the gate does. Returns the projection, the
-        unrecorded guard result, and a callable that runs the same guard with
-        recording on (counter and audit lines, exactly once).
+        :meth:`preview_redaction_decision` and :meth:`preflight_mutation`. The
+        scope, frontmatter exemption and projection come from
+        :meth:`_gate_inputs`, the same call the gate makes, so the twins cannot
+        drift from it. Returns the projection, the unrecorded guard result, and
+        a callable that runs the same guard with recording on (counter and
+        audit lines, exactly once).
+
+        ``decision_path`` is the resolution the bytes were read under, so a
+        path relinked since the read is not followed (#3191). Without it the
+        path is resolved here, once, as the gate resolves it.
         """
-        try:
-            decision_path = file_path.resolve()
-        except OSError:  # pragma: no cover - defensive: unreadable parent
-            decision_path = file_path
-        scope_val, _ = self._resolve_scope(decision_path)
-        declared = declared_exemption(decision_path, content)
-        projection = self._prepare_index_projection(decision_path, content, scope_val)
+        if decision_path is None:
+            decision_path = _decision_path(file_path)
+        scope_val, _, declared, projection = self._gate_inputs(decision_path, content)
         guard_input = content if declared else projection.guard_content
 
         def _guard(record: bool) -> privacy.WriteGuardResult:
@@ -3376,7 +4227,9 @@ class IndexEngine:
         _, _, guard, _ = self._judge_as_it_stands(file_path, content, surface="memory_doctor")
         return guard.decision
 
-    def preflight_mutation(self, file_path: Path, pre_image: bytes) -> MutationPreflight:
+    def preflight_mutation(
+        self, file_path: Path, pre_image: bytes, *, source_path: Path
+    ) -> MutationPreflight:
         """May a memory tool modify ``file_path``, whose bytes are ``pre_image``?
 
         Called under the caller's sidecar lock, before it writes. Judges the
@@ -3390,12 +4243,33 @@ class IndexEngine:
         re-index after the write would refuse the whole result anyway, and the
         write itself would already be on disk. See :class:`MutationPreflight`
         for the other two answers.
+
+        ``source_path`` is the path ``pre_image`` was read from, resolved with
+        the read (``memory_writer.read_with_source_key``). The bytes are judged
+        under it, and a refusal holds its stored key: resolved here or later, a
+        path replaced by a symlink after the read would judge the bytes under
+        the link target's scope (#3191) and hold the target, leaving the refused
+        source's chunks searchable (#3183).
+
+        If ``file_path`` no longer resolves to ``source_path``, or no longer
+        resolves at all, a write would reach a file nobody judged, so the answer
+        is ``relinked`` and the caller writes nothing. Bytes the gate refuses are
+        still refused and held under the read's key first. The judge's answer
+        for a relinked path is not relied on for the hold: the registered
+        project roots are resolved now, so a root directory itself replaced by a
+        link since the read makes the bytes read as user scope. The caller holds
+        the read's key either way (:meth:`hold_relinked_mutation`, #3291).
         """
+        source_key = fold_path_form(str(source_path))
+        try:
+            relinked = fold_path_form(str(resolve_path(file_path))) != source_key
+        except OSError:
+            relinked = True
         if not pre_image or self._registry.get(file_path.suffix) is None:
-            return MutationPreflight(None, False, True)
+            return MutationPreflight(None, False, True, relinked=relinked, source_key=source_key)
         text = indexer_text(pre_image, errors="replace")
         scope_val, projection, guard, replay = self._judge_as_it_stands(
-            file_path, text, surface="index"
+            file_path, text, surface="index", decision_path=source_path
         )
         rejection = None
         if guard.decision in ("blocked", "blocked_project_shared"):
@@ -3404,12 +4278,78 @@ class IndexEngine:
                 hit_count=len(guard.hits),
                 scope=scope_val,
                 decision=guard.decision,
+                source_key=source_key,
             )
         masking_locked = bool(self._config.index_masking_manifest_path) and bool(
             projection.redaction_count
         )
         valve_ok = not privacy.scan(text) and not projection.redaction_count
-        return MutationPreflight(rejection, masking_locked, valve_ok, replay)
+        return MutationPreflight(
+            rejection,
+            masking_locked,
+            valve_ok,
+            replay,
+            relinked=relinked,
+            source_key=source_key,
+        )
+
+    async def hold_relinked_mutation(self, file_path: Path, preflight: MutationPreflight) -> bool:
+        """Hold the source a preflight read when its path no longer resolves to it (#3291).
+
+        Called by every memory tool whose preflight came back ``relinked``,
+        before it asks for the ``blocker``. A relinked path gets no write, and
+        the source that was read is held with ``source_relinked`` under the
+        read's key, as stored, so its chunks leave search until the file is
+        indexed clean again.
+
+        The hold does not depend on what the judge said. Its scope answer can
+        be wrong exactly when the path was relinked: a registered project
+        directory replaced by a link makes ``project_shared`` bytes read as
+        user scope, so a refusal only that scope makes does not happen and
+        :meth:`refuse_mutation` is never called. Bytes the judge did refuse are
+        held by that method before a caller gets here, and its
+        ``redaction_blocked`` outranks this hold in the store.
+
+        Returns whether rows were held. A source with no chunks holds nothing,
+        and neither do rows stored under a key from before Unicode folding
+        (macOS NFD): the hold uses the folded key, as every stored-key hold
+        does, because one placed under the unfolded key would never lift
+        (#2907). Those rows stay searchable.
+        The hold moves the store's visibility epoch, which is what makes the
+        search pipeline drop its warmed answers; no caller has to. A hold that
+        fails is logged and reported as ``False``: the write is refused either
+        way, and the failure must not replace that refusal.
+        """
+        if not preflight.relinked:
+            raise ValueError(
+                "hold_relinked_mutation needs a preflight that found the path relinked"
+            )
+        if preflight.source_key is None:
+            return False
+        return await self.hold_relinked_source(file_path, preflight.source_key)
+
+    async def hold_relinked_source(self, file_path: Path, source_key: str) -> bool:
+        """Hold the rows stored under ``source_key``, the source a memory tool read (#3289).
+
+        For a tool that finds, after its preflight, that the path no longer
+        holds the file it read: :meth:`hold_relinked_mutation` when the
+        preflight saw it, and an append whose open saw it
+        (``memory_writer.SourceChangedError``). The key is the read's, as
+        stored, never resolved again. Returns whether rows were held; a hold
+        that fails is logged and reported as ``False``, because the write is
+        refused either way and the failure must not replace that refusal.
+        """
+        try:
+            held = await self._hold_waiting(file_path, RELINKED_HOLD, key=source_key)
+        except Exception as exc:
+            logger.error("Could not hold the chunks of relinked source %s: %s", file_path.name, exc)
+            return False
+        if held:
+            logger.warning(
+                "Source path relinked since it was read; holding its indexed chunks: %s",
+                file_path.name,
+            )
+        return held
 
     async def refuse_mutation(
         self, file_path: Path, preflight: MutationPreflight
@@ -3437,7 +4377,7 @@ class IndexEngine:
         await self._hold_blocked_source(file_path, rejection)
         return rejection
 
-    def _resolve_scope(self, file_path: Path) -> tuple[str, Path | None]:
+    def _resolve_scope(self, file_path: Path, *, resolved: bool = False) -> tuple[str, Path | None]:
         """Classify ``file_path`` into ``(scope, project_root)`` (ADR-0011 §2).
 
         Path-based — the same ``classify_scope`` helper that the config
@@ -3446,15 +4386,29 @@ class IndexEngine:
         (e.g. memoization, additional registry sources) land here
         without touching call sites.
         """
-        return classify_scope(file_path, self._config.project_memory_dirs)
+        return classify_scope(file_path, self._config.project_memory_dirs, resolved=resolved)
+
+    def _stored_source_keys(self, *, db: sqlite3.Connection | None = None) -> list[str]:
+        """Every distinct stored source key, read as :meth:`_stored_scope_rows` reads.
+
+        One scan of the covering ``(source_file, start_line)`` index. A store
+        that is not SQLite has no keys to compare.
+        """
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        if not isinstance(self._storage, SqliteBackend):
+            return []
+        conn = db if db is not None else self._storage._get_db()
+        return [row[0] for row in conn.execute("SELECT DISTINCT source_file FROM chunks")]
 
     def _stored_scope_rows(
-        self, keys: Iterable[str]
+        self, keys: Iterable[str], *, db: sqlite3.Connection | None = None
     ) -> list[tuple[str, str, str | None, str | None]]:
         """``(key, scope, project_root, hold reason)`` for each distinct stored row under ``keys``.
 
         Read on the writer connection, which a caller holding the source's lock
-        is the only one to write through for this source. A store that is not
+        is the only one to write through for this source: ``db`` when the
+        caller already waited for it, else ``_get_db()``. A store that is not
         SQLite has no rows to judge.
         """
         from memtomem.storage.sqlite_backend import SqliteBackend
@@ -3463,16 +4417,15 @@ class IndexEngine:
             return []
         keys = list(dict.fromkeys(keys))
         marks = ",".join("?" for _ in keys)
+        conn = db if db is not None else self._storage._get_db()
         return [
             (row[0], row[1], row[2], row[3])
-            for row in self._storage._get_db()
-            .execute(
+            for row in conn.execute(
                 "SELECT DISTINCT c.source_file, c.scope, c.project_root, h.reason "  # nosec B608
                 "FROM chunks c LEFT JOIN held_sources h ON h.source_file = c.source_file "
                 f"WHERE c.source_file IN ({marks})",
                 keys,
-            )
-            .fetchall()
+            ).fetchall()
         ]
 
     async def rewrite_refusal(
@@ -3481,22 +4434,51 @@ class IndexEngine:
         """Why a by-id rewrite of the source stored as ``stored_key`` must not run (#2923).
 
         Asked under the caller's source locks, before it writes. ``None`` means
-        the rewrite may proceed. Two refusals: the key now resolves to another
-        file, so the write would land there; or re-indexing the file would
-        store the source's project rows under another scope or project root.
+        the rewrite may proceed. Three refusals: the key now resolves to another
+        file, so the write would land there; the file is also stored under
+        another spelling of its path, whose rows would keep serving the lines
+        the rewrite removes (#3408); or re-indexing the file would store the
+        source's project rows under another scope or project root.
         """
         from memtomem.indexing.scope_guard import (
             key_spellings,
             relinked_detail,
             scope_change,
             scope_change_detail,
+            twin_detail,
         )
-        from memtomem.storage.sqlite_helpers import stored_key_moved
+        from memtomem.storage.sqlite_backend import SqliteBackend
+        from memtomem.storage.sqlite_helpers import (
+            source_twins,
+            stored_key_moved,
+            twin_candidates,
+        )
 
         name = Path(stored_key).name
+        # The scope read waits out another task's write transaction instead of
+        # being refused at once (#3179); the callers' locks are the ones the
+        # re-index after it already waits under. The relink check runs after
+        # the wait, so a key relinked while waiting is still refused before the
+        # caller reads or holds through it.
+        scope_db = (
+            await self._storage._get_db_when_idle(wait=WRITER_WAIT_S)
+            if isinstance(self._storage, SqliteBackend)
+            else None
+        )
+        # Every read on ``scope_db`` happens here, before the first ``await``:
+        # the idle writer is handed out only for reads that run before the next
+        # suspension, and after it another task may own an open transaction.
+        rows = self._stored_scope_rows(key_spellings(stored_key), db=scope_db)
+        candidates = twin_candidates(stored_key, self._stored_source_keys(db=scope_db))
         if await asyncio.to_thread(stored_key_moved, stored_key):
             return relinked_detail(name, op=op)
-        rows = self._stored_scope_rows(key_spellings(stored_key))
+        # Before ``if not rows``: an index-only delete takes no sidecar lock, so
+        # this key's own rows can be gone while the caller still holds the chunk
+        # it fetched, and the twin's rows would still serve the lines.
+        if candidates:
+            twins = await asyncio.to_thread(source_twins, stored_key, candidates)
+            if twins:
+                return twin_detail(stored_key, twins[0], op=op, surface=surface)
         if not rows:
             return None
         decision_path = await asyncio.to_thread(resolve_path, Path(stored_key))
@@ -3744,11 +4726,16 @@ def _merge_pair(current: Chunk, nxt: Chunk) -> Chunk:
     """
     hierarchy = _merged_hierarchy(current, nxt)
     content = _build_merged_content(current, nxt, hierarchy)
+    entry_times = [
+        t for t in (current.metadata.entry_created_at, nxt.metadata.entry_created_at) if t
+    ]
     new_meta = dataclasses.replace(
         current.metadata,
         heading_hierarchy=hierarchy,
         end_line=nxt.metadata.end_line,
         tags=tuple(set(current.metadata.tags) | set(nxt.metadata.tags)),
+        # A merged chunk was written when its earliest entry was (ADR-0043 §5).
+        entry_created_at=min(entry_times) if entry_times else None,
     )
     # Mirrors ``_build_merged_content``: a restored heading block is its lines
     # plus one blank, and the two bodies are joined by one blank line. Count

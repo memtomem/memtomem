@@ -58,7 +58,14 @@ def _parse_duration(spec: str) -> timedelta:
         raise click.BadParameter(f"invalid duration {spec!r}; expected like '30m', '24h', '7d'.")
     n = int(match.group(1))
     unit = _DURATION_UNITS[match.group(2).lower()]
-    return timedelta(**{unit: n})
+    try:
+        duration = timedelta(**{unit: n})
+        # The caller subtracts the duration from now; check that here so an
+        # oversized value is a parameter error, not an OverflowError later.
+        datetime.now(timezone.utc) - duration
+    except OverflowError:
+        raise click.BadParameter(f"duration {spec!r} is too large.") from None
+    return duration
 
 
 def _derive_session_namespace(agent_id: str, namespace: str | None) -> str:
@@ -463,6 +470,22 @@ def list_sessions(
             raise_cli_error(e)
 
 
+def _no_sessions_message(agent_id: str | None, since: str | None) -> str:
+    """Empty-list text that names the filters, so a wrong filter is visible (#2850).
+
+    Truthiness matches ``storage.list_sessions``: an empty ``--agent-id`` or
+    ``--since`` filters nothing there, so it is not named here either.
+    """
+    if not agent_id and not since:
+        return "No sessions found. Start one with `mm session start`."
+    parts = ["No sessions found"]
+    if agent_id:
+        parts.append(f"for --agent-id '{agent_id}'")
+    if since:
+        parts.append(f"since {since}")
+    return " ".join(parts) + "."
+
+
 async def _list_sessions(
     agent_id: str | None, since: str | None, limit: int, *, as_json: bool = False
 ) -> int:
@@ -486,7 +509,7 @@ async def _list_sessions(
         return len(sessions)
 
     if not sessions:
-        click.echo("No sessions found.")
+        click.echo(_no_sessions_message(agent_id, since))
         return 0
 
     click.echo(f"{'ID':<38}{'Agent':<15}{'Started':<22}{'Status'}")

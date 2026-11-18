@@ -128,6 +128,7 @@ async def _run_migrate(dry_run: bool, assume_yes: bool = False) -> None:
                     comp.storage,
                     old,
                     new,
+                    is_managed_source=comp.index_engine.is_managed_source,
                     merge=new in existing,
                 )
             except NamespaceMutationBusyError as exc:
@@ -241,10 +242,14 @@ async def _run_register(agent_id: str, description: str | None, color: str | Non
 
     namespace = f"{_CURRENT_PREFIX}{agent_id}"
     async with cli_components() as comp:
-        await comp.storage.set_namespace_meta(namespace, description=description, color=color)
+        await comp.storage.set_namespace_meta(
+            namespace, description=description, color=color, surface="cli_agent_register"
+        )
         if await comp.storage.get_namespace_meta(SHARED_NAMESPACE) is None:
             await comp.storage.set_namespace_meta(
-                SHARED_NAMESPACE, description="Shared knowledge base for all agents"
+                SHARED_NAMESPACE,
+                description="Shared knowledge base for all agents",
+                surface="cli_agent_register",
             )
     click.echo(f"Agent registered: {agent_id}")
     click.echo(f"- Namespace: {namespace}")
@@ -419,10 +424,18 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
             tags = list(chunk.metadata.tags) + [f"shared-from={chunk_id}"]
 
         from memtomem import privacy
-        from memtomem.tools.memory_writer import append_entry
+        from memtomem.tools.memory_writer import append_entry, entry_guard_text
 
+        title = (
+            "Shared: " + " > ".join(chunk.metadata.heading_hierarchy)
+            if chunk.metadata.heading_hierarchy
+            else "Shared: memory"
+        )
+
+        # The copy as it is written: the heading path becomes its title and
+        # the source's tags go with it.
         guard = privacy.enforce_write_guard(
-            chunk.content,
+            entry_guard_text(chunk.content, title, tags),
             surface="cli_agent_share",
             force_unsafe=force_unsafe,
             audit_context={"chunk_id": chunk_id, "target": target},
@@ -432,12 +445,6 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 f"Chunk content matches {len(guard.hits)} privacy pattern(s); share rejected. "
                 "Retry with --force-unsafe to bypass (audit-logged)."
             )
-
-        title = (
-            "Shared: " + " > ".join(chunk.metadata.heading_hierarchy)
-            if chunk.metadata.heading_hierarchy
-            else "Shared: memory"
-        )
 
         from datetime import datetime, timezone
 
@@ -516,12 +523,17 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 if mix_err is not None:
                     raise click.ClickException(mix_err)
                 from memtomem.indexing.engine import PrivacyRejection
-                from memtomem.tools.memory_mutation import appended_valve_text, preflight_refusal
+                from memtomem.tools.memory_mutation import (
+                    appended_valve_text,
+                    preflight_refusal,
+                    refuse_changed_append,
+                )
+                from memtomem.tools.memory_writer import SourceChangedError
 
                 # The re-index after the append judges the whole file: refuse a
                 # file whose content may not be indexed before writing anything.
                 needs_valve = guard.decision == "bypassed"
-                refusal, pre = await preflight_refusal(
+                refusal, judged = await preflight_refusal(
                     comp.index_engine,
                     path,
                     op="mm agent share",
@@ -530,15 +542,26 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 )
                 if refusal is not None:
                     raise click.ClickException(refusal.removeprefix("Error: "))
-                appended = append_entry(path, chunk.content, title=title, tags=tags)
+                try:
+                    appended = append_entry(
+                        path, chunk.content, title=title, tags=tags, judged=judged
+                    )
+                except SourceChangedError as exc:
+                    refusal = await refuse_changed_append(
+                        comp.index_engine, path, judged, op="mm agent share"
+                    )
+                    raise click.ClickException(refusal.removeprefix("Error: ")) from exc
                 try:
                     stats = await comp.index_engine.index_file(
                         path,
                         namespace=target,
                         ingress_guarded=True,
                         force_unsafe=needs_valve,
-                        valve_text=(appended_valve_text(pre, appended) if needs_valve else None),
+                        valve_text=(
+                            appended_valve_text(judged.data, appended.text) if needs_valve else None
+                        ),
                         lock_held=True,
+                        written_source=appended.source,
                     )
                 except PrivacyRejection as exc:
                     raise click.ClickException(
@@ -554,6 +577,12 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
     click.echo(f"Shared to namespace '{target}'.")
     click.echo(f"- File: {path}")
     click.echo(f"- Indexed chunks: {stats.indexed_chunks}")
+    from memtomem.tools.memory_mutation import append_warning
+
+    # Excluded, or replaced by a link, while the entry was appended.
+    warning = append_warning(stats, judged)
+    if warning is not None:
+        click.echo(f"Warning: {warning}", err=True)
 
 
 # ── search ──────────────────────────────────────────────────────────────

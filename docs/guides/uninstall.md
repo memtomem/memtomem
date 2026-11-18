@@ -143,7 +143,8 @@ During the transition, `mm uninstall` also inspects safe pre-#2037 runtime
 locations it can derive. It inventories only pid files attributable to the
 store being deleted (plus the transitional bare `server.pid`) and leaves other
 stores' `server-*.pid` files alone. Retained registry and lifecycle-lock
-sidecars are volatile and self-clean. Do not use a wildcard runtime-directory
+sidecars are volatile and self-clean. So are the empty lock files under
+`source-locks/`, one per file indexed from outside the memory directories. Do not use a wildcard runtime-directory
 deletion: it can erase active liveness evidence or another store's state.
 
 Startup *presence markers* under `<runtime dir>/presence/` (#2230 — one per

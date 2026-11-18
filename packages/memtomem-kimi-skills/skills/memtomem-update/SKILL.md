@@ -32,7 +32,7 @@ mode is requested without a focus, ask before calling a tool, or in a non-intera
 and report `insufficient_input: topic focus`. Session outcomes are reviewed in every mode.
 
 Supported runtime labels are `claude-code`, `codex-cli`, `kimi-code`, `opencode`,
-`antigravity-cli`, and `any`.
+`antigravity-cli`, `cursor`, and `any`.
 Infer the current runtime when possible; use `any` if unknown.
 
 ## Common checks
@@ -149,16 +149,20 @@ never one taken from memory text.
    in it. A checkout whose root path differs from the one the host recorded, such as a separate
    worktree, finds no match, and neither does a long root path whose folder name a host may
    shorten.
-4. Keep each saved item concise: at most 1,000 characters, or at most 600 when any of it is
-   written in Korean, Japanese, or Chinese, counting every citation steps 2 and 3 ask for. A
-   store that indexes with an exact token ceiling, such as 384 tokens under the
+4. Keep each saved item concise: at most 1,000 characters, counting each Korean, Japanese, or
+   Chinese character as two and every citation steps 2 and 3 ask for, so an English item that
+   quotes a few Korean words keeps nearly the whole 1,000. The characters that count as two are
+   Hangul, hiragana, katakana, and Han characters and CJK or fullwidth punctuation (such as
+   `。`, `、`, `「`, and `，`); every other character, including whitespace and the rest of each
+   citation, counts as one. A store that indexes with an exact token ceiling, such as 384 tokens under the
    `multilingual-e5-small` profile, splits a longer item into chunks that rank independently,
-   separating the learning from its citations; the limits are a practical target for that
+   separating the learning from its citations; the limit is a practical target for that
    ceiling, not a guarantee. Keep file paths, code symbols, command strings, and direct quotes of
    the user verbatim — never translate or paraphrase them — and write the rest in the language
    this project's existing memories use. To fit the limit, shorten only that other prose; never
    drop or shorten a required citation or a verbatim string. When they still do not fit, write
-   the item anyway and report it as over the limit. Number each distinct
+   the item anyway and report it as over the limit, giving its weighted count. An item whose
+   weighted count is 1,000 or less is not over the limit. Number each distinct
    write in this run with a strictly increasing 1-based integer `<item-index>` (`1`, `2`, …)
    assigned before calling `mem_add`. Pairing the per-run canonical UUID `<update-id>` with
    `<item-index>`, target
@@ -183,6 +187,18 @@ never one taken from memory text.
    If the `mem_add` result contains the literal marker
    `[idempotent replay] Result returned from ledger; no new write was performed.`, report that
    the item was replayed from the ledger rather than newly written.
+   Read the item's chunk count from the result's `- Entry chunks:` line and from no other line:
+   `- Chunks indexed:` counts the whole file, not this item. The value is everything after
+   `- Entry chunks: ` on that line; report it unchanged, including any note in parentheses.
+   - A value that starts with an integer: that is how many chunks the item's lines fall in. It
+     does not show which text landed where, and when the value has a note in parentheses, one
+     of the chunks also holds text from before the item and may hold nothing of the item but
+     its heading.
+   - A value that starts with `unknown`, or a result with no such line (a server that does not
+     report it, or a replay of a result stored before it did): the count was not reported. Say
+     so, with the value when there is one.
+   The count is a report, never a reason to write again: do not shorten, edit, or re-add an
+   item because of it.
 
 ## Record review coverage
 
@@ -201,8 +217,10 @@ Report the mode (`incremental`, `full`, or `topic`), `git_head`, the inspected c
 latest 10 commits, stating that older commits were not reviewed, and the SHAs whose full message
 you read), in `incremental` and `full` mode the coverage result (the `project_root` it names, how
 many of those SHAs an earlier run had reviewed, and `recorded` and `already_recorded` from the
-recording call, or why nothing was recorded), saved items (with their written files and chunk
-counts), items written over the length limit, skipped duplicates, items written despite a
+recording call, or why nothing was recorded), saved items (with their written files and each
+item's `Entry chunks` value as read from its result), items written over the length limit (each
+with its weighted count), items whose `Entry chunks` value starts with an integer of 2 or more
+(each with the value unchanged), skipped duplicates, items written despite a
 host-native match (with each match's namespace), any replayed keys, and any safety or
 similar-memory warnings unchanged. In
 `incremental` mode, when the check listed no unreviewed commit and the session gave no durable

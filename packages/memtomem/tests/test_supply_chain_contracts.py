@@ -6,6 +6,7 @@ import ast
 import json
 import re
 import shlex
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -88,7 +89,13 @@ def test_every_external_workflow_action_is_immutable() -> None:
 
 def test_uv_toolchain_pin_matches_ci_release_and_sbom_workflows() -> None:
     versions: dict[str, str] = {}
-    for name in ("ci.yml", "release.yml", "release-sbom.yml"):
+    for name in (
+        "ci.yml",
+        "release.yml",
+        "release-langchain.yml",
+        "release-sbom.yml",
+        "release-langchain-sbom.yml",
+    ):
         text = (_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
         matches = re.findall(r'^\s*UV_VERSION:\s*"([^"]+)"\s*$', text, re.MULTILINE)
         assert len(matches) == 1, f"{name} must declare one UV_VERSION"
@@ -194,6 +201,28 @@ def test_codex_plugin_matches_contract_and_marketplace() -> None:
     )
 
 
+def test_codex_plugin_composer_icon_is_a_bundled_png() -> None:
+    # The awesome-codex-plugins catalog requires interface.composerIcon and
+    # fetches the bundle on its own, so the icon has to live inside
+    # plugins/memtomem. Codex reads the path only when it starts with "./" and
+    # has no ".." component. The catalog asks for under 50 KB (its maintainer
+    # wrote 50 KiB); 50,000 bytes is the stricter of the two. It is the Claude
+    # plugin's icon byte for byte.
+    bundle = (_ROOT / "plugins/memtomem").resolve()
+    path = _json("plugins/memtomem/.codex-plugin/plugin.json")["interface"]["composerIcon"]
+    assert path.startswith("./")
+    assert ".." not in path.split("/")
+    icon = (bundle / path).resolve()
+    assert icon.is_relative_to(bundle)
+    data = icon.read_bytes()
+    assert len(data) < 50_000
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert data[12:16] == b"IHDR"
+    assert int.from_bytes(data[16:20], "big") == int.from_bytes(data[20:24], "big") == 512
+    claude_icon = _ROOT / "packages/memtomem-claude-plugin/.claude-plugin/icon.png"
+    assert data == claude_icon.read_bytes()
+
+
 def test_codex_plugin_bundle_ships_its_license_and_security_policy() -> None:
     # Plugin catalogs mirror plugins/memtomem on its own, without the repository
     # root. Redistributing it alone must carry the full license text (Apache-2.0
@@ -274,7 +303,22 @@ def test_hermes_plugin_matches_contract() -> None:
     # Decision pinned here independently of the renderer: a pinned minor that uv can
     # download, not ">=3.12" (which picked a Python newer than the classifiers list).
     assert contract["hermes"]["python"] == "3.12"
+    # Also pinned here: huggingface-hub 1.20.0 is the first release that checks
+    # HF_HUB_DISABLE_IMPLICIT_TOKEN before it opens a saved login (with the flag set and
+    # an unreadable token file, 1.19.0 raised PermissionError and 1.20.0 did not). A
+    # lower floor brings back the read the flag is there to prevent.
+    hub_floor = "huggingface-hub>=1.20"
+    assert contract["hermes"]["hub_floor"] == hub_floor
     requirement = f"memtomem[{','.join(core['mcp_extras'])}]=={core['version']}"
+    launch_args = [
+        "--python",
+        "3.12",
+        "--from",
+        requirement,
+        "--with",
+        hub_floor,
+        "memtomem-server",
+    ]
 
     manifest = _json("packages/memtomem-hermes-plugin/plugin.json")
     assert manifest["$schema"] == "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
@@ -286,29 +330,62 @@ def test_hermes_plugin_matches_contract() -> None:
             "memtomem": {
                 "type": "stdio",
                 "command": "uvx",
-                "args": ["--python", "3.12", "--from", requirement, "memtomem-server"],
+                "args": launch_args,
                 "env": {
                     "MEMTOMEM_TOOL_MODE": core["tool_mode"],
                     "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage",
                     "ORT_DISABLE_TELEMETRY": "1",
+                    # Hermes only: its catalog rules forbid a plugin reading `.env` files
+                    # or another tool's login (here, the saved Hugging Face one).
+                    "PYTHON_DOTENV_DISABLED": "1",
+                    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
                 },
             }
         },
     }
 
     # Per launch line, not per file: a stale pin or a dropped --python beside a correct
-    # one elsewhere passes a whole-file `in`. Tokens run to the next quote, space or
-    # bracket, so `0.6.5rc1` is captured whole rather than matching `0.6.5`.
+    # one elsewhere passes a whole-file `in`. Each line is compared whole with the line
+    # the argument list spells, so the order, the shell quoting and anything else on the
+    # line are part of the comparison: uvx passes an option written after
+    # `memtomem-server` to the server, and a POSIX shell reads an unquoted `>=1.20` as a
+    # redirection. Either way the huggingface-hub floor would not apply.
+    # The Korean entry is the same launch with the korean extra added.
+    korean_requirement = f"memtomem[{','.join([*core['mcp_extras'], 'korean'])}]=={core['version']}"
+    korean_args = [korean_requirement if arg == requirement else arg for arg in launch_args]
+    assert korean_args != launch_args
+
     readme = (root / "README.md").read_text(encoding="utf-8")
     launches = [line for line in readme.splitlines() if "memtomem[" in line]
-    assert len(launches) == 2, launches  # requirements line + manual config.yaml args
-    for line in launches:
-        assert re.findall(r"memtomem\[[^\]]*\]==[^\s'\"\],]*", line) == [requirement], line
-        assert re.findall(r"""--python["']?,?\s*["']?([^\s'",\]]+)""", line) == ["3.12"], line
-    # Both launch examples run uvx: the requirements line spells it, the manual entry
-    # sets it as `command:` right above its `args:` line.
-    assert launches[0].lstrip(" -`").startswith("uvx --python"), launches[0]
-    assert re.findall(r"^ *command: *(\S+)\n *args: \[\"--python\"", readme, re.M) == ["uvx"]
+    assert launches == [
+        f"  `{shlex.join(['uvx', *launch_args])}`.",  # under Requirements
+        f"    args: {json.dumps(korean_args)}",  # the Korean config.yaml entry
+        f"    args: {json.dumps(launch_args)}",  # the project-scope config.yaml entry
+    ]
+
+    # A manual entry replaces this package's, so it must carry the whole launch: the
+    # same command and arguments, and the env. Without PYTHON_DOTENV_DISABLED the server
+    # reads ~/.env again, and Hermes refuses a non-string value (an unquoted `1` is an
+    # int once parsed).
+    blocks = [
+        block
+        for block in re.findall(r"^```yaml\n(.*?)^```", readme, re.M | re.S)
+        if "mcp_servers:" in block
+    ]
+    assert len(blocks) == 2, blocks
+    rendered = _json("packages/memtomem-hermes-plugin/mcp.json")
+    rendered_env = rendered["mcpServers"]["memtomem"]["env"]
+    for block, args in zip(blocks, (korean_args, launch_args), strict=True):
+        example = yaml.safe_load(block)["mcp_servers"]["memtomem"]
+        assert example["command"] == "uvx"
+        assert example["args"] == args
+        # Without cwd, Hermes starts a native entry in its own working directory,
+        # so a project registered there would get project scope.
+        assert isinstance(example.get("cwd"), str), example
+        example_env = example["env"]
+        for key, value in rendered_env.items():
+            assert isinstance(example_env.get(key), str), (key, example_env.get(key))
+            assert example_env[key] == value, (key, example_env[key], value)
 
     _assert_hermes_install_commands(readme, "packages/memtomem-hermes-plugin")
 
@@ -352,6 +429,153 @@ def test_antigravity_plugin_matches_contract() -> None:
     ), installs
 
 
+def test_cursor_plugin_matches_contract() -> None:
+    contract = _contract()
+    core = contract["core"]
+    root = _ROOT / "packages/memtomem-cursor-plugin"
+    requirement = f"memtomem[{','.join(core['mcp_extras'])}]=={core['version']}"
+
+    manifest = _json("packages/memtomem-cursor-plugin/.cursor-plugin/plugin.json")
+    assert manifest["name"] == "memtomem"
+    assert manifest["version"] == contract["plugins"]["cursor_version"]
+    assert manifest["license"] == "Apache-2.0"
+    assert manifest["skills"] == "./skills/"
+    assert manifest["mcpServers"] == "./mcp.json"
+    # The same launch as the Antigravity bundle: Cursor starts the server outside the
+    # project too, and the pinned Python keeps uvx off a Command Line Tools 3.9.
+    assert _json("packages/memtomem-cursor-plugin/mcp.json") == _json(
+        "packages/memtomem-antigravity-plugin/mcp_config.json"
+    )
+    assert _json("packages/memtomem-cursor-plugin/mcp.json")["mcpServers"]["memtomem"]["args"] == [
+        "--python",
+        "3.12",
+        "--from",
+        requirement,
+        "memtomem-server",
+    ]
+
+    # The logo is a bundled file: .gitignore ignores *.png, so a missing exception
+    # would ship a manifest pointing at nothing.
+    logo = (root / manifest["logo"]).resolve()
+    assert logo.is_relative_to(root.resolve())
+    assert logo.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    # check-ignore exits 1 when the path is not ignored (0 = ignored, 128 = error).
+    # --no-index: without it a tracked file is never reported, so the check would pass
+    # after the .gitignore exception is removed.
+    logo_path = logo.relative_to(_ROOT.resolve()).as_posix()
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", "--no-index", "--", logo_path],
+        cwd=_ROOT,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert ignored.returncode == 1, (ignored.returncode, ignored.stderr)
+
+    # The marketplace takes this directory on its own, so it carries the license and
+    # the security policy the way plugins/memtomem does.
+    assert (root / "LICENSE").read_bytes() == (_ROOT / "LICENSE").read_bytes()
+    policy = (root / "SECURITY.md").read_text(encoding="utf-8")
+    assert "https://github.com/memtomem/memtomem/blob/main/SECURITY.md" in policy
+    assert "https://github.com/memtomem/memtomem/security/advisories/new" in policy
+
+    # The repo-root catalog points at this directory and names no version of its own.
+    catalog = _json(".cursor-plugin/marketplace.json")
+    assert [entry["source"] for entry in catalog["plugins"]] == ["packages/memtomem-cursor-plugin"]
+    assert all("version" not in entry for entry in catalog["plugins"])
+
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    launches = [line for line in readme.splitlines() if "memtomem[" in line]
+    assert len(launches) == 1, launches
+    assert re.findall(r"memtomem\[[^\]]*\]==[^\s'\"\],]*", launches[0]) == [requirement]
+    assert re.findall(r"--python\s+(\S+)", launches[0]) == ["3.12"], launches[0]
+    # Install and update copy the same directory. Copying onto an existing install nests
+    # the new bundle inside the old one, so the update copy follows a delete.
+    copies = re.findall(r"^cp -R (\S+) ~/.cursor/plugins/local/memtomem$", readme, re.M)
+    assert copies == ["memtomem/packages/memtomem-cursor-plugin"] * 2, copies
+    update = re.search(r"^git -C memtomem pull\n(.*?)\n```", readme, re.M | re.S)
+    assert update is not None
+    assert update[1].splitlines() == [
+        "rm -rf ~/.cursor/plugins/local/memtomem",
+        "cp -R memtomem/packages/memtomem-cursor-plugin ~/.cursor/plugins/local/memtomem",
+    ], update[1]
+
+
+def test_openclaw_bundle_matches_contract() -> None:
+    contract = _contract()
+    core = contract["core"]
+    root = _ROOT / "packages/memtomem-openclaw-bundle"
+    requirement = f"memtomem[{','.join(core['mcp_extras'])}]=={core['version']}"
+
+    # ClawHub publishes a bundle only under a Codex, Claude or Cursor marker; this one is
+    # a Codex manifest, and ClawHub takes the release version from it.
+    manifest = _json("packages/memtomem-openclaw-bundle/.codex-plugin/plugin.json")
+    assert manifest["name"] == "memtomem"
+    assert manifest["version"] == contract["plugins"]["openclaw_version"]
+    assert manifest["license"] == "Apache-2.0"
+    assert manifest["skills"] == "./skills/"
+    assert manifest["mcpServers"] == "./.mcp.json"
+    # The catalog name and one category; without `id`, ClawHub names the package after
+    # the folder.
+    assert _json("packages/memtomem-openclaw-bundle/openclaw.plugin.json") == {
+        "id": "memtomem",
+        "categories": ["memory"],
+    }
+    # Both hosts start the server in the plugin directory, where it would otherwise read
+    # ~/.env, so the bundle shares the Hermes launch env except for the one key that
+    # answers a Hermes catalog rule (no saved Hugging Face login), and its launch line
+    # carries no huggingface-hub floor. No Agent Plugins `type` key either.
+    hermes_server = _json("packages/memtomem-hermes-plugin/mcp.json")["mcpServers"]["memtomem"]
+    hermes_only = {"HF_HUB_DISABLE_IMPLICIT_TOKEN"}
+    assert hermes_only <= set(hermes_server["env"])
+    expected_server = {
+        "command": "uvx",
+        "args": ["--python", "3.12", "--from", requirement, "memtomem-server"],
+        "env": {k: v for k, v in hermes_server["env"].items() if k not in hermes_only},
+    }
+    assert _json("packages/memtomem-openclaw-bundle/.mcp.json") == {
+        "mcpServers": {"memtomem": expected_server}
+    }
+    assert expected_server["env"]["PYTHON_DOTENV_DISABLED"] == "1"
+
+    # Bundled files .gitignore would otherwise drop (*.png, .mcp.json). check-ignore
+    # exits 1 when the path is not ignored; --no-index so a tracked file is still judged.
+    for bundled in ("assets/icon.png", ".mcp.json"):
+        ignored = subprocess.run(
+            ["git", "check-ignore", "-q", "--no-index", "--", f"{root.name}/{bundled}"],
+            cwd=root.parent,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        assert ignored.returncode == 1, (bundled, ignored.returncode, ignored.stderr)
+    # ClawHub's catalog artwork: a PNG at assets/icon.png, at most 512 KiB; the same
+    # image as the Codex plugin's.
+    icon = (root / "assets/icon.png").read_bytes()
+    assert icon[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(icon) <= 512 * 1024
+    assert icon == (_ROOT / "plugins/memtomem/assets/icon.png").read_bytes()
+
+    # ClawHub uploads this directory on its own.
+    assert (root / "LICENSE").read_bytes() == (_ROOT / "LICENSE").read_bytes()
+    policy = (root / "SECURITY.md").read_text(encoding="utf-8")
+    assert "https://github.com/memtomem/memtomem/blob/main/SECURITY.md" in policy
+    assert "https://github.com/memtomem/memtomem/security/advisories/new" in policy
+
+    # Codex's own marketplace still lists only plugins/memtomem.
+    codex_catalog = _json(".agents/plugins/marketplace.json")
+    assert [entry["source"]["path"] for entry in codex_catalog["plugins"]] == ["./plugins/memtomem"]
+
+    # The README's install line and its messaging-agent deny rule, which names every tool
+    # the bundle registers (OpenClaw prefixes them `memtomem__`).
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    installs = [line for line in readme.splitlines() if line.startswith("openclaw plugins install")]
+    assert installs == [
+        "openclaw plugins install --force --accept-capabilities ./packages/memtomem-openclaw-bundle"
+    ], installs
+    assert '"family-chat": { tools: { deny: ["memtomem__*"] } },' in readme
+
+
 def test_hermes_memory_plugin_matches_contract() -> None:
     contract = _contract()
     root = _ROOT / "packages/memtomem-hermes-memory"
@@ -360,9 +584,12 @@ def test_hermes_memory_plugin_matches_contract() -> None:
 
     manifest = yaml.safe_load((root / "plugin.yaml").read_text(encoding="utf-8"))
     # No `hooks:` key: a memory provider registers through register(ctx), not hooks.
-    assert set(manifest) == {"name", "version", "description"}, manifest
+    assert set(manifest) == {"name", "version", "description", "requires_hermes"}, manifest
     assert manifest["name"] == "memtomem-memory"
     assert manifest["version"] == contract["plugins"]["hermes_memory_version"]
+    # Catalog rule 14: the floor is declared here too, and it is a SemVer lower bound.
+    assert manifest["requires_hermes"] == contract["hermes"]["memory_requires_hermes"]
+    assert re.fullmatch(r">=\d+\.\d+\.\d+", manifest["requires_hermes"]), manifest
 
     # Hermes's survival contract for a user plugin: no dependency declarations, nothing to
     # install. The provider imports the standard library and Hermes, nothing else.
@@ -375,7 +602,12 @@ def test_hermes_memory_plugin_matches_contract() -> None:
             imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             imported.add(node.module.split(".")[0])
-    assert imported - set(sys.stdlib_module_names) == {"agent", "hermes_cli"}, imported
+    # hermes_constants: the public ``hermes_home_key`` (catalog rule 9 lists the module).
+    assert imported - set(sys.stdlib_module_names) == {
+        "agent",
+        "hermes_cli",
+        "hermes_constants",
+    }, imported
 
     # The release the provider refuses to run below: one value in the code, the contract
     # and the README.

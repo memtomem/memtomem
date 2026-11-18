@@ -93,6 +93,12 @@ class ChunkMetadata:
     retrieval_context: str = ""  # bounded description; never part of body identity
     redaction_count: int = 0  # source-level count; indexed projection is read-only
     source_read_only: bool = False  # no safe whole-line source rewrite for this chunk
+    # The entry's ``> created:`` time, parsed from the file (ADR-0043 §5). Not a
+    # stored column: ``chunk_content`` copies it onto ``Chunk.created_at`` so a
+    # chunk the store has never seen is dated by its entry, not by the index
+    # run. Lives here rather than on ``Chunk`` because merging and splitting
+    # rebuild ``Chunk`` objects but carry metadata through ``dataclasses.replace``.
+    entry_created_at: datetime | None = None
 
 
 def _like_glob_matches(pattern: str, value: str) -> bool:
@@ -470,8 +476,6 @@ class ContextInfo:
     chunk_position: int = 0  # 1-indexed
     total_chunks_in_file: int = 0
     context_tier_used: str | None = None  # "full" | "standard" | "minimal" | None
-    ranked_siblings: tuple[object, ...] = ()  # RankedSibling instances (Feature C)
-    related_chunks: tuple[object, ...] = ()  # cross-source related chunks (Feature I)
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,6 +512,32 @@ class ChunkLink:
     namespace_target: str
     created_at: datetime
     source_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkTopology:
+    """Where a chunk sits in its source and what points at it.
+
+    Facts as stored, for a reader deciding whether two chunks with the same
+    body are the same record. None of them is a verdict on what may be removed.
+
+    A line span is *recorded* when ``start_line >= 1`` and ``end_line >=
+    start_line``; the structured chunker stores ``0, 0`` for values it cannot
+    place. The two span fields are ``None`` for a chunk without a recorded
+    span, and a sibling without one takes no part in either.
+    """
+
+    only_in_source: bool  # no other stored chunk has this source_file
+    at_source_start: bool | None  # no sibling starts on an earlier line
+    span_shared: bool | None  # a sibling's line span overlaps this one's
+    consolidated_into: int  # summaries covering this chunk (outgoing edges)
+    consolidates: int  # chunks this one summarises (incoming edges)
+    other_relations: int  # edges of any other type, either direction
+    # ``chunk_links`` rows this chunk is the source of, as (link_type, count)
+    # sorted by type. The source of a ``shared`` row is the chunk a copy was
+    # made from; the source of a ``summarizes`` row is the summary.
+    links_out: tuple[tuple[str, int], ...]
+    links_in: tuple[str, ...]  # link types of rows this chunk is the target of
 
 
 @dataclass(frozen=True, slots=True)
@@ -610,3 +640,48 @@ class IndexingStats:
     # source instead (#2923). The reason is also in ``errors``; this lets a
     # by-id rewrite tell its caller that its change is on disk but held.
     scope_held: bool = False
+    # ADR-0043: files with no stored rows that took their namespace from their
+    # day-file name, and day-file-shaped names that did not decode, which fell
+    # back to the session binding or the rules (committed writes only, both).
+    # The second is the signal that a rebuild did not recover every namespace.
+    # Appended last for positional construction compatibility.
+    namespaces_restored_from_name: int = 0
+    day_file_names_undecoded: int = 0
+    # Files the exclude guard skipped after they were handed to the engine:
+    # a single-file ``index_file`` call, or a walked file whose exclusion was
+    # installed after discovery. Files a directory walk filtered out at
+    # discovery are not counted. With ``index_file(purge_if_excluded=True)``
+    # the chunks stored under the path's own key were also removed, and
+    # ``deleted_chunks`` says how many (#3158). Appended last for positional
+    # construction compatibility.
+    excluded_files: int = 0
+    # 1 when ``index_file`` found the path no longer holding the file its
+    # caller wrote: the chunks stored under that file's key were held, and
+    # nothing was indexed in its place. Set by a call that names the written
+    # file (``written_source``, #3320: a link, or another file, at the path)
+    # and by ``hold_if_relinked=True`` (#3164: the leaf replaced by a
+    # symlink). Appended last for positional construction compatibility.
+    relinked_files: int = 0
+    # 1 when ``index_file`` left the file's stored chunks describing the content
+    # it read: its chunk write committed (even if the AI summary refresh after
+    # the commit then failed, which is then the only entry in ``errors``), every
+    # chunk was already current, or an emptied file's rows were removed. 0 on
+    # every refusal and hold, several of which report no error at all (an
+    # unreadable file's rows are held with ``errors`` empty), so a caller that
+    # must know whether a file it wrote was indexed reads this, not ``errors``
+    # (#3168). Only that call sets it. Appended last for positional
+    # construction compatibility.
+    current_files: int = 0
+    # The chunks an append became, set only by an ``index_file`` call that
+    # passed ``append_region`` (#3292). Unlike ``new_chunk_ids`` they are this
+    # append's alone, judged from the text the call chunked, and they include a
+    # chunk that kept an existing id because its content matched. In file
+    # order. ``appended_attribution`` says how cleanly: ``"exact"`` when every
+    # one's span starts on a line the append wrote, ``"merged"`` when one starts
+    # on a line from before it (a short entry merged into the previous section),
+    # and ``"unverified"`` with no ids wherever a span cannot say what a chunk
+    # holds or the file was not the text the caller expected (see
+    # ``memtomem.indexing.append_attribution.attribute_append``), and when the
+    # call did not ask. Appended last for positional construction compatibility.
+    appended_chunk_ids: tuple[UUID, ...] = ()
+    appended_attribution: Literal["exact", "merged", "unverified"] = "unverified"

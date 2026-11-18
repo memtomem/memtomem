@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from memtomem.web.deps import get_storage
+from memtomem.web.routes._writer_wait import WRITER_BUSY_READ_DETAIL, writer_busy_as_503
 from memtomem.web.schemas.sessions import (
     SessionEventsResponse,
     SessionEventOut,
@@ -23,7 +24,8 @@ async def list_sessions(
     storage=Depends(get_storage),
 ) -> SessionsListResponse:
     """List episodic memory sessions."""
-    rows = await storage.list_sessions(agent_id=agent_id, since=since, limit=limit)
+    with writer_busy_as_503(WRITER_BUSY_READ_DETAIL):
+        rows = await storage.list_sessions(agent_id=agent_id, since=since, limit=limit)
     sessions = [SessionOut(**r) for r in rows]
     return SessionsListResponse(sessions=sessions, total=len(sessions))
 
@@ -40,6 +42,7 @@ async def get_session_events(
     contain ``/``, and the default converter 404s on those. The id is only ever
     a SQL parameter here, never a filesystem path, so matching slashes is safe.
     """
-    events = await storage.get_session_events(session_id)
+    with writer_busy_as_503(WRITER_BUSY_READ_DETAIL):
+        events = await storage.get_session_events(session_id)
     out = [SessionEventOut(**e) for e in events]
     return SessionEventsResponse(session_id=session_id, events=out, total=len(out))

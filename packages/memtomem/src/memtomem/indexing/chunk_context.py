@@ -10,9 +10,12 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from memtomem.chunking.bounded import TokenBudget
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.llm.utils import strip_llm_response
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from memtomem.config import IndexingConfig
     from memtomem.llm.base import LLMProvider
     from memtomem.models import Chunk
@@ -31,7 +34,16 @@ async def enrich_context(
     config: IndexingConfig,
     llm: LLMProvider | None,
     storage: SqliteBackend,
+    *,
+    check_source: Callable[[], None] | None = None,
 ) -> None:
+    """Describe each chunk with the LLM and cache the descriptions under the chunks' source.
+
+    ``check_source`` runs inside the cache write's transaction, after its last
+    ``await``. The write resolves the source path; a caller whose path may have
+    been relinked during the LLM calls passes a check that raises then, and the
+    raise rolls the write back instead of caching under the link target (#3180).
+    """
     if not config.enrich_chunk_context or llm is None or not chunks:
         return
     budget = TokenBudget(config)
@@ -83,4 +95,9 @@ async def enrich_context(
             chunk.metadata = replace(chunk.metadata, retrieval_context=structural)
             logger.warning("Chunk description unavailable; retaining structural context")
 
-    await storage.set_chunk_descriptions(source, current)
+    # After the LLM calls, so another task may own the writer by now: wait it
+    # out rather than fail the index at once (#3173).
+    async with storage.transaction(wait=WRITER_WAIT_S):
+        await storage.set_chunk_descriptions(source, current)
+        if check_source is not None:
+            check_source()

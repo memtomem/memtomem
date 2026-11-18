@@ -1,0 +1,164 @@
+# langchain-memtomem
+
+A [LangGraph](https://github.com/langchain-ai/langgraph) `BaseStore` whose
+`search(query=...)` runs the [memtomem](https://github.com/memtomem/memtomem)
+search pipeline — query expansion, BM25 and dense fusion, optional
+cross-encoder rerank, time decay, MMR, entity boost — over one Markdown
+projection per item, in an index the store owns.
+
+- **Each item is a file a person can open and diff.** A JSON record is the
+  source of truth; an indexed item also has a Markdown projection beside it.
+- **The index is the store's.** It lives under the root you choose, built
+  from a configuration the store assembles itself: nothing from your own
+  memtomem's `config.json`, `config.d` or `MEMTOMEM_*` variables reaches it,
+  and the store writes its records and index only under its root. It reads
+  that configuration once, to find which project tier the root is in.
+  Outside the root, the store can also touch memtomem's shared paths: with
+  ONNX embedding or the default reranker, model files are downloaded to
+  memtomem's model cache (`~/.memtomem/cache/fastembed` unless
+  `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH` names another
+  directory), and opening an index that needs a schema migration takes a lock
+  in memtomem's runtime directory (`/tmp/memtomem-<uid>` on POSIX) and removes
+  aged stale entries from the instance registries it reads. `docs/protocol.md` lists these.
+- **The store is the application's memory**, not the developer's: its
+  namespaces are your users and threads. If you want to read it from your
+  own memtomem, add `<root>/projections` to `indexing.read_only_memory_dirs`
+  in your personal configuration.
+
+## Install
+
+```bash
+pip install langchain-memtomem
+```
+
+Requires Python 3.12+, `langgraph>=1.0,<2` and `memtomem>=0.7.9,<0.8`, the
+first memtomem release whose `create_components` takes the options the store
+passes (the package refuses to import against a memtomem older than 0.7.4,
+which lacks the ADR-0042 public names). Embedding is off by default (`embedding.provider = "none"`,
+BM25 only, no model download); pass an `embedding` section to turn it on.
+
+## Use
+
+```python
+from langchain_memtomem import MemtomemPipelineStore
+
+store = await MemtomemPipelineStore.open("/var/app/memory")
+
+await store.aput(("users", "alice"), "pref-1", {"text": "prefers window seats", "kind": "pref"})
+await store.aput(("users", "alice"), "pref-2", {"text": "allergic to peanuts"}, index=False)
+
+hits = await store.asearch(("users",), query="seat preference", filter={"kind": "pref"}, limit=5)
+for item in hits:
+    print(item.namespace, item.key, item.score, item.value)
+
+await store.adelete(("users", "alice"), "pref-1")
+await store.aclose()
+```
+
+`get`, `list_namespaces` and a query-less `search` read the records only.
+`search(query=...)` ranks projections through the pipeline and returns whole
+items, paginated over items. `index=False` stores an item without a
+projection; it is listed and filtered, never ranked. `async with
+MemtomemPipelineStore(root) as store:` opens on entry and closes on exit. A synchronous
+`store.put(...)` / `store.search(...)` works outside a running event loop.
+
+With an embedder and a reranker, both of which need memtomem's `onnx` extra in
+the same environment:
+
+```bash
+pip install langchain-memtomem 'memtomem[onnx]'
+```
+
+```python
+store = await MemtomemPipelineStore.open(
+    "/var/app/memory",
+    config={
+        "embedding": {"provider": "onnx", "model": "multilingual-e5-small"},
+        "rerank": {"enabled": True},
+        "search": {"cache_ttl": 5.0},
+    },
+    max_chunks_per_search=400,
+)
+```
+
+`config` takes the sections of memtomem's `Mem2MemConfig` you want to set
+(`embedding`, `search`, `rerank`, …). `storage` and `indexing` belong to the
+store and are refused, so this release has no chunking override. A top-level
+section `Mem2MemConfig` does not define is ignored, not refused; an unknown key
+inside a known section is refused.
+
+### BM25, dense or hybrid
+
+`retrieval` picks which retrievers a query search runs. It takes the same keys
+as memtomem's `MemtomemHybridStore`:
+
+```python
+store = await MemtomemPipelineStore.open(
+    "/var/app/memory",
+    config={"embedding": {"provider": "onnx", "model": "multilingual-e5-small"}},
+    retrieval={"mode": "hybrid", "weights": [1.0, 1.0], "rrf_k": 60},
+)
+```
+
+- `"hybrid"` (the default) fuses BM25 and dense with reciprocal-rank fusion,
+  `weights` being `[bm25, dense]`. Without an embedder, or when the dense leg
+  cannot run, it ranks by BM25 alone.
+- `"bm25"` runs keyword search only.
+- `"dense"` runs vector search only. It needs an embedder: opening without one
+  raises `ValueError`. A query whose dense leg cannot run (the query
+  embedding or the vector lookup failed, or the index was built with another
+  embedding model) raises `DenseSearchUnavailable` instead of returning
+  nothing.
+
+`weights` apply to `"hybrid"` only, and are validated in every mode. Set the
+legs either here or with `config["search"]` (`enable_bm25`, `enable_dense`,
+`rrf_weights`, `rrf_k`), not both: giving both is refused. The choice is not
+saved under the root; pass it again when you reopen. Every mode indexes the
+same way, so changing it on a later open needs no reindex.
+
+## What to know
+
+- **Recall is bounded.** A query search asks the pipeline for at most
+  `max_chunks_per_search` chunks in one pass (default 200). It starts with a
+  smaller window and doubles it until it has `offset + limit` items or the
+  window reaches that bound, so a query whose filter matches little can run
+  several passes; `rerank.max_pool` does not lower the bound.
+- **Read-after-write.** The instance that wrote sees its write at once.
+  Another store instance over the same root sees it after its
+  `search.cache_ttl` (30 s by default), or at once if a cached hit disagrees
+  with the files.
+- **Two instances over one root** — two processes, or two stores in one —
+  serialise per item on memtomem's own file lock. An interrupted write is
+  repaired when the store is next opened, or when a query hits the item.
+- **Project tiers.** If the root is inside a directory registered in your
+  memtomem as a `project_shared` tier (git-tracked), opening it requires
+  `confirm_project_shared=True`, and `force_unsafe` is refused there. The
+  project registry is the one thing the store reads from your personal
+  memtomem configuration.
+- **Secrets.** Every write runs memtomem's redaction guard over the record
+  and over the projection text before anything is written. A hit refuses the
+  write; `force_unsafe=True` on the store lets it through, except in a
+  `project_shared` tier.
+- **Names.** Each namespace segment and the key encode to at most 200
+  characters on disk (up to 124 bytes of UTF-8 each), and a whole namespace
+  to at most 256; a longer one is refused at `put`. The encoding is
+  single-case, so names that differ only in case stay apart on macOS and
+  Windows too.
+- **Scores depend on the retrievers that ran.** With one retriever active
+  and no session-summary rescue results, `item.score` is its raw score (Okapi
+  BM25, or `1 / (1 + distance)` for dense). Otherwise it is a
+  reciprocal-rank-fusion score. That includes the default without an
+  embedder, where the dense leg is on but finds nothing. A reranker's score
+  replaces either one when it rescored the results, and any enabled score
+  modifiers (time decay, access, importance, entity boosts) multiply on top.
+  Compare scores within one store configuration only.
+- **TTLs** are not supported in this version: an explicit `ttl=` raises
+  `NotImplementedError` (LangGraph's own check, since `supports_ttl` is
+  `False`).
+
+The full protocol — write order, repair table, interruption matrix, search
+widening, measurements — is in [`docs/protocol.md`](docs/protocol.md).
+
+## License
+
+Apache-2.0, the same as memtomem.

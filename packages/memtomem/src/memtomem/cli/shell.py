@@ -7,6 +7,8 @@ import shlex
 
 import click
 
+from memtomem.tools.temporal import format_source_name
+
 
 @click.command()
 def shell() -> None:
@@ -166,7 +168,7 @@ async def _cmd_ask(comp, args: list[str]) -> None:
             if r.chunk.metadata.heading_hierarchy
             else ""
         )
-        source = str(r.chunk.metadata.source_file).split("/")[-1]
+        source = format_source_name(r.chunk.metadata.source_file)
         label = heading or source
 
         click.echo(f"  {click.style(f'[{r.rank}]', fg='green')} {label} ({r.score:.2f})")
@@ -192,12 +194,13 @@ async def _cmd_add(comp, args: list[str]) -> None:
     from datetime import datetime, timezone
 
     from memtomem import privacy
-    from memtomem.tools.memory_writer import append_entry
+    from memtomem.tools.memory_writer import append_entry, entry_guard_text
 
     # Interactive shell has no inline ``--force-unsafe`` syntax; on a
     # hit the user is told to retry via ``mm add --force-unsafe`` so
-    # the bypass remains an explicit, audit-logged action.
-    guard = privacy.enforce_write_guard(content, surface="cli_shell_add")
+    # the bypass remains an explicit, audit-logged action. The guard reads
+    # the entry as written, like every other appender.
+    guard = privacy.enforce_write_guard(entry_guard_text(content), surface="cli_shell_add")
     if guard.decision == "blocked":
         click.secho(
             f"Content matches {len(guard.hits)} privacy pattern(s); write rejected. "
@@ -253,24 +256,35 @@ async def _cmd_add(comp, args: list[str]) -> None:
         memory_lock_path,
     )
     from memtomem.indexing.engine import PrivacyRejection
-    from memtomem.tools.memory_mutation import preflight_refusal
+    from memtomem.tools.memory_mutation import (
+        append_warning,
+        preflight_refusal,
+        refuse_changed_append,
+    )
+    from memtomem.tools.memory_writer import SourceChangedError
 
     # Held across the preflight, the append and the re-index, like every other
     # memory write: the preflight's answer is about the file as it stands, and
     # only the lock keeps it standing until the re-index reads it.
     try:
         async with async_file_lock(memory_lock_path(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
-            refusal, _ = await preflight_refusal(
+            refusal, judged = await preflight_refusal(
                 comp.index_engine, target, op="add", needs_valve=False, surface="shell"
             )
             if refusal is not None:
                 comp.search_pipeline.invalidate_cache()
                 click.secho(refusal.removeprefix("Error: "), fg="red")
                 return
-            append_entry(target, content)
+            try:
+                appended = append_entry(target, content, judged=judged)
+            except SourceChangedError:
+                refusal = await refuse_changed_append(comp.index_engine, target, judged, op="add")
+                comp.search_pipeline.invalidate_cache()
+                click.secho(refusal.removeprefix("Error: "), fg="red")
+                return
             try:
                 stats = await comp.index_engine.index_file(
-                    target, ingress_guarded=True, lock_held=True
+                    target, ingress_guarded=True, lock_held=True, written_source=appended.source
                 )
             except PrivacyRejection as exc:
                 comp.search_pipeline.invalidate_cache()
@@ -290,6 +304,10 @@ async def _cmd_add(comp, args: list[str]) -> None:
         comp.search_pipeline.invalidate_cache()
 
     click.secho(f"Added to {target.name} ({stats.indexed_chunks} chunks indexed)", fg="green")
+    # Excluded, or replaced by a link, while the entry was appended.
+    warning = append_warning(stats, judged)
+    if warning is not None:
+        click.secho(warning, fg="yellow")
 
 
 async def _cmd_recall(comp, args: list[str]) -> None:
@@ -308,11 +326,20 @@ async def _cmd_recall(comp, args: list[str]) -> None:
     # scope filter — interactive ``recall`` in a registered project
     # cwd should surface project_shared / project_local rows alongside
     # user-tier ones, matching the contract ``mm mem recall`` honours.
+    from memtomem.models import NamespaceFilter
     from memtomem.server.tools.search import _resolve_project_context_root
 
     project_context_root = _resolve_project_context_root(comp)
+    # The namespaces ``mm recall`` shows with no ``--namespace``: system ones
+    # (``archive:*``, ``agent-runtime:*``) stay hidden (#3117). ``mm recall
+    # --namespace`` is the way to read them.
     chunks = await comp.storage.recall_chunks(
-        since=since, limit=20, project_context_root=project_context_root
+        since=since,
+        limit=20,
+        namespace_filter=NamespaceFilter.parse(
+            None, system_prefixes=tuple(comp.config.search.system_namespace_prefixes)
+        ),
+        project_context_root=project_context_root,
     )
 
     if not chunks:
@@ -321,7 +348,7 @@ async def _cmd_recall(comp, args: list[str]) -> None:
 
     click.secho(f"Recent memories (last {days} days):", fg="cyan")
     for c in chunks:
-        src = str(c.metadata.source_file).split("/")[-1]
+        src = format_source_name(c.metadata.source_file)
         snippet = c.content[:80].replace("\n", " ")
         click.echo(f"  {click.style(src, fg='bright_black')} {snippet}")
 

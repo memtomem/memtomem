@@ -57,7 +57,12 @@ from memtomem.context._canonical_txn import (
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import InvalidNameError, Layout, validate_name
-from memtomem.context._runtime_targets import resolve_import_runtimes, runtime_fanout_root
+from memtomem.memory_scope import ProjectEntryRelinked
+from memtomem.context._runtime_targets import (
+    relinked_skip,
+    resolve_import_runtimes,
+    runtime_fanout_root,
+)
 from memtomem.context._sync_atomic import (
     ON_DROP_LEVELS,
     AtomicSyncAdapter,
@@ -473,8 +478,7 @@ def generate_all_commands(
         surface: Gate A audit identifier, forwarded verbatim to the
             engine's privacy scans. The CLI relies on the default
             ``"cli_context_sync"``; the Web sync route passes
-            ``"web_context_commands_sync"`` and the MCP tools pass
-            ``"mcp_context_generate"`` / ``"mcp_context_sync"`` (#1246).
+            ``"web_context_commands_sync"`` (#1246).
         force_unsafe: Reviewed Gate A bypass (ADR-0011 §5) forwarded to
             the engine. ``True`` lets a reviewed false positive fan out
             to ``user`` / ``project_local``; ``project_shared`` stays
@@ -655,11 +659,19 @@ def extract_commands_to_canonical(
         )
 
     # ── Gemini branch — TOML → canonical Markdown conversion ──
-    try:
-        gemini_dir = runtime_fanout_root("commands", "gemini", scope, project_root)
-    except KeyError:
-        gemini_dir = None
-    if "gemini" in runtimes and gemini_dir is not None and gemini_dir.is_dir():
+    gemini_dir = None
+    if "gemini" in runtimes:
+        # Resolved only when Gemini was asked for: a linked ``.gemini`` must
+        # not fail a Claude-only pull.
+        try:
+            gemini_dir = runtime_fanout_root("commands", "gemini", scope, project_root)
+        except KeyError:
+            gemini_dir = None
+        except ProjectEntryRelinked as exc:
+            # Nothing is copied from behind a link into the canonical store.
+            skipped.append(relinked_skip("gemini", "gemini", exc))
+            gemini_dir = None
+    if gemini_dir is not None and gemini_dir.is_dir():
         gemini_label = f"gemini ({gemini_dir})"
         for toml_file in sorted(gemini_dir.glob("*.toml")):
             cmd_name = toml_file.stem
@@ -761,7 +773,7 @@ def extract_commands_to_canonical(
                         canonical_content.encode("utf-8"),
                         resolve_target=_resolve,
                         overwrite=overwrite,
-                        snapshot_note="pre-overwrite snapshot (import from gemini)",
+                        snapshot_note="pre-overwrite snapshot (pull from gemini)",
                         lock_timeout=lock_remaining(),
                     )
                 except TimeoutError:

@@ -49,6 +49,18 @@ from memtomem.storage.sqlite_visibility import (
 
 logger = logging.getLogger(__name__)
 
+
+def _row_screen(hide_unavailable: bool) -> str:
+    """The source-hold screen a context window's count and seek both apply.
+
+    One fragment for both statements, so the ordinal can only count the rows
+    the seek is allowed to return. Both are fixed SQL with no parameters.
+    """
+    if hide_unavailable:
+        return f"{NOT_WITHHELD_CHUNKS} AND {VISIBLE_SOURCE_CHUNKS}"
+    return NOT_WITHHELD_CHUNKS
+
+
 # Hard ceiling on the ``k`` of a sqlite-vec KNN query (``embedding MATCH ?``
 # with an inner ``LIMIT``). sqlite-vec 0.1.9 rejects anything larger with
 # ``k value in knn query too large, provided <k> and the limit is 4096``; it is
@@ -73,7 +85,9 @@ _VISIBLE_SOURCE = VISIBLE_SOURCE_CHUNKS
 
 #: The two ``chunks_fts`` columns, as fts5 column-filter names (#2224).
 #: ``content`` is what a search is *for*; ``source_file`` is a fallback so
-#: typing a filename still finds that file, never a competitor to prose.
+#: typing a filename still finds that file, never a competitor to prose. It
+#: holds only the file's name without its suffix (``fts_source_text``), not
+#: the path: a directory word is shared by every chunk under it (#3208).
 _FTS_CONTENT_COLUMN = "content"
 _FTS_SOURCE_COLUMN = "source_file"
 
@@ -189,18 +203,23 @@ def _restrict_to_column(column: str, body: str) -> str:
     return "{" + column + "} : (" + body + ")"
 
 
-def _column_match(column: str, query: str, *, use_or: bool) -> str:
+def _column_match(column: str, query: str, *, use_or: bool, tokenizer: str = "unicode61") -> str:
     """Tokenize *query* and restrict it to one column — one call, one analysis.
 
     The search path builds the bodies itself (it needs each form once, not once
     per column); this is the convenience spelling the tests and any future
     single-shot caller use.
     """
-    return _restrict_to_column(column, _fts.tokenize_for_fts(query, for_query=True, use_or=use_or))
+    return _restrict_to_column(
+        column, _fts.tokenize_for_fts(query, for_query=True, use_or=use_or, tokenizer=tokenizer)
+    )
 
 
 class SearchOpsMixin:
     """Search, recall, context-window, and audit read operations for SqliteBackend."""
+
+    _fts_tokenizer: str  # set by ``SqliteBackend.__init__``
+    _bm25_path_fallback: bool  # set by ``SqliteBackend.__init__``
 
     async def bm25_search(
         self,
@@ -211,8 +230,11 @@ class SearchOpsMixin:
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
         source_filter: str | None = None,
+        *,
+        deadline: float | None = None,
     ) -> list[SearchResult]:
-        async with self._lease_read_db() as db:
+        """``deadline`` bounds only the wait for a read connection (``_lease_read_db``)."""
+        async with self._lease_read_db(deadline=deadline) as db:
             ns_clause = ""
             ns_params: list = []
             if namespace_filter:
@@ -243,9 +265,9 @@ class SearchOpsMixin:
             # ``fts5(content, source_file)`` and an unqualified MATCH searches
             # both, so a term appearing only in a chunk's *path* used to
             # retrieve it and — every column weighted 1.0 in the default
-            # ``rank`` — score as a relevance signal. ``source_file`` is stored
-            # raw, so unicode61 splits it into components and every directory
-            # and filename word became a searchable term: on a real
+            # ``rank`` — score as a relevance signal. ``source_file`` then held
+            # the raw path, so unicode61 split it into components and every
+            # directory and filename word became a searchable term: on a real
             # 6,995-chunk store, 71 of the top 100 hits for ``plans`` were
             # chunks about something else, surfaced because they live under
             # ``.claude/plans/``.
@@ -256,9 +278,12 @@ class SearchOpsMixin:
             # scored 0.0 still occupies a BM25 slot and still contributes
             # positive fused relevance downstream. It has to not be retrieved.
             #
-            # The fallback keeps filename lookup working — typing a path word
+            # The fallback keeps filename lookup working — typing a file's name
             # still finds that file's chunks — but only once nothing in any
             # chunk's *content* matches, so a path can never outrank prose.
+            # The column holds only that name (``fts_source_text``): with the
+            # whole path, a word of the memory dir's root, or the extension,
+            # matched every chunk under it and returned them all (#3208).
             # No weights are needed either way: under a column-qualified MATCH
             # ``bm25(chunks_fts, 1.0, 0.0)`` and the bare ``rank`` score
             # identically, because the excluded column contributes nothing to
@@ -283,9 +308,20 @@ class SearchOpsMixin:
             # for the four ``(column, form)`` expressions directly would analyse
             # the query once per expression, which for a morphological backend
             # is the expensive half of the call.
-            and_body = _fts.tokenize_for_fts(query, for_query=True)
-            or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
+            tokenizer = self._fts_tokenizer
+            and_body = _fts.tokenize_for_fts(query, for_query=True, tokenizer=tokenizer)
+            or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True, tokenizer=tokenizer)
             bodies = [and_body] if or_body == and_body else [and_body, or_body]
+            # A backend built with ``bm25_path_fallback=False`` never reaches
+            # the path column. Its rows' file names are the owner's
+            # bookkeeping, not names a user types, but one can still spell a
+            # word (langchain-memtomem's key ``V`` encodes to ``sky``), and the
+            # fallback would return that row for it (#3205).
+            columns = (
+                (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN)
+                if self._bm25_path_fallback
+                else (_FTS_CONTENT_COLUMN,)
+            )
 
             def _query(conn: sqlite3.Connection) -> list:
                 # ADR-0011 §6 + PR-D review #2: filter must run *inside* the
@@ -314,7 +350,7 @@ class SearchOpsMixin:
                        ORDER BY fts.rank, {tie_break}, c.id
                        LIMIT ?"""
                 rows: list = []
-                for column in (_FTS_CONTENT_COLUMN, _FTS_SOURCE_COLUMN):
+                for column in columns:
                     for body in bodies:
                         rows = conn.execute(
                             sql,
@@ -365,14 +401,25 @@ class SearchOpsMixin:
         source_filter: str | None = None,
         *,
         exhaustive: bool = False,
+        escalate: bool = True,
+        deadline: float | None = None,
     ) -> list[SearchResult]:
+        """``escalate=False`` keeps a non-exhaustive search to its first KNN pass.
+
+        ``deadline`` bounds only the wait for a read connection (``_lease_read_db``).
+
+        For a best-effort caller (query expansion's heading probe) a selective
+        filter would otherwise drive the larger attempts, up to a full-table
+        pass, for a handful of rows; it gets fewer than ``top_k`` instead.
+        ``exhaustive`` is one full pass already and ignores it.
+        """
         # bm25-only mode (dimension=0) — no chunks_vec table to query. Return
         # early instead of raising OperationalError that the search pipeline
         # would log as a misleading "Dense search unavailable" warning.
         if not self._has_vec_table:
             return []
 
-        async with self._lease_read_db() as db:
+        async with self._lease_read_db(deadline=deadline) as db:
             # Validate the query width HERE, not by sniffing sqlite-vec's error on
             # the first MATCH. ``chunks_vec`` is legitimately empty while chunks
             # survive — ``reset_embedding_meta`` drops and recreates the vector
@@ -513,15 +560,13 @@ class SearchOpsMixin:
                 # available, so retrying cannot find more). Clamped and de-duplicated
                 # so a large ``top_k`` cannot spend three identical round-trips.
                 attempts: list[int] = []
-                for raw_k in (
-                    [total_vec_rows or 1]
-                    if exhaustive
-                    else [
-                        max(top_k * 5, 100),
-                        max(top_k * 50, 1000),
-                        total_vec_rows,
-                    ]
-                ):
+                if exhaustive:
+                    schedule = [total_vec_rows or 1]
+                elif escalate:
+                    schedule = [max(top_k * 5, 100), max(top_k * 50, 1000), total_vec_rows]
+                else:
+                    schedule = [max(top_k * 5, 100)]
+                for raw_k in schedule:
                     clamped = max(1, min(raw_k, knn_ceiling))
                     if clamped not in attempts:
                         attempts.append(clamped)
@@ -620,6 +665,8 @@ class SearchOpsMixin:
         scope_filter: ScopeFilter | None,
         project_context_root: Path | None,
         as_of_unix: int | None,
+        hide_unavailable: bool,
+        deadline: float | None = None,
     ) -> dict[UUID, ContextWindowRows | None]:
         """Physical neighbours plus visible ordinal/total, without listing the file.
 
@@ -639,6 +686,9 @@ class SearchOpsMixin:
         A row withheld by a redaction hold (#2777) is neither counted nor
         returned as a neighbour, and each statement judges that in its own
         snapshot, so no neighbour is returned that was withheld when read.
+        With ``hide_unavailable`` the same goes for a row ranked search hides
+        for any other source hold or a pending check (#3114), with the same
+        per-statement judgement; see the protocol for which caller passes it.
         """
         if not anchor_ids:
             return {}
@@ -653,6 +703,7 @@ class SearchOpsMixin:
             project_context_root=project_context_root,
             as_of_unix=as_of_unix,
         )
+        screen = _row_screen(hide_unavailable)
         # One pass per file. ``ROWS BETWEEN UNBOUNDED PRECEDING AND 1
         # PRECEDING`` is the "strictly before" the ordinal is defined on, and
         # ``SUM(vis) OVER ()`` the file's visible total; subtracting the
@@ -666,7 +717,9 @@ class SearchOpsMixin:
         # CTE can end in an INSERT and it should not have to parse one to find
         # out. This spelling is the same plan and is visibly a read.
         wanted = [str(a) for a in anchor_ids]
-        async with self._lease_read_db() as db:
+        # ``deadline`` (a search's ``deadline_ms``) bounds only the wait for a
+        # read connection; the reads themselves run to completion.
+        async with self._lease_read_db(deadline=deadline) as db:
             rows = db.execute(
                 f"""
                 SELECT id, start_line, rid, vis, COALESCE(visible_before, 0), visible_all
@@ -679,7 +732,7 @@ class SearchOpsMixin:
                            SUM(vis) OVER () AS visible_all
                     FROM (
                         SELECT id, start_line, rowid AS rid,
-                               CASE WHEN ({vis_sql}) AND {NOT_WITHHELD_CHUNKS}
+                               CASE WHEN ({vis_sql}) AND {screen}
                                     THEN 1 ELSE 0 END AS vis
                         FROM chunks WHERE source_file=?
                     )
@@ -702,8 +755,12 @@ class SearchOpsMixin:
                 _, start_line, rid, vis, visible_before, visible_all = row
                 key = (start_line, rid, str(anchor_id))
                 result[anchor_id] = ContextWindowRows(
-                    before=self._neighbor_rows(db, norm_source, key, window, before=True),
-                    after=self._neighbor_rows(db, norm_source, key, window, before=False),
+                    before=self._neighbor_rows(
+                        db, norm_source, key, window, before=True, screen=screen
+                    ),
+                    after=self._neighbor_rows(
+                        db, norm_source, key, window, before=False, screen=screen
+                    ),
                     visible_before=int(visible_before),
                     visible_total_excluding_anchor=int(visible_all or 0) - int(vis),
                 )
@@ -717,6 +774,7 @@ class SearchOpsMixin:
         window: int,
         *,
         before: bool,
+        screen: str,
     ) -> list[Chunk]:
         """The ``window`` rows physically adjacent to the anchor.
 
@@ -732,10 +790,10 @@ class SearchOpsMixin:
         between would move the anchor past its own key and hand it back as one
         of its neighbours — the match rendered as its own context.
 
-        The physical window is chosen first and withheld rows are dropped
-        from it after, in the same statement: filtering before the ``LIMIT``
-        would reach past a withheld row for a more distant one and present it
-        as adjacent (#2777).
+        The physical window is chosen first and the rows ``screen`` rejects
+        are dropped from it after, in the same statement: filtering before the
+        ``LIMIT`` would reach past a withheld row for a more distant one and
+        present it as adjacent (#2777).
         """
         if window <= 0:
             return []
@@ -745,7 +803,7 @@ class SearchOpsMixin:
             "SELECT * FROM chunks WHERE rowid IN ("
             f"SELECT rowid FROM chunks WHERE source_file=? AND (start_line, rowid) {op} (?, ?) "
             f"AND id <> ? ORDER BY start_line {direction}, rowid {direction} LIMIT ?"
-            f") AND {NOT_WITHHELD_CHUNKS} "  # nosec B608
+            f") AND {screen} "  # nosec B608
             f"ORDER BY start_line {direction}, rowid {direction}",
             (norm_source, start_line, rid, anchor_id, window),
         ).fetchall()

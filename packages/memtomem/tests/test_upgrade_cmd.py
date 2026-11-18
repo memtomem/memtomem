@@ -1617,6 +1617,17 @@ def test_version_specifier_rejected(monkeypatch, fake_uv, force_tty):
     assert calls == []
 
 
+def test_version_with_a_trailing_newline_rejected(monkeypatch, fake_uv, force_tty):
+    # ``match`` + ``$`` accepted "0.1.30\n" and passed "memtomem==0.1.30\n" to uv.
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--version", "0.1.30\n"])
+    assert result.exit_code != 0
+    assert "not a bare PEP 440 release" in result.output
+    assert calls == []
+
+
 def test_version_prerelease_accepted(monkeypatch, fake_uv, force_tty):
     calls, _configure = fake_uv
     _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
@@ -1816,3 +1827,142 @@ def test_dry_run_skips_db_probe(monkeypatch, tmp_path, fake_uv, force_tty):
     result = CliRunner().invoke(cli, ["upgrade", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert calls == []
+
+
+# ── one termination per process (#3381) ──────────────────────────────────────
+
+_STAMP = "2026-11-16T00:00:00+00:00"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: stops by signal")
+def test_a_daemon_holding_two_lock_files_is_signalled_once(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    """A shared daemon holds its name's lock and its store's; one SIGTERM, both cleaned."""
+    calls, _configure = fake_uv
+    lifetime = tmp_path / "server-daemon-t.pid"
+    store_pid = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+    for path in (lifetime, store_pid):
+        path.write_text(f"444\n\n{_STAMP}\n")
+    states = [
+        ServerState(alive=True, pid=444, pid_file=store_pid, started=_STAMP),
+        ServerState(alive=True, pid=444, pid_file=lifetime, started=_STAMP),
+    ]
+    _patch_liveness(monkeypatch, states)
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert result.exit_code == 0, result.output
+    assert sent == [(444, upgrade_cmd.signal.SIGTERM)]
+    assert not lifetime.exists()
+    assert not store_pid.exists()
+    assert calls
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: stops by signal")
+@pytest.mark.parametrize(
+    "second_stamp",
+    ["2026-11-16T00:00:01+00:00", None],
+    ids=["different-stamp", "no-stamp"],
+)
+def test_one_pid_under_lock_files_that_disagree_is_not_signalled(
+    monkeypatch, tmp_path, fake_uv, force_tty, second_stamp
+):
+    """Two files that record one pid but not one start time may be a recycled pid."""
+    calls, _configure = fake_uv
+    first = tmp_path / "server-daemon-t.pid"
+    second = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+    first.write_text(f"444\n\n{_STAMP}\n")
+    second.write_text("444\n")
+    states = [
+        ServerState(alive=True, pid=444, pid_file=first, started=_STAMP),
+        ServerState(alive=True, pid=444, pid_file=second, started=second_stamp),
+    ]
+    _patch_liveness(monkeypatch, states)
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(upgrade_cmd, "probe_pid", lambda _pid: "dead")
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert result.exit_code == 1, result.output
+    assert "do not record the same start time" in result.output
+    assert sent == []
+    assert first.exists() and second.exists()
+    assert calls == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: Windows plans no signals")
+def test_the_dry_run_plans_one_stop_for_a_daemon_holding_two_lock_files(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    lifetime = tmp_path / "server-daemon-t.pid"
+    store_pid = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+    states = [
+        ServerState(alive=True, pid=444, pid_file=store_pid, started=_STAMP),
+        ServerState(alive=True, pid=444, pid_file=lifetime, started=_STAMP),
+    ]
+    _patch_liveness(monkeypatch, states)
+
+    result = CliRunner().invoke(cli, ["upgrade", "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["would_kill"] == [444]
+    assert payload["would_remove"] == [str(store_pid), str(lifetime)]
+
+    _patch_liveness(monkeypatch, states)  # each invocation consumes its own probes
+    result = CliRunner().invoke(cli, ["upgrade", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Stop running server (pid 444") == 1
+    assert result.output.count("Remove stale") == 2
+
+
+def test_the_dry_run_reports_lock_files_that_disagree_on_one_pid(
+    monkeypatch, tmp_path, fake_uv, force_tty
+):
+    """The plan refuses what the stop loop would refuse, instead of planning to stop it."""
+    first = tmp_path / "server-daemon-t.pid"
+    second = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+    states = [
+        ServerState(alive=True, pid=444, pid_file=first, started=_STAMP),
+        ServerState(alive=True, pid=444, pid_file=second, started="2026-11-16T00:00:01+00:00"),
+    ]
+    _patch_liveness(monkeypatch, states)
+    result = CliRunner().invoke(cli, ["upgrade", "--dry-run", "--json"])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert "do not record the same start time" in payload["error"]
+
+
+@pytest.mark.parametrize("continue_on_error", [False, True])
+def test_a_failed_lock_file_cleanup_stops_or_continues_by_the_flag(
+    monkeypatch, tmp_path, continue_on_error
+):
+    """One process, two files: the first file's cleanup fails; the flag decides the second."""
+    lifetime = tmp_path / "server-daemon-t.pid"
+    store_pid = tmp_path / "server-aaaaaaaaaaaaaaaa.pid"
+    states = [
+        ServerState(alive=True, pid=444, pid_file=store_pid, started=_STAMP),
+        ServerState(alive=True, pid=444, pid_file=lifetime, started=_STAMP),
+    ]
+    monkeypatch.setattr(upgrade_cmd, "_terminate_pid", lambda pid, grace: ([pid], None))
+    retired: list[Path] = []
+
+    def retire(state, pid, *, warnings_to_stderr=False):
+        retired.append(state.pid_file)
+        if state.pid_file == store_pid:
+            return [], ServerState(alive=False, pid=None, pid_file=None), "cleanup failed"
+        return [state.pid_file], ServerState(alive=False, pid=None, pid_file=None), None
+
+    monkeypatch.setattr(upgrade_cmd, "_retire_pid_file", retire)
+    killed, removed, problems, _remaining, _web = upgrade_cmd._stop_process_snapshot(
+        states,
+        ServerState(alive=False, pid=None, pid_file=None),
+        grace=0,
+        continue_on_error=continue_on_error,
+    )
+    assert killed == [444]
+    assert problems == ["cleanup failed"]
+    assert retired == ([store_pid, lifetime] if continue_on_error else [store_pid])
+    assert removed == ([lifetime] if continue_on_error else [])

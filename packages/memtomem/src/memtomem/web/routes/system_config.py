@@ -26,8 +26,9 @@ from memtomem.config import (
     saved_embedding_identity,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
-from memtomem.errors import RetryableError
-from memtomem.search.reranker.factory import create_reranker
+from memtomem.errors import RetryableError, TransactionOwnedError
+from memtomem.search.reranker.factory import create_reranker, load_reranker
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.sqlite_helpers import fold_path_form, norm_path
 from memtomem.web import hot_reload as _hot_reload
 from memtomem.web.deps import (
@@ -39,6 +40,11 @@ from memtomem.web.deps import (
     require_configured,
 )
 from memtomem.web.routes._locks import _config_lock
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_NOTHING_CHANGED_DETAIL,
+    WRITER_BUSY_READ_DETAIL,
+    wait_for_writer,
+)
 from memtomem.web.schemas.config import (
     BuiltinExcludePatternsResponse,
     ConfigDecayOut,
@@ -67,6 +73,10 @@ from memtomem.web.schemas.config import (
 )
 
 logger = logging.getLogger("memtomem.web.routes.system")
+
+#: Seconds ``memory-dirs/remove`` allows the sweep and watcher update after the
+#: config save, on a deadline of their own (#3181).
+_POST_SAVE_BUDGET_S = 60.0
 
 _LOCALHOST_ADDRS = {"127.0.0.1", "::1", "localhost"}
 
@@ -170,12 +180,7 @@ async def _validate_reranker_ready(reranker: object | None) -> None:
     installed) surfaces as a clean rejection rather than a 500 at first
     search.
     """
-    if reranker is None:
-        return
-
-    load_model = getattr(reranker, "_get_model", None)
-    if callable(load_model):
-        await _asyncio.to_thread(load_model)
+    await load_reranker(reranker)
 
 
 # Mounted only through ``system.router``, which carries the ``system`` tag.
@@ -667,15 +672,19 @@ async def patch_config(
                     await search_pipeline.swap_reranker(pending_reranker, pending_rerank_config)
 
                 if tokenizer_changed:
-                    from memtomem.storage.fts_tokenizer import set_tokenizer
-
-                    set_tokenizer(config.search.tokenizer)
+                    storage.set_fts_tokenizer(config.search.tokenizer)
                     count = await storage.rebuild_fts()
-                    logger.info(
-                        "FTS index rebuilt with tokenizer=%s (%d chunks)",
-                        config.search.tokenizer,
-                        count,
-                    )
+                    built = storage.fts_tokenizer_effective
+                    fallback = hr.fts_rebuild_fallback_warning(storage)
+                    if fallback is None:
+                        logger.info("FTS index rebuilt with tokenizer=%s (%d chunks)", built, count)
+                    else:
+                        logger.warning(
+                            "FTS index rebuilt with tokenizer=%s (%d chunks): %s",
+                            built,
+                            count,
+                            fallback,
+                        )
 
                 if onnx_batch_changed:
                     embedder = getattr(request.app.state, "embedder", None)
@@ -899,6 +908,8 @@ async def add_memory_dir(
                 "namespaces_preserved_against_rules": (stats.namespaces_preserved_against_rules),
                 "namespaces_reassigned": stats.namespaces_reassigned,
                 "namespace_moves": list(stats.namespace_moves),
+                "namespaces_restored_from_name": stats.namespaces_restored_from_name,
+                "day_file_names_undecoded": stats.day_file_names_undecoded,
             }
             has_issues = bool(stats.errors or stats.blocked_files)
             has_processed_chunks = (stats.indexed_chunks + stats.skipped_chunks) > 0
@@ -1012,8 +1023,9 @@ async def remove_memory_dir(
         raise HTTPException(status_code=400, detail="path is required")
     delete_chunks = bool(body.get("delete_chunks", False))
 
+    saved_as_removed: Path | None = None
     try:
-        async with _asyncio.timeout(60):
+        async with _asyncio.timeout(60) as deadline:
             async with _config_lock:
                 await hr.reload_if_stale(
                     request.app, storage=storage, search_pipeline=search_pipeline
@@ -1066,6 +1078,11 @@ async def remove_memory_dir(
                         )
                     raise
                 hr.commit_writer_signature(request.app)
+                # What follows the save gets a budget of its own (#3181): the
+                # sweep's writer wait must not inherit what the lock wait spent,
+                # or the deadline lands after the save and skips the watcher.
+                saved_as_removed = resolved
+                deadline.reschedule(_asyncio.get_running_loop().time() + _POST_SAVE_BUDGET_S)
 
                 # Chunk cleanup happens after the registration is removed
                 # so a partial failure never leaves chunks orphaned with
@@ -1073,10 +1090,10 @@ async def remove_memory_dir(
                 # to ``chunks_fts`` / ``chunks_vec`` / ``chunk_links`` via
                 # the schema's ``ON DELETE CASCADE``.
                 deleted_chunks = 0
+                sweep_refused = False
                 if delete_chunks:
                     from memtomem.indexing.engine import norm_dir_prefix, swept_on_remove
 
-                    rows = await storage.get_source_files_with_counts()
                     # The same form :func:`norm_dir_prefix` builds (Unicode form
                     # folded where the filesystem folds it, a trailing
                     # ``os.sep``; #647), made from the path checked above
@@ -1091,27 +1108,58 @@ async def remove_memory_dir(
                     # status ``delete_chunk_count`` the dialog shows applies the
                     # same rule.
                     surviving = [norm_dir_prefix(p) for p in config.indexing.all_index_roots()]
+                    # One transaction that waits for another task's (#3181).
+                    # ``delete_by_source`` does not suspend, so the loop held the
+                    # event loop for its whole length already; holding the writer
+                    # for it too makes the sweep all-or-nothing and costs one
+                    # wait, not one per source. Listing inside it sweeps a source
+                    # indexed during the wait as well.
+                    swept = 0
                     try:
-                        for row in rows:
-                            source_path = row[0]
-                            # Judged and deleted by the stored key: resolving it
-                            # would follow a path that has since become a link
-                            # to another source's rows (#2835, #2878).
-                            key = fold_path_form(str(source_path))
-                            if swept_on_remove(key, prefix, surviving):
-                                deleted_chunks += await storage.delete_by_source(
-                                    source_path, as_stored=True
-                                )
-                    finally:
+                        async with storage.transaction(wait=WRITER_WAIT_S):
+                            rows = await storage.get_source_files_with_counts()
+                            for row in rows:
+                                source_path = row[0]
+                                # Judged and deleted by the stored key: resolving
+                                # it would follow a path that has since become a
+                                # link to another source's rows (#2835, #2878).
+                                key = fold_path_form(str(source_path))
+                                if swept_on_remove(key, prefix, surviving):
+                                    swept += await storage.delete_by_source(
+                                        source_path, as_stored=True
+                                    )
+                    except TransactionOwnedError:
+                        # Refused at admission: nothing was deleted.
+                        sweep_refused = True
+                    else:
+                        deleted_chunks = swept
                         # Same cache-staleness class as #2141: these rows are
                         # gone from the store but a warmed query would still
-                        # return them. In ``finally`` because a source that
-                        # fails partway through the sweep must not discard the
-                        # deletions the sources before it already committed.
+                        # return them.
                         if deleted_chunks:
                             search_pipeline.invalidate_cache()
 
                 watcher = getattr(request.app.state, "file_watcher", None)
+                if sweep_refused:
+                    # The directory is already saved as removed and a retry
+                    # answers 404, so the refusal says what is left, and a
+                    # watcher failure must not replace it with a bare 500.
+                    detail = (
+                        f"{resolved} was removed from memory_dirs, but none of its chunks were "
+                        "deleted: another write held the database longer than this request "
+                        "waits. Its sources that no other memory directory contains stay "
+                        "indexed and can be removed from the Sources page."
+                    )
+                    if watcher is not None:
+                        try:
+                            await watcher.reconfigure(config.indexing)
+                        except Exception:
+                            logger.exception("Could not reconfigure the file watcher")
+                            detail += (
+                                " The file watcher could not be updated either; restart "
+                                "mm web to stop watching the directory."
+                            )
+                    raise HTTPException(status_code=503, detail=detail)
                 if watcher is not None:
                     await watcher.reconfigure(config.indexing)
 
@@ -1124,6 +1172,13 @@ async def remove_memory_dir(
                     "deleted_chunks": deleted_chunks,
                 }
     except TimeoutError:
+        if saved_as_removed is not None:
+            raise HTTPException(
+                503,
+                f"{saved_as_removed} was removed from memory_dirs, but removing its chunks or "
+                "updating the file watcher did not finish in time. Chunks still indexed under "
+                "it can be removed from the Sources page.",
+            )
         raise HTTPException(503, "memory-dirs/remove timed out — another update may be in progress")
 
 
@@ -1301,6 +1356,9 @@ async def memory_dirs_status(
 
 @router.get("/embedding-status", response_model=EmbeddingStatusResponse)
 async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusResponse:
+    # ``stored_embedding_info`` reads the writer synchronously; wait for
+    # another task's transaction first, with no ``await`` before the read (#3182).
+    await wait_for_writer(storage, detail=WRITER_BUSY_READ_DETAIL)
     stored_info = getattr(storage, "stored_embedding_info", None)
     stored_out = (
         EmbeddingConfigInfo(
@@ -1479,6 +1537,10 @@ async def reset_embedding(
     """Reset embedding metadata to current config. Drops all vectors."""
     from memtomem.config import embedding_policy_fingerprint
 
+    # Wait out another task's transaction first (#3182); a timeout changed
+    # nothing. ``reset_embedding_meta`` has no ``await`` before its idle check
+    # (pinned by test_qa_audit_pins), so nothing takes the writer in between.
+    await wait_for_writer(storage, detail=WRITER_BUSY_NOTHING_CHANGED_DETAIL)
     await storage.reset_embedding_meta(
         dimension=config.embedding.dimension,
         provider=config.embedding.provider,
@@ -1518,13 +1580,29 @@ async def _resume_watching(state) -> str:
         return await _resume_watching_locked(state, WatcherResumer)
 
 
+def _no_live_events_note(watcher) -> str:
+    """The reset-message clause for a running watcher whose observer failed (#3080).
+
+    Such a watcher counts as started — its source checks run, and a second
+    start would duplicate them — but no file event reaches it, so saying
+    edits are auto-indexed would be false.
+    """
+    error = getattr(watcher, "observer_error", None)
+    if not isinstance(error, str):
+        return ""
+    return (
+        f" The file watcher could not start ({error}), so new edits are not"
+        " auto-indexed: restart `mm web` to try again."
+    )
+
+
 async def _resume_watching_locked(state, resumer_cls) -> str:
     watcher = getattr(state, "file_watcher", None)
     # Read inside the lock: the reset that went first may have just started it.
     started = getattr(state, "file_watcher_started", watcher is not None)
     blocked = getattr(state, "file_watcher_resume_blocked", False)
     if started:
-        return ""
+        return _no_live_events_note(watcher)
     if watcher is None or blocked:
         # No instance to start, or an earlier attempt failed in a way that
         # cannot be retried in this process.
@@ -1544,7 +1622,9 @@ async def _resume_watching_locked(state, resumer_cls) -> str:
         state.file_watcher_started = resumer.started
         state.file_watcher_resume_blocked = not resumer.can_retry
     if resumer.started:
-        return " File watching is on again, so new edits are auto-indexed."
+        return _no_live_events_note(watcher) or (
+            " File watching is on again, so new edits are auto-indexed."
+        )
     if resumer.can_retry:
         return (
             " Starting the file watcher failed, so auto-indexing is still off:"

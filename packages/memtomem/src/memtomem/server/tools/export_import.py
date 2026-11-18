@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from memtomem.constants import writable_namespace_arg
 from memtomem.generation import hold_app_generation
 from memtomem.server import mcp
+from memtomem.server.client_paths import client_cwd_of, resolve_client_path
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
@@ -31,25 +30,25 @@ async def mem_export(
     """Export indexed memory chunks to a JSON bundle file.
 
     Args:
-        output_file: Destination path for the JSON export (e.g. ~/backup.json).
+        output_file: File name for the JSON bundle, not a path (e.g. backup.json);
+            it is written to ~/.memtomem/exports/.
         source_filter: Only export chunks whose source file path contains this substring.
         tag_filter: Only export chunks that carry this exact tag.
         since: ISO 8601 datetime lower bound on created_at (e.g. "2026-01-01T00:00:00Z").
         namespace: Only export chunks in this namespace.
 
-    Path policy (ADR-0006 Axis G): ``output_file`` is an unrestricted local
-    path by design — local-tool authority, not a traversal bug. This is
-    intentionally asymmetric with the root-bounded read surfaces
-    (``mem_add(file=)`` / ``mem_index``): backups are written *outside* the
-    indexed tree on purpose, so ``memory_dirs`` is the wrong allowlist for an
-    export target. The final component cannot be a symlink; parent aliases
-    are allowed. Do not constrain it to memory/export roots without
-    revisiting that ADR — it would break the documented ``~/backup.json``
-    workflow.
+    Path policy (ADR-0006 Axis G, amended): the caller names the file, not
+    the directory. A bundle written over a file a program executes, such as a
+    shell startup file, would run the note text inside it, so an MCP export
+    lands only in memtomem's export directory.
     """
     from datetime import datetime, timezone
 
-    from memtomem.tools.export_import import export_chunks
+    from memtomem.tools.export_import import (
+        ExportTargetError,
+        export_chunks,
+        resolve_export_target,
+    )
 
     app = await _get_app_initialized(ctx)
 
@@ -62,10 +61,10 @@ async def mem_export(
         except ValueError as exc:
             return f"Invalid 'since' datetime: {exc}"
 
-    # Resolved, intentionally unrestricted (ADR-0006 Axis G): local-tool
-    # authority, not a traversal bug — asymmetric with root-bounded mem_index.
-    # Keep the final component unresolved so the helper can refuse a symlink.
-    target = Path(output_file).expanduser()
+    try:
+        target = resolve_export_target(output_file)
+    except ExportTargetError as exc:
+        return f"Export refused: {exc}"
     bundle = await export_chunks(
         app.storage,
         output_path=target,
@@ -158,7 +157,7 @@ async def mem_import(
 
     # Resolved, intentionally unrestricted (ADR-0006 Axis F/G): the import trust
     # boundary is the F.3 redaction gate below, not this path.
-    source = Path(input_file).expanduser().resolve()
+    source = resolve_client_path(app, input_file)
 
     if not source.exists():
         return f"File not found: {source}"
@@ -181,6 +180,7 @@ async def mem_import(
                 indexing_config=app.config.indexing,
                 project_root_map=project_root_map,
                 confirm_project_shared=confirm_project_shared,
+                path_base=client_cwd_of(app),
             )
     except ImportPrivacyError as exc:
         if exc.shared_blocked:

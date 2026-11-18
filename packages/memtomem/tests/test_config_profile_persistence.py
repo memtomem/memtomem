@@ -470,7 +470,7 @@ async def test_mcp_persist_rollback_keeps_profile_budgets(
     monkeypatch.setattr(status_config, "_get_app_initialized", AsyncMock(return_value=app))
     real_save = config_mod.save_config_overrides
 
-    def locked(_config):
+    def locked(_config, _fields=None):
         raise TimeoutError
 
     monkeypatch.setattr(config_mod, "save_config_overrides", locked)

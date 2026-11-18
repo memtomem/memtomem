@@ -185,11 +185,14 @@ def test_same_inode_change_after_preimage_is_refused(tmp_path, operation, identi
     args = [source, 1, 5]
     if operation != "remove_lines":
         args.append("NEW BODY")
+    # The span check refuses before any base is consulted.
+    base = {"base": memory_writer.IndexedBase("")} if operation == "replace_chunk_body" else {}
     with pytest.raises(StaleSourceProvenanceError):
         getattr(memory_writer, operation)(
             *args,
             expected_source_span_hash=digest,
             expected_identity=pre.identity if identity_known else None,
+            **base,
         )
     assert source.read_text() == STRANGER
 
@@ -239,9 +242,16 @@ async def test_transformed_chunks_keep_original_span_evidence(
         raw_span = "\n".join(raw_lines[meta.start_line - 1 : meta.end_line])
         assert meta.source_span_hash == hashlib.sha256(raw_span.encode()).hexdigest()
         args = [source, meta.start_line, meta.end_line]
+        kwargs = {}
         if operation != "remove_lines":
             args.append("NEW BODY")
-        getattr(memory_writer, operation)(*args, expected_source_span_hash=meta.source_span_hash)
+            # The span evidence authorizes an edit of the span's source text;
+            # an edit of these transformed contents is refused (#3071).
+            body = memory_writer.chunk_source_text(raw_lines, meta.start_line, meta.end_line)
+            kwargs["base"] = memory_writer.SourceBase(memory_writer.source_text_hash(body))
+        getattr(memory_writer, operation)(
+            *args, expected_source_span_hash=meta.source_span_hash, **kwargs
+        )
         assert source.read_bytes() != original
 
 

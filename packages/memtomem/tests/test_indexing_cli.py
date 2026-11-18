@@ -508,6 +508,30 @@ class TestReassignNamespacesFlag:
         assert "kept their stored namespace" not in out
         assert "reassigned" not in out
 
+    def test_day_file_name_advisory_sums_streams_and_names_the_remedy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """ADR-0043: a rebuild says how many namespaces came back from day-file
+        names and how many names it could not read."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        event = _make_complete_event(total_files=3, indexed=3)
+        event["namespaces_restored_from_name"] = 2
+        event["day_file_names_undecoded"] = 1
+        _install_fake_engine(monkeypatch, events=[event])
+
+        asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+
+        lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+        assert "2 file(s) took their namespace from their day-file name." in lines
+        assert (
+            "1 day file(s) are named for a namespace that could not be read from the name, "
+            "and were indexed into the rules' or session's namespace." in lines
+        )
+        assert "→ To put one back: mm index --force --namespace <namespace> <file>" in lines
+
     def test_moves_out_of_a_system_namespace_are_called_out(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:

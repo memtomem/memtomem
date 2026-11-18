@@ -11,19 +11,19 @@ approves every agent's next action, see the
 
 ## 1. Prepare one store
 
-Use memtomem `0.7.3` for every runtime. On a fresh machine, initialize the
+Use memtomem `0.7.11` for every runtime. On a fresh machine, initialize the
 user-owned store once without adding an extra MCP registration:
 
 ```bash
-uvx --from 'memtomem==0.7.3' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem==0.7.3' mm status
+uvx --from 'memtomem==0.7.11' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem==0.7.11' mm status
 ```
 
 From the project root, initialize the Git-ignored project tier:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem==0.7.3' mm mem init --scope project_local
+uvx --from 'memtomem==0.7.11' mm mem init --scope project_local
 ```
 
 Keep `.memtomem/memories.local` untracked. Do not use `mm context sync` for
@@ -88,8 +88,11 @@ then resume it in Claude Code with `/memtomem:handoff resume`.
 first word of the arguments: `/memtomem:handoff s to codex-cli`,
 `/memtomem:handoff r <ID>`.
 
-Each save must report its `handoff_id`, `project_local` scope,
-`shared:<project-slug>` namespace, written file, and indexed chunk count. Each
+Each save that `mem_add` confirms must report its `handoff_id`,
+`project_local` scope, `shared:<project-slug>` namespace, written file, and the
+`Entry chunks` value its `mem_add` result printed (or that the server did not
+report one). A save that `mem_add` refuses, or that ends in an error, must
+report that result unchanged, with no file or chunk count added. Each
 resume must report whether the stored project root, Git commit, and worktree
 summary agree with the live repository. Resolve divergence from Git before
 continuing.

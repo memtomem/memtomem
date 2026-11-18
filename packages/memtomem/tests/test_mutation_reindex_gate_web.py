@@ -104,15 +104,16 @@ async def test_chunk_delete_refuses_untouched(bm25_only_components):
     assert await comp.storage.is_source_held(target)
 
 
-async def test_scratch_promote_after_append_is_marked_promoted(bm25_only_components):
-    """A title the ingress never scanned: refused after the append, marked promoted."""
+async def test_scratch_promote_after_append_is_marked_promoted(bm25_only_components, monkeypatch):
+    """Bytes the ingress never scanned: refused after the append, marked promoted."""
+    from test_mutation_reindex_gate import _intruder_after_the_append
+
     comp, mem_dir = bm25_only_components
     await comp.storage.scratch_set("note", "scratch-body-marker")
+    _intruder_after_the_append(monkeypatch, "password: hunter2-title-value")
 
     async with _web_client(comp) as client:
-        resp = await client.post(
-            "/api/scratch/note/promote", json={"title": "password: hunter2-title-value"}
-        )
+        resp = await client.post("/api/scratch/note/promote", json={"title": "clean title"})
 
     _assert_index_blocked(resp, written=True)
     assert (await comp.storage.scratch_get("note"))["promoted"] is True
@@ -121,15 +122,16 @@ async def test_scratch_promote_after_append_is_marked_promoted(bm25_only_compone
     assert "hunter2-title-value" not in await _stored(comp, written[0])
 
 
-async def test_a_refused_promotion_cannot_be_promoted_again(bm25_only_components):
+async def test_a_refused_promotion_cannot_be_promoted_again(bm25_only_components, monkeypatch):
     """Its body is already in the file: a retry must not append it a second time."""
+    from test_mutation_reindex_gate import _intruder_after_the_append
+
     comp, mem_dir = bm25_only_components
     await comp.storage.scratch_set("note", "scratch-body-marker")
+    _intruder_after_the_append(monkeypatch, "password: hunter2-title-value")
 
     async with _web_client(comp) as client:
-        first = await client.post(
-            "/api/scratch/note/promote", json={"title": "password: hunter2-title-value"}
-        )
+        first = await client.post("/api/scratch/note/promote", json={"title": "clean title"})
         _assert_index_blocked(first, written=True)
         retried = await client.post("/api/scratch/note/promote", json={"title": "clean"})
 

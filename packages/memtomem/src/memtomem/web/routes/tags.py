@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from memtomem.errors import TransactionOwnedError
 from memtomem.services import tag_management as tag_svc
 from memtomem.tools.auto_tag import auto_tag_storage
 from memtomem.web.deps import get_project_context_root, get_search_pipeline, get_storage
+from memtomem.web.routes._writer_wait import WRITER_BUSY_NOTHING_CHANGED_DETAIL, writer_busy_as_503
 from memtomem.web.schemas.tags import (
     AutoTagRequest,
     AutoTagResponse,
@@ -54,15 +56,28 @@ async def run_auto_tag(
     on the response is just bytes the UI doesn't need.
     """
     sample_limit = _DRY_RUN_SAMPLE_CAP if body.dry_run else 0
-    stats = await auto_tag_storage(
-        storage,
-        source_filter=body.source_filter,
-        max_tags=body.max_tags,
-        overwrite=body.overwrite,
-        dry_run=body.dry_run,
-        sample_limit=sample_limit,
-        search_pipeline=search_pipeline,
-    )
+    try:
+        stats = await auto_tag_storage(
+            storage,
+            source_filter=body.source_filter,
+            max_tags=body.max_tags,
+            overwrite=body.overwrite,
+            dry_run=body.dry_run,
+            sample_limit=sample_limit,
+            search_pipeline=search_pipeline,
+        )
+    except TransactionOwnedError as exc:
+        # Each chunk's tags commit on their own, so the run stopped partway
+        # with the earlier ones written (#3181).
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Auto-tag stopped partway: another write held the database longer than "
+                "this request waits. The tags written before it stopped are kept. Run it "
+                "again to continue; without overwrite, chunks that already have tags are "
+                "skipped."
+            ),
+        ) from exc
     return AutoTagResponse(
         total_chunks=stats.total_chunks,
         tagged_chunks=stats.tagged_chunks,
@@ -113,13 +128,14 @@ async def rename_tag(
     apply call.
     """
     try:
-        result = await tag_svc.rename_tag(
-            storage,
-            name,
-            body.new_name,
-            dry_run=dry_run,
-            search_pipeline=search_pipeline,
-        )
+        with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+            result = await tag_svc.rename_tag(
+                storage,
+                name,
+                body.new_name,
+                dry_run=dry_run,
+                search_pipeline=search_pipeline,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _to_response(result)
@@ -135,9 +151,10 @@ async def delete_tag(
     """Drop ``name`` from every visible chunk that carries it. Chunks ending up
     tag-less stay indexed; chunks of a held source keep the tag."""
     try:
-        result = await tag_svc.delete_tag(
-            storage, name, dry_run=dry_run, search_pipeline=search_pipeline
-        )
+        with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+            result = await tag_svc.delete_tag(
+                storage, name, dry_run=dry_run, search_pipeline=search_pipeline
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _to_response(result)
@@ -153,13 +170,14 @@ async def merge_tags(
     """Replace every tag in ``body.sources`` with ``body.target`` across all
     visible chunks. Resulting per-chunk tag list is deduplicated."""
     try:
-        result = await tag_svc.merge_tags(
-            storage,
-            body.sources,
-            body.target,
-            dry_run=dry_run,
-            search_pipeline=search_pipeline,
-        )
+        with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+            result = await tag_svc.merge_tags(
+                storage,
+                body.sources,
+                body.target,
+                dry_run=dry_run,
+                search_pipeline=search_pipeline,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _to_response(result)

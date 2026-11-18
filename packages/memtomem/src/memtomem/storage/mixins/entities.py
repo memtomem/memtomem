@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from memtomem.errors import StorageError
+from memtomem.storage.sqlite_helpers import escape_like, namespace_sql
 from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority_case
 from memtomem.storage.sqlite_visibility import VISIBLE_SOURCE_C
 
 if TYPE_CHECKING:
-    from memtomem.models import Chunk, ScopeFilter
+    from memtomem.models import Chunk, NamespaceFilter, ScopeFilter
 
 # ``_memtomem_meta`` key for the one-time entity backfill (#2133). Values:
 # a decimal ``chunks.rowid`` cursor while the walk is in progress, ``done``
@@ -230,13 +231,18 @@ class EntityMixin:
         self,
         entity_type: str | None = None,
         value: str | None = None,
-        namespace: str | None = None,
+        namespace_filter: NamespaceFilter | None = None,
         limit: int = 50,
         *,
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
     ) -> list[dict]:
         """Search entities, optionally filtered by type, value substring, and namespace.
+
+        ``value`` is a literal substring: ``%`` and ``_`` in it match only
+        themselves. ``namespace_filter`` is applied as given — build it with
+        :meth:`NamespaceFilter.parse` and the configured system prefixes for a
+        default search, since ``None`` here hides nothing.
 
         The ADR-0011 scope-context fragment is appended unconditionally, the
         same way the search and recall paths append it: this query joins
@@ -260,11 +266,13 @@ class EntityMixin:
             query += "AND e.entity_type = ? "
             params.append(entity_type)
         if value:
-            query += "AND e.entity_value LIKE ? "
-            params.append(f"%{value}%")
-        if namespace:
-            query += "AND c.namespace = ? "
-            params.append(namespace)
+            query += "AND e.entity_value LIKE ? ESCAPE '\\' "
+            params.append(f"%{escape_like(value)}%")
+        if namespace_filter is not None:
+            ns_frag, ns_params = namespace_sql(namespace_filter, column_alias="c.")
+            if ns_frag:
+                query += f"AND ({ns_frag}) "
+                params.extend(ns_params)
 
         scope_frag, scope_params = scope_context_sql(
             scope_filter, project_context_root, column_alias="c."

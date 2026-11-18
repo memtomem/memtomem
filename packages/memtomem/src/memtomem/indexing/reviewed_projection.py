@@ -17,8 +17,14 @@ from memtomem.indexing.privacy_projection import IndexProjection
 
 
 def prepare_reviewed_projection(
-    path: Path, content: str, manifest_path: str, *, scope: str = "user"
+    path: Path, content: str, manifest_path: str, *, scope: str = "user", resolved: bool = False
 ) -> IndexProjection:
+    """``content`` with the reviewed spans of ``path``'s manifest entry masked.
+
+    The entry is keyed by ``path`` resolved. ``resolved=True`` says ``path``
+    already is that resolution, and it is used as given, so a leaf replaced by
+    a symlink since then does not select the link target's entry (#3191).
+    """
     original = IndexProjection(content, content)
     if scope == "project_shared":
         return original
@@ -26,7 +32,7 @@ def prepare_reviewed_projection(
         manifest = json.loads(Path(manifest_path).expanduser().read_text())
         if manifest["version"] != 1:
             return original
-        entry = manifest["sources"].get(str(path.resolve()))
+        entry = manifest["sources"].get(str(path if resolved else path.resolve()))
         if not entry or entry["source_sha256"] != hashlib.sha256(content.encode()).hexdigest():
             return original
         lines = content.splitlines(keepends=True)

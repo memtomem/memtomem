@@ -34,6 +34,14 @@ const STATE = {
   lastSettingsSection: null,
   selectedChunkId: null,
   selectedOriginal: '',
+  // The selected chunk's indexed content (what View renders before an edit
+  // session loads, and what the history panel keeps).
+  selectedIndexed: '',
+  // The result the detail panel shows (set by showDetail, cleared by clearDetail).
+  selectedResult: null,
+  // ``{chunkId, hash}`` once the selected chunk's source text is in the
+  // editor; ``hash: null`` while it loads or after the base went stale.
+  sourceEdit: null,
   lastQuery: '',
   selectedIds: new Set(),
   lastResults: [],
@@ -45,6 +53,13 @@ const STATE = {
   maxResultScore: 0,
   resultScoreViews: {},
   sourcesBrowserStale: false,
+  // The source the chunk browser shows (or is loading) and the limit it was
+  // asked for, set by ``browseSource``; ``null`` once ``hideBrowser`` empties it.
+  browsedSource: null,
+  browsedLimit: 100,
+  // A card save's refresh of ``browsedSource``, held while another editor is
+  // open in the browser (#3077); see ``_requestBrowserRefresh``.
+  browserRefreshPending: null,
   tagsTabStale: false,
   homeStale: false,
   detailViewSource: '',
@@ -362,10 +377,13 @@ async function ensureCsrfToken() {
   finally { if (_csrfTokenPromise === pending) _csrfTokenPromise = null; }
 }
 
-async function csrfFetch(url, options = {}) {
+// ``withToken`` attaches the token to a safe-method request as well: the
+// server records a search (history, access counts, a run id) only when the
+// request carries it, so a page elsewhere cannot write those records.
+async function csrfFetch(url, options = {}, { withToken = false } = {}) {
   const unsafe = _UNSAFE_METHODS.has((options.method || 'GET').toUpperCase());
   let token = '';
-  if (unsafe) {
+  if (unsafe || withToken) {
     token = await ensureCsrfToken();
     // Preserve plain objects, Headers and tuple lists. Normalize iterable
     // forms through Headers so repeated names retain fetch's merge semantics.
@@ -380,7 +398,18 @@ async function csrfFetch(url, options = {}) {
     if (token) options.headers['X-Memtomem-CSRF'] = token;
   }
   const res = await fetch(url, options);
-  if (!unsafe || res.status !== 403) return res;
+  if (!unsafe) {
+    // The server answered but did not record: the token it was sent is not the
+    // current one (it restarted since this page fetched it). Fetch the current
+    // token and send the read once more; the first one recorded nothing.
+    if (!token || res.headers?.get?.('X-Memtomem-CSRF-Stale') !== '1') return res;
+    if (_csrfToken === token) _csrfToken = null;
+    const fresh = await ensureCsrfToken();
+    if (!fresh || fresh === token) return res;
+    options.signal?.throwIfAborted();
+    return fetch(url, { ...options, headers: { ...options.headers, 'X-Memtomem-CSRF': fresh } });
+  }
+  if (res.status !== 403) return res;
   // Inspect a clone: other refusals retain their original response body for
   // the caller's privacy/consent/permission handling.
   if (typeof res.clone !== 'function') return res;
@@ -405,7 +434,7 @@ async function csrfFetch(url, options = {}) {
 // SPA parses it via ``api()`` below and surfaces a confirm-and-retry UX
 // through ``apiWithRedactionRetry()``. Issue #785.
 class RedactionBlockedError extends Error {
-  constructor({ hits, surface, scope }) {
+  constructor({ hits, surface, scope, labelOnly }) {
     super('redaction_blocked');
     this.name = 'RedactionBlockedError';
     this.hits = hits;
@@ -414,6 +443,9 @@ class RedactionBlockedError extends Error {
     // on surfaces that do not report one — callers must treat undefined as
     // "unknown", never as "not shared".
     this.scope = scope;
+    // True when every hit was a label rule (``password:``, ``api_key=``).
+    // Only the namespace description route reports it; undefined elsewhere.
+    this.labelOnly = labelOnly;
   }
 }
 
@@ -451,13 +483,18 @@ function formatProjectTierBlockedToast(err) {
   return lines.join('\n');
 }
 
+// Reads the server records only when they carry the CSRF token (``GET
+// /api/search``); ``api()`` sends it on them unless the caller says otherwise.
+const _RECORDED_READS = /^\/api\/search(\?|$)/;
+
 async function api(method, path, body, opts = {}) {
   if (typeof opts !== 'object' || Array.isArray(opts)) opts = {};
   const fetchOpts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body !== undefined) fetchOpts.body = JSON.stringify(body);
   if (opts.signal) fetchOpts.signal = opts.signal;
   else fetchOpts.signal = AbortSignal.timeout(opts.timeout ?? 30_000);
-  const res = await csrfFetch(API + path, fetchOpts);
+  const withToken = opts.withToken ?? _RECORDED_READS.test(path);
+  const res = await csrfFetch(API + path, fetchOpts, { withToken });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     if (
@@ -469,6 +506,7 @@ async function api(method, path, body, opts = {}) {
         hits: err.detail.hits,
         surface: err.detail.surface,
         scope: err.detail.scope,
+        labelOnly: err.detail.label_only,
       });
     }
     if (
@@ -1752,7 +1790,9 @@ function showToast(message, type = 'success', options = {}) {
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
   closeBtn.className = 'toast-close';
-  closeBtn.title = 'Close';
+  closeBtn.title = (typeof I18N !== 'undefined' && I18N.t)
+    ? I18N.t('common.close')
+    : 'Close';
   closeBtn.setAttribute('aria-label', (typeof I18N !== 'undefined' && I18N.t)
     ? I18N.t('toast.close_aria')
     : 'Close notification');
@@ -2594,6 +2634,11 @@ function _renderHomeDashboardError(err) {
 
 async function loadDashboard() {
   _setHomeDashboardLoading();
+  // Not awaited and independent of the dashboard fetches below: the remote
+  // inference notice must follow config changed outside this page even when
+  // the rest of the dashboard fails to load. Defined in settings-config.js,
+  // which the tests-js harness does not load alongside app.js.
+  if (typeof _loadHomeInference === 'function') _loadHomeInference();
   try {
     // /api/sessions and /api/scratch are dev-only — gated below. The
     // namespaces list endpoint is prod-mounted via namespaces_read so
@@ -3016,7 +3061,7 @@ function _renderNsChart(namespaces) {
 
   chart.innerHTML = sorted.map((ns, i) => {
     const pct = Math.round((ns.chunk_count / max) * 100);
-    const color = ns.color || palette[i % palette.length];
+    const color = safeCssColor(ns.color, palette[i % palette.length]);
     const nsName = String(ns.namespace || '');
     const fullNs = escapeHtml(nsName);
     const shortNs = escapeHtml(formatNsLabel(nsName));
@@ -3225,16 +3270,6 @@ function _markDataStale() {
   STATE.sourcesBrowserStale = true;
   STATE.tagsTabStale = true;
   STATE.homeStale = true;
-}
-
-// Sync result content in STATE.lastResults cache and DOM after edit
-function _syncResultContent(chunkId, newContent) {
-  const cached = STATE.lastResults.find(r => String(r.chunk.id) === String(chunkId));
-  if (cached) cached.chunk.content = newContent;
-  const item = document.querySelector(`.result-item[data-id="${CSS.escape(String(chunkId))}"]`);
-  if (!item) return;
-  const snippet = item.querySelector('.result-snippet');
-  if (snippet) snippet.innerHTML = highlightText(truncate(newContent, 200), STATE.lastQuery);
 }
 
 qs('search-btn').addEventListener('click', doSearch);
@@ -3762,7 +3797,11 @@ function _syncResultTags(chunkId, newTags) {
   if (body) _attachResultTagRow(chunkId, [...newTags], body);
 }
 
-function renderResults(results, retrievalStats) {
+// ``keepDetail``: re-render after rows were removed, not for a new result set.
+// The detail panel (and any draft in it) is left as it is, no row is selected
+// in its place, and the remaining bulk selection survives.
+function renderResults(results, retrievalStats, { keepDetail = false } = {}) {
+  const keptSelection = keepDetail ? new Set(STATE.selectedIds) : null;
   STATE.lastResults = results;
   STATE.resultScoreViews = _buildScoreViews(results);
   let display = [...results];
@@ -3779,6 +3818,9 @@ function renderResults(results, retrievalStats) {
   _renderActiveFilters();
 
   if (!filtered.length) {
+    // Emptied, not only hidden: keyboard navigation and Select-all walk the
+    // rows in the DOM, and a hidden stale row would still be reachable.
+    list.innerHTML = '';
     hide(list);
     hide(qs('bulk-toolbar'));
     hide(qs('load-more-row'));
@@ -3787,7 +3829,7 @@ function renderResults(results, retrievalStats) {
       ? emptyState('🔍', 'Enter a query to search', '<kbd>/</kbd> focus · <kbd>j</kbd>/<kbd>k</kbd> navigate · <kbd>p</kbd> pin · <kbd>c</kbd> copy')
       : emptyState('○', 'No results found', 'Try different keywords or filters');
     _syncWelcomeVisibility();
-    clearDetail();
+    if (!keepDetail) clearDetail();
     return;
   }
   hide(empty);
@@ -3898,13 +3940,27 @@ function renderResults(results, retrievalStats) {
       groupEl.appendChild(groupItems);
       list.appendChild(groupEl);
     });
-    if (firstItem) { firstItem.classList.add('selected'); showDetail(firstResult); }
+    if (firstItem && !keepDetail) { firstItem.classList.add('selected'); showDetail(firstResult); }
   } else {
     filtered.forEach((r, i) => {
       const item = _buildResultItem(r);
       list.appendChild(item);
-      if (i === 0) { item.classList.add('selected'); showDetail(r); }
+      if (i === 0 && !keepDetail) { item.classList.add('selected'); showDetail(r); }
     });
+  }
+  if (keepDetail) {
+    list.querySelectorAll('.result-item').forEach(item => {
+      item.classList.toggle('selected', String(item.dataset.id) === String(STATE.selectedChunkId));
+    });
+    const boxes = list.querySelectorAll('.result-checkbox');
+    boxes.forEach(cb => {
+      const result = filtered.find(x => String(x.chunk.id) === String(cb.dataset.id));
+      if (result && (keptSelection.has(result.chunk.id) || keptSelection.has(cb.dataset.id))) {
+        cb.checked = true;
+        STATE.selectedIds.add(result.chunk.id);
+      }
+    });
+    updateBulkToolbar(boxes.length);
   }
 }
 
@@ -3915,6 +3971,13 @@ function showDetail(r) {
 
   STATE.selectedChunkId = r.chunk.id;
   STATE.selectedOriginal = r.chunk.content;
+  STATE.selectedIndexed = r.chunk.content;
+  // Kept apart from STATE.lastResults, which a save can drop this row from
+  // while the panel (and a draft) stays open.
+  STATE.selectedResult = r;
+  _endSourceEdit();
+  _frontmatterGen += 1;
+  STATE.detailFrontmatter = { chunkId: r.chunk.id, leading: false };
 
   const scoreView = _scoreViewForResult(r);
   qs('d-score').textContent = scoreView.isReranked
@@ -3979,6 +4042,7 @@ function showDetail(r) {
   hide(qs('d-preview'));
   hide(qs('d-preview-btn'));  // Preview merged into View
   _setDetailMode(STATE.detailViewMode || 'view');
+  _requestFrontmatter(r.chunk);
 
   // Reset diff state
   hide(qs('d-diff'));
@@ -3992,44 +4056,212 @@ function showDetail(r) {
   }
 }
 
+// After a save: the re-index can retire the chunk's id, and what the caches
+// hold for it is its pre-edit text.
+function _forgetSavedChunk(chunkId) {
+  // Prev/next within a source reads this list; it holds pre-save ids and text.
+  _sourceChunksCache = { file: null, chunks: [] };
+  // A dropped row must leave the bulk selection too: Select-all only visits
+  // visible checkboxes, so a hidden id would stay selected and a bulk delete
+  // would remove a chunk nobody can see. Ids are stored as given and as
+  // checkbox dataset strings, so drop both spellings.
+  STATE.selectedIds.delete(chunkId);
+  STATE.selectedIds.delete(String(chunkId));
+  const kept = STATE.lastResults.filter(r => String(r.chunk.id) !== String(chunkId));
+  if (kept.length === STATE.lastResults.length) return;
+  // Re-rendered rather than the row removed, so totals, groups and the empty
+  // state follow; ``keepDetail`` leaves the panel and its draft alone.
+  renderResults(kept, STATE.lastRetrievalStats, { keepDetail: true });
+}
+
 function clearDetail() {
   hide(qs('detail-view'));
   show(qs('detail-empty'));
   _setI18nLabel(
     qs('detail-empty').querySelector('p'), 'search.detail_empty', 'Select a result to view details');
   STATE.selectedChunkId = null;
+  STATE.selectedResult = null;
+  _endSourceEdit();
+  _frontmatterGen += 1;
+  STATE.detailFrontmatter = null;
+}
+
+// A Markdown note's YAML frontmatter is shown as metadata, not handed to
+// ``marked``, which reads ``---`` as a rule and ``key: value`` above the
+// closing ``---`` as a heading (#3030). The regex is
+// ``chunking/markdown.py:_FRONT_MATTER_RE`` verbatim, and a span counts only
+// where ``leading_frontmatter`` counts it: ending at a line boundary.
+const _FRONT_MATTER_RE = /^---\n([\s\S]*?)\n---\n?/;
+
+function _leadingFrontmatter(text) {
+  const m = _FRONT_MATTER_RE.exec(text);
+  if (!m) return null;
+  const span = m[0];
+  return (span.endsWith('\n') || span.length === text.length) ? span : null;
+}
+
+function _isMarkdownSource(path) {
+  const p = path || '';
+  return p.endsWith('.md') || p.endsWith('.markdown');
+}
+
+// Indexed content alone cannot say whether it opens with the file's
+// frontmatter (a file opening ``# Topic`` / ``---`` / text / ``---`` stores the
+// same shape), so the server answers from the file. Source text needs no
+// answer: a span starting at line 1 is the file's head.
+let _frontmatterGen = 0;
+
+async function _requestFrontmatter(chunk) {
+  if (!_isMarkdownSource(chunk.source_file) || chunk.start_line !== 1) return;
+  if (!(chunk.content || '').startsWith('---\n')) return;
+  const gen = _frontmatterGen;
+  let resp;
+  try {
+    resp = await api('GET', `/api/chunks/${chunk.id}/frontmatter`);
+  } catch (_err) {
+    return;  // A display hint: the note renders as it always has.
+  }
+  if (gen !== _frontmatterGen) return;
+  STATE.detailFrontmatter = { chunkId: chunk.id, leading: !!(resp && resp.leading) };
+  if (STATE.detailViewMode === 'view') _setDetailMode('view');
+}
+
+// The frontmatter span of the text the detail editor holds, or null.
+function _detailFrontmatterSpan(text) {
+  const r = STATE.selectedResult;
+  const id = STATE.selectedChunkId;
+  if (!r || id == null || r.chunk.start_line !== 1) return null;
+  const session = STATE.sourceEdit;
+  if (session && session.chunkId === id && session.loaded) return _leadingFrontmatter(text);
+  const fm = STATE.detailFrontmatter;
+  if (fm && fm.chunkId === id && fm.leading) return _leadingFrontmatter(text);
+  return null;
+}
+
+// The detail editor edits the chunk's source text, not its indexed content
+// (#3071). Indexed content is a projection of the span: wikilinks resolved,
+// merged sections with rebuilt heading labels, a frontmatter preamble without
+// the heading it was merged into. Saving an edit of it rewrote the span from
+// text that did not hold all of its lines. One session per selection: fetched
+// on the first Edit, kept across View/Edit toggles (so a draft survives), and
+// ended when the selection changes, so a late response can never fill another
+// chunk's editor.
+let _sourceEditGen = 0;
+// The detail panel runs one save at a time. Its Save button is shared by every
+// selection, so a second save started while the first runs would leave the
+// first one's cleanup deciding the second one's controls.
+let _detailSaveInFlight = false;
+
+function _endSourceEdit() {
+  _sourceEditGen += 1;
+  STATE.sourceEdit = null;
+  const editor = qs('d-editor');
+  if (editor) editor.readOnly = false;
+  const saveBtn = qs('d-save-btn');
+  if (saveBtn) saveBtn.disabled = _detailSaveInFlight;
+}
+
+async function _beginSourceEdit() {
+  const chunkId = STATE.selectedChunkId;
+  if (!chunkId) return;
+  if (STATE.sourceEdit && STATE.sourceEdit.chunkId === chunkId) return;
+  const gen = ++_sourceEditGen;
+  STATE.sourceEdit = { chunkId, hash: null };
+  const editor = qs('d-editor');
+  const saveBtn = qs('d-save-btn');
+  editor.readOnly = true;
+  saveBtn.disabled = true;
+  let src;
+  try {
+    src = await api('GET', `/api/chunks/${chunkId}/source`);
+  } catch (err) {
+    if (gen !== _sourceEditGen) return;
+    _endSourceEdit();
+    showToast(t('toast.chunk_source_load_failed', { error: err.message }), 'error');
+    _setDetailMode('view');
+    return;
+  }
+  if (gen !== _sourceEditGen) return;
+  // ``loaded``: the editor now holds source text (or a draft of it), whatever
+  // its value is equal to; a stale save clears ``hash`` and keeps this.
+  STATE.sourceEdit = { chunkId, hash: src.base_hash, loaded: true };
+  STATE.selectedOriginal = src.text;
+  editor.value = src.text;
+  editor.readOnly = false;
+  saveBtn.disabled = _detailSaveInFlight;
+  hide(qs('d-diff-btn'));
+  _updateWordCount();
+  // Edit → View while this was loading rendered the indexed text.
+  if (STATE.detailViewMode === 'view') _setDetailMode('view');
 }
 
 // Edit / Delete / Reset
 qs('d-save-btn').addEventListener('click', async () => {
-  if (!STATE.selectedChunkId) return;
-  const newContent = qs('d-editor').value;
+  // Captured before the first await: the selection can change while the
+  // save is in flight, and nothing after it may act on the new one.
+  if (_detailSaveInFlight) return;
+  const chunkId = STATE.selectedChunkId;
+  const session = STATE.sourceEdit;
+  if (!chunkId || !session || session.chunkId !== chunkId || !session.hash) return;
+  const editor = qs('d-editor');
+  const newContent = editor.value;
+  const indexed = STATE.selectedIndexed;
   const btn = qs('d-save-btn');
+  _detailSaveInFlight = true;
   btnLoading(btn, true);
+  // Read-only while the save is in flight: what is typed now would not be in
+  // this save, and a successful save closes the panel it was typed into.
+  editor.readOnly = true;
   try {
-    const resp = await saveChunkBody(STATE.selectedChunkId, { new_content: newContent });
+    const resp = await saveChunkBody(chunkId, { new_content: newContent, base_hash: session.hash });
     if (resp === null) return;
     // History push must follow a confirmed write — pushing before the
     // request would pollute the undo stack with a no-op entry when the
-    // user cancels the redaction-blocked confirm dialog.
-    _pushHistory(STATE.selectedChunkId, STATE.selectedOriginal);
+    // user cancels the redaction-blocked confirm dialog. History keeps the
+    // indexed content it has always kept.
+    _pushHistory(chunkId, indexed);
     // ``saveChunkBody`` already showed a held re-index's warning (#2923).
     if (!resp.warning) showToast(t('toast.chunk_saved'), 'success');
-    STATE.selectedOriginal = newContent;
-    _syncResultContent(STATE.selectedChunkId, newContent);
-    _updateHistoryBtn(STATE.selectedChunkId);
+    // The save re-indexed the file, so the chunk's id and span can have
+    // changed and the response can describe the pre-edit row: drop the row
+    // rather than keep showing or selecting it. The panel closes only if this
+    // edit session is still the open one; a chunk opened (or this one
+    // reopened) while the save ran keeps its session and draft.
     _markDataStale();
     loadStats();
+    _forgetSavedChunk(chunkId);
+    if (STATE.sourceEdit === session) clearDetail();
+    // The same chunk reopened while the save ran keeps its session; its
+    // History button now has the entry this save pushed.
+    else if (String(STATE.selectedChunkId) === String(chunkId)) _updateHistoryBtn(chunkId);
   } catch (err) {
-    showToast(t('toast.save_failed', { error: err.message }), 'error');
+    if (err.status === 409 && err.message === 'edit_base_mismatch') {
+      // The source changed since it was loaded. Keep the draft, but stop
+      // saving it over text the user has not seen.
+      session.hash = null;
+      showToast(t('toast.chunk_source_changed'), 'error');
+    } else {
+      showToast(t('toast.save_failed', { error: err.message }), 'error');
+    }
   } finally {
+    _detailSaveInFlight = false;
     btnLoading(btn, false);
+    // Only this save's own session gets its editor back; another selection's
+    // editor state belongs to that selection's session.
+    if (STATE.sourceEdit === session) editor.readOnly = false;
+    // ``btnLoading`` re-enabled the button; whichever session is open now
+    // decides whether it may save (one still loading, or gone stale, may not).
+    if (STATE.sourceEdit && !STATE.sourceEdit.hash) btn.disabled = true;
   }
 });
 
 qs('d-delete-btn').addEventListener('click', async () => {
-  if (!STATE.selectedChunkId) return;
-  const r = STATE.lastResults.find(x => String(x.chunk.id) === String(STATE.selectedChunkId));
+  // Captured before the dialog: a save finishing while it is open can drop
+  // this chunk's result and close the panel, and the delete must not then
+  // fall through to whatever (or nothing) is selected afterwards.
+  const chunkId = STATE.selectedChunkId;
+  if (!chunkId) return;
+  const r = STATE.selectedResult;
   const src = r ? r.chunk.source_file.split('/').pop() : '';
   const lines = r ? `lines ${r.chunk.start_line}–${r.chunk.end_line}` : '';
   const ok = await showConfirm({
@@ -4038,8 +4270,9 @@ qs('d-delete-btn').addEventListener('click', async () => {
     confirmText: t('common.delete'),
   });
   if (!ok) return;
+  if (String(STATE.selectedChunkId) !== String(chunkId)) return;
   try {
-    const resp = await api('DELETE', `/api/chunks/${STATE.selectedChunkId}`);
+    const resp = await api('DELETE', `/api/chunks/${chunkId}`);
     // Set when the delete is on disk but its source was held instead of
     // re-indexed (#2923); it replaces the plain success toast.
     if (resp && resp.warning) showToast(resp.warning, 'warning');
@@ -4104,13 +4337,19 @@ function _setDetailMode(mode) {
     btn.dataset.mode = 'edit';
     // Show edit-only actions
     show(qs('d-save-btn'));
+    _beginSourceEdit();
   } else {
     const content = editor.value;
     const lang = getLanguage(STATE.detailViewSource);
-    const isMarkdown = (lang === 'markdown' || (STATE.detailViewSource || '').endsWith('.md'));
+    const isMarkdown = (lang === 'markdown' || _isMarkdownSource(STATE.detailViewSource));
     if (isMarkdown && typeof marked !== 'undefined') {
       codeView.className = 'detail-code-view md-preview';
-      codeView.innerHTML = DOMPurify.sanitize(marked.parse(content));
+      const span = _detailFrontmatterSpan(content);
+      const html = span === null
+        ? marked.parse(content)
+        : `<pre class="md-frontmatter"><code>${escapeHtml(span.replace(/\n$/, ''))}</code></pre>`
+          + marked.parse(content.slice(span.length));
+      codeView.innerHTML = DOMPurify.sanitize(html);
     } else if (lang && lang !== 'markdown' && window.Prism && Prism.languages[lang]) {
       codeView.className = 'detail-code-view';
       codeView.innerHTML = `<pre><code class="language-${lang}">${Prism.highlight(content, Prism.languages[lang], lang)}</code></pre>`;
@@ -4249,14 +4488,18 @@ qs('bulk-select-all').addEventListener('change', () => {
 });
 
 qs('bulk-delete-btn').addEventListener('click', async () => {
-  const ids = [...STATE.selectedIds];
-  if (!ids.length) return;
+  const asked = [...STATE.selectedIds];
+  if (!asked.length) return;
   const ok = await showConfirm({
-    title: t('confirm.bulk_delete_title', { count: ids.length }),
-    message: t('confirm.bulk_delete_msg', { count: ids.length }),
+    title: t('confirm.bulk_delete_title', { count: asked.length }),
+    message: t('confirm.bulk_delete_msg', { count: asked.length }),
     confirmText: t('common.delete'),
   });
   if (!ok) return;
+  // Only what is still selected once the dialog closes: a save that finished
+  // meanwhile drops its chunk from the list and from the selection.
+  const ids = asked.filter(id => STATE.selectedIds.has(id));
+  if (!ids.length) return;
   const btn = qs('bulk-delete-btn');
   btnLoading(btn, true);
   let deleted = 0, failed = 0;
@@ -4902,7 +5145,16 @@ function _retranslateSourcesPartialNote() {
 }
 
 
+// Bumped by every ``browseSource`` and ``hideBrowser``: a listing answers only
+// the browse that is still the latest, so one landing late never replaces the
+// view that followed it.
+let _browseGen = 0;
+
 function hideBrowser() {
+  // A listing still in flight must not bring the cards back.
+  _browseGen += 1;
+  STATE.browsedSource = null;
+  STATE.browserRefreshPending = null;
   document.querySelector('.sources-layout')?.classList.remove('mobile-detail');
   hide(qs('chunks-browser-content'));
   const browser = qs('chunks-browser');
@@ -6239,10 +6491,17 @@ function _renderMemorySourceItem(s, maxChunks) {
 }
 
 async function browseSource(path, limit = 100, enterMobileDetail = false) {
+  const gen = ++_browseGen;
+  STATE.browsedSource = path;
+  STATE.browsedLimit = limit;
+  // This browse fetches the source afresh: a held refresh is satisfied by it,
+  // or belongs to a source no longer shown.
+  STATE.browserRefreshPending = null;
   const browser = qs('chunks-browser');
   panelLoading(browser);
   try {
     const data = await api('GET', `/api/chunks?source=${encodeURIComponent(path)}&limit=${limit}`);
+    if (gen !== _browseGen) return;
     browser.innerHTML = '';
     const content = document.createElement('div');
     content.id = 'chunks-browser-content';
@@ -6369,6 +6628,8 @@ async function browseSource(path, limit = 100, enterMobileDetail = false) {
           try {
             await api('DELETE', `/api/chunks/${c.id}`);
             card.remove();
+            // The card can take the last open editor with it.
+            _flushBrowserRefresh();
             showToast(t('toast.chunk_deleted'), 'success');
             // Update count badge
             const countEl = content.querySelector('.badge-blue');
@@ -6462,8 +6723,67 @@ async function browseSource(path, limit = 100, enterMobileDetail = false) {
       });
     }
   } catch (err) {
+    if (gen !== _browseGen) return;
     browser.innerHTML = `<div class="empty-state"><p>Error: ${escapeHtml(err.message)}</p></div>`;
   }
+}
+
+// A card save refreshes its source's cards, which rebuilds every card in the
+// browser: an editor open on another card, and its draft, would go with it
+// (#3077). So the refresh waits until no editor is open, in either view, and
+// ``_flushBrowserRefresh`` runs wherever an editor closes. A save for a source
+// the browser no longer shows touches nothing: that browse fetched afresh.
+// Pending always names ``browsedSource``: ``browseSource`` and ``hideBrowser``
+// clear it whenever that changes.
+function _requestBrowserRefresh(path) {
+  if (path !== STATE.browsedSource) return;
+  STATE.browserRefreshPending = path;
+  _flushBrowserRefresh();
+}
+
+function _flushBrowserRefresh() {
+  const pending = STATE.browserRefreshPending;
+  if (!pending) return;
+  if (qs('chunks-browser')?.querySelector('.chunk-card-edit-area')) {
+    _showRefreshHeldNotice();
+    return;
+  }
+  STATE.browserRefreshPending = null;
+  browseSource(pending, STATE.browsedLimit);
+}
+
+// Until the held refresh runs, the saved chunk's cards keep their pre-save
+// text, under an id the re-index may have retired: disable what would act on
+// that id or copy that text, in both views. An editor already open on it is
+// left alone.
+function _markChunkSaved(chunkId) {
+  const browser = qs('chunks-browser');
+  if (!browser) return;
+  const sel = `[data-chunk-id="${CSS.escape(String(chunkId))}"]`;
+  browser.querySelectorAll(`.chunk-card${sel}, .doc-chunk-block${sel}`).forEach(el => {
+    el.classList.add('chunk-card-saved');
+    el.querySelectorAll('.card-copy-btn, .card-edit-btn, .card-delete-btn, .doc-chunk-edit-btn')
+      .forEach(btn => { btn.disabled = true; });
+  });
+}
+
+// One notice for the whole browser, above both views: the Document view's
+// Copy All joins every chunk's text, the saved one's included, so it is off
+// until the refresh replaces that text. The refresh rebuilds the browser and
+// takes the notice with it.
+function _showRefreshHeldNotice() {
+  const content = qs('chunks-browser-content');
+  if (!content) return;
+  content.querySelectorAll('.document-copy-btn').forEach(btn => { btn.disabled = true; });
+  if (content.querySelector('.chunks-refresh-held')) return;
+  const notice = document.createElement('div');
+  notice.className = 'chunks-refresh-held';
+  notice.setAttribute('role', 'status');
+  notice.setAttribute('data-i18n', 'chunks.refresh_held');
+  content.querySelector('.chunks-browser-header')?.after(notice);
+  // Filled after it is in the page: a live region that arrives with its text
+  // already set is often not announced.
+  setTimeout(() => { notice.textContent = t('chunks.refresh_held'); }, 0);
 }
 
 function _renderDocumentView(chunks, container, path) {
@@ -6488,6 +6808,7 @@ function _renderDocumentView(chunks, container, path) {
   sorted.forEach(c => {
     const block = document.createElement('div');
     block.className = 'doc-chunk-block';
+    block.dataset.chunkId = c.id;
 
     if (lang && lang !== 'markdown' && window.Prism) {
       const pre = document.createElement('pre');
@@ -6523,7 +6844,9 @@ function _startChunkEdit(card, chunk, sourcePath) {
   const editArea = document.createElement('div');
   editArea.className = 'chunk-card-edit-area';
   const ta = document.createElement('textarea');
-  ta.value = chunk.content;
+  // Filled with the chunk's source text once it loads (#3071): the indexed
+  // content is a projection of the span, not the text a save replaces.
+  ta.readOnly = true;
   editArea.appendChild(ta);
 
   const actionsDiv = document.createElement('div');
@@ -6539,36 +6862,76 @@ function _startChunkEdit(card, chunk, sourcePath) {
   editArea.appendChild(actionsDiv);
   card.appendChild(editArea);
 
-  ta.focus();
+  let base = null;
+  saveBtn.disabled = true;
+  api('GET', `/api/chunks/${chunk.id}/source`).then(src => {
+    if (!editArea.isConnected) return;
+    base = src;
+    ta.value = src.text;
+    ta.readOnly = false;
+    saveBtn.disabled = false;
+    ta.focus();
+  }).catch(err => {
+    if (!editArea.isConnected) return;
+    closeEditor();
+    showToast(t('toast.chunk_source_load_failed', { error: err.message }), 'error');
+  });
+
+  // Every way this editor closes: a refresh held for it can run once it is
+  // the last one gone.
+  function closeEditor() {
+    editArea.remove();
+    _flushBrowserRefresh();
+  }
 
   cancelBtn.addEventListener('click', e => {
     e.stopPropagation();
-    editArea.remove();
+    closeEditor();
   });
 
   saveBtn.addEventListener('click', async e => {
     e.stopPropagation();
+    if (!base) return;
     const newContent = ta.value;
-    if (newContent === chunk.content) { editArea.remove(); return; }
+    if (newContent === base.text) { closeEditor(); return; }
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
+    ta.readOnly = true;  // what is typed now would not be in this save
     try {
-      const resp = await saveChunkBody(chunk.id, { new_content: newContent });
+      const resp = await saveChunkBody(chunk.id, {
+        new_content: newContent,
+        base_hash: base.base_hash,
+      });
       if (resp === null) {
         saveBtn.disabled = false;
         saveBtn.textContent = 'Save';
+        ta.readOnly = false;
         return;
       }
       // ``saveChunkBody`` already showed a held re-index's warning (#2923).
       if (!resp.warning) showToast(t('toast.chunk_updated'), 'success');
-      _syncResultContent(chunk.id, newContent);
       _markDataStale();
-      // Refresh the browser to show updated content
-      browseSource(sourcePath, card.closest('#chunks-browser-content')?.querySelectorAll('.chunk-card').length > 100 ? 500 : 100);
+      // Search still holds this chunk's pre-edit text, under an id the
+      // re-index can retire: drop that result, and close the detail panel on
+      // it unless a source edit (and its draft) is open there.
+      _forgetSavedChunk(chunk.id);
+      if (String(STATE.selectedChunkId) === String(chunk.id) && !STATE.sourceEdit) clearDetail();
+      // This session's editor, not "the editor on this chunk": Cancel and Edit
+      // during the save can have opened another one on the same card.
+      editArea.remove();
+      _markChunkSaved(chunk.id);
+      _requestBrowserRefresh(sourcePath);
     } catch (err) {
+      saveBtn.textContent = 'Save';
+      ta.readOnly = false;
+      if (err.status === 409 && err.message === 'edit_base_mismatch') {
+        // Keep the draft; the base it was written against is gone.
+        base = null;
+        showToast(t('toast.chunk_source_changed'), 'error');
+        return;
+      }
       showToast(t('toast.update_failed', { error: err.message }), 'error');
       saveBtn.disabled = false;
-      saveBtn.textContent = 'Save';
     }
   });
 }
@@ -6744,7 +7107,10 @@ qs('add-btn').addEventListener('click', async () => {
     const data = await apiWithRedactionRetry('POST', '/api/add', body);
     if (data === null) return;
     const n = data.indexed_chunks;
-    showToast(t('toast.saved_to_file', { path: tildifyPath(data.file), count: n }), 'success');
+    // Set when the file became excluded while the entry was appended (#3165):
+    // the entry is on disk but not indexed, so it replaces the success toast.
+    if (data.warning) showToast(data.warning, 'warning');
+    else showToast(t('toast.saved_to_file', { path: tildifyPath(data.file), count: n }), 'success');
     qs('add-content').value = '';
     _markDataStale();
     loadStats();
@@ -7468,6 +7834,8 @@ function indexAdvisoryToast(result) {
   const preserved = Number(result && result.namespaces_preserved_against_rules) || 0;
   const reassigned = Number(result && result.namespaces_reassigned) || 0;
   const missingVectors = Number(result && result.chunks_missing_vectors) || 0;
+  const undecoded = Number(result && result.day_file_names_undecoded) || 0;
+  const restored = Number(result && result.namespaces_restored_from_name) || 0;
   if (preserved > 0) {
     showToast(t('index.result.namespace_preserved', { count: preserved }), 'warning');
   }
@@ -7480,7 +7848,16 @@ function indexAdvisoryToast(result) {
   if (missingVectors > 0) {
     showToast(t('index.result.missing_vectors', { count: missingVectors }), 'warning');
   }
-  return preserved > 0 || reassigned > 0 || missingVectors > 0;
+  // ADR-0043: namespaces a rebuild read back from day-file names, and the day
+  // files whose name did not give theirs back, so a rebuild indexed them into
+  // the rules' or session's namespace.
+  if (restored > 0) {
+    showToast(t('index.result.namespaces_restored_from_name', { count: restored }), 'info');
+  }
+  if (undecoded > 0) {
+    showToast(t('index.result.day_file_names_undecoded', { count: undecoded }), 'warning');
+  }
+  return preserved > 0 || reassigned > 0 || missingVectors > 0 || restored > 0 || undecoded > 0;
 }
 
 // The ``/api/reindex`` shape is per-root, so its consumers have to add the
@@ -7500,6 +7877,14 @@ function indexAdvisoryToastForRoots(results) {
     ),
     chunks_missing_vectors: roots.reduce(
       (sum, r) => sum + (Number(r.chunks_missing_vectors) || 0),
+      0,
+    ),
+    namespaces_restored_from_name: roots.reduce(
+      (sum, r) => sum + (Number(r.namespaces_restored_from_name) || 0),
+      0,
+    ),
+    day_file_names_undecoded: roots.reduce(
+      (sum, r) => sum + (Number(r.day_file_names_undecoded) || 0),
       0,
     ),
   });
@@ -7564,6 +7949,14 @@ function _renderIndexResult(result, { registerAsSource, path }) {
     const missingVectors = Number(result.chunks_missing_vectors) || 0;
     if (missingVectors > 0) {
       lines.push(t('index.result.missing_vectors', { count: missingVectors }));
+    }
+    const restored = Number(result.namespaces_restored_from_name) || 0;
+    if (restored > 0) {
+      lines.push(t('index.result.namespaces_restored_from_name', { count: restored }));
+    }
+    const undecoded = Number(result.day_file_names_undecoded) || 0;
+    if (undecoded > 0) {
+      lines.push(t('index.result.day_file_names_undecoded', { count: undecoded }));
     }
     qs('r-namespace-advisory').textContent = lines.join('\n');
     nsAdvisoryRow.hidden = lines.length === 0;
@@ -7752,7 +8145,13 @@ async function findSimilar() {
   list.innerHTML = '<div class="empty-state" style="height:60px"><p>Loading…</p></div>';
 
   try {
-    const data = await api('GET', `/api/chunks/${STATE.selectedChunkId}/similar?top_k=5`);
+    // Neighbours from the namespace the Search tab is filtered to, read at
+    // click time as ``_buildSearchParams`` reads it. With no filter the route
+    // hides the system namespaces, as a search does.
+    const params = new URLSearchParams({ top_k: 5 });
+    const nsFilter = qs('ns-filter')?.value;
+    if (nsFilter) params.set('namespace', nsFilter);
+    const data = await api('GET', `/api/chunks/${STATE.selectedChunkId}/similar?${params}`);
     if (!data.results.length) {
       list.innerHTML = '<div class="empty-state" style="height:60px"><p>No similar chunks found</p></div>';
       return;
@@ -7817,6 +8216,13 @@ function escapeHtml(str) {
 // also safe — past redundant ``.replace(/"/g, ...)`` was a no-op once the
 // quote handling moved into escapeHtml.
 function escapeAttr(str) { return escapeHtml(str); }
+// Namespace colors are interpolated into ``style``/``value`` attributes. The
+// server only stores ``#`` + 3, 4, 6 or 8 hex digits (``NAMESPACE_COLOR_PATTERN``),
+// but a row written before that check may hold anything, so render it as the
+// fallback.
+function safeCssColor(color, fallback) {
+  return typeof color === 'string' && /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(color) ? color : fallback;
+}
 
 // ---------------------------------------------------------------------------
 // Search History (A)
@@ -9054,7 +9460,7 @@ qs('d-source-btn').addEventListener('click', async () => {
     const data = await api('GET', `/api/chunks?source=${encodeURIComponent(sourceFile)}&limit=100`);
     const chunks = data.chunks || [];
     if (!chunks.length) {
-      list.innerHTML = '<div class="empty-state" style="height:40px"><span>No chunks found</span></div>';
+      list.innerHTML = `<div class="empty-state" style="height:40px"><span data-i18n="chunks.none_found">${escapeHtml(t('chunks.none_found'))}</span></div>`;
       return;
     }
     list.innerHTML = chunks.map(c => `

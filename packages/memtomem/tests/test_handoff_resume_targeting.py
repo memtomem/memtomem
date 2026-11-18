@@ -30,7 +30,6 @@ selection is decidable from one bounded page.
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -381,11 +380,11 @@ async def test_search_applies_tag_filter_before_the_candidate_cap() -> None:
 def test_handoff_id_tag_round_trips_through_the_writer(tmp_path) -> None:
     """UUID-bearing tags must survive the ``> tags:`` blockquote writer."""
     from memtomem.chunking.markdown import MarkdownChunker
-    from memtomem.tools.memory_writer import append_entry
+    from helpers import append_judged
 
     target = tmp_path / "handoff.md"
     tag = f"handoff-id-{_TARGET_ID}"
-    append_entry(target, "objective: x\n", title="Handoff", tags=["handoff", tag])
+    append_judged(target, "objective: x\n", title="Handoff", tags=["handoff", tag])
 
     chunks = MarkdownChunker().chunk_file(target, target.read_text(encoding="utf-8"))
 
@@ -421,10 +420,10 @@ def _max_size_record(*, fenced: bool) -> str:
 def _chunk_at_min_size(tmp_path, record: str):
     from memtomem.chunking.markdown import MarkdownChunker
     from memtomem.config import IndexingConfig
-    from memtomem.tools.memory_writer import append_entry
+    from helpers import append_judged
 
     target = tmp_path / "handoff.md"
-    append_entry(
+    append_judged(
         target,
         record,
         title=f"Handoff {_TARGET_ID}",
@@ -568,62 +567,6 @@ _FIELDS = (
 )
 # A record saved before ``artifacts`` existed has every other field (#2930).
 _LEGACY_FIELDS = tuple(key for key in _FIELDS if key != "artifacts")
-_FASTEMBED_CACHE_ENV = ("MEMTOMEM_FASTEMBED_CACHE", "FASTEMBED_CACHE_PATH")
-
-
-def _verified_cached_e5_tokenizer() -> str | None:
-    """A copy of the pinned tokenizer already in a fastembed cache, read only.
-
-    Looks where the product would (the non-empty overrides, then the default
-    ``~/.memtomem/cache/fastembed``) without creating or writing anything, and
-    returns a file only when its checksum is the pinned one.
-    """
-    import hashlib
-    from pathlib import Path
-
-    from memtomem.embedding.profiles import E5_MODEL, E5_REVISION, E5_TOKENIZER_SHA256
-
-    roots = [os.environ[name] for name in _FASTEMBED_CACHE_ENV if os.environ.get(name)]
-    roots.append(str(Path.home() / ".memtomem" / "cache" / "fastembed"))
-    snapshot = Path("models--" + E5_MODEL.replace("/", "--"), "snapshots", E5_REVISION)
-    for root in roots:
-        candidate = Path(root).expanduser() / snapshot / "tokenizer.json"
-        if not candidate.is_file():
-            continue
-        with candidate.open("rb") as stream:
-            if hashlib.file_digest(stream, "sha256").hexdigest() == E5_TOKENIZER_SHA256:
-                return str(candidate)
-    return None
-
-
-@pytest.fixture(scope="session")
-def _e5_tokenizer_file(tmp_path_factory) -> str:
-    """The pinned E5 ``tokenizer.json``, checksum-verified, as a plain path.
-
-    Reuses a verified copy from an existing cache without writing to it;
-    otherwise downloads into a temporary cache, never the developer's. Skips
-    only when the file cannot be fetched. A checksum mismatch on the download
-    (``ValueError``) is a real failure and propagates.
-    """
-    pytest.importorskip("tokenizers")
-    pytest.importorskip("huggingface_hub")
-    httpx = pytest.importorskip("httpx")
-    from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
-
-    from memtomem.embedding.profiles import E5_TOKENIZER, resolve_tokenizer
-
-    cached = _verified_cached_e5_tokenizer()
-    if cached is not None:
-        return cached
-    with pytest.MonkeyPatch.context() as mp:
-        # ``MEMTOMEM_FASTEMBED_CACHE`` outranks ``FASTEMBED_CACHE_PATH``, so
-        # this alone keeps the download out of any cache the developer uses.
-        mp.setenv("MEMTOMEM_FASTEMBED_CACHE", str(tmp_path_factory.mktemp("fastembed")))
-        try:
-            path = resolve_tokenizer(E5_TOKENIZER)
-        except (HfHubHTTPError, LocalEntryNotFoundError, OSError, httpx.TransportError) as exc:
-            pytest.skip(f"pinned E5 tokenizer unavailable: {type(exc).__name__}: {exc}")
-    return str(path)
 
 
 @pytest.fixture
@@ -692,10 +635,10 @@ def _e5_rows(tmp_path, record: str, config):
     """
     from memtomem.chunking.bounded import bound_chunks
     from memtomem.chunking.markdown import MarkdownChunker
-    from memtomem.tools.memory_writer import append_entry
+    from helpers import append_judged
 
     target = tmp_path / "handoff.md"
-    append_entry(
+    append_judged(
         target,
         record,
         title=f"Handoff {_TARGET_ID}",

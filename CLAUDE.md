@@ -12,10 +12,10 @@ Requires Python 3.12+ and `uv` (workspace-managed monorepo).
 ```bash
 uv pip install -e "packages/memtomem[all]"             # install deps
 uv run pytest -m "not ollama"                          # tests (CI filter)
-uv run ruff check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py && \
+uv run ruff check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py && \
     uv run ruff format --check \
-    packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py   # lint (required)
-uv run mypy packages/memtomem/src                         # typecheck (advisory)
+    packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py   # lint (required)
+uv run mypy packages/memtomem/src packages/langchain-memtomem/src   # typecheck (advisory)
 ```
 
 The `ollama` marker auto-skips when Ollama isn't running; CI always uses
@@ -55,8 +55,8 @@ for `memtomem` and both resolve to `memtomem.cli:cli`.
 - **Search pipeline order is fixed**: query expansion → BM25 + dense (parallel,
   both carrying the scope-context, tag and source filters) → RRF fusion →
   cross-encoder rerank (optional) → source filter (defensive recheck) →
-  validity filter → time-decay → MMR → access-freq boost → importance boost →
-  entity-match boost → context-window expansion. Don't reorder stages in
+  validity filter → time-decay → access-freq boost → importance boost →
+  entity-match boost → MMR → context-window expansion. Don't reorder stages in
   `packages/memtomem/src/memtomem/search/pipeline.py` without updating the
   Stage comments in that file. Filters that select at retrieval belong on
   `SearchMetadataFilter`; before pushing a new one into a leg's SQL, check

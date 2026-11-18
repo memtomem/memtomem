@@ -277,6 +277,49 @@ def _split_oversized_part(text: str, max_chars: int) -> list[_TextSpan]:
     return result or [whole]
 
 
+MARKDOWN_EXTENSIONS = frozenset({".md", ".markdown"})
+
+
+def resolve_wikilinks(text: str) -> str:
+    """The text ``chunk_file`` splits: ``[[target|alias]]`` → alias, ``[[target]]`` → target."""
+    return _WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
+
+
+def leading_frontmatter(text: str) -> str | None:
+    """The frontmatter span at the head of the text ``chunk_file`` stores, or None.
+
+    *text* is a whole file as the engine reads it. The span is the one
+    ``_FRONT_MATTER_RE`` consumes on the wikilink-resolved text, including the
+    newline after the closing ``---`` when there is one. A span that ends
+    mid-line (a closing ``----`` or ``--- x`` line) is None: the regex stops
+    after three hyphens, so no line holds just the block, and a reader that
+    showed it as a block would invent a boundary the producer did not use.
+    """
+    resolved = resolve_wikilinks(text)
+    match = _FRONT_MATTER_RE.match(resolved)
+    if match is None:
+        return None
+    span = match.group(0)
+    if span.endswith("\n") or len(span) == len(resolved):
+        return span
+    return None
+
+
+def _frontmatter_line_set(text: str) -> frozenset[int]:
+    """Return 1-indexed line numbers covered by leading YAML frontmatter,
+    opener and closer lines included.
+
+    Treating frontmatter lines as non-headings prevents a ``# comment`` or
+    other heading-shaped line inside frontmatter from splitting the block
+    and entering the document outline (#3096).
+    """
+    span = leading_frontmatter(text)
+    if not span:
+        return frozenset()
+    count = len(split_source_lines(span))
+    return frozenset(range(1, count + 1))
+
+
 class MarkdownChunker:
     def __init__(self, indexing_config=None):
         self._max_tokens = 512
@@ -288,7 +331,7 @@ class MarkdownChunker:
             self._para_threshold = getattr(indexing_config, "paragraph_split_threshold", 800)
 
     def supported_extensions(self) -> frozenset[str]:
-        return frozenset({".md", ".markdown"})
+        return MARKDOWN_EXTENSIONS
 
     def chunk_file(self, file_path: Path, content: str) -> list[Chunk]:
         if not content.strip():
@@ -302,8 +345,7 @@ class MarkdownChunker:
         # carries the same (valid_from_unix, valid_to_unix) pair.
         valid_from_unix, valid_to_unix = self._extract_validity_window(content)
 
-        # Resolve wikilinks: [[target|alias]] → alias, [[target]] → target
-        content = _WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), content)
+        content = resolve_wikilinks(content)
 
         sections = self._split_by_headings(content)
         chunks: list[Chunk] = []
@@ -320,6 +362,9 @@ class MarkdownChunker:
         # ``## title`` + header + ``### parts`` tags its parts too. The stack
         # holds ``(level, tags)`` for each open scope.
         scope_tags: list[tuple[int, list[str]]] = []
+        # The entry's ``> created:`` time scopes the same way (ADR-0043 §5):
+        # an entry's ``### parts`` were written when the entry was.
+        scope_created: list[tuple[int, datetime]] = []
 
         for section in sections:
             # Close scopes before the empty-text skips below: a heading-only
@@ -327,6 +372,8 @@ class MarkdownChunker:
             for level in section["heading_levels"]:
                 while scope_tags and scope_tags[-1][0] >= level:
                     scope_tags.pop()
+                while scope_created and scope_created[-1][0] >= level:
+                    scope_created.pop()
 
             raw_section_text = section["text"]
             text = raw_section_text.strip()
@@ -345,12 +392,18 @@ class MarkdownChunker:
             # Per-entry metadata blockquote (``> created: ...`` / ``> tags:
             # [...]``) is promoted to ``metadata.tags`` and stripped from
             # the chunk content so it doesn't leak into BM25/embedding.
+            # Read before the strip below, which only removes a group that
+            # holds tags; a ``> created:``-only group stays in the content.
+            section_created = self._section_created_at(text)
             section_tags, text, blockquote_strip_lines = self._extract_section_blockquote_tags(text)
             inherited_tags = {tag for _, tags in scope_tags for tag in tags}
+            entry_created = section_created or (scope_created[-1][1] if scope_created else None)
             # Pushed before the skip below, which an entry whose header is its
             # section's only text takes. A preamble's tags stay its own.
             if section_tags and section["heading_levels"]:
                 scope_tags.append((section["heading_levels"][-1], section_tags))
+            if section_created is not None and section["heading_levels"]:
+                scope_created.append((section["heading_levels"][-1], section_created))
             if not text.strip():
                 continue
             combined_tags = tuple(sorted(set(fm_tags) | set(section_tags) | inherited_tags))
@@ -388,6 +441,7 @@ class MarkdownChunker:
                             file_context=file_ctx,
                             valid_from_unix=valid_from_unix,
                             valid_to_unix=valid_to_unix,
+                            entry_created_at=entry_created,
                         ),
                     )
                 )
@@ -413,6 +467,7 @@ class MarkdownChunker:
                                 valid_from_unix=valid_from_unix,
                                 valid_to_unix=valid_to_unix,
                                 file_context=file_ctx,
+                                entry_created_at=entry_created,
                             ),
                         )
                     )
@@ -565,21 +620,46 @@ class MarkdownChunker:
           ``end_line`` aligned with the source file after the strip.
         """
         lines = split_source_lines(text)
+        group = cls._leading_blockquote_group(lines)
+        if group is None:
+            return [], text, 0
+        block_inner, i = group
+
+        # Find a ``tags:`` key inside the block (case-sensitive).
+        tags: list[str] = []
+        for idx, inner in enumerate(block_inner):
+            inner_stripped = inner.strip()
+            if inner_stripped.startswith("tags:"):
+                tags = cls._parse_tags_value(inner_stripped[5:], block_inner[idx + 1 :])
+                break
+
+        if not tags:
+            return [], text, 0
+
+        # Strip the blockquote group plus immediately-trailing blank lines.
+        rest_start = i
+        while rest_start < len(lines) and not lines[rest_start].strip():
+            rest_start += 1
+        return tags, "\n".join(lines[rest_start:]), rest_start
+
+    @staticmethod
+    def _leading_blockquote_group(lines: list[str]) -> tuple[list[str], int] | None:
+        """The section-leading blockquote group's inner lines, and the index past it.
+
+        ``None`` when the first non-blank line is not a blockquote. Includes
+        lazy-continuation lines: a non-blank, non-``>``-prefixed line that
+        immediately follows a ``>``-prefixed line without a blank between.
+        """
         # Skip leading blank lines (text is usually .strip()ed already, but
         # be defensive — _split_section can pass non-stripped chunks).
         i = 0
         while i < len(lines) and not lines[i].strip():
             i += 1
         if i == len(lines) or not lines[i].lstrip().startswith(">"):
-            return [], text, 0
-
-        # Collect the contiguous blockquote group, including lazy-continuation
-        # lines: a non-blank, non-``>``-prefixed line that immediately follows
-        # a ``>``-prefixed line without an intervening blank line.
+            return None
         block_inner: list[str] = []
         while i < len(lines):
-            line = lines[i]
-            stripped = line.lstrip()
+            stripped = lines[i].lstrip()
             if not stripped:
                 break
             if stripped.startswith(">"):
@@ -598,23 +678,35 @@ class MarkdownChunker:
                 i += 1
                 continue
             break
+        return block_inner, i
 
-        # Find a ``tags:`` key inside the block (case-sensitive).
-        tags: list[str] = []
-        for idx, inner in enumerate(block_inner):
+    @classmethod
+    def _section_created_at(cls, text: str) -> datetime | None:
+        """The ``created:`` time in a section-leading blockquote group (ADR-0043 §5).
+
+        Read whether or not the group also holds tags, and without stripping
+        anything: a group without tags stays in the chunk content, as it
+        always has, so no existing chunk's hash changes. A value that does not
+        parse as an ISO 8601 time is ignored; one without an offset is UTC,
+        which is what the writer emits.
+        """
+        group = cls._leading_blockquote_group(split_source_lines(text))
+        if group is None:
+            return None
+        for inner in group[0]:
             inner_stripped = inner.strip()
-            if inner_stripped.startswith("tags:"):
-                tags = cls._parse_tags_value(inner_stripped[5:], block_inner[idx + 1 :])
-                break
-
-        if not tags:
-            return [], text, 0
-
-        # Strip the blockquote group plus immediately-trailing blank lines.
-        rest_start = i
-        while rest_start < len(lines) and not lines[rest_start].strip():
-            rest_start += 1
-        return tags, "\n".join(lines[rest_start:]), rest_start
+            if inner_stripped.startswith("created:"):
+                try:
+                    parsed = datetime.fromisoformat(inner_stripped[len("created:") :].strip())
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    # Inside the guard: a time at either end of the range parses
+                    # but overflows when moved to UTC, and one bad header must not
+                    # fail the file.
+                    return parsed.astimezone(timezone.utc)
+                except (ValueError, OverflowError):
+                    return None
+        return None
 
     def _split_section(self, text: str, section: dict, *, body_offset: int = 0) -> list[dict]:
         """Split an oversized section by paragraphs or sentences.
@@ -772,6 +864,8 @@ class MarkdownChunker:
     def _split_by_headings(self, content: str) -> list[dict]:
         lines = split_source_lines(content)
         fence_lines = _fence_line_set(content)
+        frontmatter_lines = _frontmatter_line_set(content)
+        ignored_lines = fence_lines | frontmatter_lines
         sections: list[dict] = []
         current_hierarchy: list[str] = []
         current_lines: list[str] = []
@@ -784,7 +878,7 @@ class MarkdownChunker:
         pending_levels: list[int] = []
 
         for i, line in enumerate(lines, 1):
-            match = _HEADING_RE.match(line) if i not in fence_lines else None
+            match = _HEADING_RE.match(line) if i not in ignored_lines else None
             if match:
                 # Flush previous section
                 if current_lines:

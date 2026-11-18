@@ -682,3 +682,49 @@ class TestPreCaseFoldStamps:
             assert storage.embedding_mismatch is None
         finally:
             await storage.close()
+
+
+async def test_reset_counts_see_a_table_created_after_open(tmp_path: Path) -> None:
+    """The reset wording counts vectors from the file, not the open-time flag (#2423).
+
+    A backend that opened a dim-0 store saw no ``chunks_vec``. Another
+    connection then creates it and writes a vector row. ``get_vector_count``
+    still answers 0 from its flag (pinned in ``test_storage_extended``), so the
+    wording must not use it: the reset of this store drops a row.
+    """
+    import struct
+
+    import sqlite_vec
+
+    from memtomem.embedding.identity import embedding_reset_counts, store_has_nothing_to_reset
+
+    db_path = tmp_path / "m.db"
+    await _stamp_dim0(db_path)
+    storage = SqliteBackend(
+        StorageConfig(sqlite_path=db_path),
+        dimension=0,
+        embedding_provider="none",
+        embedding_model="",
+        embedding_policy_fingerprint="none:v1",
+    )
+    await storage.initialize()
+    try:
+        assert await embedding_reset_counts(storage) == (0, 0)
+
+        other = sqlite3.connect(str(db_path))
+        other.enable_load_extension(True)
+        sqlite_vec.load(other)
+        other.execute("CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[4])")
+        other.execute(
+            "INSERT INTO chunks_vec(rowid, embedding) VALUES (7, ?)",
+            (struct.pack("4f", 1, 0, 0, 0),),
+        )
+        other.commit()
+        other.close()
+
+        assert await storage.get_vector_count() == 0
+        counts = await embedding_reset_counts(storage)
+        assert counts == (0, 1)
+        assert store_has_nothing_to_reset(*counts) is False
+    finally:
+        await storage.close()

@@ -8,6 +8,7 @@ full component initialization (embedding provider, SQLite, etc.).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
@@ -63,6 +64,21 @@ def _fixture_span_hash(source: Path, start: int, end: int) -> str | None:
     except (FileNotFoundError, NotADirectoryError):
         return None
     return source_span_hash(text.splitlines(), start, end)
+
+
+def _indexed_body(source: Path, start: int, end: int) -> str:
+    """The content a faithful chunk of this fixture span holds: its body.
+
+    Edits without a ``base_hash`` are of the indexed content, accepted only
+    where that content is the span's body (#3071), so a fixture chunk standing
+    in for an indexed one carries the body of the span it claims.
+    """
+    from memtomem.tools.memory_writer import _find_body_start_index
+
+    span = source.read_text(encoding="utf-8").splitlines()[start - 1 : end]
+    while span and not span[-1].strip():
+        span.pop()
+    return "\n".join(span[_find_body_start_index(span) :])
 
 
 def _make_test_chunk(
@@ -258,6 +274,9 @@ def app(_isolated_config_paths: Path):
     # plain MagicMock children, which don't implement the async-context
     # protocol the tag-management service relies on.
     storage._tag_write_lock = asyncio.Lock()
+    # Routes that wait for the writer enter ``storage.transaction(wait=...)``;
+    # an AsyncMock child would hand back a coroutine, not a context manager.
+    storage.transaction = MagicMock(side_effect=lambda **_: contextlib.nullcontext())
 
     # -- embedder mock --
     embedder = AsyncMock()
@@ -290,6 +309,7 @@ def app(_isolated_config_paths: Path):
     # the read-only-root gate is the second one.
     index_engine.is_excluded = MagicMock(return_value=False)
     index_engine.is_read_only_source = MagicMock(return_value=False)
+    index_engine.is_managed_source = MagicMock(return_value=True)
     index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     index_engine.rewrite_refusal = AsyncMock(return_value=None)
     # ``mutated=True`` mirrors what an engine that indexed chunks really
@@ -563,6 +583,30 @@ class TestStats:
             "txt",
         }
         assert data["home_total_source_size"] == 6
+
+    async def test_stats_home_lists_skip_held_and_pending_sources(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """The Home lists apply the Sources tree's rule (#3109): a held or
+        pending source is in neither list, the file-type split nor the size."""
+        visible = tmp_path / "visible.md"
+        held = tmp_path / "held.txt"
+        pending = tmp_path / "pending.rst"
+        for path, body in ((visible, "a"), (held, "bb"), (pending, "ccc")):
+            path.write_text(body)
+        app.state.storage.get_source_files_with_counts.return_value = [
+            (path, 1, f"2026-01-0{i}T00:00:00", "default", 1, 1, 1)
+            for i, path in enumerate((visible, held, pending), start=1)
+        ]
+        app.state.storage.get_held_sources.return_value = [held]
+        app.state.storage.get_pending_source_checks.return_value = [pending]
+
+        data = (await client.get("/api/stats")).json()
+
+        assert [s["path"] for s in data["home_sources"]] == [str(visible)]
+        assert [s["path"] for s in data["home_recent_sources"]] == [str(visible)]
+        assert data["home_file_type_distribution"] == [{"file_type": "md", "count": 1}]
+        assert data["home_total_source_size"] == 1
 
     async def test_stats_home_aggregates_handle_many_sources(
         self, app, client: AsyncClient, tmp_path
@@ -1234,8 +1278,14 @@ class TestSearch:
         run_id = "e38ab6c7-4db4-4d68-8dca-93c1da2dcfe6"
         app.state.search_pipeline.search.return_value[1].query_run_id = run_id
 
-        resp = await client.get("/api/search", params={"q": "hello world"})
+        # Only a search that carries the token is recorded and given a run id.
+        resp = await client.get(
+            "/api/search",
+            params={"q": "hello world"},
+            headers={"X-Memtomem-CSRF": app.state.csrf_token},
+        )
 
+        assert app.state.search_pipeline.search.call_args.kwargs["record"] is True
         assert resp.status_code == 200
         assert resp.json()["query_run_id"] == run_id
         assert resp.json()["retrieval_stats"]["query_run_id"] == run_id
@@ -2638,7 +2688,7 @@ class TestEditChunkNamespaceLookupFailure:
         source.write_text("## Cache strategy\n\nOld body line.\n", encoding="utf-8")
         chunk = _make_test_chunk(source=str(source))
         chunk = chunk.__class__(
-            content=chunk.content,
+            content=_indexed_body(source, 1, 3),
             metadata=chunk.metadata.__class__(
                 source_file=source,
                 heading_hierarchy=("## Cache strategy",),
@@ -2677,7 +2727,7 @@ class TestEditChunkNamespaceLookupFailure:
         source.write_text("## Cache strategy\n\nOld body line.\n", encoding="utf-8")
         chunk = _make_test_chunk(source=str(source))
         chunk = chunk.__class__(
-            content=chunk.content,
+            content=_indexed_body(source, 1, 3),
             metadata=chunk.metadata.__class__(
                 source_file=source,
                 heading_hierarchy=("## Cache strategy",),
@@ -2711,7 +2761,7 @@ class TestDeleteChunk:
         assert resp.status_code == 200
         data = resp.json()
         assert data["deleted"] == 1
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
 
     @staticmethod
     def _real_source_chunk(app, tmp_path: Path):
@@ -2904,7 +2954,7 @@ class TestDeleteChunk:
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
 
         assert resp.status_code == 200, resp.text
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
         assert "first" not in source.read_text(encoding="utf-8")
 
     async def test_delete_reports_partial_failure_when_index_cleanup_does_not_finish(
@@ -3066,7 +3116,7 @@ class TestEditChunk:
         chunk = _make_test_chunk(source=str(source))
         # Chunk range covers the entire entry on disk.
         chunk = chunk.__class__(
-            content=chunk.content,
+            content=_indexed_body(source, 1, 6),
             metadata=chunk.metadata.__class__(
                 source_file=source,
                 heading_hierarchy=("## Cache strategy",),
@@ -3143,7 +3193,7 @@ class TestEditChunkRedaction:
         source.write_text("## H\n\nbody\n", encoding="utf-8")
         chunk = _make_test_chunk(source=str(source))
         chunk = chunk.__class__(
-            content=chunk.content,
+            content=_indexed_body(source, 1, 3),
             metadata=chunk.metadata.__class__(
                 source_file=source,
                 heading_hierarchy=("## H",),
@@ -3304,7 +3354,7 @@ class TestEditChunkProjectSharedGateB:
 
         def _chunk(chunk_scope: str):
             return base.__class__(
-                content=base.content,
+                content=_indexed_body(source, 1, 3),
                 metadata=base.metadata.__class__(
                     source_file=source,
                     heading_hierarchy=("## H",),
@@ -4494,6 +4544,31 @@ class TestIndex:
         resp = await client.post("/api/index", json={"path": "/etc"})
         assert resp.status_code == 200
 
+    async def test_trigger_index_reports_namespaces_read_from_day_file_names(
+        self, app, client: AsyncClient
+    ):
+        """ADR-0043: the response model carries both counters, so the JS
+        reporter can say which namespaces a rebuild did not get back."""
+        app.state.index_engine.index_path = AsyncMock(
+            return_value=IndexingStats(
+                total_files=3,
+                total_chunks=3,
+                indexed_chunks=3,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=1.0,
+                namespaces_restored_from_name=2,
+                day_file_names_undecoded=1,
+            )
+        )
+
+        resp = await client.post("/api/index", json={"path": "/tmp/memories"})
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["namespaces_restored_from_name"] == 2
+        assert data["day_file_names_undecoded"] == 1
+
     async def test_trigger_index_returns_namespace_provenance(self, app, client: AsyncClient):
         """The response preserves the hybrid namespace union and identifies
         its authoritative applied subset without collapsing multi-NS runs."""
@@ -4747,6 +4822,8 @@ class TestReindexAll:
                     deleted_chunks=0,
                     duration_ms=1.0,
                     namespaces_preserved_against_rules=2,
+                    namespaces_restored_from_name=4,
+                    day_file_names_undecoded=1,
                 ),
                 IndexingStats(
                     total_files=1,
@@ -4768,6 +4845,11 @@ class TestReindexAll:
         assert results[0]["namespaces_reassigned"] == 0
         assert results[0]["namespace_moves"] == []
         assert results[1]["namespace_moves"] == []
+        # ADR-0043: unconditional for the same reason.
+        assert results[0]["namespaces_restored_from_name"] == 4
+        assert results[0]["day_file_names_undecoded"] == 1
+        assert results[1]["namespaces_restored_from_name"] == 0
+        assert results[1]["day_file_names_undecoded"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -6175,36 +6257,6 @@ class TestRemoveMemoryDirChunkCleanup:
     # ---------------------------------------------------------------------------
     # POST /api/upload — redaction guard wire-in
     # ---------------------------------------------------------------------------
-
-    async def test_partial_sweep_failure_still_invalidates_the_committed_deletes(
-        self, app, client: AsyncClient, tmp_path: Path
-    ) -> None:
-        """#2141 class: the first source's chunks are gone from the store even
-        though a later source blows the request up, so a warmed query must not
-        keep returning them."""
-        target = tmp_path / "going-away"
-        keep = tmp_path / "keep-this"
-        target.mkdir()
-        keep.mkdir()
-        app.state.config.indexing.memory_dirs = [target, keep]
-        app.state.storage.get_source_files_with_counts.return_value = [
-            (target / "a.md", 2, "2026-04-29T00:00:00", "default", 100, 50, 200),
-            (target / "b.md", 2, "2026-04-29T00:00:00", "default", 100, 50, 200),
-        ]
-        app.state.storage.delete_by_source = AsyncMock(side_effect=[2, RuntimeError("store blip")])
-        app.state.search_pipeline.invalidate_cache.reset_mock()
-
-        with (
-            patch("memtomem.web.routes.system.save_config_overrides"),
-            pytest.raises(RuntimeError, match="store blip"),
-        ):
-            await client.post(
-                "/api/memory-dirs/remove",
-                json={"path": str(target), "delete_chunks": True},
-            )
-
-        assert app.state.storage.delete_by_source.await_count == 2
-        assert app.state.search_pipeline.invalidate_cache.call_count == 1
 
     @staticmethod
     def _serve_rows(app, rows: list[tuple[Path, int]]) -> None:
@@ -7647,7 +7699,7 @@ class TestChunkCrudCrossProcessLock:
     def _chunk_on(self, source: Path, cid: uuid.uuid4 | None = None) -> Chunk:
         c = _make_test_chunk(chunk_id=cid, source=str(source))
         return c.__class__(
-            content=c.content,
+            content=_indexed_body(source, 1, 3) if source.exists() else c.content,
             metadata=c.metadata.__class__(
                 source_file=source,
                 heading_hierarchy=("## H",),
@@ -7786,7 +7838,7 @@ class TestChunkCrudCrossProcessLock:
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted"] == 1
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
         assert not (tmp_path / "gone").exists()
         assert not any(tmp_path.iterdir()), f"stray artifacts: {list(tmp_path.iterdir())}"
 
@@ -7871,7 +7923,7 @@ class TestChunkCrudCrossProcessLock:
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted"] == 1
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
         # Untouched: the rows went, the recreated file did not.
         assert src.read_text(encoding="utf-8") == "## H\n\nrecreated by another writer\n"
 
@@ -8011,7 +8063,7 @@ class TestChunkCrudCrossProcessLock:
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted"] == 1
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
         assert not src.exists()  # nothing was recreated
         # No re-index of a file that is not there.
         app.state.index_engine.index_file.assert_not_awaited()
@@ -8371,7 +8423,7 @@ class TestIndexRoutesInvalidateSearchCache:
 
         source = tmp_path / "edit.md"
         source.write_text("# Heading\n\nBody one.\nBody two.\nBody three.\n", encoding="utf-8")
-        chunk = _make_test_chunk(source=str(source))
+        chunk = _make_test_chunk(content=_indexed_body(source, 1, 5), source=str(source))
         app.state.storage.get_chunk = AsyncMock(return_value=chunk)
         app.state.index_engine.index_file = AsyncMock(
             side_effect=NamespaceResolutionError("store down")
@@ -8411,7 +8463,7 @@ class TestIndexRoutesInvalidateSearchCache:
         resp = await client.delete(f"/api/chunks/{CHUNK_ID}")
 
         assert resp.status_code >= 500
-        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id])
+        app.state.storage.delete_chunks.assert_awaited_once_with([chunk.id], finalize_emptied=True)
         assert app.state.search_pipeline.invalidate_cache.call_count == 1
 
     async def test_delete_chunk_refusal_inside_the_guarded_region_does_not_invalidate(
@@ -8507,3 +8559,37 @@ class TestIndexRoutesInvalidateSearchCache:
 
         assert committed["files"] == 1
         assert pipeline.invalidate_cache.call_count == 1
+
+
+class TestInferenceEndpointsRoute:
+    """``GET /api/inference-endpoints`` reports the running config's endpoints."""
+
+    async def test_default_config_has_none(self, app, client: AsyncClient):
+        from memtomem.config import Mem2MemConfig
+
+        app.state.config = Mem2MemConfig()
+        resp = await client.get("/api/inference-endpoints")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["endpoints"] == []
+        assert body["not_covered"].startswith("Not covered: Langfuse session tracing")
+
+    async def test_remote_and_local_endpoints(self, app, client: AsyncClient):
+        from memtomem.config import Mem2MemConfig
+
+        app.state.config = Mem2MemConfig(
+            embedding={"provider": "openai", "model": "text-embedding-3-small"},
+            llm={"enabled": True, "provider": "ollama"},
+            rerank={"enabled": True, "provider": "cohere"},
+        )
+
+        resp = await client.get("/api/inference-endpoints")
+        assert resp.status_code == 200
+        assert [
+            (e["component"], e["provider"], e["host"], e["remote"])
+            for e in resp.json()["endpoints"]
+        ] == [
+            ("embedding", "openai", "api.openai.com", True),
+            ("llm", "ollama", "localhost:11434", False),
+            ("rerank", "cohere", "api.cohere.ai", True),
+        ]

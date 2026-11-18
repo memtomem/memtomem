@@ -1,7 +1,7 @@
 # ADR-0006: Web UI folder/upload privacy redaction trust-boundary
 
-**Status:** Accepted (trigger fired 2026-06-11; amended to add Axis F — bundle import; amended 2026-06-30 to add Axis G — export/import path policy)
-**Date:** 2026-04-30 (amended 2026-06-11, 2026-06-30)
+**Status:** Accepted (trigger fired 2026-06-11; amended to add Axis F — bundle import; amended 2026-06-30 to add Axis G — export/import path policy; a `force_unsafe` valve on MCP `mem_index` reviewed and declined, #2801; amended 2026-11-14: Axis G — MCP `mem_export` writes only into `~/.memtomem/exports/`)
+**Date:** 2026-04-30 (amended 2026-06-11, 2026-06-30, 2026-11-14; reviewed 2026-11-13)
 **Context:** Issue #585 — PR #575 follow-up review surfaced that
 `packages/memtomem/src/memtomem/privacy.py: DEFAULT_PATTERNS` is enforced
 only on the MCP `mem_add` / `mem_batch_add` paths. The Web UI's
@@ -238,7 +238,8 @@ system had a hard refusal and a global valve, and nothing in between.
 
 `--force-unsafe` does not close it. It is **invocation-scoped**, and three of
 the surfaces that index these files cannot pass it at all: MCP `mem_index` has
-no such parameter (the core tool description budget is full), the watcher
+no such parameter (the core tool description budget is full; Axis E.6 later
+decided it stays that way), the watcher
 calls `index_file` without one, and the debounce queue carries only
 `(path, namespace, force)` — `mm index --debounce-window --force-unsafe` is
 rejected as a usage error. So on those paths the file is *permanently*
@@ -312,6 +313,51 @@ exemption's counter measures only what it actually waived.
 outside pattern-documenting notes, or if a hit class beyond the two label
 rules is ever proposed for the allowlist, that is a new decision — not an
 extension of this one.
+
+### Axis E.6 — `mem_index` gets no valve over MCP (reviewed 2026-11-13)
+
+> Axis E.5 noted that MCP `mem_index` cannot pass `force_unsafe` and gave the
+> core tool description budget as the reason. That described the state without
+> deciding it. [#2801](https://github.com/memtomem/memtomem/issues/2801) asked
+> for the decision.
+
+**The gap.** `mem_index` lists the files it blocked and offers no bypass. A
+file with hits gets through `mem_index` verbatim only by carrying the E.5
+declaration, which waives only the two label rules.
+
+| Option | Behavior | Verdict |
+|--------|----------|---------|
+| E.6a — add `force_unsafe` to `mem_index` | the MCP caller sets the valve itself; refused for `project_shared`, audit-logged and counted | ❌ |
+| E.6b — **no valve on `mem_index`** | `mem_index` keeps refusing to store a file with hits verbatim unless it carries the E.5 declaration | ✅ |
+
+**Decision: E.6b.** `mem_index` stays without `force_unsafe`.
+
+**Why.** The valve exists to record that someone looked at the flagged content
+and accepted it. On `mem_index` the flag would accept a whole file that is
+already on disk, including content the caller did not write and may never have
+read, and the acceptance would come from the caller alone. The existing
+bypasses for indexing a file, `mm index --force-unsafe` and the Web UI's
+"Index without privacy gate" checkbox, sit on human-facing surfaces.
+
+Two arguments this decision does not rest on:
+
+- **Not breadth.** MCP callers already hold valves. `mem_add` takes
+  `force_unsafe`, and so do `mem_fetch`, `mem_import`, `mem_import_notion` and
+  `mem_import_obsidian`, for content the caller did not write. This decision
+  therefore does not keep flagged content away from an MCP caller, and does
+  not claim to. Those tools keep their parameter. Whether they should is a
+  separate question that this amendment does not settle; it settles only that
+  `mem_index` does not become one more.
+- **Not the description budget.** A full budget would be a reason to make
+  room, not a reason to decline.
+
+**Accepted consequence.** `mem_index` cannot perform this bypass: it keeps
+refusing to store a reviewed false positive outside the two label rules
+verbatim.
+
+**Reopen trigger.** MCP callers gain an approval they cannot give themselves,
+for example an elicitation that the client's user answers. A valve bound to
+that approval would be a new decision, not an extension of this one.
 
 ### Axis F — Bundle import (added 2026-06-11 amendment)
 
@@ -458,6 +504,30 @@ operator misconfig ADR-0029 documents, and reachable over local `stdio`
 regardless, so the accept-as-residual call stands on its own merits,
 independent of ADR-0029's outcome.
 
+#### Amendment 2026-11-14 — MCP export confined (G.2 adopted for `mem_export`)
+
+G.1 weighed the export channel as data loss and exfiltration. It did not weigh
+execution: the bundle is indented JSON, and a shell that sources it runs a
+`$(…)` inside a double-quoted line, while note text is the caller's. A bundle
+written over a shell startup file (`~/.zshrc`, `~/.bashrc`, `~/.zshenv`,
+`~/.profile`) therefore runs a command from a note at the next shell start,
+and that is reachable over local `stdio` in the default `core` mode.
+
+So `mem_export`'s `output_file` is now a file name, not a path, and the bundle
+is written to `~/.memtomem/exports/` (`tools/export_import.py`
+`resolve_export_target`). The name follows ADR-0037's portable grammar (ASCII
+letters, digits, `.`, `_`, `-`; no leading hyphen, no trailing dot, no Windows
+device name), which excludes separators, drive-relative names and alternate
+data streams on every platform. The `exports` directory must be a real
+directory, not a link or junction; links above it are followed. The documented
+`~/backup.json` workflow is given up: the result names the full path, and
+moving the bundle elsewhere is the user's own step.
+
+Unchanged: `mem_import(input_file=…)` (its trust boundary is the F.3 gate,
+path-independent), the web transport (download and upload only), and the
+`export_chunks` library function. The statements of G.1 above and below that
+say the export path stays unrestricted are superseded for `mem_export`.
+
 ## Decision
 
 **Accepted (2026-06-11).** Axes **A.3 + B.2 + C.1 + D.2 + E.1** (bulk
@@ -467,7 +537,8 @@ upload surface is guarded, the folder-index surfaces are not yet (see
 **built 2026-06-30 in #1490**. Originally deferred; promoted on the public `--allow-remote-ui`
 trigger (see "Trigger record"). The 2026-06-30 amendment adds **Axis G → G.1**
 — the MCP `mem_export` / `mem_import` filesystem paths stay unrestricted
-(local-tool authority), documented rather than constrained, with an accepted
+(local-tool authority; superseded for `mem_export` by the 2026-11-14 Axis G
+amendment), documented rather than constrained, with an accepted
 core-mode export-write residual and a reopen trigger (no code or behavior
 change).
 
@@ -758,7 +829,9 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
     field coverage, not a new pattern set (Axis C's `DEFAULT_PATTERNS` is
     unchanged), and it never touches self-exports (their scan is skipped), so
     round-trip fidelity is unaffected.
-- **Export/import filesystem paths stay unrestricted (Axis G → G.1).** The MCP
+- **Export/import filesystem paths stay unrestricted (Axis G → G.1; superseded
+  for `mem_export` by the 2026-11-14 amendment, which writes it only into
+  `~/.memtomem/exports/`).** The MCP
   `mem_export` / `mem_import` tools keep arbitrary resolved paths by design
   (local-tool authority); the import trust boundary remains the F.3 redaction
   gate, not the path. The read/write asymmetry with the root-bounded
@@ -862,11 +935,18 @@ These were considered when drafting and folded into the leaning above:
   reachability and is named in the reopen trigger.
 - Issue #1486 — the security-audit decision this amendment records.
 
+### Added by the 2026-11-13 review (Axis E.6)
+
+- `packages/memtomem/src/memtomem/server/tools/indexing.py` — `mem_index`,
+  whose signature has no `force_unsafe`.
+- `packages/memtomem/tests/test_mutation_refusal_remedy.py` —
+  `test_mem_index_takes_no_force_unsafe` pins the decision.
+- Issue #2801 — the decision this review records.
 
 ### Memory bundle v4 export/restore clarification (2026-10-26)
 
 Core export retains unrestricted local-tool path authority and replacement of
-regular files. The final component is now checked before resolution and refused
+regular files (superseded on 2026-11-14: see the Axis G amendment). The final component is now checked before resolution and refused
 if it is a symlink; parent aliases remain allowed. Publication is atomic and
 owner-private. v4 signatures bind format/version as well as records/relations.
 Shared-scope imports always scan the complete record, including verified

@@ -1,6 +1,6 @@
 """Architectural guard — engine refusals never spell a surface's vocabulary (#1869).
 
-The engine states the CONDITION; the CLI, MCP and web surfaces each append
+The engine states the CONDITION; the CLI and web surfaces each append
 their own remediation (:mod:`memtomem.context.remediation`). Before this
 contract, ``pull_apply`` told every caller to ``pass --from <runtime>`` — a flag
 an MCP client cannot pass (its parameter is ``from_runtime``) and the browser
@@ -63,13 +63,10 @@ SWEPT_AREAS: tuple[tuple[str, list[pathlib.Path], re.Pattern[str]], ...] = (
 #: exemptions (PR review nit 5).
 ALLOWED: frozenset[tuple[str, str]] = frozenset(
     {
-        # The hint table itself — every surface's spelling lives here by design.
+        # The hint table itself — the CLI's spelling lives here by design.
         ("context/remediation.py", "--overwrite"),
         ("context/remediation.py", "--from <runtime>"),
         ("context/remediation.py", "--force-unsafe-import"),
-        ("context/remediation.py", "overwrite=True"),
-        ("context/remediation.py", "from_runtime="),
-        ("context/remediation.py", "force_unsafe_import=True"),
         # Runnable shell commands, not remediation clauses: these are meant to
         # be copy-pasted verbatim into a terminal (#1869 "keep as-is").
         ("context/settings_doctor.py", "mm context settings-migrate --from="),
@@ -185,23 +182,35 @@ def test_allowlist_entries_still_exist() -> None:
     assert not stale, "ALLOWED entries no longer present — drop them:\n" + "\n".join(stale)
 
 
-@pytest.mark.parametrize("surface", ["cli", "mcp"])
-def test_actionable_codes_have_a_clause_on_every_writing_surface(surface: str) -> None:
-    """Both text surfaces answer for every key — a half-filled row is a silent
-    downgrade for whichever surface was forgotten."""
+def test_actionable_codes_have_a_cli_clause() -> None:
+    """The CLI, the one text surface, answers for every key — a missing row is
+    a silent downgrade to the neutral reason."""
     from memtomem.context import remediation
 
-    missing = [key for key in remediation._HINTS if not remediation.action_hint(key, surface)]
-    assert not missing, f"no {surface} remediation for: {missing}"
+    missing = [key for key in remediation._HINTS if not remediation.action_hint(key, "cli")]
+    assert not missing, f"no cli remediation for: {missing}"
 
 
-def test_skills_overwrite_hint_is_a_runnable_route_per_surface() -> None:
-    """The per-skill route must be executable as written on each surface.
+def test_hint_surfaces_are_cli_and_web_only() -> None:
+    """No context write has an MCP tool (ADR-0044), so no remediation may name
+    one: a clause telling an agent to re-call a tool it cannot reach is not
+    remediation."""
+    from typing import get_args
+
+    from memtomem.context import remediation
+
+    assert set(get_args(remediation.HintSurface)) == {"cli", "web"}
+    for key, row in remediation._HINTS.items():
+        assert set(row) == {"cli", "web"}, key
+        assert "mem_context_" not in "".join(row.values()), key
+
+
+def test_skills_overwrite_hint_is_a_runnable_route() -> None:
+    """The per-skill route must be executable as written.
 
     Round-2 Codex finding on #1869 follow-up: a clause that names a
-    preview-only command (no ``--apply``) or an incomplete MCP call (missing
-    ``name=`` or the consent parameter) reads as remediation but does not run.
-    Pin the load-bearing tokens, not the full prose.
+    preview-only command (no ``--apply``) reads as remediation but does not
+    run. Pin the load-bearing tokens, not the full prose.
     """
     from memtomem.context import remediation
 
@@ -209,22 +218,6 @@ def test_skills_overwrite_hint_is_a_runnable_route_per_surface() -> None:
     assert "mm context pull skills" in cli
     assert "--overwrite" in cli
     assert "--apply" in cli  # without it the command only previews
-
-    mcp = remediation.action_hint("skills_overwrite_unsupported", "mcp")
-    # Every argument must sit INSIDE a mem_context_pull(...) call — apply=True
-    # without an explicit in-call scope is rejected by the tool, so tokens
-    # dangling outside the parentheses read as remediation but do not run
-    # (round-3 Codex finding).
-    calls = re.findall(r"mem_context_pull\(([^)]*)\)", mcp)
-    assert calls, "mcp hint must show a mem_context_pull(...) invocation"
-    for call in calls:
-        assert 'kind="skills"' in call
-        assert 'name="<name>"' in call  # required parameter
-        assert "overwrite=True" in call
-        assert "apply=True" in call
-        assert 'scope="' in call  # apply requires an explicit scope
-    assert any('scope="project_shared"' in c and "confirm_project_shared=True" in c for c in calls)
-    assert any('scope="user"' in c and "allow_host_writes=True" in c for c in calls)
 
     # Web renders via i18n (settings.ctx.import_skip_skills_overwrite_unsupported);
     # a non-empty clause here would bypass localization.
@@ -294,7 +287,7 @@ def test_gate_a_abort_offers_no_tier_retry_on_any_surface(tmp_path: pathlib.Path
     than the blocked one. Advice that reliably fails is worse than none
     (Codex review, round 2).
     """
-    for surface in ("cli_context_init", "mcp_context_init", "web_context_agents_import"):
+    for surface in ("cli_context_init", "web_context_agents_import"):
         message = _gate_a_message(surface, tmp_path)
         assert "Remove the secret from" in message
         assert "project_local" not in message

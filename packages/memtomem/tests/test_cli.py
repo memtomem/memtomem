@@ -67,12 +67,12 @@ class TestCLIGroup:
 
     def test_help_shows_description(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["--help"])
-        assert "markdown-first memory infrastructure" in result.output
+        assert "long-term memory for AI coding agents" in result.output
 
     def test_short_help_flag(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["-h"])
         assert result.exit_code == 0
-        assert "markdown-first memory infrastructure" in result.output
+        assert "long-term memory for AI coding agents" in result.output
 
     def test_version_flag_prints_package_version(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["--version"])
@@ -285,7 +285,7 @@ class TestConfigCLI:
     def test_config_set_tokenizer_triggers_fts_rebuild(
         self, tmp_path, monkeypatch, runner: CliRunner
     ) -> None:
-        """Changing search.tokenizer via CLI must trigger set_tokenizer + FTS rebuild.
+        """Changing search.tokenizer via CLI must switch the backend + rebuild FTS.
 
         ``rebuild_fts`` and ``initialize`` are ``AsyncMock``, not ``MagicMock``:
         the bug in #2112 was a bare call to an ``async def``, and a plain
@@ -298,19 +298,14 @@ class TestConfigCLI:
         mock_storage.initialize = AsyncMock()
         mock_storage.rebuild_fts = AsyncMock(return_value=42)
         mock_storage.close = AsyncMock()
+        # The read-back of what actually ran: no fallback here.
+        mock_storage.fts_tokenizer_effective = "kiwipiepy"
 
-        with (
-            patch("memtomem.storage.fts_tokenizer.set_tokenizer") as mock_set_tok,
-            # ``set_tokenizer`` is mocked, so the module global never moves —
-            # pin the read-back too, or the command correctly reports a
-            # fallback that only the mock created.
-            patch("memtomem.storage.fts_tokenizer.get_tokenizer", return_value="kiwipiepy"),
-            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
-        ):
+        with patch("memtomem.storage.factory.create_storage", return_value=mock_storage):
             result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
             assert result.exit_code == 0, result.output
 
-            mock_set_tok.assert_called_once_with("kiwipiepy")
+            mock_storage.set_fts_tokenizer.assert_called_once_with("kiwipiepy")
             mock_storage.rebuild_fts.assert_awaited_once()
             mock_storage.close.assert_awaited_once()
 
@@ -334,15 +329,13 @@ class TestConfigCLI:
         mock_storage.initialize = AsyncMock()
         mock_storage.rebuild_fts = AsyncMock(return_value=7)
         mock_storage.close = AsyncMock()
+        mock_storage.fts_tokenizer_effective = "unicode61"
 
-        with (
-            patch("memtomem.storage.fts_tokenizer.set_tokenizer") as mock_set_tok,
-            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
-        ):
+        with patch("memtomem.storage.factory.create_storage", return_value=mock_storage):
             result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
             assert result.exit_code == 0, result.output
 
-            mock_set_tok.assert_called_once_with("unicode61")
+            mock_storage.set_fts_tokenizer.assert_called_once_with("unicode61")
             mock_storage.rebuild_fts.assert_awaited_once()
 
         assert "MEMTOMEM_SEARCH__TOKENIZER is set and takes precedence" in result.output
@@ -354,9 +347,9 @@ class TestConfigCLI:
     ) -> None:
         """kiwipiepy missing: the success line names the fallback, not the request.
 
-        ``_get_kiwi`` reverts the module-global to unicode61 mid-rebuild when
-        the package is absent, so announcing the requested name would be a
-        second false claim on top of the one #2112 fixed.
+        The backend tokenizes as unicode61 from the first kiwipiepy call when the
+        package is absent, so announcing the requested name would be a second
+        false claim on top of the one #2112 fixed.
         """
         monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
 
@@ -364,12 +357,9 @@ class TestConfigCLI:
         mock_storage.initialize = AsyncMock()
         mock_storage.rebuild_fts = AsyncMock(return_value=5)
         mock_storage.close = AsyncMock()
+        mock_storage.fts_tokenizer_effective = "unicode61"  # fell back mid-rebuild
 
-        with (
-            patch("memtomem.storage.fts_tokenizer.set_tokenizer"),
-            patch("memtomem.storage.fts_tokenizer.get_tokenizer", return_value="unicode61"),
-            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
-        ):
+        with patch("memtomem.storage.factory.create_storage", return_value=mock_storage):
             result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
             assert result.exit_code == 0, result.output
 
@@ -388,10 +378,7 @@ class TestConfigCLI:
         mock_storage.rebuild_fts = AsyncMock(return_value=1)
         mock_storage.close = AsyncMock()
 
-        with (
-            patch("memtomem.storage.fts_tokenizer.set_tokenizer"),
-            patch("memtomem.storage.factory.create_storage", return_value=mock_storage),
-        ):
+        with patch("memtomem.storage.factory.create_storage", return_value=mock_storage):
             result = runner.invoke(cli, ["config", "set", "search.tokenizer", "kiwipiepy"])
 
         assert result.exit_code != 0
@@ -458,10 +445,10 @@ class TestConfigCLI:
         """Non-tokenizer config changes must NOT trigger FTS rebuild."""
         monkeypatch.setattr("memtomem.config._override_path", lambda: tmp_path / "config.json")
 
-        with patch("memtomem.storage.fts_tokenizer.set_tokenizer") as mock_set_tok:
+        with patch("memtomem.storage.factory.create_storage") as mock_create:
             result = runner.invoke(cli, ["config", "set", "search.default_top_k", "20"])
             assert result.exit_code == 0, result.output
-            mock_set_tok.assert_not_called()
+            mock_create.assert_not_called()
 
     def test_config_set_immutable_field(self, runner: CliRunner) -> None:
         """Attempting to set a non-mutable field is rejected."""
@@ -2119,6 +2106,13 @@ class TestSubcommandHelp:
         assert "--until" in result.output
         assert "--format" in result.output
 
+    def test_recall_until_help_explains_boundaries(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["recall", "--help"])
+        assert result.exit_code == 0, result.output
+        help_text = " ".join(result.output.split())
+        assert "date-only value includes that whole period (UTC)" in help_text
+        assert "full datetime is exclusive" in help_text
+
     def test_recall_until_partial_date_is_inclusive_of_the_period(
         self, runner: CliRunner, monkeypatch
     ) -> None:
@@ -2211,6 +2205,22 @@ class TestHelpEpilog:
         )
         assert scoped_example in lines
 
+    def test_recall_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["recall", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert "mm recall --since 2026-10 --tag-filter onboarding --limit 5" in lines
+        assert "mm recall --since 2026-10-01 --until 2026-10-23" in lines
+
+    def test_index_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["index", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert "mm index ./notes --recursive" in lines
+        assert "mm index ./notes --force --namespace shared" in lines
+
     def test_config_help_shows_examples(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["config", "--help"])
         assert result.exit_code == 0
@@ -2236,7 +2246,7 @@ class TestHelpEpilog:
         left for the terminal to soft-wrap, which breaks it mid-flag on screen.
         Nothing else in the help output can regress this, so pin it here.
         """
-        for command in ("search", "add", "config", "session"):
+        for command in ("search", "add", "recall", "index", "config", "session"):
             result = runner.invoke(cli, [command, "--help"])
             assert result.exit_code == 0
             examples = [
@@ -2245,3 +2255,30 @@ class TestHelpEpilog:
             assert examples, f"no examples rendered for {command}"
             over_width = [line for line in examples if len(line) > 80]
             assert not over_width, f"{command} examples exceed 80 columns: {over_width}"
+
+    def test_schedule_add_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["schedule", "add", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert 'mm schedule add --cron "0 3 * * 0" --job compaction' in lines
+        assert 'mm schedule add --cron "0 4 1 * *" --job importance_decay' in lines
+        assert (
+            'mm schedule add --cron "30 2 * * 1" --job dedup_scan --params \'{"limit":20}\''
+            in lines
+        )
+        assert "mm schedule run-now <id>" in lines
+
+        # Click may wrap the prose note, so compare it with whitespace joined.
+        flattened = " ".join(result.output.split())
+        assert (
+            "Cron times are UTC. Schedules fire only while an MCP server is running "
+            "with scheduler.enabled and health_watchdog.enabled both true "
+            "(both default to false); run-now runs one immediately."
+        ) in flattened
+
+        # The single-word loop above cannot take `schedule add`, so check it here.
+        examples = [line for line in result.output.splitlines() if line.strip().startswith("mm ")]
+        assert len(examples) == 4
+        over_width = [line for line in examples if len(line) > 80]
+        assert not over_width, f"schedule add examples exceed 80 columns: {over_width}"

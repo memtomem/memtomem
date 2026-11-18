@@ -17,7 +17,7 @@ from memtomem import privacy
 from memtomem.cli import cli
 
 
-# Matches privacy.DEFAULT_PATTERNS (``\b(?:AKIA|ASIA)[0-9A-Z]{16}\b``).
+# Matches the AWS access key id rule in privacy.DEFAULT_PATTERNS.
 _SECRET_LINE = "API_KEY=AKIAIOSFODNN7EXAMPLE\n"
 _SAFE_LINE = "Just a benign instruction line.\n"
 

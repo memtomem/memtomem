@@ -1,6 +1,6 @@
 # ADR-0030: Explicit Preview/Pull model for the Context Gateway
 
-**Status:** Proposed
+**Status:** Proposed (amended 2026-11-13: the MCP Pull tool is retired; CLI and web only, ADR-0044)
 **Date:** 2026-07-18 (§10 amended 2026-07-19, post PR-G design-gate)
 **Context:** The Context Gateway's import path is a fixed-order "first
 runtime wins" scan (claude → gemini → codex → kimi;
@@ -320,7 +320,8 @@ from a payload definition:
   filesystems that reject directory fsync (network/tmpfs/Windows),
   matching the existing single-file overwrite.
 - **API compatibility (read-only this campaign).** Skills gain a
-  read-only `version list` across CLI/Web/MCP; `create`/`promote`/
+  read-only `version list` across CLI/Web/MCP (MCP since retired with the
+  whole `mem_context_version` tool, ADR-0044); `create`/`promote`/
   `delete-label` remain **refused for skills** (a skill version is
   created only internally by an overwrite-Pull), and labeled skill
   **fan-out** — which needs a `label` argument the skill generators do

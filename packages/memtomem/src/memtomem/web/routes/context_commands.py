@@ -376,9 +376,9 @@ async def import_command(
 ) -> dict:
     """Pull a single runtime command into the scoped canonical dir.
 
-    Same response shape as the section-level import so the web UI can reuse
+    Same response shape as the section-level pull so the web UI can reuse
     its rendering. 404 when no runtime file matches the name (the section
-    import would silently report 0 imported, which is the wrong shape of
+    pull would silently report 0 ``imported``, which is the wrong shape of
     feedback for "you clicked a specific item that doesn't exist") — pinned
     on the gate's dry-run preview too.
     """

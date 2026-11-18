@@ -16,18 +16,22 @@ both surfaces.
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import itertools
 import logging
 import re
 import stat as stat_mod
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
 from memtomem.config import TargetScope, classify_scope
+from memtomem.constants import InvalidNameError, validate_writable_namespace
 from memtomem.errors import ConfigError
 from memtomem.models import stored_namespace
+from memtomem.storage.sqlite_helpers import resolve_path
 
 
 logger = logging.getLogger(__name__)
@@ -223,6 +227,54 @@ def resolve_scope_target(
     )
 
 
+def explicit_target_tier_refusal(
+    target: Path,
+    scope: str,
+    *,
+    memory_dirs: Sequence[Path | str],
+    project_memory_dirs: Sequence[Path | str],
+    scope_hint: Callable[[str], str],
+) -> str | None:
+    """Why a caller-named append target may not be written for ``scope``, or ``None``.
+
+    The CLI and web confine an explicit file to the directory ``scope`` chose,
+    but a tier registered inside that directory is another tier with its own
+    gates (#2821). The target is judged by the tier it is in: which configured
+    directory owns it, and which tier the indexer will label its rows with
+    (:func:`~memtomem.integrations.langgraph.resolve_target_scope`, the gate
+    ADR-0042 published so that it is not copied). Any other tier is refused,
+    with or without that tier's confirmation, as the day file is (#2807).
+
+    The tier is decided by spelling, so an alias of a registered tier (another
+    case, another Unicode form) passes as ``user`` here as it does on every
+    surface (#3268).
+
+    ``scope_hint`` renders, in the caller's vocabulary, how to write with a
+    tier's own scope.
+    """
+    from memtomem.integrations.langgraph import (
+        TierWouldNotRoundTrip,
+        UnregisteredProjectTarget,
+        resolve_target_scope,
+    )
+
+    try:
+        tier = resolve_target_scope(target, list(memory_dirs), list(project_memory_dirs))
+    except (TierWouldNotRoundTrip, UnregisteredProjectTarget) as exc:
+        return f"{exc} Nothing was written."
+    except (OSError, RuntimeError) as exc:
+        # A configured root that cannot be resolved (on POSIX ``~nobody/...``
+        # raises ``RuntimeError`` from ``expanduser``) leaves the tier unknown.
+        return f"Could not tell which memory tier {target} is in ({exc}); nothing was written."
+    if tier == scope:
+        return None
+    return (
+        f"{target} is in the {tier} memory tier, not the {scope} one; nothing was written. "
+        f"Choose a file outside that tier, or write to it from its project with "
+        f"{scope_hint(tier)}."
+    )
+
+
 _FS_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 # Digest length and readable-slug budget for per-namespace day files. 16 hex
@@ -283,6 +335,104 @@ def day_file_name(namespace: str | None, default_namespace: str, *, date_str: st
     slug = _FS_UNSAFE_RE.sub("-", namespace).strip("-")
     slug = slug.encode("utf-8")[:_NS_SLUG_MAX_BYTES].decode("utf-8", "ignore").strip("-")
     return f"{date_str}--{slug}-{digest}.md" if slug else f"{date_str}--{digest}.md"
+
+
+#: A non-default day file's name, as :func:`day_file_name` writes it with a slug.
+#: The digest-only form (``{date}--{digest}.md``) is deliberately not matched:
+#: with no slug there is no candidate to check the digest against.
+_DAY_FILE_RE = re.compile(
+    r"(?P<date>\d{4}-\d{2}-\d{2})--(?P<slug>.+)-(?P<digest>[0-9a-f]{%d})\.md" % _NS_DIGEST_LEN
+)
+
+#: How many candidates :func:`decode_day_file_namespace` tries before giving up
+#: (ADR-0043 §1). 2^16 is about 0.1 s of hashing, once per namespace per run.
+_DECODE_BUDGET = 1 << 16
+
+#: What ``day_file_name`` can have trimmed from the slug's ends: a ``-`` it
+#: wrote itself, or the ``:`` (or any other unsafe character) it turned into
+#: one. Two at the end, one at the start: the handoff workflow trims only
+#: leading ``-`` from its project slug, so ``shared:repo-copy-`` is a real shape.
+_EDGE_CHARS = ("-", ":")
+_LEADS = ("", *_EDGE_CHARS)
+_TRAILS = ("", *_EDGE_CHARS, *(a + b for a in _EDGE_CHARS for b in _EDGE_CHARS))
+
+
+def decode_day_file_namespace(name: str) -> str | None:
+    """The namespace a day file's *name* declares, or ``None`` (ADR-0043).
+
+    ``day_file_name`` writes ``{date}--{slug}-{sha256(ns)[:16]}.md``, where the
+    slug is the namespace with every character outside ``[A-Za-z0-9._-]``
+    turned into ``-`` and the ends trimmed. For the namespaces memtomem
+    produces, the only such character is the ``:`` between segments, so the
+    slug is the candidate: turn some of its ``-`` back into ``:`` (fewest
+    first), put back a trimmed edge, and keep the candidate whose digest
+    matches.
+
+    A match is accepted only if ``day_file_name`` writes exactly this name
+    for it again and the write gate accepts it. The re-encoding check is what
+    makes truncation safe without special-casing it: a truncated slug's
+    candidates are all shorter than the namespace, so none of them reproduces
+    the digest.
+
+    The digest is a 64-bit truncation, so this is recovery, not proof: a file
+    named like a day file declares its namespace whoever wrote it.
+    """
+    m = _DAY_FILE_RE.fullmatch(name)
+    if m is None:
+        return None
+    candidate = _decode_slug(m["slug"], m["digest"])
+    if candidate is None:
+        return None
+    # ``day_file_name`` only maps ``default_namespace`` to the bare form, so any
+    # value the gate refuses as a namespace stands in for "never the default".
+    if day_file_name(candidate, "", date_str=m["date"]) != name:
+        return None
+    try:
+        validate_writable_namespace(candidate)
+    except InvalidNameError:
+        return None
+    return candidate
+
+
+def day_file_declaration(path: Path) -> tuple[str | None, bool]:
+    """The namespace the file ``path`` resolves to declares by name, and whether it is
+    named like a day file at all.
+
+    ``(None, True)`` is a day-file-shaped name that did not decode — what the
+    indexer counts so an unrecovered rebuild is visible. Resolved because the
+    indexer decides on the resolved path (``_index_file``'s ``decision_path``)
+    while discovery keeps symlink names: decoding the link's name would preview
+    one namespace and index another.
+    """
+    try:
+        name = resolve_path(path).name
+    except OSError:
+        name = path.name
+    return decode_day_file_namespace(name), _DAY_FILE_RE.fullmatch(name) is not None
+
+
+@functools.lru_cache(maxsize=1024)
+def _decode_slug(slug: str, digest: str) -> str | None:
+    dashes = [i for i, ch in enumerate(slug) if ch == "-"]
+    tried = 0
+    for turns in range(len(dashes) + 1):
+        for positions in itertools.combinations(dashes, turns):
+            chars = list(slug)
+            for pos in positions:
+                chars[pos] = ":"
+            core = "".join(chars)
+            for lead in _LEADS:
+                for trail in _TRAILS:
+                    tried += 1
+                    if tried > _DECODE_BUDGET:
+                        return None
+                    candidate = lead + core + trail
+                    if (
+                        hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:_NS_DIGEST_LEN]
+                        == digest
+                    ):
+                        return candidate
+    return None
 
 
 #: Directory, under a scope's memory base, that holds agent consolidation summaries.
@@ -364,6 +514,20 @@ def namespace_mix_error(
     )
 
 
+def namespace_name_mix_error(
+    target: Path, declared: str, resolved: str, *, override_hint: str
+) -> str:
+    """Refusal message when a write's namespace differs from the one ``target``'s
+    name declares (ADR-0043 §3)."""
+    return (
+        f"{target.name} is named as the day file of namespace '{declared}'; this write "
+        f"resolves to namespace '{resolved}'. A rebuilt index restores a day file's "
+        f"namespace from its name, so this entry would move to '{declared}' then.\n"
+        "Either write under that namespace, omit the explicit file so the write lands "
+        f"in its own namespace's day file, or pass {override_hint} to write anyway."
+    )
+
+
 async def namespace_mix_refusal(
     *,
     index_engine: Any,
@@ -381,8 +545,11 @@ async def namespace_mix_refusal(
     would refuse a write to a file whose stored namespace the indexer
     would have *preserved*, which is a refusal with no hazard behind it.
 
-    From there it decides from the file *and* the stored rows:
+    From there it decides from the file's name, the file, and the stored rows:
 
+    - A name that declares a namespace (ADR-0043): refuse a write that
+      resolves to another one, whatever the file holds. A rebuild would move
+      the entry to the declared namespace.
     - Missing or empty file: nothing to protect. Any rows are stale (a
       deleted file whose chunks have not been reaped), so they are
       ignored rather than refusing a write against content that no
@@ -431,9 +598,29 @@ async def namespace_mix_refusal(
         )
     else:
         has_content = stat_mod.S_ISREG(st.st_mode) and st.st_size > 0
+    declared, _shaped = day_file_declaration(target)
+    if declared is not None and (effective_ns is None or effective_ns != declared):
+        # ADR-0043 §3: a file named like a day file declares its namespace,
+        # empty or not, rows or not. A write under another namespace would be
+        # indexed under it now and under the declared one after a rebuild, so
+        # it is refused like any other mix. A write that names the declared
+        # namespace — every default-target ``mem_add`` — skips the resolution.
+        try:
+            resolved_now = await index_engine.effective_namespace_for(target, effective_ns)
+        except Exception:
+            logger.warning("namespace mix guard could not resolve %s", target, exc_info=True)
+            return (
+                f"could not determine which namespace a write to {target} resolves to "
+                "(the chunk store did not answer). Retry, or pass "
+                f"{override_hint} to append anyway."
+            )
+        if stored_namespace(resolved_now) != declared:
+            return namespace_name_mix_error(
+                target, declared, stored_namespace(resolved_now), override_hint=override_hint
+            )
     if not has_content:
-        # Checked before anything else: a brand-new day file is the common
-        # case, and it needs neither a namespace resolution nor a query.
+        # A brand-new day file is the common case, and it needs neither a
+        # namespace resolution nor a query.
         return None
     try:
         resolved = await index_engine.effective_namespace_for(target, effective_ns)
@@ -482,6 +669,98 @@ def project_tier_registration_error(target_dir: Path, scope: TargetScope) -> str
         "by design; alternatively edit ~/.memtomem/config.json and add "
         f"{target_dir} to indexing.project_memory_dirs.)"
     )
+
+
+_PROJECT_TIER_DIR_NAMES = {"project_shared": "memories", "project_local": "memories.local"}
+
+
+def project_tier_dir(scope: str, project_root: Path) -> Path:
+    """A project tier's directory as spelled under ``project_root``, unresolved.
+
+    :func:`resolve_memory_scope_dir` returns where that path leads. This is
+    the path itself, for a caller that has to ask whether it is a link
+    (:func:`project_tier_is_relinked`).
+    """
+    return project_root / ".memtomem" / _PROJECT_TIER_DIR_NAMES[scope]
+
+
+def project_tier_is_relinked(tier_dir: Path) -> bool:
+    """Whether a project tier directory, or the ``.memtomem`` holding it, is a link.
+
+    Those two entries live in the project's checkout, and a checkout can
+    deliver either one as a symbolic link. The directory then names whatever
+    the link points at: ``memories -> ..`` makes the whole project the tier.
+    Nothing above the project root is asked about; that part of the path is
+    the machine's, not the repository's. Each entry is judged by
+    :func:`entry_is_link`, so an entry that cannot be inspected counts as a
+    link: a tier nobody can vouch for is not used, and the caller goes on to
+    its other directories.
+    """
+    tier_dir = tier_dir.expanduser()
+    return any(entry_is_link(entry) for entry in (tier_dir, tier_dir.parent))
+
+
+def entry_is_link(entry: Path) -> bool:
+    """Whether ``entry`` itself is a symbolic link or a junction.
+
+    Only the last component is asked about; links above it are followed. A
+    missing entry is not a link. An entry that cannot be inspected counts as
+    one. ``lstat`` is asked directly because ``Path.is_symlink`` answers
+    ``False`` for some errors and raises for others, and which ones has
+    changed between Python versions.
+    """
+    try:
+        mode = entry.lstat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return stat_mod.S_ISLNK(mode) or entry.is_junction()
+
+
+class ProjectEntryRelinked(ValueError):
+    """A project path memtomem would write through, or copy from, is a link.
+
+    ``entry`` is the linked entry, relative to the project root and spelled
+    with forward slashes. The message names only that entry: the link's
+    target can sit anywhere, and a web response must not carry it.
+    """
+
+    def __init__(self, entry: str) -> None:
+        self.entry = entry
+        super().__init__(
+            f"{entry} is a symbolic link or junction inside the project; memtomem does not "
+            "write through it or copy from it. Replace it with a regular directory or file "
+            "to continue."
+        )
+
+
+def relinked_project_entry(project_root: Path, rel: Path, *, judge_leaf: bool) -> str | None:
+    """The first entry of ``project_root / rel`` that is a link, or ``None``.
+
+    The entries are judged one by one with :func:`entry_is_link`, from the
+    first component of ``rel`` down to its parent, and the last component too
+    when ``judge_leaf`` is set: a writer that replaces its file atomically
+    swaps a link at the leaf for a regular file, while one that opens the file
+    in place writes through it. Where a link points does not matter. Nothing
+    at or above ``project_root`` is judged; that part of the path belongs to
+    the machine, not to the checkout. The answer is the entry relative to
+    ``project_root`` with forward slashes.
+    """
+    if rel.is_absolute() or rel.anchor or ".." in rel.parts or not rel.parts:
+        raise ValueError(f"not a path inside the project: {rel.as_posix()!r}")
+    parts = rel.parts if judge_leaf else rel.parts[:-1]
+    for depth in range(1, len(parts) + 1):
+        if entry_is_link(project_root.joinpath(*parts[:depth])):
+            return Path(*parts[:depth]).as_posix()
+    return None
+
+
+def refuse_relinked_project_entry(project_root: Path, rel: Path, *, judge_leaf: bool) -> None:
+    """Raise :class:`ProjectEntryRelinked` when :func:`relinked_project_entry` finds one."""
+    entry = relinked_project_entry(project_root, rel, judge_leaf=judge_leaf)
+    if entry is not None:
+        raise ProjectEntryRelinked(entry)
 
 
 def is_project_tier_registered(target_dir: Path, project_memory_dirs) -> bool:

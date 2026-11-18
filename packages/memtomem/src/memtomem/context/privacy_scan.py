@@ -6,12 +6,9 @@ underneath, but the two surfaces differ on:
 
 * ``surface=`` string — caller-supplied on both sides. Sync defaults to
   ``"cli_context_sync"`` (migrate: ``"cli_context_migrate"``); the Web
-  sync routes pass ``"web_context_<kind>_sync"`` and the MCP tools pass
-  ``"mcp_context_generate"`` / ``"mcp_context_sync"`` /
-  ``"mcp_context_artifact_migrate"`` (#1246). The import side defaults
-  to ``"cli_context_init"``; the Web import routes pass
-  ``"web_context_<kind>_import"`` and the MCP tool passes
-  ``"mcp_context_init"`` (#1229).
+  sync routes pass ``"web_context_<kind>_sync"`` (#1246). The import side
+  defaults to ``"cli_context_init"``; the Web import routes pass
+  ``"web_context_<kind>_import"`` (#1229).
 * ``force_unsafe`` valve — both sides now expose a reviewed bypass, but
   scope-asymmetrically (ADR §5). ``project_shared`` is ALWAYS hard-refused
   regardless of the flag (git history is forever; a forced fan-out is a
@@ -195,7 +192,7 @@ def scan_artifact_tree(
             match the ASCII-only regex pattern set, so this does not
             create false positives on benign binary assets.
         surface: Audit-log surface tag — e.g. ``"cli_context_sync"``,
-            ``"web_context_skills_sync"``, ``"mcp_context_artifact_migrate"``.
+            ``"web_context_skills_sync"``.
             Used by :func:`enforce_write_guard` to attribute the outcome
             to the calling code path.
         scope: Destination scope. Determines block-vs-skip semantics

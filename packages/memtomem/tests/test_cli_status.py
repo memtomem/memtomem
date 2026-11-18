@@ -874,6 +874,13 @@ RRF weights: [1.0, 1.0]
 BM25 candidates: 50
 Dense candidates: 50
 Watcher:   {effective_watcher_backend(comp.config.indexing)}
+LLM:       off
+Reranker:  off
+
+Remote inference endpoints
+--------------------------
+  none configured
+  Not covered: Langfuse session tracing, webhooks, and content returned to the connected MCP client.
 
 Runtime context
 ---------------
@@ -938,7 +945,12 @@ class TestStatusJson:
         assert result.exit_code == 0, result.output
 
         data = json.loads(result.output)
-        assert set(data) == {"config", "runtime", "index", "immutable", "warnings"}
+        assert set(data) == {"config", "runtime", "index", "immutable", "warnings", "inference"}
+        assert data["inference"] == {
+            "llm": {"enabled": False, "provider": "ollama"},
+            "rerank": {"enabled": False, "provider": "fastembed"},
+            "remote_endpoints": [],
+        }
         assert set(data["runtime"]) == {"cwd", "project_context_root", "project_context_source"}
         assert data["runtime"]["cwd"] == str(Path.cwd().resolve())
         assert data["index"]["total_chunks"] == 42
@@ -1779,3 +1791,78 @@ class TestStatusReportNeutralisesControlCharacters:
         warning = json.loads(result.stdout)["warnings"][0]
         assert warning["stored"]["model"] == "bge\x1b[31m"
         assert warning["configured"]["provider"] == "ollama\nforged"
+
+
+class TestStatusRemoteInference:
+    """The report names every configured remote inference endpoint."""
+
+    @staticmethod
+    def _report(config: Mem2MemConfig) -> tuple[dict, str]:
+        import asyncio
+
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools.status_config import (
+            collect_status_report,
+            render_status_report,
+        )
+
+        app = AppContext.from_components(_mock_components(config=config))
+        data = asyncio.run(collect_status_report(app))
+        return data, render_status_report(data)
+
+    def test_openai_cohere_and_remote_llm_are_listed(self) -> None:
+        data, text = self._report(
+            Mem2MemConfig(
+                embedding={"provider": "openai", "model": "text-embedding-3-small"},
+                llm={"enabled": True, "provider": "ollama", "base_url": "http://gpu.lan:11434"},
+                rerank={"enabled": True, "provider": "cohere"},
+            )
+        )
+        endpoints = data["inference"]["remote_endpoints"]
+        assert [(e["component"], e["provider"], e["host"]) for e in endpoints] == [
+            ("embedding", "openai", "api.openai.com"),
+            ("llm", "ollama", "gpu.lan:11434"),
+            ("rerank", "cohere", "api.cohere.ai"),
+        ]
+        lines = text.splitlines()
+        start = lines.index("Remote inference endpoints")
+        assert lines[start + 2 : start + 6] == [
+            "  - embedding (openai) -> api.openai.com: sends note text and search queries",
+            "  - llm (ollama) -> gpu.lan:11434: sends note text, queries and session notes "
+            "for the enabled LLM features",
+            "  - rerank (cohere) -> api.cohere.ai: sends search queries and the text of "
+            "candidate results",
+            "  Not covered: Langfuse session tracing, webhooks, and content returned to "
+            "the connected MCP client.",
+        ]
+        assert "LLM:       ollama" in lines
+        assert "Reranker:  cohere" in lines
+
+    def test_local_providers_report_none_configured(self) -> None:
+        data, text = self._report(
+            Mem2MemConfig(
+                embedding={"provider": "ollama", "model": "nomic-embed-text"},
+                llm={"enabled": True, "provider": "ollama"},
+                rerank={"enabled": True, "provider": "fastembed"},
+            )
+        )
+        assert data["inference"]["remote_endpoints"] == []
+        lines = text.splitlines()
+        start = lines.index("Remote inference endpoints")
+        assert lines[start + 2] == "  none configured"
+
+    def test_malformed_punycode_base_url_does_not_break_the_report(self) -> None:
+        data, text = self._report(
+            Mem2MemConfig(
+                embedding={
+                    "provider": "openai",
+                    "model": "text-embedding-3-small",
+                    "base_url": "https://xn--a.example",
+                }
+            )
+        )
+        assert [e["host"] for e in data["inference"]["remote_endpoints"]] == ["xn--a.example"]
+        assert (
+            "  - embedding (openai) -> xn--a.example: sends note text and search queries"
+            in text.splitlines()
+        )

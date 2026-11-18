@@ -33,7 +33,7 @@ import pytest
 
 from memtomem.errors import StorageError
 from memtomem.storage import sqlite_backend, sqlite_namespace
-from memtomem.storage.sqlite_helpers import norm_path, serialize_f32
+from memtomem.storage.sqlite_helpers import fts_source_text, norm_path, serialize_f32
 
 from helpers import make_chunk
 
@@ -81,7 +81,7 @@ def _seed(storage, source: Path, count: int, *, namespace: str = "default") -> l
     ]
     db.executemany(
         "INSERT OR REPLACE INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
-        [(rowid, f"row {rowid}", norm_path(source)) for rowid in rowids],
+        [(rowid, f"row {rowid}", fts_source_text(norm_path(source))) for rowid in rowids],
     )
     if storage._has_vec_table:
         db.executemany(
@@ -109,8 +109,12 @@ def _remaining(storage, source: Path) -> tuple[int, int]:
     chunks = db.execute(
         "SELECT COUNT(*) FROM chunks WHERE source_file=?", (norm_path(source),)
     ).fetchone()[0]
+    # By value, not through ``chunks`` rowids: after a delete the chunk rows are
+    # gone, and a join would count a leftover FTS row as removed. The column
+    # holds the file's name only (#3208); each test here uses its own name.
     fts = db.execute(
-        "SELECT COUNT(*) FROM chunks_fts WHERE source_file=?", (norm_path(source),)
+        "SELECT COUNT(*) FROM chunks_fts WHERE source_file=?",
+        (fts_source_text(norm_path(source)),),
     ).fetchone()[0]
     return chunks, fts
 

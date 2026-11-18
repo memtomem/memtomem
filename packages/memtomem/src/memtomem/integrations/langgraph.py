@@ -45,7 +45,14 @@ from memtomem.constants import (
 )
 from memtomem.services.search_service import rrf_weights_from
 
-__all__ = ["MemtomemBaseStore", "MemtomemHybridStore", "MemtomemStore"]
+__all__ = [
+    "MemtomemBaseStore",
+    "MemtomemHybridStore",
+    "MemtomemStore",
+    "TierWouldNotRoundTrip",
+    "UnregisteredProjectTarget",
+    "resolve_target_scope",
+]
 
 if TYPE_CHECKING:
     from memtomem.integrations.langgraph_hybrid_store import MemtomemHybridStore
@@ -76,7 +83,7 @@ def __getattr__(name: str) -> Any:
 _CHUNK_LOCK_MOVE_RETRIES = 3
 
 
-class _UnregisteredProjectTarget(Exception):
+class UnregisteredProjectTarget(Exception):
     """A target names a project tree that no config entry covers.
 
     Raised rather than returned so the refusal cannot be dropped. An optional
@@ -86,7 +93,7 @@ class _UnregisteredProjectTarget(Exception):
     """
 
 
-class _TierWouldNotRoundTrip(Exception):
+class TierWouldNotRoundTrip(Exception):
     """The tier the gates would use is not the tier the indexer would store.
 
     The gates need to know which tier they are protecting; the indexer decides,
@@ -116,7 +123,7 @@ def _owned_tier(
     """Which tier *owns* ``target``, by configured directory rather than spelling.
 
     ``classify_scope`` decides from the path's shape, and a path can be shaped
-    to defeat it in both directions — see :func:`_resolve_target_scope`, which
+    to defeat it in both directions — see :func:`resolve_target_scope`, which
     is what callers should use. This half answers only the ownership question.
     """
     # 1. A registered project root that covers the target decides the tier.
@@ -162,7 +169,7 @@ def _owned_tier(
     #    onto a git-tracked path with both gates bypassed.
     pattern_scope, _ = classify_scope(target, None)
     if pattern_scope != "user":
-        raise _UnregisteredProjectTarget(
+        raise UnregisteredProjectTarget(
             f"{target} is a project-canonical path, but no "
             "indexing.project_memory_dirs entry covers it. Register the tier "
             "or choose a target inside a configured memory directory."
@@ -171,7 +178,7 @@ def _owned_tier(
     return "user"
 
 
-def _resolve_target_scope(
+def resolve_target_scope(
     target: Path,
     memory_dirs: list,
     project_memory_dirs: list,
@@ -185,13 +192,23 @@ def _resolve_target_scope(
     later surface — ``mem_edit``, ``mem_delete`` — trusts the second. A write
     whose two answers differ is one this adapter declines.
 
-    Raises :class:`_UnregisteredProjectTarget` or
-    :class:`_TierWouldNotRoundTrip`; never returns a tier it is unsure of.
+    Raises :class:`UnregisteredProjectTarget` or
+    :class:`TierWouldNotRoundTrip`; never returns a tier it is unsure of.
+
+    Public since ADR-0042: a package that stores beside memtomem needs the same
+    gate, and a copy of it would be a second safety policy to keep in step.
+
+    ``target`` is normalised here (``expanduser().resolve()``), the way the
+    configured roots are. The in-tree callers already pass a resolved path; a
+    caller of the public name may not, and an unresolved symlink into a
+    registered ``project_shared`` directory would otherwise be gated as
+    ``user`` while the indexer stored its rows as ``project_shared``.
     """
+    target = Path(target).expanduser().resolve()
     owned = _owned_tier(target, memory_dirs, project_memory_dirs)
     indexed, _ = classify_scope(target, project_memory_dirs)
     if owned != indexed:
-        raise _TierWouldNotRoundTrip(
+        raise TierWouldNotRoundTrip(
             f"{target} would be gated as {owned!r} but stored as {indexed!r}, so "
             "the gates and every later edit or delete would disagree about which "
             "tier it is in. Choose a target that is not nested inside another "
@@ -201,21 +218,27 @@ def _resolve_target_scope(
     return owned
 
 
+# The names these were born under, kept for in-tree importers and tests.
+_UnregisteredProjectTarget = UnregisteredProjectTarget
+_TierWouldNotRoundTrip = TierWouldNotRoundTrip
+_resolve_target_scope = resolve_target_scope
+
+
 def _gate_scope_for(comp: "Components", target: Path) -> str | dict:
-    """``_resolve_target_scope`` with this adapter's error-dict contract.
+    """``resolve_target_scope`` with this adapter's error-dict contract.
 
     Both destinations — a caller's ``file=`` and the derived day file — go
     through it, so neither can be given a tier the other would not be.
     """
     try:
-        return _resolve_target_scope(
+        return resolve_target_scope(
             target,
             comp.config.indexing.memory_dirs,
             comp.config.indexing.project_memory_dirs,
         )
-    except _UnregisteredProjectTarget as exc:
+    except UnregisteredProjectTarget as exc:
         return {"error": "unregistered_project_target", "detail": str(exc)}
-    except _TierWouldNotRoundTrip as exc:
+    except TierWouldNotRoundTrip as exc:
         return {"error": "tier_would_not_round_trip", "detail": str(exc)}
 
 
@@ -234,6 +257,16 @@ class MemtomemStore:
             ``~/.memtomem`` location. The constructor itself does not
             validate (the config object is built lazily) — the first
             ``await``-ed call surfaces the error.
+
+    The FTS tokenizer (``search.tokenizer``) is read once, when the
+    components are built. A later ``mm config set search.tokenizer``, or a
+    tokenizer change made through the MCP server or the Web UI, rebuilds the
+    index for that process's backend only. To query the rebuilt index with the
+    new tokenizer, close and recreate the store with the new value in its
+    config: persisted to ``config.json`` (``mem_config`` and the Web UI keep a
+    change runtime-only unless asked to persist it), or passed as
+    ``config_overrides={"search": {"tokenizer": ...}}``, which outranks the
+    file.
     """
 
     def __init__(self, config_overrides: dict[str, Any] | None = None):
@@ -576,9 +609,12 @@ class MemtomemStore:
                 audit_context={"namespace": effective_namespace},
             )
 
-        # ADR-0011 §5 Gate A, now told which tier it is scanning for.
+        # ADR-0011 §5 Gate A, now told which tier it is scanning for. It reads
+        # the entry as it is written, title and tags included.
+        from memtomem.tools.memory_writer import entry_guard_text
+
         guard = privacy.enforce_write_guard(
-            content,
+            entry_guard_text(content, title, tags),
             surface="langgraph_add",
             force_unsafe=force_unsafe,
             scope=effective_scope,
@@ -648,26 +684,41 @@ class MemtomemStore:
                     return {"error": "namespace_mix_refused", "detail": mix_err}
 
                 from memtomem.indexing.engine import PrivacyRejection
-                from memtomem.tools.memory_mutation import appended_valve_text, preflight_refusal
+                from memtomem.tools.memory_mutation import (
+                    appended_valve_text,
+                    preflight_refusal,
+                    refuse_changed_append,
+                )
+                from memtomem.tools.memory_writer import SourceChangedError
 
                 # The re-index after the append judges the whole file: refuse a
                 # file whose content may not be indexed before writing anything.
                 needs_valve = guard.decision == "bypassed"
-                refusal, pre = await preflight_refusal(
+                refusal, judged = await preflight_refusal(
                     comp.index_engine, target, op="add", needs_valve=needs_valve, surface="neutral"
                 )
                 if refusal is not None:
                     comp.search_pipeline.invalidate_cache()
                     return {"error": "index_blocked", "detail": refusal, "written": False}
-                appended = append_entry(target, content, title=title, tags=tags)
+                try:
+                    appended = append_entry(target, content, title=title, tags=tags, judged=judged)
+                except SourceChangedError:
+                    refusal = await refuse_changed_append(
+                        comp.index_engine, target, judged, op="add"
+                    )
+                    comp.search_pipeline.invalidate_cache()
+                    return {"error": "index_blocked", "detail": refusal, "written": False}
                 try:
                     stats = await comp.index_engine.index_file(
                         target,
                         namespace=effective_namespace,
                         ingress_guarded=True,
                         force_unsafe=needs_valve,
-                        valve_text=(appended_valve_text(pre, appended) if needs_valve else None),
+                        valve_text=(
+                            appended_valve_text(judged.data, appended.text) if needs_valve else None
+                        ),
                         lock_held=True,
+                        written_source=appended.source,
                     )
                 except PrivacyRejection as exc:
                     comp.search_pipeline.invalidate_cache()
@@ -686,10 +737,17 @@ class MemtomemStore:
         if stats.mutated:
             comp.search_pipeline.invalidate_cache()
 
-        return {
+        result: dict[str, Any] = {
             "file": str(target),
             "indexed_chunks": stats.indexed_chunks,
         }
+        from memtomem.tools.memory_mutation import append_warning
+
+        # Excluded, or replaced by a link, while the entry was appended.
+        warning = append_warning(stats, judged)
+        if warning is not None:
+            result["warning"] = warning
+        return result
 
     async def get(self, chunk_id: str) -> dict | None:
         """Get a chunk by UUID, inside the caller's project boundary.
@@ -771,6 +829,8 @@ class MemtomemStore:
                 the bounded re-key can follow. "Writer" and not "process":
                 the sidecar has an in-process layer as well, so a second
                 coroutine in this same interpreter can be the one holding it.
+                Or the store's writer stayed held past ``WRITER_WAIT_S`` while
+                the chunk was re-read under that lock; nothing was deleted.
         """
         from memtomem import privacy
         from memtomem.errors import ProjectSharedConfirmationRequiredError
@@ -811,6 +871,11 @@ class MemtomemStore:
                         f"chunk {chunk_id} source file is locked by another writer "
                         "(migration in flight?); retry."
                     )
+                if reason == "writer_busy":
+                    raise TimeoutError(
+                        f"the store's writer stayed busy while re-reading chunk {chunk_id}; "
+                        "nothing was deleted, retry."
+                    )
                 if reason == "read_only":
                     # Refused before the acquire, so nothing was written beside
                     # the source. Not retryable: re-keying would meet the same
@@ -818,6 +883,12 @@ class MemtomemStore:
                     from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
 
                     raise PermissionError(READ_ONLY_TARGET_DETAIL)
+                if reason == "unmanaged":
+                    # Refused before the acquire as well, and as final: the
+                    # chunk's source is outside every memory directory.
+                    from memtomem.source_provenance import UNMANAGED_SOURCE_DETAIL
+
+                    raise PermissionError(UNMANAGED_SOURCE_DETAIL)
                 if reason == "moved":
                     # The file we held was not this row's any more, so nothing
                     # it said is authoritative. Re-key onto the new one.

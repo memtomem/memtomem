@@ -1,11 +1,10 @@
 """Per-surface action hints for context refusals (#1869).
 
 The engine states the **condition** ("the Store already has agents/foo"); each
-surface states its own **remediation** ("pass --overwrite" / "re-call with
-overwrite=True" / the Overwrite checkbox). Before this module the engine spelled
-CLI flags into the reason itself, so an MCP client was told to ``pass --from``
-— a flag it cannot pass (its parameter is ``from_runtime``) — and the web Pull
-picker rendered the same CLI wording verbatim.
+surface states its own **remediation** ("pass --overwrite" / the Overwrite
+checkbox). Before this module the engine spelled CLI flags into the reason
+itself, so the web Pull picker rendered CLI wording verbatim. (An MCP column
+existed while the context writes had MCP tools; ADR-0044 removed both.)
 
 Neutral-text-only was considered and rejected (#1869): it would silently
 downgrade the CLI, which today hands the user a copy-pasteable flag.
@@ -36,7 +35,7 @@ from typing import Literal, cast
 from memtomem.context._skip_reasons import SkipCode
 
 #: Which surface's vocabulary to render remediation in.
-HintSurface = Literal["cli", "mcp", "web"]
+HintSurface = Literal["cli", "web"]
 
 #: Keys are ``reason_code`` values, which every refusal already carries all the
 #: way to the surface. That is the whole addressing scheme: no refusal here is
@@ -63,31 +62,20 @@ HintKey = SkipCode
 _HINTS: dict[HintKey, dict[HintSurface, str]] = {
     "canonical_exists": {
         "cli": "Pass --overwrite to replace it.",
-        "mcp": "Re-call with overwrite=True to replace it.",
         "web": "",  # settings.ctx.pull_hint_canonical_exists
     },
     "source_conflict": {
         "cli": "Pass --from <runtime> to choose a source.",
-        "mcp": 'Re-call with from_runtime="<runtime>" to choose a source.',
         "web": "",  # settings.ctx.pull_hint_source_conflict
     },
     "privacy_blocked": {
         "cli": "Pass --force-unsafe-import to bypass after review.",
-        "mcp": "Re-call with force_unsafe_import=True to bypass for a reviewed "
-        "false positive (user tier only).",
         "web": "",  # settings.ctx.pull_hint_privacy_blocked
     },
     "skills_overwrite_unsupported": {
         "cli": "Pull it individually (the pre-image is snapshotted first): "
         "mm context pull skills <name> --overwrite --apply, with --scope "
         "matching this destination tier.",
-        "mcp": "Pull it individually (the pre-image is snapshotted first): "
-        'mem_context_pull(kind="skills", name="<name>", overwrite=True, '
-        'apply=True, scope="project_shared", confirm_project_shared=True) '
-        "for the git-tracked tier, or "
-        'mem_context_pull(kind="skills", name="<name>", overwrite=True, '
-        'apply=True, scope="user", allow_host_writes=True) '
-        "for a user-tier skill.",
         "web": "",  # settings.ctx.import_skip_skills_overwrite_unsupported
     },
 }
@@ -111,8 +99,8 @@ def action_hint(code: str | None, surface: HintSurface) -> str:
 def append_hint(reason: str, code: str | None, surface: HintSurface) -> str:
     """*reason* with *surface*'s remediation appended, or *reason* unchanged.
 
-    The single joining site, so CLI skip lines, CLI exceptions and MCP result
-    lines cannot render the same hint three different ways. A reason that does
+    The single joining site, so CLI skip lines and CLI exceptions cannot render
+    the same hint two different ways. A reason that does
     not already end in sentence punctuation gets a period first — engine skip
     reasons are terse fragments ("canonical exists") as often as sentences.
     """

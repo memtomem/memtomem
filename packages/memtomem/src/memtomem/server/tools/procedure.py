@@ -6,6 +6,7 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.tools.temporal import format_source_name
 
 
 @mcp.tool()
@@ -104,7 +105,7 @@ async def mem_procedure_list(
         heading = (
             " > ".join(r.chunk.metadata.heading_hierarchy)
             if r.chunk.metadata.heading_hierarchy
-            else source.split("/")[-1]
+            else format_source_name(source)
         )
         tags = ", ".join(t for t in r.chunk.metadata.tags if t != "procedure")
         tag_suffix = f" [{tags}]" if tags else ""

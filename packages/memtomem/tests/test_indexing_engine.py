@@ -3851,7 +3851,9 @@ class TestBulkSymlinkedLeaf:
         )
 
         lock_paths: list[Path] = []
+        detached_for: list[Path] = []
         real = atomic_mod.async_file_lock
+        real_detached = atomic_mod.async_detached_source_lock
 
         @contextlib.asynccontextmanager
         async def spy(lock_path, *, timeout):
@@ -3859,7 +3861,14 @@ class TestBulkSymlinkedLeaf:
             async with real(lock_path, timeout=timeout):
                 yield
 
+        @contextlib.asynccontextmanager
+        async def spy_detached(data_path, *, timeout):
+            detached_for.append(Path(data_path))
+            async with real_detached(data_path, timeout=timeout):
+                yield
+
         monkeypatch.setattr(atomic_mod, "async_file_lock", spy)
+        monkeypatch.setattr(atomic_mod, "async_detached_source_lock", spy_detached)
         stats = await engine.index_path(memory_dir, recursive=True)
 
         assert not stats.errors
@@ -3867,11 +3876,15 @@ class TestBulkSymlinkedLeaf:
             "a symlink alias must not select a weaker policy than its canonical target: "
             f"{stats.applied_namespaces}"
         )
-        # ...while the lock is the target's: one physical file, one sidecar, so
-        # a CRUD span on the target and this run cannot both write it.
-        assert [lp.name for lp in lock_paths] == [".target.md.lock"], (
-            f"the sidecar must be keyed on the resolved path: {[lp.name for lp in lock_paths]}"
+        # ...while the lock is the target's: one physical file, one lock. The
+        # target is outside every index root, so that lock is the detached one
+        # and no sidecar is created beside it.
+        key = atomic_mod.detached_source_lock_key
+        assert [key(p) for p in detached_for] == [key(target)], (
+            f"the lock must be keyed on the resolved path: {detached_for}"
         )
+        assert lock_paths == []
+        assert not (target.parent / ".target.md.lock").exists()
 
 
 class TestEmbedConcurrency:

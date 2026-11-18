@@ -1257,7 +1257,7 @@ def resolve_project_selector(
     sets one today) raises :class:`UnknownProjectSelectorError` rather than
     returning a rootless scope.
     """
-    if _SCOPE_ID_SHAPE.match(selector):
+    if _SCOPE_ID_SHAPE.fullmatch(selector):
         for scope in scopes:
             if scope.scope_id == selector:
                 if scope.root is None:

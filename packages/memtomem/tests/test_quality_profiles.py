@@ -499,3 +499,24 @@ def test_pre_v3_canonical_shape_is_unchanged_by_the_v3_field():
             "min_pool",
             "max_pool",
         }
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        _doc({}, name="p1\n"),
+        _doc({"rerank": {"model": "org/model\n"}}),
+        _doc({"rerank": {"model": "model\n"}}),
+    ],
+    ids=["name", "model-two-segments", "model-one-segment"],
+)
+def test_a_trailing_newline_is_not_part_of_the_allowed_shape(doc):
+    # ``re.match`` with ``$`` also matches just before a final ``\n``; the
+    # shape checks use ``fullmatch`` so the newline is rejected.
+    with pytest.raises(EvalCaseValidationError):
+        load_profile_document(doc)
+
+
+def test_plain_name_and_model_are_still_accepted():
+    doc = load_profile_document(_doc({"rerank": {"model": "org/model-v2.1"}}, name="p1"))
+    assert doc.name == "p1"

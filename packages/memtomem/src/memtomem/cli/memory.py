@@ -183,6 +183,13 @@ def add(
         raise_cli_error(e)
 
 
+def _cli_scope_hint(tier: str) -> str:
+    flags = f"--scope {tier}"
+    if tier == "project_shared":
+        flags += " --confirm-project-shared"
+    return f"`mm add {flags}`"
+
+
 async def _add(
     content: str,
     title: str | None,
@@ -203,8 +210,13 @@ async def _add(
     from memtomem.cli._session_state import resolve_session_write_namespace
     from memtomem.constants import InvalidNameError, validate_namespace
     from memtomem.indexing.engine import PrivacyRejection
-    from memtomem.tools.memory_mutation import appended_valve_text, preflight_refusal
-    from memtomem.tools.memory_writer import append_entry
+    from memtomem.indexing.redaction_exemption import indexer_text
+    from memtomem.tools.memory_mutation import (
+        appended_valve_text,
+        preflight_refusal,
+        refuse_changed_append,
+    )
+    from memtomem.tools.memory_writer import SourceChangedError, append_entry
 
     if namespace is not None:
         # Raised as a ClickException so ``--json`` runs get the ``{"ok": false}``
@@ -214,8 +226,11 @@ async def _add(
         except InvalidNameError as exc:
             raise click.ClickException(str(exc)) from exc
 
+    from memtomem.tools.memory_writer import entry_guard_text
+
+    # The entry as it is written: the title and tags go into the file too.
     guard = privacy.enforce_write_guard(
-        content,
+        entry_guard_text(content, title, tags),
         surface="cli_mm_add",
         force_unsafe=force_unsafe,
         scope=scope,
@@ -314,6 +329,19 @@ async def _add(
                 target.relative_to(base)
             except ValueError:
                 raise click.ClickException("File path escapes memory directory")
+            # A tier registered inside ``base`` is another tier, with its own
+            # gates; the ones below are run for ``--scope`` (#2821).
+            from memtomem.memory_scope import explicit_target_tier_refusal
+
+            tier_err = explicit_target_tier_refusal(
+                target,
+                scope,
+                memory_dirs=comp.config.indexing.memory_dirs,
+                project_memory_dirs=comp.config.indexing.project_memory_dirs,
+                scope_hint=_cli_scope_hint,
+            )
+            if tier_err is not None:
+                raise click.ClickException(tier_err)
         else:
             # Issue #2005: one day file per namespace. A single day file
             # shared by two namespaces loses one of them as soon as chunk
@@ -423,7 +451,7 @@ async def _add(
                     # refuse a file whose content may not be indexed before
                     # writing anything.
                     needs_valve = guard.decision == "bypassed"
-                    refusal, pre = await preflight_refusal(
+                    refusal, judged = await preflight_refusal(
                         comp.index_engine,
                         target,
                         op="mm add",
@@ -432,19 +460,21 @@ async def _add(
                     )
                     if refusal is not None:
                         raise click.ClickException(refusal.removeprefix("Error: "))
-                    target.parent.mkdir(parents=True, exist_ok=True)
                     # Counted the way chunk ``start_line`` is, not ``str.splitlines``,
-                    # which also breaks at U+0085, ``\x0c`` and friends.
-                    pre_lines = (
-                        len(
-                            split_source_lines(target.read_text(encoding="utf-8", errors="replace"))
+                    # which also breaks at U+0085, ``\x0c`` and friends. From the bytes
+                    # the preflight judged, not a later read that would follow a link
+                    # put at the path since; the append makes any missing directory
+                    # under the judged path itself (#3289).
+                    pre_lines = len(split_source_lines(indexer_text(judged.data, errors="replace")))
+                    try:
+                        appended = await asyncio.to_thread(
+                            append_entry, target, content, title=title, tags=tags, judged=judged
                         )
-                        if target.exists()
-                        else 0
-                    )
-                    appended = await asyncio.to_thread(
-                        append_entry, target, content, title=title, tags=tags
-                    )
+                    except SourceChangedError as exc:
+                        refusal = await refuse_changed_append(
+                            comp.index_engine, target, judged, op="mm add"
+                        )
+                        raise click.ClickException(refusal.removeprefix("Error: ")) from exc
                     try:
                         stats = await comp.index_engine.index_file(
                             target,
@@ -452,9 +482,12 @@ async def _add(
                             ingress_guarded=True,
                             force_unsafe=needs_valve,
                             valve_text=(
-                                appended_valve_text(pre, appended) if needs_valve else None
+                                appended_valve_text(judged.data, appended.text)
+                                if needs_valve
+                                else None
                             ),
                             lock_held=True,
+                            written_source=appended.source,
                         )
                     except PrivacyRejection as exc:
                         # On disk, unindexed: e.g. a title the ingress never scanned.
@@ -502,33 +535,59 @@ async def _add(
         else:
             raise click.ClickException(NS_RETARGET_EXHAUSTED_ERROR)
 
+        from memtomem.tools.memory_mutation import append_warning
+
+        # The file became excluded, or was replaced by a link, while the entry was
+        # appended. Exit 0: the entry is on disk, and a failure status would invite
+        # a duplicate.
+        warning = append_warning(stats, judged)
         if as_json:
-            click.echo(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "target": str(target),
-                        "chunks": stats.indexed_chunks,
-                        # ``None`` when the write was un-pinned and the engine's
-                        # namespace rules decided — the ack reports what this
-                        # command pinned, not what the engine resolved.
-                        "namespace": effective_ns,
-                    }
-                )
-            )
+            payload: dict[str, object] = {
+                "ok": True,
+                "target": str(target),
+                "chunks": stats.indexed_chunks,
+                # ``None`` when the write was un-pinned and the engine's
+                # namespace rules decided — the ack reports what this
+                # command pinned, not what the engine resolved.
+                "namespace": effective_ns,
+            }
+            if warning is not None:
+                payload["warning"] = warning
+            click.echo(json.dumps(payload))
         else:
             click.echo(f"Added to {target} ({stats.indexed_chunks} chunks indexed)")
             if effective_ns is not None:
                 # Surfaced so a session-inherited redirect is never silent: a
                 # plain ``mm search`` hides system namespaces.
                 click.echo(f"  Namespace: {effective_ns}")
+            if warning is not None:
+                click.echo(f"Warning: {warning}", err=True)
 
 
-@click.command()
+# See the note on ``SEARCH_EPILOG`` in ``cli/search.py`` for why ``\b`` is
+# required here. A date-only ``--until`` includes that whole day (UTC), so the
+# second example covers October 1-23.
+RECALL_EPILOG = """\
+Examples:
+
+\b
+  mm recall --since 2026-10 --tag-filter onboarding --limit 5
+  mm recall --since 2026-10-01 --until 2026-10-23
+"""
+
+
+@click.command(epilog=RECALL_EPILOG)
 @click.option(
     "--since", default=None, help="Start date (YYYY, YYYY-MM, YYYY-MM-DD, or ISO datetime)"
 )
-@click.option("--until", default=None, help="End date (exclusive, same formats)")
+@click.option(
+    "--until",
+    default=None,
+    help=(
+        "End date, same formats. A date-only value includes that whole period (UTC); "
+        "a full datetime is exclusive."
+    ),
+)
 @click.option("--limit", "-l", default=20, help="Number of recent chunks")
 @click.option("--source-filter", "-s", default=None, help="Filter by source")
 @click.option(

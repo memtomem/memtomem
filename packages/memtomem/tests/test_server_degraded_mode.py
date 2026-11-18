@@ -192,6 +192,18 @@ async def test_create_components_enters_degraded_instead_of_raising(degraded_com
     assert comp.storage.embedding_mismatch is not None
 
 
+async def test_the_recovery_backend_keeps_bm25_path_fallback(tmp_path, monkeypatch):
+    """The degraded-mode reopen builds its own backend; it must not drop the setting."""
+    comp = await create_components(
+        _degraded_config(tmp_path, monkeypatch), bm25_path_fallback=False
+    )
+    try:
+        assert comp.embedding_broken is not None, "fixture must start degraded"
+        assert comp.storage.bm25_path_fallback is False
+    finally:
+        await close_components(comp)
+
+
 async def test_mem_add_blocked_in_degraded_mode(degraded_components):
     """``mem_add`` must return the actionable mismatch error, not crash."""
     app = _make_app(degraded_components)
@@ -231,14 +243,11 @@ async def test_mem_embedding_reset_apply_current_repairs_mismatch(degraded_compo
     assert "onnx/bge-m3" in reset_out
     assert "1024d" in reset_out
 
-    # The receipt must name the forced re-index — an apply-current reset
-    # leaves the store with no vectors until it runs (#2115). The CLI is the
-    # named remedy because a whole-tree re-embed is a long shell job, not
-    # because the MCP call is unsafe: since #2104 both preserve stored
-    # namespaces, session or not.
-    assert "mm index --force" in reset_out
-    assert "keeps the namespace its chunks are stored under" in reset_out
-    assert "dense search finds nothing" in reset_out
+    # The fixture store holds no chunks or vectors, so the receipt reports what
+    # the pre-reset check saw instead of "all vectors deleted" (#2423). The
+    # populated case, which must name the forced re-index, is pinned below.
+    assert "No chunks or vectors were found when checked before the reset" in reset_out
+    assert "All vectors deleted" not in reset_out
 
     # Live storage view: mismatch cleared.
     assert app.storage.embedding_mismatch is None
@@ -262,6 +271,75 @@ async def test_mem_embedding_reset_apply_current_repairs_mismatch(degraded_compo
     assert "Embedding mismatch detected" not in message
     assert add_stats is not None
     assert add_stats.indexed_chunks >= 1
+
+
+@pytest.mark.parametrize(
+    ("chunks", "vectors"),
+    [(3, 3), (0, 2), (3, 0), (None, 0), (0, None)],
+    ids=["populated", "orphan-vectors", "bm25-only", "chunks-unknown", "vectors-unknown"],
+)
+async def test_mem_embedding_reset_on_a_store_with_content_names_the_reindex(
+    degraded_components, chunks, vectors
+):
+    """Anything other than a store known to be empty keeps the #2115 receipt.
+
+    The counts are patched because only the wording depends on them: an
+    unknown count must not be read as empty (#2423).
+    """
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+
+    async def counts(_storage):
+        return chunks, vectors
+
+    with patch("memtomem.server.tools.status_config.embedding_reset_counts", counts):
+        status_out = await mem_embedding_reset(mode="status", ctx=ctx)  # type: ignore[arg-type]
+        reset_out = await mem_embedding_reset(mode="apply_current", ctx=ctx)  # type: ignore[arg-type]
+
+    assert "(destructive, re-index needed)" in status_out
+    assert "currently holds no chunks" not in status_out
+    # The receipt must name the forced re-index — an apply-current reset
+    # leaves the store with no vectors until it runs (#2115). The CLI is the
+    # named remedy because a whole-tree re-embed is a long shell job, not
+    # because the MCP call is unsafe: since #2104 both preserve stored
+    # namespaces, session or not.
+    assert "mm index --force" in reset_out
+    assert "keeps the namespace its chunks are stored under" in reset_out
+    assert "dense search finds nothing" in reset_out
+
+
+async def test_mem_embedding_reset_on_a_store_with_a_real_chunk_names_the_reindex(
+    degraded_components,
+):
+    """The populated case through the real counts, not patched ones."""
+    from .helpers import make_chunk
+
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    await app.storage.upsert_chunks([make_chunk("bm25 only, no vector", embedding=[])])
+    assert (await app.storage.get_stats())["total_chunks"] == 1
+
+    status_out = await mem_embedding_reset(mode="status", ctx=ctx)  # type: ignore[arg-type]
+    reset_out = await mem_embedding_reset(mode="apply_current", ctx=ctx)  # type: ignore[arg-type]
+
+    assert "(destructive, re-index needed)" in status_out
+    assert "1 chunk(s) stay but need `mm index --force <path>` to re-embed." in status_out
+    assert "All vectors deleted" in reset_out
+    assert "mm index --force" in reset_out
+
+
+async def test_mem_embedding_reset_status_on_an_empty_store_says_nothing_is_deleted(
+    degraded_components,
+):
+    """The fixture store holds no chunks or vectors (#2423)."""
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+
+    out = await mem_embedding_reset(mode="status", ctx=ctx)  # type: ignore[arg-type]
+
+    assert "Mismatch detected" in out
+    assert "This store currently holds no chunks or vectors." in out
+    assert "destructive" not in out.split("apply_current")[1].splitlines()[0]
 
 
 async def test_mem_embedding_reset_revert_to_stored_swaps_runtime(degraded_components):
@@ -342,6 +420,22 @@ async def test_revert_to_stored_preserves_llm_on_index_engine(degraded_component
     # The engine must still reference the same LLM instance — anything
     # else means the rebuild path silently dropped it.
     assert app.index_engine._llm is sentinel_llm
+
+
+async def test_revert_to_stored_preserves_chunk_source_labels(degraded_components):
+    """``chunk_source_labels`` is a component setting, not a config field, so
+    the rebuilt engine has nothing to read it from but the engine it replaces
+    (#3209). Dropping it would put ``File:`` lines back into a store whose file
+    names are bookkeeping."""
+    app = _make_app(degraded_components)
+    ctx = _StubCtx(app)
+    pre_index = app.index_engine
+    pre_index._chunk_source_labels = False
+
+    await mem_embedding_reset(mode="revert_to_stored", ctx=ctx)  # type: ignore[arg-type]
+
+    assert app.index_engine is not pre_index
+    assert app.index_engine._chunk_source_labels is False
 
 
 async def test_revert_to_stored_closes_the_retired_generation(degraded_components):
@@ -1626,6 +1720,9 @@ async def test_recovered_watcher_indexes_a_new_file_without_a_restart(tmp_path, 
     )
 
     config = _degraded_config(tmp_path, monkeypatch)
+    # macOS resolves ``auto`` to polling and builds that observer directly,
+    # past the ``Observer`` patch above.
+    config.indexing.watcher_poll_interval_ms = 100
     mem_dir = Path(config.indexing.memory_dirs[0])
     app = AppContext(config=config)
     await app.ensure_initialized()

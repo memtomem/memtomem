@@ -8,7 +8,9 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._append_target import own_appended_chunk_id
 from memtomem.server.tools._id_access import caller_boundary, in_boundary, resolve_chunk
+from memtomem.tools.temporal import format_source_name
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +52,7 @@ async def mem_reflect(
         lines.append("### Frequently Accessed Topics")
         for row in top_topics:
             hierarchy = row["hierarchy"]
-            topic = " > ".join(hierarchy) if hierarchy else row["source_file"].split("/")[-1]
+            topic = " > ".join(hierarchy) if hierarchy else format_source_name(row["source_file"])
             lines.append(f"  {row['total_access']}x — {topic}")
         lines.append("")
 
@@ -163,9 +165,10 @@ async def mem_reflect_save(
     # The core, not ``mem_add``: its ``stats`` is what tells a refusal (an
     # excluded ``reflections.md`` #2488, a namespace mix, the redaction guard)
     # apart from a save. On a refusal nothing was written, so there is no
-    # insight to link — ``recent[0]`` below would be some older chunk.
+    # insight to link.
     from memtomem.indexing.engine import PrivacyRejection
 
+    appended: list[str] = []
     try:
         result, stats = await _mem_add_core(
             content=insight,
@@ -176,6 +179,7 @@ async def mem_reflect_save(
             template=None,
             ctx=ctx,
             event_type="reflect_save",
+            on_appended=appended.append,
         )
     except PrivacyRejection as exc:
         if exc.mutation_outcome != "appended":
@@ -184,23 +188,29 @@ async def mem_reflect_save(
     if stats is None:
         return result
 
-    # Link related chunks to the new insight
-    if related_chunks:
+    # Link related chunks to the new insight. Not when the file became excluded,
+    # or was replaced by a symlink, while the insight was appended: nothing was
+    # indexed (#3165, #3289). ``result`` carries the notice.
+    if related_chunks and not (stats.excluded_files or stats.relinked_files):
         app = await _get_app_initialized(ctx)
         from uuid import UUID
 
-        # ADR-0011 PR-D round 9: thread project context onto the
-        # always-on scope filter. Insights default to user-tier today,
-        # but ``mem_reflect`` may land a project-tier reflection in
-        # the future; threading the context now means the
-        # ``recent[0]`` lookup returns the just-written insight chunk
-        # under whichever tier it lives in.
-        from memtomem.server.tools.search import _resolve_project_context_root
-
-        project_context_root = _resolve_project_context_root(app)
-        recent = await app.storage.recall_chunks(limit=1, project_context_root=project_context_root)
-        if recent:
-            insight_id = recent[0].id
+        # Best effort, like the links themselves: the insight is saved by now,
+        # and an error here would invite a retry that appends it again.
+        try:
+            insight_id = await own_appended_chunk_id(app, stats, appended, allow_merged=True)
+        except Exception:
+            logger.warning("mem_reflect_save: could not attribute the insight", exc_info=True)
+            insight_id = None
+        if insight_id is None:
+            logger.warning(
+                "mem_reflect_save: could not tell which chunk holds the insight "
+                "(%d appended chunk ids, %s); related chunks not linked",
+                len(stats.appended_chunk_ids),
+                stats.appended_attribution,
+            )
+            result += f"\n- {_UNLINKED_NOTICE}"
+        else:
             for cid in related_chunks:
                 try:
                     # Linking is a write, and the same boundary applies:
@@ -222,3 +232,8 @@ async def mem_reflect_save(
                     logger.warning("Failed to link chunk %s to reflection", cid, exc_info=True)
 
     return f"Insight saved.\n{result}"
+
+
+_UNLINKED_NOTICE = (
+    "Warning: could not tell which chunk holds this insight; related chunks were not linked."
+)

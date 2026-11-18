@@ -102,6 +102,32 @@ class TestSessionListJson:
         assert data == {"sessions": [], "count": 0}
 
 
+class TestSessionListEmptyText:
+    """The plain empty message names the filters that matched nothing (#2850)."""
+
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ([], "No sessions found. Start one with `mm session start`."),
+            (["--agent-id", "planner"], "No sessions found for --agent-id 'planner'."),
+            (["--since", "2026-10-01"], "No sessions found since 2026-10-01."),
+            (
+                ["--agent-id", "planner", "--since", "2026-10-01"],
+                "No sessions found for --agent-id 'planner' since 2026-10-01.",
+            ),
+        ],
+        ids=["no-filter", "agent-id", "since", "both"],
+    )
+    def test_empty_message_names_filters(self, runner, monkeypatch, args, expected):
+        comp = _mock_components(sessions=[])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["session", "list", *args])
+
+        assert result.exit_code == 0, result.output
+        assert result.output == expected + "\n"
+
+
 class TestSessionEventsJson:
     def test_happy_path(self, runner, monkeypatch):
         comp = _mock_components(
@@ -744,6 +770,27 @@ class TestSessionStartIdempotent:
         )
         assert result.exit_code != 0
         assert "invalid duration" in result.output.lower()
+        comp.storage.find_stale_active_sessions.assert_not_awaited()
+        comp.storage.create_session.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "duration",
+        [
+            "1000000000d",  # beyond timedelta's own range
+            "800000d",  # a valid timedelta, but now minus it is before year 1
+        ],
+    )
+    def test_oversized_duration_raises_bad_parameter(self, runner, monkeypatch, duration):
+        comp = self._comp(current_row=None)
+        self._patch(monkeypatch, comp, None)
+
+        result = runner.invoke(
+            cli,
+            ["session", "start", "--agent-id", "claude-code", "--auto-end-stale", duration],
+        )
+        assert result.exit_code == 2, result.output
+        assert isinstance(result.exception, SystemExit)
+        assert f"duration '{duration}' is too large." in result.output
         comp.storage.find_stale_active_sessions.assert_not_awaited()
         comp.storage.create_session.assert_not_awaited()
 

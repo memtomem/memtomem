@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import memtomem.server as server_mod
 from memtomem.server import lifespan as lifespan_mod
 from .helpers import set_home
 
@@ -507,6 +508,27 @@ def test_dotenv_honours_python_dotenv_disabled(dotenv_file, flag: str, loaded: b
 
 
 @pytest.mark.real_dotenv
+def test_dotenv_disabled_neither_searches_nor_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flag stops the loader before it looks for a file, not after reading one.
+
+    The Hermes plugin sets it because the catalog does not list a plugin that reads
+    `.env` files; a check placed after ``find_dotenv()`` would still apply nothing,
+    which ``test_dotenv_honours_python_dotenv_disabled`` cannot tell apart.
+    """
+    import dotenv
+    import dotenv.main
+
+    def _called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the .env loader ran with PYTHON_DOTENV_DISABLED set")
+
+    monkeypatch.setattr(dotenv, "find_dotenv", _called)
+    monkeypatch.setattr(dotenv.main, "DotEnv", _called)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+
+    assert lifespan_mod._load_dotenv() == []
+
+
+@pytest.mark.real_dotenv
 def test_dotenv_missing_file_is_a_no_op(dotenv_file) -> None:
     before = dict(os.environ)
 
@@ -572,42 +594,214 @@ async def test_lifespan_logs_left_out_dotenv_names(
 # ── static-resource AppContext handle ─────────────────────────────────
 
 
+# A bound on waits that only end when the code under test cooperates. Never
+# reached on a passing run; it turns a stall into a failure.
+_COORDINATION_TIMEOUT_S = 30
+
+
+def _read_context(app: object) -> object:
+    """The ``Context`` the SDK hands ``read_resource`` for a request whose
+    lifespan context is ``app``."""
+    from mcp.server.mcpserver import Context
+
+    request = MagicMock()
+    request.lifespan_context = app
+    return Context(request_context=request, mcp_server=server_mod.mcp)
+
+
+def _fake_app(namespaces: list[tuple[str, int]]) -> MagicMock:
+    app = MagicMock()
+    app.ensure_initialized = AsyncMock()
+    app.storage.list_namespaces = AsyncMock(return_value=namespaces)
+    return app
+
+
+async def _read_namespaces(context: object | None) -> list[dict]:
+    contents = list(await server_mod.mcp.read_resource("memtomem://namespaces", context))  # type: ignore[arg-type]
+    assert len(contents) == 1
+    return json.loads(contents[0].content)
+
+
 @pytest.mark.asyncio
-async def test_lifespan_publishes_and_retracts_active_app(
+async def test_resource_read_binds_the_requests_app_and_retracts_it() -> None:
+    """The 2.0 SDK refuses to inject ``Context`` into a static resource
+    handler, so those handlers read the ``AppContext`` through
+    ``context._ACTIVE_APP``. ``read_resource`` owns that handle: bound from
+    the request for the length of the read, retracted afterwards. The static
+    handler resolves it with no ``ctx`` parameter in sight, and opens the
+    store once on the way."""
+    import memtomem.server.context as context_mod
+
+    app = _fake_app([("work", 3)])
+    seen: list[object] = []
+
+    async def list_namespaces() -> list[tuple[str, int]]:
+        seen.append(context_mod._active_app())
+        return [("work", 3)]
+
+    app.storage.list_namespaces = list_namespaces
+
+    assert context_mod._active_app() is None
+    assert await _read_namespaces(_read_context(app)) == [{"namespace": "work", "chunks": 3}]
+    assert seen == [app]
+    app.ensure_initialized.assert_awaited_once()
+    assert context_mod._active_app() is None
+
+
+@pytest.mark.asyncio
+async def test_resource_read_retracts_the_app_when_the_handler_raises() -> None:
+    import memtomem.server.context as context_mod
+    from mcp.server.mcpserver.exceptions import ResourceError
+
+    app = _fake_app([])
+    app.storage.list_namespaces = AsyncMock(side_effect=OSError("disk"))
+
+    with pytest.raises(ResourceError):
+        await _read_namespaces(_read_context(app))
+    assert context_mod._active_app() is None
+
+
+@pytest.mark.asyncio
+async def test_nested_resource_read_hands_the_outer_app_back() -> None:
+    """A read made from inside a handler binds its own app and, on the way
+    out, restores the one the outer read is still using."""
+    import memtomem.server.context as context_mod
+
+    outer = _fake_app([])
+    inner = _fake_app([("inner", 1)])
+    seen: dict[str, object] = {}
+
+    async def outer_list_namespaces() -> list[tuple[str, int]]:
+        seen["inner_result"] = await _read_namespaces(_read_context(inner))
+        seen["outer_after"] = context_mod._active_app()
+        return [("outer", 2)]
+
+    outer.storage.list_namespaces = outer_list_namespaces
+
+    assert await _read_namespaces(_read_context(outer)) == [{"namespace": "outer", "chunks": 2}]
+    assert seen["inner_result"] == [{"namespace": "inner", "chunks": 1}]
+    assert seen["outer_after"] is outer
+
+
+@pytest.mark.asyncio
+async def test_overlapping_resource_reads_do_not_share_the_active_app() -> None:
+    """Reads overlap: several on one connection, and over SSE across
+    connections that each hold their own ``AppContext``. Each must answer
+    from its own, and one finishing must not blank the handle for another
+    still running: with a plain module global the second read would clobber
+    the first, and its exit would leave the first reading ``None``."""
+    import memtomem.server.context as context_mod
+
+    in_first = asyncio.Event()
+    release_first = asyncio.Event()
+    seen: dict[str, object] = {}
+
+    first = _fake_app([])
+    second = _fake_app([("second", 2)])
+
+    async def first_list_namespaces() -> list[tuple[str, int]]:
+        in_first.set()
+        await release_first.wait()
+        # Still this read's own app, after the second read has come and gone.
+        seen["first_after"] = context_mod._active_app()
+        return [("first", 1)]
+
+    first.storage.list_namespaces = first_list_namespaces
+
+    task = asyncio.create_task(_read_namespaces(_read_context(first)))
+    reached = asyncio.create_task(in_first.wait())
+    try:
+        # Whichever comes first: a read that dies before its handler would
+        # otherwise leave this waiting on an event nobody sets. The timeout
+        # is for a read that does neither, and for a second read that waits
+        # on the first, which is itself waiting to be released below.
+        async with asyncio.timeout(_COORDINATION_TIMEOUT_S):
+            await asyncio.wait({task, reached}, return_when=asyncio.FIRST_COMPLETED)
+            assert not task.done(), task.exception()
+            assert await _read_namespaces(_read_context(second)) == [
+                {"namespace": "second", "chunks": 2}
+            ]
+            release_first.set()
+            assert await task == [{"namespace": "first", "chunks": 1}]
+    finally:
+        # Whatever failed above, neither task outlives the test.
+        release_first.set()
+        reached.cancel()
+        task.cancel()
+        await asyncio.gather(task, reached, return_exceptions=True)
+    assert seen["first_after"] is first
+    assert context_mod._active_app() is None
+
+
+@pytest.mark.asyncio
+async def test_task_started_during_a_resource_read_loses_the_app_when_the_read_ends() -> None:
+    """A task copies the context variables of the task that starts it, and a
+    reset in the parent does not reach the copy. The read that first opens the
+    store starts the watcher and the schedulers, which outlive it; they must
+    not keep a connection's ``AppContext`` readable."""
+    import memtomem.server.context as context_mod
+    from mcp.server.mcpserver.exceptions import ResourceError
+
+    app = _fake_app([])
+    release = asyncio.Event()
+    seen: dict[str, object] = {}
+    children: list[asyncio.Task[None]] = []
+
+    async def child() -> None:
+        seen["during"] = context_mod._active_app()
+        await release.wait()
+        seen["after"] = context_mod._active_app()
+        with pytest.raises(RuntimeError, match="outside a request"):
+            await context_mod._get_active_app_initialized()
+        # The inherited value cannot stand in for a request either.
+        with pytest.raises(ResourceError):
+            await _read_namespaces(None)
+
+    async def list_namespaces() -> list[tuple[str, int]]:
+        children.append(asyncio.create_task(child()))
+        # Let the child run up to its gate while the read is still open.
+        await asyncio.sleep(0)
+        return []
+
+    app.storage.list_namespaces = list_namespaces
+
+    try:
+        assert await _read_namespaces(_read_context(app)) == []
+        assert seen["during"] is app
+    finally:
+        release.set()
+        async with asyncio.timeout(_COORDINATION_TIMEOUT_S):
+            await asyncio.gather(*children)
+    assert seen["after"] is None
+
+
+@pytest.mark.asyncio
+async def test_lifespan_does_not_publish_the_active_app(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The 2.0 SDK refuses to inject ``Context`` into a static resource
-    handler, so those handlers read the lifespan's ``AppContext`` through
-    ``context._ACTIVE_APP``. The lifespan owns that handle: published on
-    entry, retracted on exit — otherwise a static resource read after
-    shutdown would touch a closed context instead of failing."""
+    """The lifespan's task is not where handlers run (#3374): over stdio the
+    SDK starts a handler in the context of the stdin reader, which predates
+    the lifespan. A handle published here reaches a caller in this task and
+    not a stdio client, which is how the bug stayed green."""
     monkeypatch.delenv("MEMTOMEM_WEBHOOK__ENABLED", raising=False)
     monkeypatch.delenv("MEMTOMEM_WEBHOOK__URL", raising=False)
 
     import memtomem.server.context as context_mod
 
-    assert context_mod._ACTIVE_APP.get() is None
-
-    async with lifespan_mod.app_lifespan(MagicMock()) as ctx:
-        assert context_mod._ACTIVE_APP.get() is ctx
-
-    assert context_mod._ACTIVE_APP.get() is None
+    async with lifespan_mod.app_lifespan(MagicMock()):
+        assert context_mod._active_app() is None
 
 
 @pytest.mark.asyncio
-async def test_overlapping_lifespans_do_not_share_the_active_app(
+async def test_overlapping_lifespans_get_separate_contexts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Over SSE the SDK runs the whole lowlevel server — lifespan included —
     once per *connection*, so two clients can hold overlapping lifespans in
-    separate tasks. Each must see its own ``AppContext``, and one
-    disconnecting must not blank the handle for the other: with a plain
-    module global the second enter would clobber the first, and the first
-    exit would leave a live connection reading ``None``."""
+    separate tasks. Each gets its own ``AppContext``, which is the one its
+    requests carry and a resource read binds."""
     monkeypatch.delenv("MEMTOMEM_WEBHOOK__ENABLED", raising=False)
     monkeypatch.delenv("MEMTOMEM_WEBHOOK__URL", raising=False)
-
-    import memtomem.server.context as context_mod
 
     started = asyncio.Event()
     may_exit = asyncio.Event()
@@ -618,23 +812,15 @@ async def test_overlapping_lifespans_do_not_share_the_active_app(
             seen["first"] = ctx
             started.set()
             await may_exit.wait()
-            # Still this connection's own context, after the second
-            # connection has come and gone.
-            seen["first_after"] = context_mod._ACTIVE_APP.get()
 
     task = asyncio.create_task(first_connection())
     try:
         await started.wait()
         async with lifespan_mod.app_lifespan(MagicMock()) as second:
             assert second is not seen["first"]
-            assert context_mod._ACTIVE_APP.get() is second
     finally:
         may_exit.set()
         await task
-
-    assert seen["first_after"] is seen["first"]
-    # Both connections gone → nothing left published in this task either.
-    assert context_mod._ACTIVE_APP.get() is None
 
 
 @pytest.mark.asyncio
@@ -671,36 +857,20 @@ async def test_same_server_overlapping_lifespans_share_one_runtime_owner(
 
 
 @pytest.mark.asyncio
-async def test_get_active_app_initialized_raises_outside_lifespan() -> None:
-    """Fail loudly rather than hand a static resource a ``None`` app."""
+async def test_static_resource_read_without_a_request_fails_loudly() -> None:
+    """Fail loudly rather than hand a static resource a ``None`` app. The
+    server wraps what a handler raises, so the message is on the cause."""
     import memtomem.server.context as context_mod
+    from mcp.server.mcpserver.exceptions import ResourceError
 
-    assert context_mod._ACTIVE_APP.get() is None
-    with pytest.raises(RuntimeError, match="lifespan is not running"):
+    assert context_mod._active_app() is None
+    with pytest.raises(RuntimeError, match="outside a request"):
         await context_mod._get_active_app_initialized()
 
-
-@pytest.mark.asyncio
-async def test_static_resource_reads_the_active_app(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """End of that path: a static resource handler resolves the published
-    context and returns its data with no ``ctx`` parameter in sight."""
-    import memtomem.server.context as context_mod
-    import memtomem.server.resources as resources_mod
-
-    app = MagicMock()
-    app.ensure_initialized = AsyncMock()
-    app.storage.list_namespaces = AsyncMock(return_value=[("work", 3)])
-
-    token = context_mod._set_active_app(app)
-    try:
-        payload = await resources_mod.namespaces_resource()
-    finally:
-        context_mod._reset_active_app(token)
-
-    assert '"namespace": "work"' in payload
-    app.ensure_initialized.assert_awaited_once()
+    with pytest.raises(ResourceError) as excinfo:
+        await _read_namespaces(None)
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert "outside a request" in str(excinfo.value.__cause__)
 
 
 class _RecordingWebhookManager:

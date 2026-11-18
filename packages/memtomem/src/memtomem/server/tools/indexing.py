@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
 
 from memtomem.constants import writable_namespace_arg
 from memtomem.server import mcp
+from memtomem.server.client_paths import resolve_client_path
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _check_embedding_mismatch
@@ -63,7 +63,7 @@ async def mem_index(
     if mismatch_msg:
         return mismatch_msg
 
-    target = Path(path).expanduser().resolve()
+    target = resolve_client_path(app, path)
 
     # The gauge spans capture -> index -> provenance event. Indexing a
     # large tree can outlast the session-teardown drain budget, in which
@@ -165,6 +165,19 @@ async def mem_index(
             "kept their stored namespace; current path rules would assign differently. "
             "Apply the rules with `mm index --reassign-namespaces <path>`."
         )
+    if stats.namespaces_restored_from_name:
+        # Hand-built like the advisory above (ADR-0043).
+        result += (
+            f"\n- Namespaces from file names: {stats.namespaces_restored_from_name} file(s) "
+            "took their namespace from their day-file name."
+        )
+    if stats.day_file_names_undecoded:
+        result += (
+            f"\n- Namespaces not restored: {stats.day_file_names_undecoded} day file(s) are "
+            "named for a namespace that could not be read from the name, and were indexed "
+            "into the rules' or session's namespace. Put one back with "
+            "`mm index --force --namespace <namespace> <file>`."
+        )
     if stats.chunks_missing_vectors:
         # Hand-built for the same reason as the advisory above. The remedy
         # names the CLI because a re-embed of a whole tree is a long,
@@ -197,8 +210,8 @@ async def mem_index(
         # #2076: hand-built like the advisories above — this surface renders a
         # string, so a new stat reaches an agent only by being written here.
         # ``mem_index`` has no ``force_unsafe`` parameter, so a declared
-        # exemption is the only way a pattern-documenting note indexes over
-        # MCP at all; naming the files is what keeps that from being silent.
+        # exemption is the only way a pattern-documenting note gets through
+        # ``mem_index`` verbatim; naming the files is what keeps that from being silent.
         result += (
             f"\n- Declared redaction exemption: {stats.exempted_files} file(s) admitted by "
             "their own frontmatter `redaction: documents-patterns` (audit-logged):\n"

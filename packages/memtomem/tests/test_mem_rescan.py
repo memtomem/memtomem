@@ -24,8 +24,8 @@ from memtomem.config import Mem2MemConfig
 from memtomem.storage.base import ChunkAuditRow
 
 
-# An AWS access-key fixture from the privacy ``DEFAULT_PATTERNS`` set
-# (``\b(?:AKIA|ASIA)[0-9A-Z]{16}\b``). Matches public-doc test pattern.
+# An AWS access-key fixture for the access key id rule in the privacy
+# ``DEFAULT_PATTERNS`` set. Matches public-doc test pattern.
 _SECRET_CONTENT = "test: aws_access_key_id=AKIAIOSFODNN7EXAMPLE"
 _SAFE_CONTENT = "plain prose with no secrets"
 

@@ -7,8 +7,24 @@ real ``~/.claude/settings.json``.  A source scanner cannot see that call chain.
 This module deliberately protects only the small user-scope files returned by
 ``SETTINGS_GENERATORS`` (currently Claude, Codex, Gemini, and Kimi settings).
 It fingerprints those files before and after every normally completed test.
-Creation, deletion, and byte-content changes fail the test; a byte-identical
-rewrite does not.
+Creation, deletion, and byte-content changes fail the test.  A byte-identical
+rewrite, or a write the test restores before teardown, does not, except in
+``strict`` mode, which also fails a test seen attempting to open one of these
+files for writing, or to rename, remove or truncate it, whatever the bytes end
+up as (#2302).  The audit event fires before the operation, so an attempt that
+then fails counts too.  That check counts only operations that name the file
+itself: one
+that renames an ancestor directory is used to attribute a change, not as a
+verdict, because it cannot tell an empty directory from one holding the file.
+So a test that moves ``~/.claude`` aside, writes or restores the settings file
+under the temporary name, and moves the directory back passes ``strict`` when
+the bytes end up unchanged; a change to them still fails it.
+An ``open`` audit event carries no ``dir_fd``, so a relative name is read
+against the cwd: a test whose cwd is the home directory and that opens
+``.claude/settings.json`` relative to a descriptor pointing elsewhere fails
+``strict`` although only its own file changed.  Exempting relative opens
+instead would let every cwd-relative write pass silently; this false positive
+is loud, and an absolute path avoids it.
 
 A byte difference alone does not say *this test wrote the file* (#2355).  On a
 developer machine these paths have another owner — the surrounding editor
@@ -22,9 +38,20 @@ about the file rather than as a verdict about the test, and only fails in
 
 This is a regression tripwire on a trusted local filesystem, not a general
 filesystem-integrity library.  It does not walk home-directory trees, recover
-after SIGKILL, detect a write that is fully restored before teardown, or make
-an adversarial pathname-swap guarantee.  Existing final-component symlinks and
-reparse points are refused rather than followed.  The witness sees only audit
+after SIGKILL, detect a write that is fully restored before teardown outside
+``strict`` mode (or, in it, one made through a shape the witness cannot see),
+or make an adversarial pathname-swap guarantee.  Existing final-component symlinks and
+reparse points are never fingerprinted through: ``strict`` refuses to run when
+a settings target is one at session start, and ``on`` leaves that target out of
+the content comparison and checks it by write observation only (#3019), so a
+dotfiles symlink does not cost the guard on every other target.  For such a
+target the witness's blind spots below are detection gaps, not attribution
+gaps: with no fingerprint, an unseen write is not reported at all.  A
+symlink's destination is watched under the one spelling ``realpath`` gave it
+when the session armed, so a write to it under another spelling, or to a new
+destination after the link is retargeted, is not seen either.  A link replaced
+unseen stays degraded for the rest of the session, because degradation is
+decided once, when the session arms.  The witness sees only audit
 events raised in *this* process: a subprocess's writes, ``mmap`` stores, writes
 through a descriptor opened before the hook armed, and writes aimed at a
 relative pathname under a ``dir_fd`` all stay invisible to it, so
@@ -72,8 +99,10 @@ def guard_mode(env: dict[str, str] | None = None) -> GuardMode:
     """Return the guard mode for this pytest invocation.
 
     ``strict`` additionally fails a test whose window contains a net change
-    this process was not observed making.  Any other non-off value is ``on``,
-    which keeps the historical meaning of "the guard is armed".
+    this process was not observed making, and a test observed attempting to
+    open a watched file for writing, or to rename, remove or truncate it, even
+    with no net change (#2302).  Any other non-off value is ``on``, which keeps
+    the historical meaning of "the guard is armed".
     """
     raw = (env if env is not None else os.environ).get(DISABLE_ENV, "").strip().lower()
     if raw in {"off", "0", "false", "no"}:
@@ -234,6 +263,63 @@ def snapshot_files(paths: tuple[Path, ...]) -> dict[str, FileFingerprint]:
     return {str(path): fingerprint(path) for path in paths}
 
 
+@dataclass(frozen=True)
+class DegradedTarget:
+    """A settings target that was unsafe to fingerprint when the session armed.
+
+    ``aliases`` are the witness keys whose writes count as writes to it: the
+    target's own pathname and, for a symlink, the file it named at that moment.
+    The second matters because a settings writer that keeps the link intact
+    replaces the link's destination, not the link, and the witness compares
+    pathnames rather than files.  Naming the destination reads nothing through
+    the link; its content is still never compared.
+    """
+
+    path: str
+    reason: str
+    aliases: tuple[str, ...]
+
+
+def _link_destination(path: Path) -> str | None:
+    """Return the normalised destination of a symlink at ``path``, if it has one."""
+    try:
+        if not os.path.islink(path):
+            return None
+        return normalise_target(os.path.realpath(path))
+    except (OSError, ValueError):
+        return None
+
+
+def partition_baseline(
+    targets: tuple[Path, ...], snapshot: dict[str, FileFingerprint], mode: GuardMode
+) -> tuple[tuple[Path, ...], tuple[DegradedTarget, ...]]:
+    """Split the session's targets into fingerprinted ones and degraded ones.
+
+    ``strict`` keeps failing closed: any unsafe target refuses the session.
+    Otherwise an unsafe target is degraded instead of refusing the session —
+    the usual cause is a settings file kept in a dotfiles repository and
+    symlinked into place, and refusing would leave ``off`` as the only way to
+    run, which unguards every other target too.  The decision is made once,
+    here; a target that turns unsafe later is a change, not a degradation.
+    """
+    if mode == "strict":
+        require_armable(snapshot)
+        return targets, ()
+    watched: list[Path] = []
+    degraded: list[DegradedTarget] = []
+    for target in targets:
+        value = snapshot[str(target)]
+        if value.state != "unsafe":
+            watched.append(target)
+            continue
+        aliases = [normalise_target(target)]
+        destination = _link_destination(target)
+        if destination is not None and destination not in aliases:
+            aliases.append(destination)
+        degraded.append(DegradedTarget(str(target), value.detail, tuple(aliases)))
+    return tuple(watched), tuple(degraded)
+
+
 def require_armable(snapshot: dict[str, FileFingerprint]) -> None:
     """Reject a baseline containing anything other than missing/regular files."""
     unsafe = [(path, value.detail) for path, value in snapshot.items() if value.state == "unsafe"]
@@ -279,13 +365,22 @@ def normalise_target(path: Path | str) -> str:
 
 @dataclass(frozen=True)
 class WriteObservation:
-    """One observed in-process write to a watched path."""
+    """One observed in-process write-capable operation on a watched path.
+
+    An audit event is raised *before* the operation runs, so this records an
+    attempt: an ``os.open`` with write flags that is closed unused, or an
+    ``os.remove`` that then raises, is recorded too.  ``direct`` is False when
+    the operation named an ancestor directory (a rename of ``~/.claude``) and
+    the watched path was projected from it, whether or not a file existed
+    there.
+    """
 
     event: str
     path: str
     window: str
     thread: str
     stack: tuple[str, ...] = ()
+    direct: bool = True
 
     def __str__(self) -> str:
         return f"{self.path} — {self.event} on thread {self.thread}"
@@ -404,19 +499,22 @@ class WriteWitness:
             self._window = BETWEEN_TESTS
         return observed
 
-    def _affected(self, candidate: object) -> tuple[str, ...]:
-        """Return the watched paths a change to ``candidate`` would change.
+    def _affected(self, candidate: object) -> tuple[tuple[str, bool], ...]:
+        """Return ``(watched path, direct)`` for each path a change to ``candidate`` changes.
 
-        Usually that is ``candidate`` itself.  A rename also moves whole
-        directories, and moving ``~/.claude`` aside removes the settings file
-        inside it just as surely as unlinking the file does, so an endpoint
-        that is an ancestor of a watched path stands in for it.
+        Usually that is ``candidate`` itself (``direct``).  A rename also moves
+        whole directories, and moving ``~/.claude`` aside removes the settings
+        file inside it just as surely as unlinking the file does, so an
+        endpoint that is an ancestor of a watched path stands in for it
+        (not ``direct``).
         """
         key = normalise_target(os.fsdecode(candidate))  # type: ignore[arg-type]
         if key in self._targets:
-            return (key,)
+            return ((key, True),)
         prefix = key + os.sep
-        return tuple(target for target in sorted(self._targets) if target.startswith(prefix))
+        return tuple(
+            (target, False) for target in sorted(self._targets) if target.startswith(prefix)
+        )
 
     def _hook(self, event: str, args: tuple[object, ...]) -> None:
         if event not in _WATCHED_EVENTS:
@@ -428,7 +526,7 @@ class WriteWitness:
             for candidate in _candidate_paths(event, args):
                 if isinstance(candidate, int):
                     continue
-                for key in self._affected(candidate):
+                for key, direct in self._affected(candidate):
                     stack = tuple(
                         traceback.format_list(traceback.extract_stack(limit=MAX_STACK_FRAMES))
                     )
@@ -443,6 +541,7 @@ class WriteWitness:
                                 window=self._window,
                                 thread=thread,
                                 stack=stack,
+                                direct=direct,
                             )
                         )
         except Exception:  # pragma: no cover - defensive; see class docstring
@@ -452,7 +551,7 @@ class WriteWitness:
 @dataclass(frozen=True)
 class Violation:
     path: str
-    kind: Literal["created", "deleted", "modified", "unsafe"]
+    kind: Literal["created", "deleted", "modified", "unsafe", "written"]
     detail: str
 
     def __str__(self) -> str:
@@ -496,6 +595,84 @@ def classify(
         target = attributed if normalise_target(violation.path) in written else unattributed
         target.append(violation)
     return attributed, unattributed
+
+
+def degraded_writes(
+    degraded: tuple[DegradedTarget, ...], observations: list[WriteObservation]
+) -> list[Violation]:
+    """Report each observed write to a degraded target or its link destination.
+
+    A degraded target has no before/after fingerprint, so an observed write is
+    the whole verdict: there is no net change to compare it against.  The
+    violation names the pathname that was written, so the failure message can
+    show the write site the witness recorded for it.
+    """
+    written = {observation.path for observation in observations}
+    violations: list[Violation] = []
+    for target in degraded:
+        own = normalise_target(target.path)
+        for alias in target.aliases:
+            if alias not in written:
+                continue
+            where = (
+                "a write was observed on this target"
+                if alias == own
+                else f"a write was observed on the file the symlink {target.path} points to"
+            )
+            violations.append(
+                Violation(
+                    alias,
+                    "written",
+                    f"{where}; its content is not compared because {target.reason}",
+                )
+            )
+    return violations
+
+
+def access_without_change(
+    violations: list[Violation],
+    observations: list[WriteObservation],
+    degraded: tuple[DegradedTarget, ...],
+) -> list[WriteObservation]:
+    """Direct write-capable accesses to a watched path that left no net change (#2302).
+
+    The digest comparison fails a test only for a net change, so a write the
+    test restores before teardown, or a byte-identical rewrite, passes it.
+    ``strict`` fails these too.  Only *direct* observations count: one
+    projected from a rename of an ancestor directory cannot tell an empty
+    directory from one holding the file, so it stays an attribution aid (see
+    :func:`classify`) and is not a verdict on its own.  Paths that already
+    have a violation, and degraded targets (handled by :func:`degraded_writes`),
+    are left out so nothing is reported twice.
+    """
+    changed = {normalise_target(violation.path) for violation in violations}
+    excluded = changed | {alias for target in degraded for alias in target.aliases}
+    return [
+        observation
+        for observation in observations
+        if observation.direct and observation.path not in excluded
+    ]
+
+
+def format_access_without_change(nodeid: str, accesses: list[WriteObservation]) -> str:
+    """Describe an observed write-capable access attempt that left the bytes unchanged."""
+    lines: list[str] = []
+    for observation in accesses:
+        lines.append(f"  {observation}, from:")
+        lines.extend(
+            f"    {frame}" for entry in observation.stack for frame in entry.rstrip().splitlines()
+        )
+    rendered = "\n".join(lines)
+    return (
+        f"{nodeid} was observed attempting write-capable access to real user "
+        "settings outside its test sandbox (opening them for writing, or renaming, "
+        "removing or truncating them; the audit event fires before the operation, "
+        "so it may not have succeeded). Their bytes are unchanged at teardown, "
+        "which this run is in strict mode to catch:\n"
+        f"{rendered}\n"
+        "Use tests.helpers.set_home(monkeypatch, tmp_path) before calling the "
+        "production path that touches these files."
+    )
 
 
 def _witness_lines(violations: list[Violation], observations: list[WriteObservation]) -> list[str]:

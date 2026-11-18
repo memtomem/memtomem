@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 from functools import lru_cache
 from collections.abc import Iterable, Sequence
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from memtomem.models import NamespaceFilter, has_namespace_prefix
 
@@ -73,6 +73,51 @@ def resolve_path(p: Path) -> Path:
         return Path(os.path.realpath(p))
 
 
+def join_path_base(base: PurePath, path: PurePath, raw: str) -> PurePath:
+    """Start ``path``, which is not absolute, at ``base`` instead of the process cwd.
+
+    For a caller that knows which directory a relative path was written
+    against when that is not this process's working directory. Takes pure
+    paths so the Windows shapes can be exercised on any platform.
+
+    ``is_absolute()`` is false on Windows for two shapes that are not plainly
+    relative. A rooted path with no drive (``\\foo``) joins to the root of
+    the base's drive, where a process started in ``base`` would resolve it. A
+    drive-relative path (``C:foo``) joins under ``base`` when it names the
+    base's drive; on another drive it means that drive's own working
+    directory, which only the process that wrote it knows, so it is refused.
+    ``raw`` is the text as given, for that message.
+    """
+    if path.drive and path.drive.casefold() != base.drive.casefold():
+        raise ValueError(
+            f"{raw!r} is relative to the working directory of drive {path.drive}, which "
+            "is not known here; pass an absolute path."
+        )
+    return base / path
+
+
+def own_leaf_key(file_path: Path) -> str:
+    """The key the store wrote for ``file_path`` while it was a regular file.
+
+    Its resolved parent plus its name as given: the leaf is never followed, so
+    a leaf that is, or becomes, a symlink still names its own rows and never
+    its target's (#2835, #2878). It does not match another spelling of the
+    leaf, so on Windows a name typed in a case other than the stored one names
+    no rows.
+    """
+    return fold_path_form(str(resolve_path(file_path.parent) / file_path.name))
+
+
+def leaf_names_own_key(own_key: str, resolved: Path) -> bool:
+    """Whether ``resolved``, a resolution of a path, is the regular file at ``own_key``.
+
+    Case is compared the way the platform compares it, because Windows'
+    ``resolve()`` takes the leaf's on-disk case: a leaf typed ``NOTE.md`` and
+    stored as ``note.md`` still names its own key there.
+    """
+    return os.path.normcase(fold_path_form(str(resolved))) == os.path.normcase(own_key)
+
+
 def norm_path(p: Path) -> str:
     """Normalize path to a canonical string.
 
@@ -91,6 +136,29 @@ def norm_path(p: Path) -> str:
     return fold_path_form(resolved)
 
 
+def fts_source_text(stored_source: str) -> str:
+    """The text ``chunks_fts.source_file`` holds for a chunk stored at *stored_source*.
+
+    That column exists so a query naming a file still finds the file once no
+    chunk's content matches (#2224). Only the file's name serves that. Every
+    other word of the path is shared: a directory's words appear in every
+    chunk under it, and an extension in every file of its type. As terms they
+    made a query naming the memory dir's root, or ``md``, return every chunk
+    under it (#3208). So the column holds the last path component with its
+    last suffix removed: ``/home/me/notes/octopus.md`` is ``octopus``.
+
+    Both separators split, whatever the host, so a database gives the same
+    terms on every OS, including a Windows-made store opened on POSIX. Only
+    the last suffix goes (``archive.tar.md`` is ``archive.tar``), and a
+    leading dot is not a suffix (``.bashrc`` stays). The function is not
+    idempotent on multi-dot names, so derive it from ``chunks.source_file``,
+    never from a value already in ``chunks_fts``.
+    """
+    name = stored_source.replace("\\", "/").rsplit("/", 1)[-1]
+    dot = name.rfind(".")
+    return name[:dot] if dot > 0 else name
+
+
 def stored_key_moved(key: str) -> bool:
     """True when the stored source key ``key`` no longer resolves to itself.
 
@@ -103,6 +171,78 @@ def stored_key_moved(key: str) -> bool:
     Resolves, so async callers run it in a thread.
     """
     return norm_path(Path(key)) != fold_path_form(key)
+
+
+def _caseless(key: str) -> str:
+    """``key`` in Unicode canonical caseless form (D145), separators as ``/`` on Windows.
+
+    Broader than any filesystem's own folding on purpose: it only picks the
+    keys :func:`source_twins` then checks on disk, so a false match costs two
+    ``lstat`` calls and nothing else.
+    """
+    if os.name == "nt":
+        key = key.replace("\\", "/")
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", key).casefold())
+
+
+def _uppercased(key: str) -> str:
+    """``key`` upper-cased, the way NTFS compares names (its upcase table).
+
+    Case folding and upper-casing disagree on some letters: dotless ``ı``
+    upper-cases to ``I`` but folds to itself, so the two spellings match here
+    and not in :func:`_caseless`.
+    """
+    if os.name == "nt":
+        key = key.replace("\\", "/")
+    return unicodedata.normalize("NFD", key).upper()
+
+
+def twin_candidates(key: str, stored: Iterable[str]) -> list[str]:
+    """The stored keys other than ``key`` that may name its file under another spelling.
+
+    A string comparison only, no filesystem access: keys equal to ``key`` in
+    canonical caseless form or upper-cased. Sorted, so a caller naming one of
+    them names the same one every time.
+    """
+    folded, upper = _caseless(key), _uppercased(key)
+    return sorted(
+        {k for k in stored if k != key and (_caseless(k) == folded or _uppercased(k) == upper)}
+    )
+
+
+def _source_identity(key: str) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of the entry at ``key``, not following a leaf symlink.
+
+    ``None`` when there is no entry, or the filesystem reports no inode
+    (``st_ino == 0``), which is no identity rather than a shared one.
+    """
+    try:
+        info = os.lstat(key)
+    except (OSError, ValueError):
+        return None
+    return None if info.st_ino == 0 else (info.st_dev, info.st_ino)
+
+
+def source_twins(key: str, stored: Iterable[str]) -> list[str]:
+    """The stored keys that name the same file as ``key`` under another spelling (#3408).
+
+    On a case-insensitive volume ``Notes/a.md`` and ``notes/a.md`` are one
+    file, and indexing both spellings stores its lines twice. A twin is a
+    :func:`twin_candidates` key whose entry has ``key``'s device and inode.
+    ``lstat``, so a key whose leaf has become a symlink to the file is a link,
+    not the file (#2835). No identity on either side, no twin. On a
+    case-sensitive volume two case spellings are two inodes, so nothing there
+    is a twin; a hard link under a caseless-equal name is, and rewrites through
+    it are then refused for the same reason. Stats files, so async callers run
+    it in a thread.
+    """
+    candidates = twin_candidates(key, stored)
+    if not candidates:
+        return []
+    own = _source_identity(key)
+    if own is None:
+        return []
+    return [k for k in candidates if _source_identity(k) == own]
 
 
 def stored_key_spellings(spelling: str) -> list[str]:
@@ -179,7 +319,9 @@ def norm_dir_prefix(d: str | Path) -> str:
     return base
 
 
-def _identity_match(spellings: tuple[str, ...], root_norm: str) -> bool:
+def _identity_match(
+    spellings: tuple[str, ...], root_norm: str, *, known_identity: bool = False
+) -> bool:
     """Whether either spelling passes through ``root`` itself, by inode identity.
 
     This replaces asking whether the filesystem folds case. That question had no
@@ -217,6 +359,12 @@ def _identity_match(spellings: tuple[str, ...], root_norm: str) -> bool:
     try:
         root_stat = root_path.stat()
     except OSError:
+        return False
+    # ``st_ino == 0`` is a filesystem that does not answer identity (some FUSE
+    # and SMB mounts): every directory on it then has the root's key. A caller
+    # that refuses on a match can live with that. One that permits on a match
+    # passes ``known_identity`` and gets the literal prefix rule alone there.
+    if known_identity and root_stat.st_ino == 0:
         return False
     key = (root_stat.st_dev, root_stat.st_ino)
     depth = len(root_path.parts)
@@ -296,14 +444,45 @@ def is_under_any_root(target: str | Path, roots: Iterable[str | Path]) -> bool:
     # For a path with no symlink in it the two spellings are identical, which is
     # the common case; checking it twice doubles the stat calls per root.
     spellings = (resolved,) if entry == resolved else (resolved, entry)
-    for root in roots:
-        prefix = norm_dir_prefix(root)
-        bare = prefix.rstrip(os.sep)
-        if any(s == bare or s.startswith(prefix) for s in spellings):
-            return True
-        if _identity_match(spellings, bare):
-            return True
-    return False
+    return any(_spellings_under_root(spellings, root) for root in roots)
+
+
+def _spellings_under_root(
+    spellings: tuple[str, ...], root: str | Path, *, known_identity: bool = False
+) -> bool:
+    """Whether any normalized spelling is ``root`` or lies under it.
+
+    ``known_identity`` is for :func:`_identity_match`.
+    """
+    prefix = norm_dir_prefix(root)
+    bare = prefix.rstrip(os.sep)
+    if any(s == bare or s.startswith(prefix) for s in spellings):
+        return True
+    return _identity_match(spellings, bare, known_identity=known_identity)
+
+
+def resolves_under_any_root(target: str | Path, roots: Iterable[str | Path]) -> bool:
+    """Whether the file ``target`` resolves to lies under any directory in ``roots``.
+
+    The allowing twin of :func:`is_under_any_root`, for a rule that permits a
+    write where that one refuses it. A refusal can afford to match on either
+    spelling of a path through a symlink. A permission cannot: a write opened
+    through ``target`` lands where it resolves, so only the fully resolved
+    spelling counts, and a link inside a root that points out of it is not
+    under the root. Each root is matched as in :func:`is_under_any_root`,
+    except that a directory is taken for the root by identity only where the
+    filesystem reports one (see :func:`_identity_match`).
+
+    A path whose resolution raises ``OSError`` is under nothing; ``norm_path``
+    would fall back to the spelling as typed, which is a path nobody resolved.
+    A symlink loop does not raise: :func:`resolve_path` returns the path up to
+    the loop, which cannot be opened, and that path is matched like any other.
+    """
+    try:
+        resolved = fold_path_form(str(resolve_path(Path(target).expanduser())))
+    except OSError:
+        return False
+    return any(_spellings_under_root((resolved,), root, known_identity=True) for root in roots)
 
 
 def project_boundary_key(project_context_root: Path | str | None) -> str:
@@ -455,20 +634,24 @@ def escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def namespace_sql(ns: NamespaceFilter) -> tuple[str, list]:
+def namespace_sql(ns: NamespaceFilter, column_alias: str = "") -> tuple[str, list]:
     """Build SQL WHERE fragment + params for a NamespaceFilter.
 
     Explicit forms (``namespaces``, ``pattern``) take priority over the
     default-search ``exclude_prefixes`` fallback — the parse layer is
     responsible for never sending both at once, so this ordering is just
     defensive.
+
+    ``column_alias`` prefixes the ``namespace`` column (pass ``"c."`` when the
+    query aliases ``chunks``), mirroring :func:`scope_context_sql`.
     """
+    col = f"{column_alias}namespace"
     if ns.namespaces:
         ph = ",".join("?" * len(ns.namespaces))
-        return f"namespace IN ({ph})", list(ns.namespaces)
+        return f"{col} IN ({ph})", list(ns.namespaces)
     if ns.pattern:
         escaped = ns.pattern.replace("_", r"\_").replace("*", "%")
-        return "namespace LIKE ? ESCAPE '\\'", [escaped]
+        return f"{col} LIKE ? ESCAPE '\\'", [escaped]
     if ns.exclude_prefixes:
         # Belt-and-suspenders cap: the config validator already rejects
         # >10, but if a caller constructs NamespaceFilter directly we still
@@ -476,7 +659,7 @@ def namespace_sql(ns: NamespaceFilter) -> tuple[str, list]:
         assert len(ns.exclude_prefixes) <= 10, (
             f"namespace_sql: exclude_prefixes has {len(ns.exclude_prefixes)} entries, cap is 10"
         )
-        clauses = " AND ".join("namespace NOT LIKE ? ESCAPE '\\'" for _ in ns.exclude_prefixes)
+        clauses = " AND ".join(f"{col} NOT LIKE ? ESCAPE '\\'" for _ in ns.exclude_prefixes)
         params = [f"{escape_like(p)}%" for p in ns.exclude_prefixes]
         return clauses, params
     return "", []

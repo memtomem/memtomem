@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import os
 import random
+import stat
 import sys
 import threading
 import time
@@ -19,6 +21,7 @@ from watchdog.observers.polling import PollingObserver
 
 from memtomem.config import IndexingConfig
 from memtomem.errors import NamespaceResolutionError, RetryableError
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.storage.source_holds import RELINKED_HOLD
 from memtomem.storage.sqlite_helpers import (
     fold_path_form,
@@ -74,6 +77,26 @@ _HELD_PROBE_TIMEOUT_S = 2.0
 # write that met a busy database.
 _RELINK_WAIT_POLL_S = 1.0
 _RELINK_JOURNAL_RETRY_DELAYS_S = (0.1, 0.5, 2.0)
+# How long the watchdog thread waits for a delete event's probe (#3031). A
+# probe that does not answer in time counts as a delete.
+_REMOVED_PROBE_TIMEOUT_S = 0.5
+
+
+def _path_still_presents_its_file(path: Path) -> bool:
+    """Whether ``path`` is a regular file reached through no symlink at all (#3031).
+
+    Run on a probe thread for a delete event. A save that renames a temporary
+    file over its target is reported as a delete of a path that still exists:
+    watchdog's FSEvents observer ends the burst with one, and the polling
+    observer reports the inode change as a delete and a create. Only a path
+    whose every component is the one the rows were keyed to counts: a leaf or
+    parent that became a link may present another file, and the stored rows
+    must then be hidden as before (#2878, #2904). ``strict`` makes a component
+    that cannot be resolved raise instead of returning the spelling unchanged.
+    """
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        return False
+    return os.path.realpath(path, strict=True) == os.path.normpath(path)
 
 
 def _held_probe(path: Path) -> tuple[str, bool]:
@@ -90,6 +113,46 @@ def _held_probe(path: Path) -> tuple[str, bool]:
     return source_state(path), is_link
 
 
+def _start_held_probe(path: Path) -> asyncio.Future[tuple[str, bool]]:
+    """Run :func:`_held_probe` on its own daemon thread; the future gets its outcome.
+
+    Not the default executor: a probe stalled on an unresponsive mount would
+    outlive its timeout there, and ``asyncio.run`` and interpreter exit both
+    join executor threads, so one held path could keep the process from
+    exiting (#2908). A daemon thread is abandoned at exit instead. Raises
+    ``RuntimeError`` when the thread cannot start.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[tuple[str, bool]] = loop.create_future()
+
+    def settle(setter: Callable[..., None], value: object) -> None:
+        if not future.done():
+            setter(value)
+
+    def deliver(setter: Callable[..., None], value: object) -> None:
+        try:
+            loop.call_soon_threadsafe(settle, setter, value)
+        except RuntimeError:
+            pass  # The loop that asked has closed.
+
+    def run() -> None:
+        try:
+            result = _held_probe(path)
+        except Exception as exc:
+            deliver(future.set_exception, exc)
+            return
+        deliver(future.set_result, result)
+
+    thread = threading.Thread(
+        target=contextvars.copy_context().run,
+        args=(run,),
+        name="memtomem-held-probe",
+        daemon=True,
+    )
+    thread.start()
+    return future
+
+
 def effective_watcher_backend(config: IndexingConfig) -> str:
     """Return the concrete watchdog backend selected for this runtime."""
     if config.watcher_backend == "auto":
@@ -97,9 +160,21 @@ def effective_watcher_backend(config: IndexingConfig) -> str:
     return config.watcher_backend
 
 
+def _stop_observer(observer: BaseObserver) -> None:
+    """Stop *observer* and join its dispatcher thread if it ever started.
+
+    An observer whose ``start`` failed part-way has stopped emitters but no
+    dispatcher thread, and joining that raises ``RuntimeError: cannot join
+    thread before it is started``.
+    """
+    observer.stop()
+    if observer.is_alive():
+        observer.join()
+
+
 def _create_observer(config: IndexingConfig) -> BaseObserver:
     if effective_watcher_backend(config) == "polling":
-        return PollingObserver()
+        return PollingObserver(timeout=config.watcher_poll_interval_ms / 1000.0)
     return Observer()
 
 
@@ -151,6 +226,15 @@ class _MarkdownEventHandler(FileSystemEventHandler):
         if not event.is_directory:
             self._enqueue(str(event.src_path))
 
+    def on_attrib(self, event: FileSystemEvent) -> None:
+        # watchdog 7.0 reports some metadata-only changes as their own event:
+        # every inotify IN_ATTRIB (6.0 reported it as a modification) and, when
+        # polling, a mode, ownership or flags change. 6.0 never calls this. A
+        # file made unreadable must still reach the indexer, whose failed read
+        # holds the source out of search (#3082).
+        if not event.is_directory:
+            self._enqueue(str(event.src_path))
+
     def on_created(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
             self._enqueue(str(event.src_path))
@@ -158,7 +242,9 @@ class _MarkdownEventHandler(FileSystemEventHandler):
     def on_deleted(self, event: FileSystemEvent) -> None:
         # Persist the source check before debounce can lose the path. Its
         # chunks become hidden immediately and remain stored until recovery or
-        # explicit cleanup (#1566, #2498).
+        # explicit cleanup (#1566, #2498). ``on_removed`` skips the check for a
+        # path still a regular file, which a rename-over save reports as
+        # deleted (#3031); the event is queued either way.
         if not event.is_directory:
             self._enqueue(str(event.src_path), removed=True)
 
@@ -222,6 +308,16 @@ class FileWatcher:
         # ``_config``: callers may replace or mutate the config before asking
         # us to reconfigure, while the observer itself keeps its old backend.
         self._observer_backend: str | None = None
+        # Why the last ``start`` ran without an observer, as "Type: message";
+        # ``None`` when it started one or never ran. Diagnostic only — whether
+        # live events flow is ``live_events``.
+        self._observer_error: str | None = None
+        # An observer whose start failed and whose cleanup failed too. Held
+        # apart from ``_observer`` so ``reconfigure`` never swaps over it, and
+        # kept until a ``stop`` manages to stop it: until then ``start``
+        # refuses, because a new observer would run beside emitters nothing
+        # could stop any more.
+        self._failed_observer: BaseObserver | None = None
         self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
         self._task: asyncio.Task[None] | None = None
         self._backfill_task: asyncio.Task[None] | None = None
@@ -232,10 +328,16 @@ class FileWatcher:
         # stalled on a mount outlives the task, and even the event loop, that
         # started it, and a new start must not add another behind it.
         self._relink_scan_thread: threading.Thread | None = None
-        self._stalled_probes: set[asyncio.Task[tuple[str, bool]]] = set()
+        self._stalled_probes: set[asyncio.Future[tuple[str, bool]]] = set()
         self._held_cursor = 0
         self._recheck_wakeup = asyncio.Event()
         self._journal_failures = 0
+        # Delete-event probe threads that outlived their wait (#3031). Shared by
+        # every observer this watcher runs (``reconfigure`` briefly has two on
+        # one handler), so the lock guards the set, never a wait. Threads, not
+        # futures: whether one is still running does not depend on a loop.
+        self._removed_probe_lock = threading.Lock()
+        self._stalled_removed_probes: set[threading.Thread] = set()
         self._handler: _MarkdownEventHandler | None = None
         self._watches: dict[Path, ObservedWatch] = {}
         # Queue-overflow recovery (#2530). ``_rescan_due`` maps a root to the
@@ -293,6 +395,9 @@ class FileWatcher:
         )
         if journal is None:
             return
+        if self._removed_path_present(path):
+            logger.debug("Delete event for a path that is still a regular file: %s", path)
+            return
         try:
             journal(path)
             self._journal_failures = 0
@@ -306,6 +411,48 @@ class FileWatcher:
             else:
                 logger.debug("Could not journal deleted watcher path %s", path, exc_info=True)
             self._journal_failures += 1
+
+    def _removed_path_present(self, path: Path) -> bool:
+        """Whether a deleted event's path is still its regular file (#3031).
+
+        Runs on the watchdog thread, before the journal. The check itself runs
+        on a daemon thread and is waited for at most ``_REMOVED_PROBE_TIMEOUT_S``:
+        a detached mount can block a filesystem call indefinitely. A probe that
+        outlives its wait is kept, and while one is still running no other
+        starts, so a dead mount costs one wait and no thread per later event.
+        Every outcome but a timely "present" answers ``False`` and the delete is
+        journaled as before: a stalled earlier probe, a thread that cannot
+        start, a timeout, an error, or a path that is not a regular file reached
+        through no link. On a slow but responsive filesystem each delete event
+        can hold the observer up by up to the wait; watchdog's FSEvents and
+        polling emitters already stat the paths they report on their own
+        threads before the event gets here.
+        """
+        with self._removed_probe_lock:
+            self._stalled_removed_probes = {t for t in self._stalled_removed_probes if t.is_alive()}
+            if self._stalled_removed_probes:
+                return False
+
+        outcome: list[bool] = []
+
+        def run() -> None:
+            try:
+                outcome.append(_path_still_presents_its_file(path))
+            except Exception:
+                outcome.append(False)
+
+        thread = threading.Thread(target=run, name="memtomem-removed-probe", daemon=True)
+        try:
+            thread.start()
+        except RuntimeError:
+            return False
+        thread.join(_REMOVED_PROBE_TIMEOUT_S)
+        if thread.is_alive():
+            with self._removed_probe_lock:
+                self._stalled_removed_probes.add(thread)
+            logger.warning("Delete-event probe timed out; hiding %s until it is reindexed", path)
+            return False
+        return outcome == [True]
 
     def _configured_roots(self) -> list[Path]:
         return [Path(d).expanduser().resolve() for d in self._config.all_index_roots()]
@@ -345,9 +492,30 @@ class FileWatcher:
         else:
             logger.debug("File watcher queue full, dropping event for %s", path)
 
+    @property
+    def live_events(self) -> bool:
+        """Whether file events reach this watcher: it runs and holds an observer."""
+        return self._task is not None and self._observer is not None
+
+    @property
+    def observer_error(self) -> str | None:
+        """Why the last ``start`` ran without an observer, or ``None``."""
+        return self._observer_error
+
     async def start(self) -> None:
-        """Schedule the watched roots and start the observer and processor task."""
+        """Schedule the watched roots and start the observer and processor task.
+
+        An observer that cannot be built, scheduled or started does not fail
+        the start (#3080): the watcher runs on without live events, recording
+        why in ``observer_error``, and its source checks and backfill still
+        run — they guard the index whether or not events arrive.
+        """
         async with self._lifecycle_lock:
+            if self._failed_observer is not None:
+                raise RuntimeError(
+                    "the observer of an earlier failed start could not be stopped; "
+                    "restart the server to resume file watching"
+                )
             loop = asyncio.get_running_loop()
             # A fresh queue per lifecycle. ``stop`` signals the processor by
             # enqueueing a sentinel, and a processor that misses it — the five
@@ -369,30 +537,82 @@ class FileWatcher:
             handler = self._make_handler(loop)
             self._handler = handler
             backend = effective_watcher_backend(self._config)
-            self._observer = _create_observer(self._config)
-            self._observer_backend = backend
             logger.info("File watcher backend: %s", backend)
 
             watched: list[Path] = []
             # ADR-0011: watch every index root (user-tier ``memory_dirs`` and
             # project-tier ``project_memory_dirs``) so files dropped into a
             # registered project_shared / project_local dir trigger reindex
-            # the same way user-tier files do.
+            # the same way user-tier files do. Collected before the observer
+            # exists, so the backfill below covers every root even when the
+            # observer fails part-way through scheduling them.
             for watch_dir in self._config.all_index_roots():
                 expanded = Path(watch_dir).expanduser().resolve()
                 if expanded.exists():
-                    watch = self._observer.schedule(handler, str(expanded), recursive=True)
-                    self._watches[expanded] = watch
-                    logger.info("Watching %s for changes", expanded)
                     watched.append(expanded)
 
-            self._observer.start()
+            self._observer_error = None
+            self._start_observer(handler, backend, watched)
             self._task = asyncio.create_task(self._process_events())
             self._pending_replay_task = asyncio.create_task(self._replay_pending_checks())
             self._held_recheck_task = asyncio.create_task(self._recheck_held_loop())
             self._relink_scan_task = asyncio.create_task(self._journal_relinked_keys())
             if watched and self._config.startup_backfill:
                 self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
+
+    def _start_observer(
+        self, handler: _MarkdownEventHandler, backend: str, roots: list[Path]
+    ) -> None:
+        """Build, schedule and start an observer on *roots*; publish it on success.
+
+        Only the observer's own operations are guarded. watchdog 7.0 re-raises
+        a native stream that failed to start out of ``Observer.start`` (6.0
+        logged it in the emitter thread), and an unguarded raise here failed
+        the whole server start, every tool call with it (#3080). A
+        ``BaseException`` still propagates, with the observer published so the
+        caller's ``stop`` can clean up after it, as before.
+        """
+        observer: BaseObserver | None = None
+        watches: dict[Path, ObservedWatch] = {}
+        try:
+            observer = _create_observer(self._config)
+            for root in roots:
+                watches[root] = observer.schedule(handler, str(root), recursive=True)
+                logger.info("Watching %s for changes", root)
+            observer.start()
+        except Exception as exc:
+            self._observer_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "The %s file watcher could not start (%s): file edits are not picked "
+                "up live until the server restarts; source checks keep running",
+                backend,
+                self._observer_error,
+                exc_info=True,
+            )
+            if observer is not None:
+                # Held *before* the cleanup and released only after it, so a
+                # cleanup cut short by a ``BaseException`` still leaves the
+                # handle where ``stop`` retries it and ``start`` refuses.
+                self._failed_observer = observer
+                try:
+                    _stop_observer(observer)
+                    self._failed_observer = None
+                except Exception:
+                    logger.warning(
+                        "Could not stop the file watcher's observer after its start "
+                        "failed; file watching cannot start again until the server restarts",
+                        exc_info=True,
+                    )
+            return
+        except BaseException:
+            if observer is not None:
+                self._observer = observer
+                self._observer_backend = backend
+                self._watches.update(watches)
+            raise
+        self._observer = observer
+        self._observer_backend = backend
+        self._watches.update(watches)
 
     async def _replay_pending_checks(self) -> None:
         storage = getattr(self._engine, "_storage", None)
@@ -498,6 +718,15 @@ class FileWatcher:
             return
         self._relink_scan_thread = thread
 
+    def _forget_probe(self, probe: asyncio.Future[tuple[str, bool]]) -> None:
+        self._stalled_probes.discard(probe)
+        # A probe that fails after its wait timed out has no awaiter left:
+        # ``shield`` drops its own callback when the outer wait is cancelled
+        # while the probe is pending. Retrieve the exception here, or asyncio
+        # reports it as never retrieved when the future is collected.
+        if not probe.cancelled():
+            probe.exception()
+
     async def _recheck_held_loop(self) -> None:
         from memtomem.storage.orphan_detect import RetainRule
 
@@ -556,9 +785,9 @@ class FileWatcher:
                             stalled = True
                             break
                         processed += 1
-                        probe = asyncio.create_task(asyncio.to_thread(_held_probe, path))
+                        probe = _start_held_probe(path)
                         self._stalled_probes.add(probe)
-                        probe.add_done_callback(self._stalled_probes.discard)
+                        probe.add_done_callback(self._forget_probe)
                         try:
                             state, is_link = await asyncio.wait_for(
                                 asyncio.shield(probe), timeout=_HELD_PROBE_TIMEOUT_S
@@ -850,6 +1079,12 @@ class FileWatcher:
             self._watches.clear()
             self._task = None
             self._backfill_task = None
+            if self._failed_observer is not None:
+                # Last, so everything above is already released when this
+                # raises. Cleared only once it stops: on a raise the handle
+                # stays, and ``start`` keeps refusing.
+                _stop_observer(self._failed_observer)
+                self._failed_observer = None
 
     async def _backfill_existing(self, dirs: list[Path]) -> None:
         """Index pre-existing files the observer can't see.
@@ -1261,7 +1496,11 @@ class FileWatcher:
         if key is None:
             return True
         try:
-            if await storage.hold_source(Path(key), RELINKED_HOLD, as_stored=True):
+            # The link check above awaited, so another task may own the writer;
+            # wait for it rather than be refused (#3181).
+            async with storage.transaction(wait=WRITER_WAIT_S):
+                held = await storage.hold_source(Path(key), RELINKED_HOLD, as_stored=True)
+            if held:
                 logger.info("Held a source that is now a symlink: %s", file_path.name)
                 if self._search_pipeline is not None:
                     self._search_pipeline.invalidate_cache()
@@ -1274,8 +1513,8 @@ class FileWatcher:
         """Reindex one changed file. Returns ``file_path`` when the reindex
         timed out acquiring the file's cross-process sidecar, or was refused by
         the redaction guard without its older chunks being held, or is now a
-        symlink whose own chunks could not be held (so the caller can retry it
-        next window), else ``None``.
+        symlink whose own chunks could not be held, or became one while it was
+        being indexed (so the caller can retry it next window), else ``None``.
 
         A path no longer contained in any configured root is dropped. Events are
         collected before a flush and ``reconfigure`` leaves them alone, so a file
@@ -1287,7 +1526,7 @@ class FileWatcher:
         and the engine. It is also a check, not a lock: a flush that passed it
         before the root was removed can still write afterwards.
         """
-        from memtomem.indexing.engine import PrivacyRejection
+        from memtomem.indexing.engine import PrivacyRejection, SourceRelinkedError
 
         if not is_under_any_root(file_path, self._config.all_index_roots()):
             logger.info("Skipped auto-reindex for %s: not under a configured root", file_path.name)
@@ -1358,6 +1597,12 @@ class FileWatcher:
             # would leave the edit unindexed until something else touched the
             # file.
             logger.warning("Auto-reindex deferred for %s: %s; will retry", file_path.name, exc)
+            return file_path
+        except SourceRelinkedError as exc:
+            # The path became a link to another source while the index awaited,
+            # and the index wrote nothing (#3180). The retry holds the leaf's
+            # own rows (``_hold_relinked_leaf``) before indexing through the link.
+            logger.warning("Auto-reindex deferred for %s: %s", file_path.name, exc)
             return file_path
         except Exception as exc:
             logger.error("Auto-reindex failed for %s: %s", file_path, exc)

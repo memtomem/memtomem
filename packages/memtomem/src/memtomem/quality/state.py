@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.quality.fingerprints import (
     corpus_fingerprint,
     index_fingerprint,
@@ -38,6 +39,23 @@ _REMOTE_EMBEDDING_PROVIDERS = frozenset({"ollama", "openai"})
 #: config's ``min_confidence`` gate. The entity boost is presence-only, so two
 #: rows that both clear the floor rank identically whatever their stored values.
 _GATED_CONFIDENCE = "gated"
+
+
+async def current_fingerprints_when_writer_idle(
+    storage: SqliteBackend, config: Mem2MemConfig
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """:func:`current_fingerprints`, after waiting for another task's transaction.
+
+    ``stored_embedding_info`` reads the meta table on the writer connection,
+    synchronously, so it is refused at once while another task owns
+    ``transaction()``. This waits up to ``WRITER_WAIT_S`` first and then
+    computes with no ``await`` in between (#3182). A timed-out wait raises
+    ``TransactionOwnedError``. A backend without the wait (a test double) is
+    read as it is.
+    """
+    if getattr(type(storage), "_wait_for_writer_idle", None) is not None:
+        await storage._wait_for_writer_idle(wait=WRITER_WAIT_S)
+    return current_fingerprints(storage, config)
 
 
 def current_fingerprints(

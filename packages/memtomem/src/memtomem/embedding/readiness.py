@@ -22,9 +22,9 @@ comes from the catalog too (``BAAI/bge-small-en-v1.5`` ships
 ``model_optimized.onnx``) (#2585). ``Path.exists`` follows symlinks, so the
 underlying blobs must be there too.
 
-A catalog entry that also has a ``sources.url`` tarball can be cached a
-second way. When the Hugging Face download fails, fastembed downloads the
-tarball instead and unpacks it flat into one directory:
+A cache written by fastembed 0.8 or earlier can hold a model a second way.
+Those versions downloaded a tarball from Google Cloud Storage when the
+Hugging Face download failed, and unpacked it flat into one directory:
 
     cache_dir/
       fast-<name>/   (entries marked ``_deprecated_tar_struct``)
@@ -33,24 +33,34 @@ tarball instead and unpacks it flat into one directory:
         special_tokens_map.json, <model file(s)>
 
 where ``<name>`` is the last ``/`` segment of the catalog's model id
-(``BAAI/bge-base-en-v1.5`` unpacks to ``fast-bge-base-en-v1.5``).
+(``BAAI/bge-base-en-v1.5`` unpacked to ``fast-bge-base-en-v1.5``).
+fastembed 0.9 downloads no tarball, and no built-in entry has a
+``sources.url`` any more, but it still loads a directory left there.
 
 fastembed only reads that directory when no Hugging Face snapshot is found
 locally. Online it then downloads from Hugging Face again, and uses the
 directory only if that fails, so the next load is a download and readiness
 does not count the directory. With ``HF_HUB_OFFLINE`` set it goes straight to
-the directory, for every catalog entry (including ones with no
-``sources.url``, such as the custom ``BAAI/bge-m3``, or a reranker), and
-readiness counts a complete one (#2594).
+the directory, for every catalog entry (including the custom ``BAAI/bge-m3``,
+or a reranker), and readiness counts a complete one (#2594).
 
 This is an approximation of fastembed's loader, kept small on purpose: the
 answer only picks the ``downloading`` or ``loading`` label while a load runs.
-Offline it can say ``loading`` for a load that then fails, when fastembed
-picks a cached snapshot other than the complete copy found here: an
-incomplete snapshot that ``refs/main`` names (a failed download can leave
-one) next to a complete tarball directory or an older complete snapshot, or
-a ``files_metadata.json`` that fastembed cannot parse. The failed load then
-shows as an error.
+It differs from the loader in these cases:
+
+- Offline it can say ``loading`` for a load that then fails, when fastembed
+  picks a cached snapshot other than the complete copy found here: an
+  incomplete snapshot that ``refs/main`` names (a failed download can leave
+  one) next to a complete tarball directory or an older complete snapshot, or
+  a ``files_metadata.json`` that fastembed cannot parse. The failed load then
+  shows as an error.
+- It can say ``loading`` for a load that downloads: fastembed discards a
+  snapshot whose model file differs in size from what ``files_metadata.json``
+  recorded, and readiness checks only that the file exists.
+- It can say ``downloading`` for a load that reads the cache: fastembed also
+  accepts a repository directory whose name differs only in case
+  (``models--qdrant--...`` for ``Qdrant/...``, as fastembed 0.8.0 cached
+  it). On a case-sensitive filesystem readiness does not find that directory.
 
 Approximate-size lookups for the readiness banner live in the sibling
 ``aliases`` module — see ``embedding/aliases.py:approx_size_mb``.
@@ -66,17 +76,22 @@ from typing import NamedTuple
 # import site. Source of truth is ``embedding/aliases.py``.
 from memtomem.embedding.aliases import approx_size_mb as approx_size_mb
 
-# Files fastembed's tokenizer loader opens from a snapshot. 0.8.0 (the
-# locked version) raises when any of these is missing; 0.8.1 relaxes
-# ``config.json`` and ``special_tokens_map.json``. Requiring the union keeps
-# "present" true only when every supported fastembed can load it, and it is
-# exactly what the pinned downloads in ``profiles.py`` fetch.
-_MARKER_FILES = (
+# Files a snapshot needs besides its model files, by how the model is loaded.
+#
+# A pinned model is fetched by ``profiles.py`` with these four in
+# ``allow_patterns``; with one missing the next online load downloads it.
+_PINNED_MARKER_FILES = (
     "config.json",
     "tokenizer.json",
     "tokenizer_config.json",
     "special_tokens_map.json",
 )
+# What fastembed's ``load_tokenizer`` raises without. It reads ``config.json``
+# and ``special_tokens_map.json`` only when they exist
+# (``test_marker_files_match_fastembed`` pins that).
+_LOADER_MARKER_FILES = ("tokenizer.json", "tokenizer_config.json")
+# A static model (``model.safetensors``) reads nothing but its tokenizer.
+_STATIC_MARKER_FILES = ("tokenizer.json",)
 
 # A model the catalog cannot describe may keep its weights in either place.
 _FALLBACK_MODEL_FILES = ("model.onnx", "onnx/model.onnx")
@@ -91,6 +106,8 @@ class _CacheSpec(NamedTuple):
     # Directory under ``cache_dir`` where fastembed looks for a model unpacked
     # from a GCS tarball, or ``None`` for a pinned or uncatalogued model.
     gcs_dir: str | None = None
+    # Files every snapshot of this model needs besides ``model_files``.
+    markers: tuple[str, ...] = _LOADER_MARKER_FILES
 
 
 def _gcs_dir_name(catalog_model: str, deprecated_tar_struct: bool) -> str:
@@ -100,7 +117,7 @@ def _gcs_dir_name(catalog_model: str, deprecated_tar_struct: bool) -> str:
     ``ModelManagement.retrieve_model_gcs`` computes it inline and then creates,
     downloads or deletes files, even with ``local_files_only=True``. This
     mirrors that computation (``fastembed/common/model_management.py``,
-    0.8.0 and 0.8.1)::
+    0.9.1)::
 
         fast_model_name = f"{'fast-' if deprecated_tar_struct else ''}{model_name.split('/')[-1]}"
         model_dir = Path(cache_dir) / fast_model_name
@@ -124,9 +141,11 @@ def _pinned_spec(model_id: str) -> _CacheSpec | None:
     )
 
     if is_e5(model_id):
-        return _CacheSpec(E5_MODEL, E5_REVISION, ("onnx/model.onnx",))
+        return _CacheSpec(E5_MODEL, E5_REVISION, ("onnx/model.onnx",), markers=_PINNED_MARKER_FILES)
     if is_minilm(model_id):
-        return _CacheSpec(MINILM_REPO, MINILM_REVISION, ("model.onnx",))
+        return _CacheSpec(
+            MINILM_REPO, MINILM_REVISION, ("model.onnx",), markers=_PINNED_MARKER_FILES
+        )
     return None
 
 
@@ -138,7 +157,10 @@ def _catalog_spec(model_id: str) -> _CacheSpec | None:
             TextCrossEncoder,
         )
 
-        from memtomem.embedding.onnx import _register_custom_models_if_needed
+        from memtomem.embedding.onnx import (
+            _register_custom_models_if_needed,
+            _static_catalog_ids,
+        )
         from memtomem.search.reranker.fastembed import ensure_custom_reranker_registered
     except ImportError:
         return None
@@ -157,8 +179,9 @@ def _catalog_spec(model_id: str) -> _CacheSpec | None:
             sources = desc.get("sources") or {}
             hf = sources.get("hf")
             model_file = desc.get("model_file")
-            # Every fastembed 0.8 entry with a ``url`` also has ``hf``, so a
-            # URL-only entry is not handled separately.
+            # No built-in entry has a ``url`` without ``hf`` (none has a
+            # ``url`` at all since fastembed 0.9), so a URL-only entry is not
+            # handled separately.
             if not hf or not model_file:
                 return None
             extra = tuple(desc.get("additional_files") or ())
@@ -168,7 +191,10 @@ def _catalog_spec(model_id: str) -> _CacheSpec | None:
             # the catalog's own model id, not the (case-insensitively matched)
             # id asked for.
             gcs_dir = _gcs_dir_name(str(desc["model"]), bool(sources.get("_deprecated_tar_struct")))
-            return _CacheSpec(hf, None, (model_file, *extra), gcs_dir)
+            markers = (
+                _STATIC_MARKER_FILES if wanted in _static_catalog_ids() else _LOADER_MARKER_FILES
+            )
+            return _CacheSpec(hf, None, (model_file, *extra), gcs_dir, markers)
     return None
 
 
@@ -176,10 +202,12 @@ def _cache_spec(model_id: str) -> _CacheSpec:
     return _pinned_spec(model_id) or _catalog_spec(model_id) or _CacheSpec(model_id, None, None)
 
 
-def _snapshot_complete(snap: Path, model_files: tuple[str, ...] | None) -> bool:
+def _snapshot_complete(
+    snap: Path, model_files: tuple[str, ...] | None, markers: tuple[str, ...]
+) -> bool:
     if not snap.is_dir():
         return False
-    if not all((snap / name).exists() for name in _MARKER_FILES):
+    if not all((snap / name).exists() for name in markers):
         return False
     if model_files is None:
         return any((snap / name).exists() for name in _FALLBACK_MODEL_FILES)
@@ -210,7 +238,7 @@ def model_snapshot_present(cache_dir: Path, model_id: str) -> bool:
         return False
     # fastembed unpacks into ``tmp/`` and renames the finished directory into
     # place, so a partial download never shows up under this name.
-    return _snapshot_complete(cache_dir / spec.gcs_dir, spec.model_files)
+    return _snapshot_complete(cache_dir / spec.gcs_dir, spec.model_files, spec.markers)
 
 
 def _hf_offline() -> bool:
@@ -221,7 +249,7 @@ def _hf_offline() -> bool:
 def _hf_snapshot_present(cache_dir: Path, spec: _CacheSpec) -> bool:
     base = cache_dir / ("models--" + spec.repo.replace("/", "--")) / "snapshots"
     if spec.revision is not None:
-        return _snapshot_complete(base / spec.revision, spec.model_files)
+        return _snapshot_complete(base / spec.revision, spec.model_files, spec.markers)
     if not base.is_dir():
         return False
-    return any(_snapshot_complete(snap, spec.model_files) for snap in base.iterdir())
+    return any(_snapshot_complete(snap, spec.model_files, spec.markers) for snap in base.iterdir())

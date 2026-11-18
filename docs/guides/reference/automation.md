@@ -23,8 +23,8 @@ automatically in the background with the built-in scheduler.
 
 | Type | What it does | Example config |
 |------|-------------|----------------|
-| `auto_archive` | Move old/unused chunks to an archive namespace | `{"max_age_days": 30}` |
-| `auto_promote` | Move frequently accessed archived chunks back to active namespace | `{"min_access_count": 5}` |
+| `auto_archive` | Move old/unused source files to an archive namespace | `{"max_age_days": 30}` |
+| `auto_promote` | Move frequently accessed archived source files back to active namespace | `{"min_access_count": 5}` |
 | `auto_expire` | Delete very old chunks with zero access | `{"max_age_days": 90}` |
 | `auto_consolidate` | Group chunks by source file into heuristic summaries | `{"min_group_size": 3}` |
 | `auto_tag` | Auto-tag untagged chunks | `{"max_tags": 5}` |
@@ -49,9 +49,16 @@ mem_policy_add(name="archive-categorized", policy_type="auto_archive",
 ```
 
 - `age_field`: `"created_at"` (default) or `"last_accessed_at"` (null-safe via COALESCE).
-- `min_access_count`: only archive chunks with access_count at most this value.
-- `max_importance_score`: only archive chunks with importance_score below this value.
-- `archive_namespace_template`: per-chunk target using the `{first_tag}` placeholder (empty tags fall back to `"misc"`).
+- `min_access_count`: a chunk matches only with access_count at most this value.
+- `max_importance_score`: a chunk matches only with importance_score below this value.
+- `archive_namespace_template`: target from each chunk's first tag via the `{first_tag}` placeholder (empty tags fall back to `"misc"`).
+
+A source file is archived whole, and only once every one of its chunks matches:
+archiving part of a file would leave it in two namespaces, which a forced
+re-index refuses. A file whose chunks' tags route to different template targets
+is skipped and reported as `split_targets` in the run's outcome. With a
+`namespace_filter`, every chunk of the file must be in that namespace or
+already in the target.
 
 **auto_promote** — bring back frequently accessed archives:
 
@@ -75,7 +82,16 @@ mem_policy_add(name="promote-recent", policy_type="auto_promote",
 - `min_importance_score`: optional importance floor (AND with access count).
 - `recency_days`: only promote if accessed within this many days. Note: this is the *opposite* of auto_archive's age cutoff — here, *recent* access qualifies a chunk.
 
-> **Tip**: auto_promote resets `last_accessed_at` to the current time on promotion, preventing immediate re-archival by auto_archive (ping-pong prevention).
+One qualifying chunk brings its whole source file back, so the file never ends
+up split across namespaces. Every chunk of the file must be in a source
+namespace or already in the target; a file with chunks elsewhere stays put.
+
+> **Tip**: auto_promote resets `last_accessed_at` to the current time on every chunk it moves, preventing immediate re-archival by auto_archive (ping-pong prevention).
+
+Neither policy merges or deletes to make room. A file whose move would put two
+chunks with the same content at the same line into one namespace is left where
+it is and listed under `conflicts` in the run's outcome, and the run reports an
+error.
 
 **auto_expire** — delete old unaccessed chunks:
 
@@ -86,6 +102,11 @@ mem_policy_add(name="expire-cold", policy_type="auto_expire",
 
 Only chunks with `access_count = 0` are expired.
 
+All three policies above skip held sources (missing, unreadable or
+redaction-blocked files kept for recovery) and sources with a pending check, as
+do `mem_decay_scan` / `mem_decay_expire`. Purge a source you have confirmed gone
+with `mm gc orphan-sources --apply`.
+
 **auto_consolidate** — summarize related chunks:
 
 ```
@@ -95,6 +116,7 @@ mem_policy_add(name="consolidate-sources", policy_type="auto_consolidate",
 
 - `min_group_size`: minimum chunks per source file to qualify (default 3).
 - `max_groups`: cap on groups processed per run (default 10).
+- `max_bullets`: how many of a source's chunks the summary reads (default 20). Only those are linked to the summary and, with `keep_originals: false`, decayed; the rest stay uncovered, so agent consolidation can still group them.
 - `keep_originals`: if `false`, soft-decays originals (importance *= 0.5, floor 0.3) instead of deleting. An original that is itself a summary (the target of a `consolidated_into` edge) keeps its importance.
 - `summary_namespace`: target namespace for summaries (default `"archive:summary"`) — excluded from default search.
 
@@ -280,13 +302,16 @@ mem_do(action="schedule_delete", params={"id": "<id>"})
 
 ### Reading a run record
 
-Each schedule keeps the outcome of its latest run:
+Each schedule keeps the outcome of its latest run, and the position of a job
+that continues between runs:
 
 | Field             | Meaning                                                                 |
 |-------------------|-------------------------------------------------------------------------|
 | `last_run_status` | `ok`, `skipped`, `error`, `timeout`, or `running` while a run is in flight |
 | `last_run_error`  | Error text for `error` / `timeout`                                      |
 | `last_run_result` | The summary the job returned (`null` for `error` / `timeout`)           |
+| `state`           | Where the next run starts, for a job that continues (`dedup_scan`); `null` for the other jobs |
+| `cron_error`      | Why the cron expression cannot be scheduled, or `null` when it can (see below) |
 
 `skipped` means the job returned normally but did no work, and its
 `skipped_reason` says why. For example, `dedup_scan` has no scanner
@@ -294,16 +319,88 @@ Each schedule keeps the outcome of its latest run:
 to the status. `mm schedule list --json` and `schedule_list` return the whole
 record.
 
+`cron_error` is checked each time the schedule is read, the same way the
+dispatcher finds the next slot: from `last_run_at`, or `created_at` before the
+first run. It does not depend on how the last run ended. It has three kinds of
+value:
+- `null`: the expression can be scheduled.
+- A croniter parse error, such as `CroniterBadCronError: …` or its subclass
+  `CroniterNotAlphaError: …`: croniter cannot read the expression, so the
+  dispatcher skips the schedule on every tick and it never runs on its own.
+  An expression stored with non-ASCII digits or spaces that croniter 6
+  accepted is refused by croniter 7 this way. `mm schedule list` marks such a
+  row `automatic runs blocked`; `mm schedule run-now <id>` still runs it.
+  Under croniter 6 only, a random `R` field whose range leaves the field's
+  bounds (`R(0-60)` for minutes) fails this way only on its out-of-range
+  draws, so such a row can be reported blocked and still run; croniter 7
+  refuses that expression every time.
+- `unchecked: …`: the check did not reach a verdict. That covers a stored
+  timestamp that does not parse, and `CroniterBadDateError` ("failed to find
+  next date"), which croniter raises both for a date that never occurs
+  (`0 0 30 2 *`, which `mm schedule add` accepts) and for one draw of its
+  random `R` field that the next draw may not repeat (`0 0 R(28-30) 2 *`
+  fails only on the draw that lands on the 30th). `mm schedule list` marks
+  such a row `cron check failed`. The message is the same for both causes,
+  so look at the row's `cron_expr`: one with no random field and a date that
+  never occurs is skipped on every tick like a blocked row; replace it the
+  same way.
+
+To replace a blocked schedule, add the corrected one first, written with ASCII
+digits and spaces and for a date that exists, with the same `--job` and the
+`params` that `mm schedule list --json` shows for the old row, passed as JSON
+to `--params`. If `mm schedule add` refuses a key as unsupported, leave it out:
+the job ignores keys it does not define. Then remove the old schedule with
+`mm schedule delete <id>`. The new schedule starts with no run history, and a
+`dedup_scan` walk starts again from the first pool.
+
 A `dedup_scan` result also reports what the scan covered: `pool` (chunks
-selected, at most `max_scan`), `probed` (pool chunks searched with their
-stored vector) and `without_vector` (pool chunks with no usable stored
-vector, not probed).
+selected, at most `max_scan`), `remaining` (scannable chunks after the pool),
+`probed` (pool chunks searched with their stored vector), `without_vector`
+(pool chunks with no usable stored vector, not probed),
+`same_source_read_only_pairs` (pairs left out because both members are
+read-only chunks of the same file; neither can be removed) and `pairs_found`
+(pairs before `limit`; when it is above `candidates`, the list was cut).
 - **Zero candidates with a large `without_vector` count** means part of the
   pool was never checked, not that it is duplicate-free.
 - **`near_search_enabled: false`** (a BM25-only store) means only exact
   duplicates were looked for. `without_vector` is then `0` and says nothing
   about vector coverage.
 - **The counts describe the selected pool**, not the whole store.
+
+A `dedup_scan` schedule walks the store, one pool per run:
+
+- **Each run scans the pool after the one the last finished run scanned.**
+  The first run scans the first pool (the first `max_scan` scannable chunks
+  in chunk-id order). A run that reaches the end of the store (`remaining`
+  is `0`) makes the next run start from the first pool again, which is also
+  how a chunk added before the position during a walk gets scanned. In a
+  result, `after` is the chunk id the run started after and `next_after` the
+  one the next run starts after; each is `null` for the first pool.
+- **`state` holds the same position** as `{"after": "<chunk id>"}`, or
+  `null` when the next run starts from the first pool. It is the stored
+  position, not a description of a run in flight, and it is where to read
+  the position after a run that ended in `error` or `timeout`, which has no
+  result.
+- **Only a scan that finished moves the position.** A run that ends in
+  `error` or `timeout`, or is `skipped`, leaves it, so the next run scans
+  the same pool. A pool that times out on every run keeps the schedule
+  there; delete the schedule and register one with a smaller `max_scan`.
+- **Each schedule has its own position.** `mm schedule run-now` and
+  `schedule_run_now` move it as a dispatched run does. Deleting a schedule
+  deletes its position, and a new schedule starts from the first pool.
+- **The counts of a walk's runs do not add up to a count for the store.** A
+  walk in steps is not one scan of the whole store: a near pair whose members
+  are in two pools can be counted in both runs, and copies with one content
+  hash in different pools are left to the near search (see
+  [Deduplication](organization-maintenance.md#deduplication)).
+- **Runs of one schedule that overlap** (a `run-now` while a dispatched run
+  is in flight, or a run still going at its next slot) start from the same
+  position and scan the same pool, and the position is the one the last of
+  them to finish writes. A run that finishes after others have moved on
+  puts the position back at the end of its own pool: the pools after it are
+  scanned again, and a chunk added in the meantime before that position
+  waits for the next walk from the start. If that happens on every walk,
+  such a chunk can stay unscanned.
 
 > Phase A is direct-cron only. Natural-language schedules
 > (`spec="every Sunday 3am"`) and `disable`/`enable` commands arrive in

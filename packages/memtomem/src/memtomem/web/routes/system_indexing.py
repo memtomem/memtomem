@@ -15,12 +15,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from memtomem.constants import InvalidNameError, writable_namespace_arg
-from memtomem.errors import NamespaceResolutionError
+from memtomem.errors import NamespaceResolutionError, TransactionOwnedError
+from memtomem.storage.base import WRITER_WAIT_S
 from memtomem.source_provenance import (
     EXCLUDED_TARGET_DETAIL,
     READ_ONLY_TARGET_DETAIL,
     ExcludedSourceError,
     ReadOnlySourceError,
+    UPLOAD_DIR,
 )
 from memtomem.web.deps import (
     get_config,
@@ -108,6 +110,13 @@ def _resolve_add_target(base: Path, raw: str) -> Path:
     except ValueError as exc:
         raise ValueError(_ADD_PATH_ERROR) from exc
     return resolved
+
+
+def _web_scope_hint(tier: str) -> str:
+    fields = f"scope={tier!r}"
+    if tier == "project_shared":
+        fields += " and confirm_project_shared=true"
+    return fields
 
 
 def _revalidate_add_target(base: Path, target: Path) -> None:
@@ -217,6 +226,8 @@ async def reindex_all(
             "chunks_missing_vectors": stats.chunks_missing_vectors,
             "namespaces_reassigned": stats.namespaces_reassigned,
             "namespace_moves": list(stats.namespace_moves),
+            "namespaces_restored_from_name": stats.namespaces_restored_from_name,
+            "day_file_names_undecoded": stats.day_file_names_undecoded,
         }
         if stats.blocked_files:
             entry["blocked_paths"] = list(stats.blocked_paths)
@@ -464,6 +475,8 @@ async def trigger_index(
         chunks_missing_vectors=stats.chunks_missing_vectors,
         namespaces_reassigned=stats.namespaces_reassigned,
         namespace_moves=list(stats.namespace_moves),
+        namespaces_restored_from_name=stats.namespaces_restored_from_name,
+        day_file_names_undecoded=stats.day_file_names_undecoded,
     )
 
 
@@ -559,7 +572,7 @@ async def upload_files(
         quarantine_uploads,
     )
 
-    upload_dir = Path("~/.memtomem/uploads").expanduser()
+    upload_dir = UPLOAD_DIR.expanduser()
     # Before ``quarantine_uploads``, not inside it: that context manager calls
     # ``prepare_upload_dir`` (which chmods the directory to 0700) and then
     # creates a ``.quarantine-*`` subdirectory and writes the uploaded bytes
@@ -704,7 +717,7 @@ async def uploads_usage() -> UploadUsageResponse:
     gate so the panel surfaces the empty state on a fresh install before
     the user finishes the config wizard.
     """
-    upload_dir = Path("~/.memtomem/uploads").expanduser()
+    upload_dir = UPLOAD_DIR.expanduser()
     if not upload_dir.is_dir():
         return UploadUsageResponse(file_count=0, total_bytes=0, oldest_mtime=None)
     file_count = 0
@@ -790,8 +803,11 @@ async def add_memory(
     # on project_shared writes fire on the Web path too (ADR-0011 PR-D
     # round 7 parity — same fix as the chunks PATCH path at
     # ``chunks.py:73-86``).
+    from memtomem.tools.memory_writer import entry_guard_text
+
+    # The entry as it is written: the title and tags go into the file too.
     guard = privacy.enforce_write_guard(
-        req.content,
+        entry_guard_text(req.content, req.title, req.tags),
         surface="web_api_add",
         force_unsafe=req.force_unsafe,
         scope=req.scope,
@@ -882,6 +898,19 @@ async def add_memory(
             target = _resolve_add_target(base, req.file)
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=_ADD_PATH_ERROR) from exc
+        # A tier registered inside ``base`` is another tier, with its own
+        # gates; the ones above were run for ``req.scope`` (#2821).
+        from memtomem.memory_scope import explicit_target_tier_refusal
+
+        tier_err = explicit_target_tier_refusal(
+            target,
+            req.scope,
+            memory_dirs=config.indexing.memory_dirs,
+            project_memory_dirs=config.indexing.project_memory_dirs,
+            scope_hint=_web_scope_hint,
+        )
+        if tier_err is not None:
+            raise HTTPException(status_code=422, detail=tier_err)
     else:
         # Issue #2005: one day file per namespace — a shared day file loses one
         # namespace as soon as chunk merging joins two entries. The web surface
@@ -988,36 +1017,59 @@ async def add_memory(
             # and let the valve cover this entry only in a file with nothing
             # flagged or masked in it.
             from memtomem.indexing.engine import PrivacyRejection
-            from memtomem.tools.memory_mutation import appended_valve_text
-            from memtomem.tools.memory_writer import read_pre_image_or_empty
+            from memtomem.indexing.redaction_exemption import indexer_text
+            from memtomem.tools.memory_mutation import (
+                append_warning,
+                appended_valve_text,
+                refuse_changed_append,
+            )
+            from memtomem.tools.memory_writer import SourceChangedError, read_for_append
             from memtomem.web.routes import system as _sys
 
             needs_valve = guard.decision == "bypassed"
-            pre = await _asyncio.to_thread(read_pre_image_or_empty, target)
-            preflight = await _asyncio.to_thread(index_engine.preflight_mutation, target, pre)
+            judged = await _asyncio.to_thread(read_for_append, target)
+            preflight = await _asyncio.to_thread(
+                index_engine.preflight_mutation,
+                target,
+                judged.data,
+                source_path=judged.source_path,
+            )
             if preflight.rejection is not None:
                 rejection = await index_engine.refuse_mutation(target, preflight)
                 search_pipeline.invalidate_cache()
                 raise privacy_index_blocked_http(rejection, "add")
+            if preflight.relinked:
+                await index_engine.hold_relinked_mutation(target, preflight)
             blocker = preflight.blocker("add", target.name, needs_valve=needs_valve)
             if blocker is not None:
                 raise index_blocked_http(blocker)
-            pre_lines = (
-                len(target.read_text(encoding="utf-8", errors="replace").splitlines())
-                if target.exists()
-                else 0
-            )
-            appended = await _asyncio.to_thread(
-                _sys.append_entry, target, req.content, title=req.title, tags=tags
-            )
+            # Counted from the bytes the preflight judged, not a later read that
+            # would follow a link put at the path since (#3289).
+            pre_lines = len(indexer_text(judged.data, errors="replace").splitlines())
+            try:
+                appended = await _asyncio.to_thread(
+                    _sys.append_entry,
+                    target,
+                    req.content,
+                    title=req.title,
+                    tags=tags,
+                    judged=judged,
+                )
+            except SourceChangedError as exc:
+                refusal = await refuse_changed_append(index_engine, target, judged, op="add")
+                search_pipeline.invalidate_cache()
+                raise index_blocked_http(refusal) from exc
             try:
                 stats = await index_engine.index_file(
                     target,
                     namespace=write_ns,
                     ingress_guarded=True,
                     force_unsafe=needs_valve,
-                    valve_text=appended_valve_text(pre, appended) if needs_valve else None,
+                    valve_text=(
+                        appended_valve_text(judged.data, appended.text) if needs_valve else None
+                    ),
                     lock_held=True,
+                    written_source=appended.source,
                 )
             except PrivacyRejection as exc:
                 # The entry is on disk; its result may not be indexed (a title
@@ -1037,25 +1089,55 @@ async def add_memory(
             # Apply tags only to newly appended chunks (so existing entries in
             # the same file are not polluted with the new entry's tags).
             if tags and stats.indexed_chunks > 0:
-                chunks = await storage.list_chunks_by_source(target, limit=None)
-                updated = []
-                for c in chunks:
-                    if c.metadata.start_line is not None and c.metadata.start_line <= pre_lines:
-                        continue
-                    merged = set(c.metadata.tags) | set(tags)
-                    if merged != set(c.metadata.tags):
-                        c.metadata = c.metadata.__class__(
-                            **{
+
+                def untagged(chunks: list) -> list:
+                    """The new entry's chunks still missing a requested tag, with it merged."""
+                    out = []
+                    for c in chunks:
+                        if c.metadata.start_line is not None and c.metadata.start_line <= pre_lines:
+                            continue
+                        merged = set(c.metadata.tags) | set(tags)
+                        if merged != set(c.metadata.tags):
+                            c.metadata = c.metadata.__class__(
                                 **{
-                                    f: getattr(c.metadata, f)
-                                    for f in c.metadata.__dataclass_fields__
-                                },
-                                "tags": tuple(sorted(merged)),
-                            }
-                        )
-                        updated.append(c)
+                                    **{
+                                        f: getattr(c.metadata, f)
+                                        for f in c.metadata.__dataclass_fields__
+                                    },
+                                    "tags": tuple(sorted(merged)),
+                                }
+                            )
+                            out.append(c)
+                    return out
+
+                # The entry carries its tags, so the index usually stored them
+                # already and nothing needs the writer. Otherwise read, merge and
+                # write again in one transaction that waits for another task's
+                # (#3181): ``upsert_chunks`` rewrites whole rows, so rows read
+                # before a wait would overwrite what that task committed to them.
+                updated = untagged(await storage.list_chunks_by_source(target, limit=None))
                 if updated:
-                    await storage.upsert_chunks(updated)
+                    try:
+                        async with storage.transaction(wait=WRITER_WAIT_S):
+                            updated = untagged(
+                                await storage.list_chunks_by_source(target, limit=None)
+                            )
+                            if updated:
+                                await storage.upsert_chunks(updated)
+                    except TransactionOwnedError as exc:
+                        # The add is durable and indexed; only its tags are
+                        # missing. Adding it again would append a second copy
+                        # (#2731).
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                f"The entry was added to {target.name} and indexed, but its "
+                                "tags were not applied: another write held the database longer "
+                                "than this request waits. Edit the new entry's tags instead of "
+                                "adding it again."
+                            ),
+                        ) from exc
+                if updated:
                     # Written outside the engine, so it carries no ``mutated``
                     # flag of its own — and it rewrites exactly the tag column
                     # search filters on (#2141).
@@ -1065,4 +1147,9 @@ async def add_memory(
             status_code=503, detail="Memory file is locked by another writer; try again."
         ) from exc
 
-    return AddMemoryResponse(file=str(target), indexed_chunks=stats.indexed_chunks)
+    return AddMemoryResponse(
+        file=str(target),
+        indexed_chunks=stats.indexed_chunks,
+        # Excluded, or replaced by a link, while the entry was appended.
+        warning=append_warning(stats, judged),
+    )

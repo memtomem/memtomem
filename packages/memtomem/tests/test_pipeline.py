@@ -120,18 +120,20 @@ class TestPipelineQueryExpansion:
         from memtomem.search.expansion import expand_query_tags
 
         class FakeStorage:
-            async def get_tag_counts(self, *, project_context_root=None):
+            async def get_tag_counts(self, *, project_context_root=None, **filters):
                 return [("deployment", 10), ("kubernetes", 5), ("docker", 3)]
 
         result = await expand_query_tags("deploy containers", FakeStorage())
-        assert "deployment" in result or result == "deploy containers"
+        # A fake that rejected a keyword would raise inside the helper, which then
+        # returns the plain query; only the appended tag proves expansion ran.
+        assert result == "deploy containers deployment"
 
     @pytest.mark.asyncio
     async def test_tag_expansion_no_match(self):
         from memtomem.search.expansion import expand_query_tags
 
         class FakeStorage:
-            async def get_tag_counts(self, *, project_context_root=None):
+            async def get_tag_counts(self, *, project_context_root=None, **filters):
                 return [("python", 5)]
 
         result = await expand_query_tags("javascript frameworks", FakeStorage())
@@ -142,7 +144,7 @@ class TestPipelineQueryExpansion:
         from memtomem.search.expansion import expand_query_tags
 
         class BrokenStorage:
-            async def get_tag_counts(self, *, project_context_root=None):
+            async def get_tag_counts(self, *, project_context_root=None, **filters):
                 raise RuntimeError("DB error")
 
         result = await expand_query_tags("test", BrokenStorage())
@@ -469,15 +471,18 @@ class TestRerankCandidatePool:
             (40, 1.5, 20, 200, 60),  # 1.5× at mid-size
             (10, 2.0, 1, 200, 20),  # min_pool=1 → 2×10 wins
             (10, 2.0, 50, 200, 50),  # elevated floor wins
+            (250, 2.0, 20, 200, 250),  # request above max_pool → pool = top_k
+            (500, 2.0, 20, 200, 500),  # request above max_pool → pool = top_k
+            (100, 0.5, 20, 200, 100),  # oversample < 1 never shrinks below top_k
         ],
     )
     async def test_pool_size_scaling_table(
         self, top_k, oversample, min_pool, max_pool, expected_pool
     ):
-        """Pool formula: ``max(min_pool, min(max_pool, int(oversample*top_k)))``."""
+        """Pool formula: ``max(top_k, min_pool, min(max_pool, int(oversample*top_k)))``."""
         from memtomem.config import RerankConfig
 
-        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(250)]
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(600)]
         received: list[int] = []
         pipeline = self._make_pipeline(
             fused_input,
@@ -586,9 +591,11 @@ class TestRerankCandidatePool:
             RerankConfig(enabled=True, oversample=0.0)
 
     @pytest.mark.asyncio
-    async def test_rerank_failure_falls_back_to_top_k_not_rerank_pool(self):
+    @pytest.mark.parametrize("top_k", [10, 250])
+    async def test_rerank_failure_falls_back_to_top_k_not_rerank_pool(self, top_k):
         """If the reranker raises, the caller must still get ``top_k`` items —
-        not the wider ``rerank_pool`` that fusion produced upstream.
+        not the wider ``rerank_pool`` that fusion produced upstream, and not
+        fewer when ``top_k`` exceeds ``max_pool``.
 
         Regression guard: PR #308 widened fusion to rerank_pool but the
         ``except`` branch left ``fused`` at that wider size, leaking pool
@@ -596,10 +603,13 @@ class TestRerankCandidatePool:
         """
         from memtomem.config import RerankConfig
 
-        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(300)]
+
+        calls: list[int] = []
 
         class BrokenReranker:
             async def rerank(self, query, results, top_k):
+                calls.append(len(results))
                 raise RuntimeError("model unavailable")
 
         pipeline = self._make_pipeline(
@@ -608,11 +618,13 @@ class TestRerankCandidatePool:
             rerank_config=RerankConfig(enabled=True),
         )
 
-        results, _ = await pipeline.search("anything", top_k=10)
-        assert len(results) == 10
+        results, _ = await pipeline.search("anything", top_k=top_k)
+        assert calls, "the reranker must actually have been invoked"
+        assert len(results) == top_k
 
     @pytest.mark.asyncio
-    async def test_rerank_timeout_falls_back_to_top_k(self):
+    @pytest.mark.parametrize("top_k", [10, 250])
+    async def test_rerank_timeout_falls_back_to_top_k(self, top_k):
         """A hung reranker (wedged ONNX session, stuck connection) must not
         hang the whole search: rerank_cfg.timeout_s is the only wall-clock
         bound on that await, and on expiry the caller still gets top_k in
@@ -621,7 +633,7 @@ class TestRerankCandidatePool:
 
         from memtomem.config import RerankConfig
 
-        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(300)]
         started = asyncio.Event()
 
         class HungReranker:
@@ -635,9 +647,9 @@ class TestRerankCandidatePool:
             rerank_config=RerankConfig(enabled=True, timeout_s=0.05),
         )
 
-        results, _ = await pipeline.search("anything", top_k=10)
+        results, _ = await pipeline.search("anything", top_k=top_k)
         assert started.is_set(), "the reranker must actually have been invoked"
-        assert len(results) == 10
+        assert len(results) == top_k
 
     def test_rerank_timeout_must_be_positive(self):
         from memtomem.config import RerankConfig
@@ -657,6 +669,56 @@ class TestRerankCandidatePool:
         assert FIELD_CONSTRAINTS["rerank.min_pool"]["type"] is int
         assert FIELD_CONSTRAINTS["rerank.max_pool"]["type"] is int
         assert FIELD_CONSTRAINTS["rerank.enabled"]["type"] is bool
+
+
+class TestRerankedResponseNotCappedByPool:
+    """A reranked search returns as many results as an unreranked one.
+
+    Real pipeline over a real BM25-only store: with a pool sized at
+    ``min(max_pool, …)`` a request above ``rerank.max_pool`` came back at
+    ``max_pool`` results (200/200/200 for 200/250/500), with nothing saying so.
+    """
+
+    MATCHES = 300
+
+    @pytest.mark.asyncio
+    async def test_reranked_count_matches_unreranked_above_max_pool(self, bm25_only_components):
+        from memtomem.config import RerankConfig
+
+        comp, mem_dir = bm25_only_components
+        await comp.storage.upsert_chunks(
+            [
+                Chunk(
+                    content=f"zephyrine ledger entry number {i}",
+                    metadata=ChunkMetadata(source_file=mem_dir / f"note{i}.md"),
+                    embedding=[0.0] * 1024,
+                )
+                for i in range(self.MATCHES)
+            ]
+        )
+
+        received: list[int] = []
+
+        class IdentityReranker:
+            async def rerank(self, query, results, top_k):
+                received.append(len(results))
+                return results[:top_k]
+
+        pipeline = comp.search_pipeline
+        pipeline._reranker = IdentityReranker()
+        pipeline._rerank_config = RerankConfig(enabled=True)
+        assert pipeline._rerank_config.max_pool == 200
+
+        for top_k, expected in ((200, 200), (250, 250), (500, self.MATCHES)):
+            received.clear()
+            reranked, stats = await pipeline.search("zephyrine", top_k=top_k, record=False)
+            assert stats.rerank_applied is True
+            # The reranker ran, and on a pool no smaller than the request
+            # (bounded by the matches that exist).
+            assert received == [min(top_k, self.MATCHES)]
+            plain, _ = await pipeline.search("zephyrine", top_k=top_k, rerank=False, record=False)
+            assert len(reranked) == expected
+            assert len(reranked) == len(plain)
 
 
 class TestPerCallRerankBypass:
@@ -1887,6 +1949,116 @@ class TestPipelineEntityBoost:
 
         _, kwargs = pipeline._storage.get_matching_entities.call_args
         assert kwargs["min_confidence"] == pytest.approx(0.6)
+
+
+class TestMmrAfterBoosts:
+    """MMR is the last ranking stage: no boost re-sorts its diversified order.
+
+    Fixture: A=1.0, B=0.9, C=0.8 from a dense-only search (fixture scores reach
+    the ranking stages unfused), A and B near-duplicates (identical vectors), C
+    orthogonal, lambda 0.7. MMR keeps A, then prefers C (0.7*0.8 = 0.56) over B
+    (0.7*0.9 - 0.3*1.0 = 0.33): ``[A, C, B]``. A boost that ran after MMR sorted
+    by score again and returned ``[A, B, C]``.
+    """
+
+    _make_result = staticmethod(TestRerankCandidatePool._make_result)
+
+    def _make_pipeline(
+        self,
+        *,
+        access_config=None,
+        importance_config=None,
+        entity_boost_config=None,
+    ):
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import MMRConfig, SearchConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        a = self._make_result("a", rank=1, score=1.0)
+        b = self._make_result("b", rank=2, score=0.9)
+        c = self._make_result("c", rank=3, score=0.8)
+        self.ids = {"a": a.chunk.id, "b": b.chunk.id, "c": c.chunk.id}
+
+        storage = AsyncMock()
+        storage.bm25_search = AsyncMock(return_value=[])
+        storage.dense_search = AsyncMock(return_value=[a, b, c])
+        storage.increment_access = AsyncMock()
+        storage.save_query_history = AsyncMock()
+        storage.get_access_counts = AsyncMock(return_value={})
+        storage.get_importance_scores = AsyncMock(return_value={})
+        storage.get_matching_entities = AsyncMock(return_value={})
+        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+        storage.get_embeddings_for_chunks = AsyncMock(
+            return_value={
+                str(a.chunk.id): [1.0, 0.0],
+                str(b.chunk.id): [1.0, 0.0],
+                str(c.chunk.id): [0.0, 1.0],
+            }
+        )
+
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(return_value=[1.0, 0.0])
+
+        return SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=False, enable_dense=True),
+            mmr_config=MMRConfig(enabled=True, lambda_param=0.7),
+            access_config=access_config,
+            importance_config=importance_config,
+            entity_boost_config=entity_boost_config,
+        )
+
+    def _order(self, results):
+        names = {cid: name for name, cid in self.ids.items()}
+        return [names[r.chunk.id] for r in results]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("boost", ["access", "importance", "entity"])
+    async def test_uniform_boost_keeps_mmr_order(self, boost):
+        from memtomem.config import AccessConfig, EntityBoostConfig, ImportanceConfig
+
+        if boost == "access":
+            pipeline = self._make_pipeline(access_config=AccessConfig(enabled=True))
+            getter = pipeline._storage.get_access_counts
+            expected_top = 1.0
+        elif boost == "importance":
+            pipeline = self._make_pipeline(importance_config=ImportanceConfig(enabled=True))
+            getter = pipeline._storage.get_importance_scores
+            expected_top = 1.0
+        else:
+            pipeline = self._make_pipeline(entity_boost_config=EntityBoostConfig(enabled=True))
+            # Every chunk carries the query's one entity: a uniform 1.5x factor.
+            pipeline._storage.get_matching_entities.return_value = {
+                str(cid): {("technology", "sqlite")} for cid in self.ids.values()
+            }
+            getter = pipeline._storage.get_matching_entities
+            expected_top = 1.5
+
+        results, _ = await pipeline.search("sqlite migration", top_k=3)
+
+        getter.assert_awaited()
+        assert self._order(results) == ["a", "c", "b"]
+        # The boost stage ran: its factor is in the returned score.
+        assert results[0].score == pytest.approx(expected_top)
+
+    @pytest.mark.asyncio
+    async def test_mmr_diversifies_over_boosted_scores(self):
+        """B's 1.5x importance boost makes it the most relevant (1.35), so MMR
+        starts from B. A is B's duplicate (0.7*(1.0/1.35) - 0.3 = 0.22) and loses
+        to C (0.7*(0.8/1.35) = 0.41): ``[B, C, A]``. Diversifying before the
+        boost picked ``[A, C, B]``, which the boost re-sorted to ``[B, A, C]``.
+        """
+        from memtomem.config import ImportanceConfig
+
+        pipeline = self._make_pipeline(importance_config=ImportanceConfig(enabled=True))
+        pipeline._storage.get_importance_scores.return_value = {str(self.ids["b"]): 1.0}
+
+        results, _ = await pipeline.search("sqlite migration", top_k=3)
+
+        assert self._order(results) == ["b", "c", "a"]
+        assert results[0].score == pytest.approx(1.35)
 
 
 def _pipeline_chunk(content: str, source: str, tags: tuple[str, ...] = ()) -> Chunk:

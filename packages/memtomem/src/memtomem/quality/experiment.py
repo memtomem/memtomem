@@ -236,8 +236,8 @@ async def _replay_profile(
 
     candidate_config = apply_profile(components.config, doc)
     # Defense in depth: the profile schema forbids the tokenizer (it is pinned by
-    # the FTS index), but assert it so a future schema gap cannot leak the global
-    # ``set_tokenizer`` side effect into later replays via ``create_components``.
+    # the FTS index), but assert it so a future schema gap cannot replay the
+    # store's index with queries tokenized another way.
     # A wrong storage path is not guarded here — it is caught by the
     # corpus/index fingerprint drift check in ``assemble_experiment`` — and the
     # config-override path stores sqlite_path as a raw str, so a Path/str compare

@@ -50,10 +50,7 @@ _METADATA_ONLY: dict[tuple[str, str], str] = {
         "search/dedup.py",
         "DedupScanner.merge",
     ): "Unions tags onto the kept chunk; losers are deleted.",
-    ("server/tools/importers.py", "mem_import_notion"): (
-        "Tag pass after index_file already indexed the written files."
-    ),
-    ("server/tools/importers.py", "mem_import_obsidian"): (
+    ("server/tools/importers.py", "_index_imported"): (
         "Tag pass after index_file already indexed the written files."
     ),
     ("server/tools/url_index.py", "mem_fetch"): "Tag pass after index_file.",

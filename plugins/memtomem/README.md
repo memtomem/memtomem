@@ -27,8 +27,8 @@ Model artifacts are fetched only when the configured workflow needs them.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```sh
-uvx --from 'memtomem[onnx]==0.7.3' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.7.3' mm status
+uvx --from 'memtomem[onnx]==0.7.11' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem[onnx]==0.7.11' mm status
 ```
 
 `--mcp skip` keeps the bootstrap from adding a second MCP registration because
@@ -53,7 +53,7 @@ the gitignored local tier explicitly:
 
 ```sh
 cd /path/to/project
-uvx --from 'memtomem[onnx]==0.7.3' mm mem init --scope project_local
+uvx --from 'memtomem[onnx]==0.7.11' mm mem init --scope project_local
 ```
 
 The plugin does not self-authorize these trust steps. After initialization,
@@ -66,7 +66,8 @@ capture a conversation or coordinate concurrent workers.
 
 ## Docs
 
-- [Korean Claude Code/Codex vibe-coding quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md)
+- [Claude Code & Codex CLI plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md)
+  ([한국어](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md))
   — initialize one store, install one plugin, and verify a memory round trip
 - [Codex integration guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/codex.md)
   — complete skill reference and advanced MCP settings

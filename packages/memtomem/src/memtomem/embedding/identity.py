@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from memtomem.embedding.aliases import resolve_embedder_id
+
+logger = logging.getLogger(__name__)
 
 
 def _is_onnx(provider: str | None) -> bool:
@@ -63,3 +67,53 @@ def embedding_identity_label(provider: str | None, model: str | None) -> str:
     """Display an unknown field explicitly, preserving ``none``'s empty model."""
     model_label = model or ("" if (provider or "").lower() == "none" else "unknown")
     return f"{provider or 'unknown'}/{model_label}"
+
+
+async def embedding_reset_counts(storage: object) -> tuple[int | None, int | None]:
+    """``(chunks, vectors)`` for the reset-cost wording; ``None`` where unreadable.
+
+    The vector count comes from ``read_embedding_stamp_fresh``, which reads the
+    file, not from ``get_vector_count``: that one answers from a table flag set
+    when this backend opened, so in a long-running server it misses a
+    ``chunks_vec`` another process created and filled since (#2423 review).
+    A storage without the fresh read reports the vector count as unknown.
+
+    A failed count is reported as unknown rather than raised: the counts only
+    shape the text around a reset, never whether it runs.
+    """
+    chunks: int | None = None
+    vectors: int | None = None
+    try:
+        chunks = int((await storage.get_stats())["total_chunks"])  # type: ignore[attr-defined]
+    except Exception:
+        logger.debug("chunk count for the reset wording failed", exc_info=True)
+    if hasattr(storage, "read_embedding_stamp_fresh"):
+        try:
+            vectors = int((await storage.read_embedding_stamp_fresh())["vectors"])
+        except Exception:
+            logger.debug("vector count for the reset wording failed", exc_info=True)
+    return chunks, vectors
+
+
+def store_has_nothing_to_reset(chunks: int | None, vectors: int | None) -> bool:
+    """Whether an embedding reset of this store would delete nothing.
+
+    Both counts must be known and zero. ``vectors`` is the raw ``chunks_vec``
+    row count, which can be non-zero with no chunks (orphan vectors), so the
+    two are checked separately. An unknown count is not treated as empty.
+    """
+    return chunks == 0 and vectors == 0
+
+
+def embedding_reset_cost(chunks: int, vectors: int | None) -> str:
+    """One sentence saying what ``apply-current`` drops and what it leaves to re-index.
+
+    ``vectors`` is the raw ``chunks_vec`` row count (``None`` when it could not
+    be read): what ``reset_embedding_meta`` drops, orphans included (#2424).
+    """
+    dropped = "all vector rows" if vectors is None else f"{vectors} vector row(s)"
+    if chunks == 0:
+        reindex = "no chunks to re-index."
+    else:
+        reindex = f"{chunks} chunk(s) stay but need `mm index --force <path>` to re-embed."
+    return f"Reset drops {dropped}; {reindex}"

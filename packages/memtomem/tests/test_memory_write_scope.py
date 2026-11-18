@@ -225,10 +225,11 @@ async def test_mem_edit_inferred_user_scope_force_unsafe_proceeds(
     bm25_only_components, monkeypatch, tmp_path
 ):
     """A user-scope chunk's edit surface still allows force_unsafe (no regression)."""
-    comp, _mem_dir = bm25_only_components
+    comp, mem_dir = bm25_only_components
     app = AppContext.from_components(comp)
     ctx = StubCtx(app)
-    src = tmp_path / "u.md"
+    # Under the memory directory: an edit by id is refused anywhere else.
+    src = mem_dir / "u.md"
     src.write_text("## hi\n\noriginal\n")
     chunk_id = uuid4()
     fake_chunk = Chunk(

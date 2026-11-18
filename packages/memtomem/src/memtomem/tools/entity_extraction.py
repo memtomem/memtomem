@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from memtomem.errors import LLMError
+
 if TYPE_CHECKING:
     from memtomem.llm.base import LLMProvider
 
@@ -126,16 +128,33 @@ _KNOWN_TECH = {
 
 # ── Regex patterns ────────────────────────────────────────────────────
 
+# Hangul (Jamo, compatibility Jamo, syllables), kana (incl. phonetic extensions
+# and halfwidth katakana) and Han (Ext A, unified, compatibility).
+_CJK_RANGES = (
+    "\u1100-\u11ff\u3040-\u30ff\u3130-\u318f\u31f0-\u31ff"
+    "\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff66-\uff9f"
+)
+# A word character that ends an entity's word: Unicode ``\w`` minus Hangul, kana
+# and Han. Those scripts attach particles and words to a Latin term or a date
+# with no space ("@alice에게", "2026-11-10에", "OpenSearch를"), so plain ``\w`` /
+# ``\b`` cut the entity wrong or lose it. Accented letters and non-ASCII digits
+# stay word characters ("OpenSearché" is not "OpenSearch"). The patterns below and
+# the query-side technology re-check in ``search/entity_boost.py`` both use this
+# class, so they end a word at the same places. ``_extract_technologies``'s
+# known-tech scan does not: it is a plain substring search.
+_NON_CJK_WORD_CHAR = rf"[^\W{_CJK_RANGES}]"
+_B = _NON_CJK_WORD_CHAR
+
 _PERSON_CONTEXT_RE = re.compile(
     r"(?:(?:by|from|cc|to|with|author|assigned|reviewer)\s*[:\s]+)"
     r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})",
     re.MULTILINE,
 )
-_MENTION_RE = re.compile(r"@([a-zA-Z]\w{2,})")
+_MENTION_RE = re.compile(rf"@([a-zA-Z]{_B}{{2,}})")
 
-_ISO_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_ISO_DATE_RE = re.compile(rf"(?<!{_B})(\d{{4}}-\d{{2}}-\d{{2}})(?!{_B})")
 _NATURAL_DATE_RE = re.compile(
-    rf"\b((?:{_MONTHS_PATTERN})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?)(?:\b|$)",
+    rf"(?<!{_B})((?:{_MONTHS_PATTERN})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?)(?!{_B})",
     re.IGNORECASE,
 )
 
@@ -153,7 +172,7 @@ _ACTION_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
-_PASCAL_CASE_RE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
+_PASCAL_CASE_RE = re.compile(rf"(?<!{_B})([A-Z][a-z]+(?:[A-Z][a-z]+)+)(?!{_B})")
 
 _QUOTED_TERM_RE = re.compile(r'"([^"]{3,50})"')
 
@@ -351,8 +370,16 @@ async def extract_entities_llm(
         entity_types: Restrict to these entity types (default: all).
 
     Returns:
-        List of :class:`ExtractedEntity` parsed from the LLM response.
+        List of :class:`ExtractedEntity` parsed from the LLM response. Empty
+        when the model answers ``NONE``, the prompt's answer for "no entities".
+
+    Raises:
+        LLMError: The answer was empty. The prompt asks for ``NONE`` when there
+            is nothing to extract, so an empty answer is the model failing to
+            answer.
     """
+    from memtomem.llm.utils import strip_llm_response
+
     type_hint = ""
     if entity_types:
         type_hint = f"\nOnly extract these types: {', '.join(entity_types)}\n"
@@ -360,6 +387,8 @@ async def extract_entities_llm(
     prompt = f"Extract entities from the following text.{type_hint}\n---\n{text[:3000]}\n---"
 
     raw = await llm_provider.generate(prompt, system=_ENTITY_SYSTEM_PROMPT, max_tokens=256)
+    if not strip_llm_response(raw):
+        raise LLMError("LLM returned an empty answer to the entity extraction prompt")
     types_set = set(entity_types) if entity_types else None
     return _parse_entity_response(raw, types_set)
 
@@ -372,7 +401,8 @@ async def extract_entities_with_llm(
     """Extract entities, preferring LLM when available.
 
     Falls back to the regex heuristic when *llm_provider* is ``None`` or
-    when the LLM call fails.
+    when the LLM call fails. An empty LLM answer is a failure
+    (``extract_entities_llm`` raises on it); ``NONE`` is not.
     """
     if llm_provider is not None:
         try:

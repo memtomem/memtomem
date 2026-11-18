@@ -119,6 +119,21 @@ class TestWriteAcks:
         assert result.exit_code == 0
         assert json.loads(result.output) == {"ok": True, "case_id": "abc", "status": "archived"}
 
+    def test_unknown_case_reports_the_input_not_the_database(self, monkeypatch):
+        from memtomem.errors import EvalCaseNotFoundError
+
+        comp = SimpleNamespace(
+            storage=SimpleNamespace(
+                set_eval_case_status=AsyncMock(
+                    side_effect=EvalCaseNotFoundError("eval case 'nope' not found")
+                )
+            )
+        )
+        _patch_components(monkeypatch, comp)
+        result = CliRunner().invoke(quality, ["status", "nope", "archived"])
+        assert result.exit_code == 1
+        assert result.output.strip().splitlines() == ["Error: eval case 'nope' not found"]
+
     def test_promote_ack(self, monkeypatch):
         monkeypatch.setattr(
             "memtomem.quality.state.current_fingerprints",

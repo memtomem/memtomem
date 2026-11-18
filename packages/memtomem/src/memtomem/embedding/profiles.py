@@ -76,8 +76,13 @@ def _verify_file(path: Path, mtime: int, size: int, expected: str) -> None:
             raise ValueError("Pinned E5 artifact checksum mismatch")
 
 
+def is_tokenizer_identifier(value: str) -> bool:
+    """Whether :func:`resolve_tokenizer` reads ``value`` as a model id, not a path."""
+    return value == E5_TOKENIZER
+
+
 def resolve_tokenizer(path: str) -> Path:
-    if path != E5_TOKENIZER:
+    if not is_tokenizer_identifier(path):
         return Path(path).expanduser().resolve()
     try:
         from huggingface_hub import hf_hub_download
@@ -89,14 +94,17 @@ def resolve_tokenizer(path: str) -> Path:
         raise missing_onnx_dependency(exc.name) from exc
 
     from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+    from memtomem.embedding.hub_locks import prepare_hub_locks
 
+    cache_dir = resolve_fastembed_cache_dir()
+    prepare_hub_locks(cache_dir)
     with hub_telemetry_off():
         resolved = Path(
             hf_hub_download(
                 E5_MODEL,
                 "tokenizer.json",
                 revision=E5_REVISION,
-                cache_dir=str(resolve_fastembed_cache_dir()),
+                cache_dir=str(cache_dir),
             )
         )
     stat = resolved.stat()
@@ -115,13 +123,16 @@ def e5_snapshot() -> Path:
         raise missing_onnx_dependency(exc.name) from exc
 
     from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+    from memtomem.embedding.hub_locks import prepare_hub_locks
 
+    cache_dir = resolve_fastembed_cache_dir()
+    prepare_hub_locks(cache_dir)
     with hub_telemetry_off():
         snapshot = Path(
             snapshot_download(
                 E5_MODEL,
                 revision=E5_REVISION,
-                cache_dir=str(resolve_fastembed_cache_dir()),
+                cache_dir=str(cache_dir),
                 allow_patterns=[
                     "onnx/model.onnx",
                     "config.json",
@@ -150,13 +161,16 @@ def minilm_snapshot() -> Path:
         raise missing_onnx_dependency(exc.name) from exc
 
     from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
+    from memtomem.embedding.hub_locks import prepare_hub_locks
 
+    cache_dir = resolve_fastembed_cache_dir()
+    prepare_hub_locks(cache_dir)
     with hub_telemetry_off():
         return Path(
             snapshot_download(
                 MINILM_REPO,
                 revision=MINILM_REVISION,
-                cache_dir=str(resolve_fastembed_cache_dir()),
+                cache_dir=str(cache_dir),
                 allow_patterns=[
                     "model.onnx",
                     "config.json",

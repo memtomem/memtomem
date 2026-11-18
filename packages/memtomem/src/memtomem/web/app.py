@@ -13,7 +13,6 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Literal, TypeGuard, get_args
 
 from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -197,7 +196,7 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     # consumer asks for it.
     app = FastAPI(
         title="memtomem Web UI",
-        description="Web UI for memtomem memory infrastructure",
+        description="Web UI for memtomem, long-term memory for AI coding agents",
         version=__version__,
         lifespan=lifespan,
         docs_url=None,
@@ -281,6 +280,50 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
         msg = re.sub(r"(?:[A-Za-z]:)?(?:[/\\][\w.\-]+){2,}", "<path>", str(exc))
         return JSONResponse(status_code=400, content={"detail": msg})
 
+    # A project runtime path that is a link inside the project (GHSA-ffh4
+    # follow-up): an operational conflict the user resolves by replacing the
+    # link. More specific than ``ValueError`` (its base), so this handler is
+    # the one Starlette picks. The message carries only the project-relative
+    # entry, never where the link points.
+    from memtomem.memory_scope import ProjectEntryRelinked
+
+    @app.exception_handler(ProjectEntryRelinked)
+    async def project_entry_relinked_handler(
+        request: Request, exc: ProjectEntryRelinked
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": str(exc),
+                "entry": exc.entry,
+                "reason_code": "project_entry_relinked",
+            },
+        )
+
+    # A storage-level write-guard refusal (#3352): the same 403 payload the
+    # in-route guards return, so the SPA's ``api()`` raises its
+    # ``RedactionBlockedError``. Without this handler the ``ValueError`` one
+    # above would still refuse, as a 400 the SPA cannot tell apart.
+    from memtomem.errors import RedactionBlockedError
+
+    @app.exception_handler(RedactionBlockedError)
+    async def redaction_blocked_handler(
+        request: Request, exc: RedactionBlockedError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": {
+                    "detail": "redaction_blocked",
+                    "hits": exc.hits,
+                    "surface": exc.surface,
+                    # Picks the wording only: true means every hit was a
+                    # label rule, not that the text holds no credential.
+                    "label_only": exc.label_only,
+                }
+            },
+        )
+
     # An unusable-but-loadable configuration (e.g. empty
     # ``indexing.memory_dirs``, #1768) is an operational conflict, not an
     # internal defect — surface the field-naming message with 409, matching
@@ -314,13 +357,10 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
             return JSONResponse(status_code=500, content={"detail": exc.public_message})
         return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Accept", "X-Memtomem-CSRF"],
-    )
-
+    # No CORS middleware: the SPA is served by this app, so every request it
+    # makes is same-origin, and no other origin is given a readable response
+    # or an answered preflight.
+    #
     # CSRF / Origin / Host guard (RFC #787).
     #
     # Order with SecurityHeaders matters: ``add_middleware`` stacks last-added

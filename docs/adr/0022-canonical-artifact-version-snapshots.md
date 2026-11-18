@@ -1,6 +1,6 @@
 # ADR-0022: Canonical artifact version snapshots + label pointers
 
-**Status:** Proposed (deferred pending trigger — skills versioning)
+**Status:** Proposed (deferred pending trigger — skills versioning; amended 2026-11-13: the MCP version and promote tools are retired; the CLI and web keep the operations, ADR-0044)
 **Date:** 2026-06-03
 **Context:** A design review asked whether memtomem could manage canonical
 context artifacts (`agents`, `commands`, `skills`) the way **Langfuse manages

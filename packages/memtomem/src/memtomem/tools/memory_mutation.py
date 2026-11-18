@@ -19,23 +19,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from memtomem.context import _atomic
 from memtomem.context._atomic import async_memory_file_lock
+from memtomem.errors import StorageError
 from memtomem.search.visibility import chunk_in_scope_boundary
+from memtomem.storage.sqlite_errors import is_writer_busy
+from memtomem.storage.sqlite_helpers import fold_path_form
 from memtomem.source_provenance import (
+    EXCLUDED_AFTER_APPEND_NOTICE,
     ExcludedSourceError,
     ReadOnlySourceError,
     SourceMissingError,
     StaleSourceProvenanceError,
+    UnmanagedSourceError,
+    relinked_after_write_notice,
 )
 from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceChangedError,
+    WrittenSource,
     read_pre_image,
+    read_with_source_key,
     restore_pre_image_quietly,
 )
 
@@ -46,8 +53,8 @@ if TYPE_CHECKING:
     from pathlib import Path
     from uuid import UUID
 
-    from memtomem.models import Chunk, IndexingStats
-    from memtomem.tools.memory_writer import PreImage
+    from memtomem.models import Chunk, ChunkMetadata, IndexingStats
+    from memtomem.tools.memory_writer import JudgedSource, PreImage
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +71,8 @@ async def locked_source_chunk(
     """Yield ``(chunk, None, cross_process_held)`` with the chunk's source-file
     sidecar (L2) held and the chunk re-fetched fresh under it, or
     ``(None, reason, cross_process_held)`` where ``reason`` is one of
-    ``"not_found"`` / ``"moved"`` / ``"locked"``.
+    ``"not_found"`` / ``"moved"`` / ``"locked"`` / ``"read_only"`` /
+    ``"unmanaged"`` / ``"writer_busy"``.
 
     Two-step acquire (issue #1587): fetch once *unlocked* to learn the
     ``source_file`` (the lock key), acquire that file's sidecar, then re-fetch
@@ -73,8 +81,16 @@ async def locked_source_chunk(
     re-keys onto a moved file and holds the L1 lock too), a file moved by
     ``memory-migrate`` between the two fetches is reported as ``"moved"`` for the
     caller to retry — web/CLI callers re-issue the request rather than looping.
-    ``"locked"`` means the sidecar acquire timed out. Exactly one ``yield`` runs
-    on every path.
+    ``"locked"`` means the sidecar acquire timed out. ``"writer_busy"`` means the
+    re-fetch, which reads the store's writer, waited ``WRITER_WAIT_S`` for another
+    task in this process to finish its transaction and gave up; nothing was read
+    or changed. The read takes no SQLite lock, so another process's writer does
+    not hold it up. Exactly one ``yield`` runs on every path.
+
+    The re-fetch reads the writer rather than a pool connection: its ``scope``
+    decides the caller's Gate-B check and its line range what the caller cuts
+    from the file, and a pool connection can serve a snapshot from before a
+    commit made while the lock was awaited (#3202).
 
     The span is ``async_memory_file_lock``, not a bare sidecar acquire: this
     helper is reached for a *delete* as well as an edit, and a chunk can
@@ -121,6 +137,12 @@ async def locked_source_chunk(
     if index_guard is not None and index_guard.is_read_only_source(resolved):
         yield None, "read_only", False
         return
+    # Same place for the same reason: a source outside every memory directory
+    # gets no sidecar beside it. ``"unmanaged"`` is a refusal of its own so a
+    # caller can say which of the two it was.
+    if index_guard is not None and not index_guard.is_managed_source(resolved, chunk.metadata):
+        yield None, "unmanaged", False
+        return
     # ``acquired`` distinguishes a timeout from the sidecar *acquire* (→ report
     # "locked") from a ``TimeoutError`` raised by the caller's own body after we
     # yielded — that must propagate, not be masked as a lock timeout or trigger
@@ -129,7 +151,13 @@ async def locked_source_chunk(
     try:
         async with async_memory_file_lock(resolved, timeout=budget) as cross_process_held:
             acquired = True
-            fresh = await storage.get_chunk(chunk_id, exclude_withheld=True)
+            try:
+                fresh = await storage.get_chunk(chunk_id, exclude_withheld=True, read_writer=True)
+            except StorageError as exc:
+                if not is_writer_busy(exc):
+                    raise
+                yield None, "writer_busy", cross_process_held
+                return
             if fresh is None or not chunk_in_scope_boundary(fresh.metadata, project_context_root):
                 yield None, "not_found", cross_process_held
                 return
@@ -151,6 +179,7 @@ async def mutate_source_and_reindex(
     mutate: Callable[[PreImage], Rewrite | None],
     *,
     force_unsafe: bool = False,
+    stored: ChunkMetadata | None = None,
 ) -> IndexingStats:
     """Backup-read → ``mutate`` (in a worker thread) → incremental re-index with
     ``lock_held=True``, restoring the pre-image and re-raising on failure.
@@ -185,6 +214,9 @@ async def mutate_source_and_reindex(
     a read-only index root raises :class:`ReadOnlySourceError` in the same
     place and for the same reason — refusing before the read is what keeps a
     write off a file another tool owns, whatever the stored per-chunk flag says.
+    A source outside every memory directory raises :class:`UnmanagedSourceError`
+    there too; ``stored`` is the metadata of the chunk ``source_file`` came
+    from, for :meth:`~memtomem.indexing.engine.IndexEngine.is_managed_source`.
     Before ``mutate`` runs, the engine judges the file as it stands, as in the
     MCP twin: content that may not be indexed is recorded, held, and raised as
     :class:`~memtomem.indexing.engine.PrivacyRejection` with
@@ -201,6 +233,8 @@ async def mutate_source_and_reindex(
         raise ExcludedSourceError(str(source_file))
     if index_engine.is_read_only_source(source_file):
         raise ReadOnlySourceError(str(source_file))
+    if not index_engine.is_managed_source(source_file, stored):
+        raise UnmanagedSourceError(str(source_file))
     from memtomem.indexing.engine import MutationBlockedError, PrivacyRejection
 
     # ``source_file`` is the chunk's stored key. Re-indexing must not store its
@@ -212,17 +246,21 @@ async def mutate_source_and_reindex(
     if refusal is not None:
         raise MutationBlockedError(refusal)
     try:
-        pre_image = await asyncio.to_thread(read_pre_image, source_file)
+        pre_image, source_path = await asyncio.to_thread(
+            read_with_source_key, read_pre_image, source_file
+        )
     except FileNotFoundError as exc:
         # Nothing read, nothing written (#2833).
         raise SourceMissingError(str(source_file)) from exc
     preflight = await asyncio.to_thread(
-        index_engine.preflight_mutation, source_file, pre_image.data
+        index_engine.preflight_mutation, source_file, pre_image.data, source_path=source_path
     )
     if preflight.rejection is not None:
         rejection = await index_engine.refuse_mutation(source_file, preflight)
         rejection.mutation_outcome = "not_written"
         raise rejection
+    if preflight.relinked:
+        await index_engine.hold_relinked_mutation(source_file, preflight)
     blocker = preflight.blocker("edit", source_file.name, needs_valve=force_unsafe)
     if blocker is not None:
         raise MutationBlockedError(blocker)
@@ -233,12 +271,20 @@ async def mutate_source_and_reindex(
         # The valve covers this edit only: bound to the judged file plus the
         # edit, and not forwarded when the rewrite read something else.
         valve_text = rewrite_valve_text(pre_image.data, written) if force_unsafe else None
+        # An exclusion installed since the check above would make the engine
+        # skip the file and leave the pre-edit chunks beside the new bytes; the
+        # purge judges it again under the locks (#3163). A path that stopped
+        # holding the rewritten file since the write, after the relinked-key
+        # refusal above, is held rather than indexed as this edit (#3172): the
+        # engine reads the file the rewrite went through, by identity (#3320).
         return await index_engine.index_file(
             source_file,
             ingress_guarded=True,
             force_unsafe=valve_text is not None,
             valve_text=valve_text,
             lock_held=True,
+            purge_if_excluded=True,
+            written_source=WrittenSource(source_path, pre_image.identity),
         )
     except Exception as exc:
         if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
@@ -288,7 +334,7 @@ async def mutate_source_and_reindex(
 
 async def preflight_refusal(
     index_engine, path: Path, *, op: str, needs_valve: bool, surface: RemedySurface
-) -> tuple[str | None, bytes]:
+) -> tuple[str | None, JudgedSource]:
     """Ask the engine whether ``path`` may take a write; the refusal text if not.
 
     For memory tools that append to or edit a file and then re-index it. The
@@ -298,18 +344,56 @@ async def preflight_refusal(
     reviewed masking manifest, and a forced write (``needs_valve``) into a file
     that already holds something flagged or masked. ``None`` means write.
 
-    Also returns the bytes the preflight judged: a caller forwarding its valve
-    binds it to them (:func:`appended_valve_text`), not to a later re-read.
-    ``surface`` is the caller's, for the remedy the refusal names.
+    Also returns what the preflight judged (``memory_writer.read_for_append``).
+    The append takes it (``append_blocks(..., judged=)``) and writes only to
+    that file (#3289); a caller forwarding its valve binds it to its bytes
+    (:func:`appended_valve_text`), not to a later re-read. ``surface`` is the
+    caller's, for the remedy the refusal names.
     """
-    from memtomem.tools.memory_writer import read_pre_image_or_empty
+    from memtomem.tools.memory_writer import read_for_append
 
-    pre = await asyncio.to_thread(read_pre_image_or_empty, path)
-    preflight = await asyncio.to_thread(index_engine.preflight_mutation, path, pre)
+    judged = await asyncio.to_thread(read_for_append, path)
+    preflight = await asyncio.to_thread(
+        index_engine.preflight_mutation, path, judged.data, source_path=judged.source_path
+    )
     if preflight.rejection is not None:
         rejection = await index_engine.refuse_mutation(path, preflight)
-        return rejection.mutation_detail(op, outcome="not_written", surface=surface), pre
-    return preflight.blocker(op, path.name, needs_valve=needs_valve), pre
+        return rejection.mutation_detail(op, outcome="not_written", surface=surface), judged
+    if preflight.relinked:
+        await index_engine.hold_relinked_mutation(path, preflight)
+    return preflight.blocker(op, path.name, needs_valve=needs_valve), judged
+
+
+async def refuse_changed_append(index_engine, path: Path, judged: JudgedSource, *, op: str) -> str:
+    """Settle an append refused at its open (``memory_writer.SourceChangedError``, #3289).
+
+    The path stopped holding the file the preflight judged between the
+    preflight and the open, so nothing was written. That is the observation
+    :meth:`IndexEngine.hold_relinked_mutation` acts on, made later: the source
+    that was read is held under the read's key, whatever is at the path now.
+    Returns the refusal text, in the wording of the preflight's own
+    ``relinked`` refusal.
+    """
+    await index_engine.hold_relinked_source(path, fold_path_form(str(judged.source_path)))
+    return (
+        f"Error: {op} refused: {path.name} was replaced after it was read; nothing was "
+        "written. Try again."
+    )
+
+
+def append_warning(stats: IndexingStats, judged: JudgedSource) -> str | None:
+    """What an append that landed tells its caller when the re-index did not index it.
+
+    An exclusion installed between the append and its re-index (#3165), or
+    the file replaced by a symlink in that window, which the re-index holds
+    rather than following (#3289). The entry is on disk either way, so it is a
+    warning, not a failure: a failure would invite the caller to append it again.
+    """
+    if stats.excluded_files:
+        return EXCLUDED_AFTER_APPEND_NOTICE
+    if stats.relinked_files:
+        return relinked_after_write_notice("entry", fold_path_form(str(judged.source_path)))
+    return None
 
 
 def outcome_after_restore(restore: RestoreOutcome) -> MutationOutcome:
@@ -331,10 +415,9 @@ def appended_valve_text(pre_image: bytes, appended: str) -> str:
     another writer added in between makes the file differ, and the engine then
     judges it without the valve.
     """
-    from memtomem.indexing.redaction_exemption import indexer_text
+    from memtomem.indexing.append_attribution import text_after_append
 
-    written = appended.replace("\n", os.linesep).encode("utf-8")
-    return indexer_text(pre_image + written, errors="replace")
+    return text_after_append(pre_image, appended)
 
 
 def rewrite_valve_text(pre_image: bytes, rewrite: Rewrite | None) -> str | None:

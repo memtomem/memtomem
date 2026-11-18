@@ -25,10 +25,8 @@ from memtomem.config import (
     RerankConfig,
     assign_section_fields,
     build_comparand,
-    classify_scope,
     coerce_and_validate,
     memory_dir_kind,
-    resolve_project_memory_dirs,
     save_config_overrides,
     saved_embedding_identity,
 )
@@ -44,6 +42,11 @@ from memtomem.web.deps import (
 )
 from memtomem.web.routes import system_config, system_indexing
 from memtomem.web.routes._locks import _config_lock
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_NOTHING_CHANGED_DETAIL,
+    writer_busy_as_503,
+    writer_transaction,
+)
 from memtomem.web.routes.system_config import (
     _DENIED_MEMORY_DIR_PARTS,
     _DENIED_MEMORY_DIR_PREFIXES,
@@ -101,6 +104,8 @@ from memtomem.web.schemas.config import (
     ConfigPatchRequest,
     ConfigPatchResponse,
     ConfigResponse,
+    InferenceEndpointOut,
+    InferenceEndpointsResponse,
 )
 from memtomem.web.schemas.memory import (
     AddMemoryRequest,
@@ -118,6 +123,7 @@ from memtomem.web.schemas.sources import (
     SourceOut,
     StatsResponse,
 )
+from memtomem.web.source_visibility import load_source_visibility
 
 __all__ = [
     "AddMemoryRequest",
@@ -324,6 +330,27 @@ async def get_bootstrap_state(request: Request) -> dict[str, Any]:
     }
 
 
+@router.get("/inference-endpoints", response_model=InferenceEndpointsResponse)
+async def get_inference_endpoints(config=Depends(get_config)) -> InferenceEndpointsResponse:
+    """Configured inference endpoints and whether each sends text off the machine."""
+    from memtomem.inference_endpoints import NOT_COVERED, describe_inference_endpoints
+
+    endpoints = describe_inference_endpoints(config.embedding, config.llm, config.rerank)
+    return InferenceEndpointsResponse(
+        endpoints=[
+            InferenceEndpointOut(
+                component=ep.component,
+                provider=ep.provider,
+                host=ep.host,
+                remote=ep.remote,
+                sends=ep.sends,
+            )
+            for ep in endpoints
+        ],
+        not_covered=NOT_COVERED,
+    )
+
+
 @router.get("/health")
 async def health_liveness() -> dict[str, Any]:
     return {"status": "ok", "checks": {"process": "ok"}}
@@ -396,7 +423,8 @@ async def embed_text(request: Request, embedder=Depends(get_embedder)):
 @router.post("/reset", dependencies=[Depends(_require_localhost)])
 async def reset_all(storage=Depends(get_storage)):
     """Delete ALL data and reinitialize the database. Embedding config preserved."""
-    deleted = await storage.reset_all()
+    async with writer_transaction(storage):
+        deleted = await storage.reset_all()
     total = sum(deleted.values())
     return {
         "ok": True,
@@ -409,8 +437,23 @@ async def reset_all(storage=Depends(get_storage)):
 @router.post("/fts-rebuild", dependencies=[Depends(_require_localhost)])
 async def rebuild_fts(storage=Depends(get_storage)):
     """Rebuild the FTS5 full-text index using the current tokenizer."""
-    count = await storage.rebuild_fts()
-    return {"ok": True, "rebuilt_rows": count, "message": f"FTS index rebuilt for {count} chunks."}
+    # The writer wait comes before the rebuild starts (#3182).
+    with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+        count = await storage.rebuild_fts()
+    # Name the tokenizer the rows were built with, and warn when it is not the
+    # one configured: a kiwipiepy rebuild without the extra falls back to
+    # unicode61 and otherwise reports success in the same words.
+    built = storage.fts_tokenizer_effective
+    warning = _hot_reload.fts_rebuild_fallback_warning(storage)
+    message = f"FTS index rebuilt with {built} ({count} chunks)."
+    return {
+        "ok": True,
+        "rebuilt_rows": count,
+        "tokenizer": built,
+        # The UI shows ``message`` as is; ``warning`` only picks the toast kind.
+        "message": message if warning is None else f"{message} {warning}",
+        "warning": warning,
+    }
 
 
 @router.get("/stats", response_model=StatsResponse)
@@ -449,8 +492,6 @@ async def get_stats(
             chunk_size_distribution=distribution,
         )
 
-    pmdirs = config.indexing.project_memory_dirs
-    resolved_roots = resolve_project_memory_dirs(pmdirs)
     # Every index root owns its sources, matching ``GET /api/sources`` —
     # a read-only or project root's files are not orphans. (#2522)
     indexed_dirs = sorted(
@@ -463,9 +504,12 @@ async def get_stats(
 
     all_sources: list[SourceOut] = []
     rows = await storage.get_source_files_with_counts()
+    # The Sources tree's rule (held/pending and the ``project_local`` tier), so
+    # the Home dashboard lists no source the Sources tab hides (#3109).
+    visibility = await load_source_visibility(storage, config)
     for p, cnt, last_indexed_iso, ns_csv, avg_tok, min_tok, max_tok in rows:
-        source_scope, _src_project_root = classify_scope(p, pmdirs, resolved_roots=resolved_roots)
-        if source_scope == "project_local":
+        hidden_reasons, source_scope = visibility.check(p)
+        if hidden_reasons:
             continue
 
         namespaces = ns_csv.split(",") if ns_csv else ["default"]

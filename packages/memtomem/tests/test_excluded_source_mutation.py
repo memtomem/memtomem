@@ -20,7 +20,11 @@ from helpers import StubCtx
 from memtomem.indexing.engine import resolve_owning_memory_dir
 from memtomem.server.context import AppContext
 from memtomem.server.tools import memory_crud
-from memtomem.source_provenance import EXCLUDED_SOURCE_DETAIL
+from memtomem.source_provenance import (
+    EXCLUDED_SOURCE_DETAIL,
+    UNMANAGED_SOURCE_DETAIL,
+    excluded_after_write_notice,
+)
 from memtomem.tools import memory_mutation, memory_writer
 from memtomem.web.app import create_app
 from memtomem.web.deps import require_configured
@@ -58,6 +62,10 @@ async def excluded_source(request, bm25_only_components, tmp_path):
     unregistered, so the parent root owns it and finds a nested worktree.
     ``unowned_worktree``: the same inside a repository outside every configured
     root, so no root owns it and its enclosing repository is the bound (#2486).
+
+    The fourth value is the refusal each surface gives. A source outside every
+    root is refused for being there before the exclusion is asked about, so
+    ``unowned_worktree`` gets that refusal; the predicate still says excluded.
     """
     comp, mem_dir = bm25_only_components
     indexing = comp.config.indexing
@@ -80,7 +88,9 @@ async def excluded_source(request, bm25_only_components, tmp_path):
     (chunk,) = await comp.storage.list_chunks_by_source(source)
     assert chunk.metadata.source_span_hash
     assert not chunk.metadata.source_read_only
-    return comp, source, chunk
+    unmanaged = request.param == "unowned_worktree"
+    assert comp.index_engine.is_managed_source(source, chunk.metadata) is not unmanaged
+    return comp, source, chunk, UNMANAGED_SOURCE_DETAIL if unmanaged else EXCLUDED_SOURCE_DETAIL
 
 
 async def _index(comp, source: Path) -> None:
@@ -105,19 +115,19 @@ async def _request(comp, surface, chunk_id):
         return await client.delete(f"/api/chunks/{chunk_id}")
 
 
-def _assert_excluded(result):
+def _assert_refused(result, detail: str):
     if isinstance(result, str):
-        assert result == f"Error: {EXCLUDED_SOURCE_DETAIL}"
+        assert result == f"Error: {detail}"
     else:
         assert result.status_code == 409, result.text
-        assert result.json()["detail"] == EXCLUDED_SOURCE_DETAIL
+        assert result.json()["detail"] == detail
 
 
 @pytest.mark.parametrize("surface", SURFACES)
 async def test_an_excluded_source_is_refused_before_any_write(
     excluded_source, monkeypatch, surface
 ):
-    comp, source, chunk = excluded_source
+    comp, source, chunk, detail = excluded_source
     source_before = source.read_bytes()
     rows_before = comp.storage._get_db().execute("SELECT * FROM chunks").fetchall()
     index = AsyncMock(wraps=comp.index_engine.index_file)
@@ -140,7 +150,7 @@ async def test_an_excluded_source_is_refused_before_any_write(
         monkeypatch.setattr(module, "restore_pre_image_quietly", restore)
         restores.append(restore)
 
-    _assert_excluded(await _request(comp, surface, chunk.id))
+    _assert_refused(await _request(comp, surface, chunk.id), detail)
 
     assert source.read_bytes() == source_before
     assert comp.storage._get_db().execute("SELECT * FROM chunks").fetchall() == rows_before
@@ -167,3 +177,104 @@ async def test_a_source_that_is_not_excluded_still_mutates(bm25_only_components,
     else:
         assert result.status_code == 200, result.text
     assert source.read_text(encoding="utf-8") != ORIGINAL
+
+
+# #3163: the guard above runs before several awaits, and ``exclude_patterns``
+# is runtime-mutable. An exclusion installed between the guard and the re-index
+# must not leave the pre-edit chunks searchable beside the rewritten bytes.
+
+THREE_SECTIONS = (
+    "## Alpha\n\nAlpha body one.\n\n"
+    "## Bravo\n\nBravo body two.\n\n"
+    "## Charlie\n\nCharlie body three.\n"
+)
+
+
+def _source_rows(comp) -> list:
+    return comp.storage._get_db().execute("SELECT id FROM chunks").fetchall()
+
+
+async def _three_chunk_source(comp, mem_dir: Path):
+    """A source of three chunks; the first one is the mutation's target.
+
+    Three, not one: the web delete removes its target row directly
+    (``ensure_index_row_absent``), so a single-chunk source would pass without
+    the purge. The siblings are what the purge alone removes.
+    """
+    source = mem_dir / "note.md"
+    source.write_text(THREE_SECTIONS, encoding="utf-8")
+    stats = await comp.index_engine.index_file(source, ingress_guarded=True)
+    assert not stats.errors
+    chunks = sorted(
+        await comp.storage.list_chunks_by_source(source), key=lambda c: c.metadata.start_line
+    )
+    assert len(chunks) == 3, [c.content for c in chunks]
+    return source, chunks[0]
+
+
+def _exclude_inside_the_write(monkeypatch, comp) -> None:
+    """Install ``**/note.md`` as an exclusion inside the writer, after the guard."""
+    indexing = comp.config.indexing
+
+    for module, name in (
+        (memory_writer, "replace_chunk_body"),
+        (memory_writer, "remove_lines"),
+        (chunk_routes, "replace_chunk_body"),
+        (chunk_routes, "remove_lines"),
+    ):
+        real = getattr(module, name)
+
+        def write(*args, _real=real, **kwargs):
+            indexing.exclude_patterns = [*indexing.exclude_patterns, "**/note.md"]
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, write)
+
+
+@pytest.mark.parametrize("surface", SURFACES)
+async def test_an_exclusion_installed_during_the_write_removes_the_stale_chunks(
+    bm25_only_components, monkeypatch, surface
+):
+    comp, mem_dir = bm25_only_components
+    source, target = await _three_chunk_source(comp, mem_dir)
+    # Searched first, so a cached result could answer the search below.
+    assert (await comp.search_pipeline.search("Bravo"))[0]
+    _exclude_inside_the_write(monkeypatch, comp)
+
+    result = await _request(comp, surface, target.id)
+
+    on_disk = source.read_text(encoding="utf-8")
+    op = "edit" if surface.endswith("edit") else "delete"
+    assert "Alpha body one." not in on_disk
+    assert ("NEW BODY" in on_disk) is (op == "edit")
+    assert "Bravo body two." in on_disk and "Charlie body three." in on_disk
+    assert comp.index_engine.is_excluded(source)
+    assert _source_rows(comp) == []
+    assert (await comp.search_pipeline.search("Bravo"))[0] == []
+    notice = excluded_after_write_notice(op)
+    if isinstance(result, str):
+        assert not result.startswith("Error"), result
+        assert result.endswith(f"\n- {notice}"), result
+    else:
+        assert result.status_code == 200, result.text
+        assert result.json()["warning"] == notice
+
+
+async def test_a_rollback_after_the_purge_does_not_bring_the_chunks_back(
+    bm25_only_components, monkeypatch
+):
+    """A failure after the purge restores the bytes; the store stays empty."""
+    comp, mem_dir = bm25_only_components
+    source, target = await _three_chunk_source(comp, mem_dir)
+    _exclude_inside_the_write(monkeypatch, comp)
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("after the re-index")
+
+    monkeypatch.setattr(memory_crud, "flag_untracked_write", boom)
+
+    result = await _request(comp, "mcp_edit", target.id)
+
+    assert result.startswith("Error"), result
+    assert source.read_text(encoding="utf-8") == THREE_SECTIONS
+    assert _source_rows(comp) == []

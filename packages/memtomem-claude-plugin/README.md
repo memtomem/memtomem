@@ -22,7 +22,7 @@ write-time indexing.
 ## What this plugin runs and connects to
 
 - **One local MCP server.** Claude Code starts `memtomem-server` over stdio with
-  `uvx --from 'memtomem[onnx]==0.7.3'`. On first launch uv downloads that exact
+  `uvx --from 'memtomem[onnx]==0.7.11'`. On first launch uv downloads that exact
   version and its dependencies from PyPI (or the package index your own uv
   configuration names) and caches them. If the machine has no Python 3.12 or
   newer, uv also downloads a managed CPython build from Astral's
@@ -81,7 +81,7 @@ Before installing, inspect existing servers with `/mcp` in Claude Code, then
 run the read-only diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.7.3" mm doctor --claude-mcp
+uvx --from "memtomem[all]==0.7.11" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin does not put `mm` on your PATH —
@@ -96,7 +96,7 @@ existing uv installation; resolve any manual MCP registration shown by the
 check before installing. The check does not intercept `/plugin install`.
 
 Before installation, doctor compares manual registrations with the launch this
-release's plugin bundles (`memtomem[onnx]==0.7.3`). After installation, it reads
+release's plugin bundles (`memtomem[onnx]==0.7.11`). After installation, it reads
 the actual plugin manifest. Use `/mcp` to verify the session, and repeat the
 diagnostic after installation.
 
@@ -106,7 +106,7 @@ diagnostic after installation.
 ```
 
 For project-scoped onboarding, run `claude plugin install memtomem@memtomem --scope project`
-from that project directory instead. The [Korean onboarding guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md#3-경로-a-claude-code-플러그인-설치)
+from that project directory instead. The [plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md#3-path-a-install-the-claude-code-plugin)
 explains effective enablement and disabling a manual server only in that project.
 
 The bundled server includes the ONNX dependencies so existing ONNX/E5 configurations
@@ -117,8 +117,8 @@ Model artifacts are fetched only when the configured workflow needs them.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.3' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.7.3' mm status
+uvx --from 'memtomem[onnx]==0.7.11' mm init --preset minimal --non-interactive --mcp skip
+uvx --from 'memtomem[onnx]==0.7.11' mm status
 ```
 
 The plugin intentionally cannot perform this trust-establishing step over MCP.
@@ -129,7 +129,7 @@ gitignored local tier explicitly:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem[onnx]==0.7.3' mm mem init --scope project_local
+uvx --from 'memtomem[onnx]==0.7.11' mm mem init --scope project_local
 ```
 
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and
@@ -162,7 +162,8 @@ must be checked in `/mcp`. The diagnostic does not execute configured servers.
 
 ## Docs
 
-- [Korean Claude Code/Codex vibe-coding quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md)
+- [Claude Code & Codex CLI plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md)
+  ([한국어](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md))
   — initialize one store, install one plugin, and verify a memory round trip
 - [Claude Code integration guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/integrations/claude-code.md)
   — setup, optional automation, and CLAUDE.md guidelines

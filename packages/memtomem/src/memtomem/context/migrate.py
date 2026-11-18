@@ -50,6 +50,7 @@ from typing import Any, Callable, Iterator, Literal, NamedTuple
 import click
 
 from memtomem.config import TargetScope
+from memtomem.memory_scope import ProjectEntryRelinked
 from memtomem.context import override as _override
 from memtomem.context._atomic import (
     _file_lock,
@@ -1885,6 +1886,12 @@ def _existing_fanout_targets(
                 scope,
             )
             continue
+        except ProjectEntryRelinked as exc:
+            # The runtime directory is a link inside the project: removing
+            # through it would delete outside the project. Left in place, as a
+            # linked target is below.
+            logger.warning("fanout cleanup: %s; leaving %s's copy in place", exc, runtime)
+            continue
         if root is None:
             continue
         if kind == "skills":
@@ -2253,10 +2260,8 @@ def migrate_scope(
 
     Args:
         surface: Gate A audit identifier forwarded to the staging scan.
-            The CLI relies on the default ``"cli_context_migrate"``; the
-            MCP tool passes ``"mcp_context_artifact_migrate"`` (#1246 —
-            previously MCP-driven moves were misattributed to the CLI
-            literal).
+            The CLI relies on the default ``"cli_context_migrate"``
+            (#1246).
 
     Returns:
         :class:`MigrateScopeResult` with ``moved=True`` on apply

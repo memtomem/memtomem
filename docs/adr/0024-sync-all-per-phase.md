@@ -172,7 +172,8 @@ phase POSTs:
   coexist and produce the same success-path writes.
 - MCP Sync-All parity (an `all` alias in the MCP `sync` contract)
   remains a v1 scope-out per ADR-0021 §"Open questions" §5 — unchanged
-  by this ADR.
+  by this ADR. (Moot since ADR-0044, 2026-11-13: there is no MCP `sync`
+  tool any more.)
 - ADR-0021 §"Sync orchestration — reuse, do not add a backend endpoint"
   is narrowly superseded: its two technical objections are answered by
   the lock-free-core split (deadlock) and the per-phase report (no

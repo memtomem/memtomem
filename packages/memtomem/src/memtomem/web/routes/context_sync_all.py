@@ -89,6 +89,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from memtomem.config import TargetScope
+from memtomem.memory_scope import ProjectEntryRelinked
 from memtomem.context.projects import ProjectScope, sync_skip_reason
 from memtomem.web.routes._errors import _classify_exception, _error, _redact_message
 from memtomem.web.routes._locks import _gateway_lock
@@ -217,6 +218,18 @@ async def _run_phase(
             native = await _sync_settings_core(project_root, target_scope)
     except HTTPException as exc:
         return {"type": phase_type, "status": "failed", "error": _phase_error_envelope(exc)}
+    except ProjectEntryRelinked as exc:
+        # A linked project path is the user's to fix, not an internal fault.
+        return {
+            "type": phase_type,
+            "status": "failed",
+            "error": {
+                "error_kind": "validation",
+                "message": str(exc),
+                "http_status": 409,
+                "reason_code": "project_entry_relinked",
+            },
+        }
     except Exception as exc:
         logger.error("sync-all %s phase failed: %s", phase_type, exc, exc_info=True)
         return {

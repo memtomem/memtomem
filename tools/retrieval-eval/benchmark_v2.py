@@ -266,7 +266,6 @@ async def _evaluate_track(
     candidate_k: int,
 ) -> dict[str, Any]:
     from memtomem.runtime import close_components, create_components
-    from memtomem.storage.fts_tokenizer import get_tokenizer, set_tokenizer
 
     tmp = Path(mkdtemp(prefix=f"retrieval_v2_{track}_"))
     memory_root = tmp / "memories"
@@ -286,10 +285,6 @@ async def _evaluate_track(
         candidate_k=candidate_k,
     )
 
-    # The FTS tokenizer is module-global and create_components only sets a
-    # non-default one, so set it here (unicode61 included) and reset it in
-    # the finally below; otherwise a kiwipiepy track leaks into later tracks.
-    set_tokenizer(tokenizer)
     components = None
     try:
         components = await create_components(
@@ -310,8 +305,9 @@ async def _evaluate_track(
                 f"incomplete {track} index: expected {expected}, observed {observed}"
             )
         # kiwipiepy failing to import silently falls back to unicode61.
-        if get_tokenizer() != tokenizer:
-            raise RuntimeError(f"{track} indexed with {get_tokenizer()}, not {tokenizer}")
+        built = components.storage.fts_tokenizer_effective
+        if built != tokenizer:
+            raise RuntimeError(f"{track} indexed with {built}, not {tokenizer}")
 
         rows: list[dict[str, Any]] = []
         latencies: list[float] = []
@@ -403,8 +399,9 @@ async def _evaluate_track(
                 )
             rows.append(row)
 
-        if get_tokenizer() != tokenizer:
-            raise RuntimeError(f"{track} searched with {get_tokenizer()}, not {tokenizer}")
+        searched = components.storage.fts_tokenizer_effective
+        if searched != tokenizer:
+            raise RuntimeError(f"{track} searched with {searched}, not {tokenizer}")
         searches_reranked = _check_rerank_coverage(rerank_observed, reranker_model)
 
         aggregate: dict[str, float] = {}
@@ -461,7 +458,6 @@ async def _evaluate_track(
     finally:
         if components is not None:
             await close_components(components)
-        set_tokenizer("unicode61")
         shutil.rmtree(tmp)
 
 

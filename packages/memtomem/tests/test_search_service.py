@@ -103,6 +103,7 @@ async def test_every_argument_reaches_the_pipeline_exactly_once():
         record=False,
         project_context_root=root,
         origin="cli",
+        deadline_ms=4500,
     )
 
     assert pipeline.calls == [
@@ -120,6 +121,7 @@ async def test_every_argument_reaches_the_pipeline_exactly_once():
             "rerank": False,
             "record": False,
             "origin": "cli",
+            "deadline_ms": 4500,
         }
     ]
 

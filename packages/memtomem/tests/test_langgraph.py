@@ -588,8 +588,11 @@ class TestAddPrivacyGate:
         monkeypatch.setattr(
             memory_writer,
             "append_entry",
-            # The real one returns the text it appended.
-            lambda *a, **k: append_calls.append((a, k)) or "",
+            # The real one returns what it appended and the file it wrote.
+            lambda *a, **k: (
+                append_calls.append((a, k))
+                or memory_writer.Appended("", memory_writer.WrittenSource(Path(a[0]), None))
+            ),
         )
         return guard_calls, append_calls
 
@@ -597,12 +600,15 @@ class TestAddPrivacyGate:
     def _stub_components(indexed_chunks: int = 3):
         comp = MagicMock()
         comp.index_engine.index_file = AsyncMock(
-            return_value=MagicMock(indexed_chunks=indexed_chunks)
+            return_value=MagicMock(
+                indexed_chunks=indexed_chunks, excluded_files=0, relinked_files=0
+            )
         )
         # A ``MagicMock`` predicate answers truthy, which the #2488 guard reads
         # as "excluded"; these tests are about the privacy gate.
         comp.index_engine.is_excluded = MagicMock(return_value=False)
         comp.index_engine.is_read_only_source = MagicMock(return_value=False)
+        comp.index_engine.is_managed_source = MagicMock(return_value=True)
         comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
         comp.index_engine.rewrite_refusal = AsyncMock(return_value=None)
         # ``add`` classifies its target against this list (ADR-0011 §5, #2321).
@@ -647,7 +653,10 @@ class TestAddPrivacyGate:
 
         # Guard saw the langgraph surface + the audit request shape.
         content, kwargs = guard_calls[0]
-        assert content == "safe content"
+        # The guard reads the entry as written, title and tags included.
+        from memtomem.tools.memory_writer import entry_guard_text
+
+        assert content == entry_guard_text("safe content", "T", ["t1"])
         assert kwargs["surface"] == "langgraph_add"
         assert kwargs["force_unsafe"] is False
         assert kwargs["audit_context"] == {
@@ -664,12 +673,21 @@ class TestAddPrivacyGate:
         (args, akw) = append_calls[0]
         assert args[0] == target.resolve()
         assert args[1] == "safe content"
+        judged = akw.pop("judged")
         assert akw == {"title": "T", "tags": ["t1"]}
+        # The append is bound to what the preflight judged (#3289).
+        assert judged.source_path == target.resolve() and judged.existed is False
         iargs, ikw = comp.index_engine.index_file.call_args
         assert iargs[0] == target.resolve()
         assert ikw["namespace"] == "agent-runtime:planner"
         assert ikw["ingress_guarded"] is True
         assert ikw["force_unsafe"] is False
+        # The re-index is told the file the append wrote (#3320), not asked to
+        # look at the path again.
+        from memtomem.tools.memory_writer import WrittenSource
+
+        assert ikw["written_source"] == WrittenSource(target.resolve(), None)
+        assert "hold_if_relinked" not in ikw
         assert result == {"file": str(target.resolve()), "indexed_chunks": 3}
 
     @pytest.mark.asyncio
@@ -925,6 +943,7 @@ class TestGetDelete:
         comp.storage.delete_chunks = AsyncMock(return_value=deleted_rows)
         # Sync predicate on the real engine; a bare MagicMock answers truthy.
         comp.index_engine.is_read_only_source = MagicMock(return_value=False)
+        comp.index_engine.is_managed_source = MagicMock(return_value=True)
         comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
         comp.index_engine.rewrite_refusal = AsyncMock(return_value=None)
         store = MemtomemStore()
@@ -2193,6 +2212,71 @@ class TestDeleteProjectSharedGateB:
         assert stats["total_files"] == 0
         assert any("outside configured memory directories" in e for e in stats["errors"]), stats
 
+    @pytest.mark.asyncio
+    async def test_the_re_fetch_reads_past_a_stale_pool_snapshot(self, tiers, monkeypatch):
+        """The re-fetch under the lock reads the writer, not an old pool snapshot (#3202).
+
+        The row is committed as ``user`` and then, while a pool connection
+        still has a statement open, as ``project_shared``. A re-fetch on that
+        connection would still see ``user`` and delete without consent.
+        """
+        from uuid import UUID
+
+        from memtomem.errors import ProjectSharedConfirmationRequiredError
+
+        store, dirs = tiers
+        try:
+            comp, _target, cid = await self._seed(store, dirs, "project_shared")
+            writer = comp.storage._get_db()
+            writer.execute("UPDATE chunks SET scope = 'user' WHERE id = ?", (cid,))
+            writer.commit()
+            reader = comp.storage._read_pool[0]
+            monkeypatch.setattr(comp.storage, "_read_pool", [reader])
+            # Many rows, so the cursor cannot step past the end and finish the
+            # statement, which would release the snapshot.
+            held = reader.execute("SELECT name FROM sqlite_master")
+            assert held.fetchone() is not None
+            try:
+                writer.execute("UPDATE chunks SET scope = 'project_shared' WHERE id = ?", (cid,))
+                writer.commit()
+                pooled = await comp.storage.get_chunk(UUID(cid))
+                assert pooled is not None and pooled.metadata.scope == "user"
+                with pytest.raises(ProjectSharedConfirmationRequiredError):
+                    await store.delete(cid)
+            finally:
+                held.close()
+            assert await store.get(cid) is not None
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_busy_writer_at_the_re_fetch_is_a_timeout(self, tiers, monkeypatch):
+        """Another task holding the writer past the wait raises the documented TimeoutError."""
+        import asyncio
+
+        store, dirs = tiers
+        try:
+            comp, _target, cid = await self._seed(store, dirs, "user")
+            monkeypatch.setattr("memtomem.storage.sqlite_backend.WRITER_WAIT_S", 0.05)
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def owner() -> None:
+                async with comp.storage.transaction():
+                    entered.set()
+                    await release.wait()
+
+            task = asyncio.create_task(owner())
+            await entered.wait()
+            try:
+                with pytest.raises(TimeoutError, match="writer stayed busy"):
+                    await store.delete(cid)
+            finally:
+                release.set()
+                await task
+            assert await store.get(cid) is not None
+        finally:
+            await store.close()
+
 
 class TestDeleteGateBUnderTheLock:
     """The tier is judged on the chunk re-fetched under the source file lock.
@@ -2244,6 +2328,7 @@ class TestDeleteGateBUnderTheLock:
         # Sync predicate on the real engine: a bare MagicMock returns a truthy
         # Mock, which would make the lock helper refuse every chunk here.
         comp.index_engine.is_read_only_source = MagicMock(return_value=False)
+        comp.index_engine.is_managed_source = MagicMock(return_value=True)
         comp.index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
         comp.index_engine.rewrite_refusal = AsyncMock(return_value=None)
         store = MemtomemStore()

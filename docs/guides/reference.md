@@ -3,7 +3,7 @@
 **Audience**: Users who have completed the [Getting Started](getting-started.md) guide
 **Prerequisites**: memtomem installed, MCP server connected to your AI editor
 
-> **New to memtomem?** Start with [Getting Started](getting-started.md), or use the [Korean Claude Code/Codex quickstart](vibe-coding-getting-started-ko.md) for a plugin-first path. This guide is a complete reference for all features.
+> **New to memtomem?** Start with [Getting Started](getting-started.md), or use the [Claude Code & Codex CLI plugin quickstart](plugin-quickstart.md) ([한국어](vibe-coding-getting-started-ko.md)) for a plugin-first path. This guide is a complete reference for all features.
 
 **On this page**
 
@@ -61,7 +61,65 @@ flowchart LR
 
 **Index once, search forever.** memtomem reads your files, breaks them into meaningful chunks, and builds a searchable index. When your AI agent needs context, it searches by both keywords and meaning to find the most relevant pieces.
 
-Your `.md` files are the source of truth. The index is a rebuildable cache — delete it anytime and re-index.
+Your `.md` files are the source of truth for what you wrote. The search index is built from them, so deleting it and re-indexing brings back what the files hold. It does not bring back what only the database records — see below.
+
+### What a rebuild restores
+
+Re-indexing after the database is gone rebuilds each chunk from its file: the text, its heading,
+the tags written in the file (the `> tags:` line or a frontmatter `tags:` key), and a frontmatter
+validity window, and the entry's creation time from its `> created:` line, so date-ranged recall
+and newest-first ordering are where they were. Chunk ids are new, so a Web UI pinned chunk saved
+before the rebuild points at a chunk that no longer exists.
+
+A memory saved outside the default namespace without naming a `file` goes to a day file of its
+own, `{date}--{slug}-{digest}.md`, and a rebuild reads the namespace back from that name:
+`2026-11-04--shared-my-project-<digest>.md` comes back in `shared:my-project`. Files already on
+disk count, whenever they were written. The name wins over an MCP session's namespace, so
+`mem_index` in a bound session rebuilds those files where they were. The index result counts them
+(`namespaces_restored_from_name`).
+
+The rest of what the database recorded is in no file, and a rebuild starts it over. That includes:
+
+- **Namespace, for files whose name does not carry it.** `{date}.md` (the default namespace's day
+  file), a file you named with `file` (unless you gave it a day file's name), and a day file whose
+  name cannot be read back — the slug is truncated after 60 bytes, and characters other than `:`
+  outside `A-Z a-z 0-9 . _ -` are lost — are indexed into the namespace your configuration gives their path: a namespace rule, a
+  folder-based auto namespace, or else `default_namespace` (`default` out of the box). `mem_index`
+  run in an MCP session with an agent or a current namespace (`mem_ns_set`) puts them into that
+  namespace instead, so rebuild with `mm index` when you want the path rules. The index result
+  counts the day-file names it could not read (`day_file_names_undecoded`); the other files are
+  not counted.
+- **Namespace moves made after writing.** `mem_ns_rename`, `mem_ns_assign` and the archive and
+  promote policies change the database only. A rebuild puts those entries back in the namespace
+  their day file is named for: rename `shared:old` to `shared:new`, rebuild, and they are in
+  `shared:old` again.
+- **Tag changes made after writing.** Auto-tagging and renaming, merging, deleting or replacing
+  tags change the database only, so a rebuild returns each chunk to the tags its file holds.
+- **Creation time, for text without a `> created:` line of its own.** A hand-written section
+  and an entry whose header a full-replacement edit removed are dated by the re-index. An entry
+  whose content opened with its own `## ` heading is not reliably dated by its entry either: the
+  header is written above that heading, where it leads no section of the entry (its tags are not
+  applied), and the entry keeps the header's time only when chunk merging happens to join them.
+- **Working state:** access and usage counts, importance scores, links made with `mem_link`,
+  summaries made by consolidation policies, sessions, schedules, and memory policies.
+
+[Pinned Context](pinned-context.md) blocks are read from their own files, not from the index, so a
+rebuild does not touch them.
+
+To put any other file in a namespace, index it with that namespace named:
+
+```bash
+mm index --force --namespace shared:my-project path/to/file.md
+```
+
+This re-embeds the whole file and puts every chunk in it in the namespace you name, so use it on
+a file that held one namespace. Indexing the file with `--namespace` before its directory has the
+same result, and `--force` is not needed on that first pass. For these files you need to know the
+namespace yourself.
+
+Because a day file's name carries its namespace, a write into a file named like one must use that
+namespace: writing another one into it is refused like any other namespace mix
+(`allow_namespace_mix` overrides).
 
 ### What happens under the hood
 
@@ -87,8 +145,8 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **102 MCP tools**. The table below is a curated selection
-grouped by task; all 102 are listed in
+memtomem provides **94 MCP tools**. The table below is a curated selection
+grouped by task; all 94 are listed in
 [Available MCP Tools](mcp-clients.md#available-mcp-tools).
 
 | Category | Tools | What they do |
@@ -142,24 +200,18 @@ search rounds scores to four decimals, whereas compose carries raw scores.
 
 ### Context tool parameters
 
-The `mem_context_*` tools (CLI: `mm context`) push canonical artifacts — skills, sub-agents, commands, MCP-server definitions — out to AI runtimes. See the [Context Gateway](context-gateway.md) guide for the Store → Push → Runtime model, and [Moving artifacts between tiers and projects](reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects) for the `move`/`copy`/`migrate` transfer verbs. The parameter surface:
+Two context-gateway tools are on MCP, and both only read: `mem_context_detect` reports which agent files and runtimes a project has, and `mem_context_diff` compares the canonical artifacts with each runtime's copy. (`mem_context_compose` belongs to pinned context, not the gateway.) See the [Context Gateway](context-gateway.md) guide for the Store → Push → Runtime model.
 
-- **`init`, `detect`, `generate`, `diff`, `sync`** accept `include="skills,agents,commands"` to scope a canonical artifact workflow.
-- **`init`, `generate`, `sync`, `diff`, `version`, `promote`** accept `scope="project_shared|user|project_local"` — the canonical **tier** (ADR-0016 §2).
-- **`generate` / `sync`** also accept `on_drop="ignore|warn|error"` (the legacy alias `strict=True` ≡ `on_drop="error"`) to control how dropped sub-agent or command fields are reported, and `label="latest|v1|production"` to deploy from a specific version snapshot (agents/commands only).
-- **`version`** manages snapshots via `action="list"|"create"|"enable"` — `enable` adopts a flat-layout artifact into directory layout (a byte-identical, same-scope move) so it can be versioned, mirroring `mm context version enable` and the web `POST …/versions/enable` route (`confirm_project_shared=True` for the git-tracked tier).
-- **`promote`** moves or deletes label pointers to versions.
-- **`memory_migrate`** takes `from_scope`/`to_scope` instead of a single `scope` (it has two endpoints), plus `apply=True` to execute and `confirm_project_shared=True` when writing to the git-tracked tier.
-- **`artifact_migrate`** migrates agents/commands/skills — flat→dir layout when `to_scope` is omitted, or a scope-tier move when it is set (`apply=True` to execute, `force=True` for a dirty flat→dir, `confirm_project_shared=True` for the git-tracked tier).
-- **`artifact_transfer`** moves or copies one canonical artifact between tiers and/or registered projects — `mode="move"|"copy"`, `to_project_scope_id` (from `mm context projects list`), `as_name` for a renamed copy, and `asset_type="mcp-servers"` for cross-project MCP-server definition copies (`apply=True` to execute, `confirm_project_shared=True` for the git-tracked tier, `allow_host_writes=True` for a user-tier landing).
-- **`pull`** brings one runtime's copy of a `kind="skills|agents|commands"` artifact (`name=…`) back into the canonical Store — the reverse of `sync`/push. Dry-run preview by default; `apply=True` executes. `from_runtime` selects the source (required when runtime copies diverge — ADR-0030 §5), `scope="user|project_shared"` the destination tier (explicit for the git-tracked tier — ADR-0030 §11; `project_local` is rejected), `overwrite=True` replaces an existing Store entry, snapshotting the current canonical first (agents/commands into `versions/vN.md`; skills into a `versions/vN/` tree, preserving Store-owned `overrides/` and `versions/` — ADR-0030 §10), `confirm_project_shared=True` / `allow_host_writes=True` for the git-tracked / user-tier landing, and `force_unsafe_import=True` (literal) to bypass Gate A for a reviewed false positive on the user tier only. Mirrors `mm context pull` and the web Pull route.
+- **`detect`** takes `include="skills,agents,commands,settings"` to also list runtime skill, sub-agent and command files and each runtime's settings file, and `include_runtimes=True` to report provider-client registration.
+- **`diff`** takes the same `include` (plus `settings`) and `scope="project_shared|user|project_local"` — the canonical **tier** to compare (ADR-0016 §2).
 
-> **CLI/web-only (no MCP verb).** Wiki→project install/update (`mm context install`/`update`) and the projects registry (`mm context projects {list, add, remove, pause, resume}`) are intentionally not exposed as `mem_context_*` tools — they write into a project's `.memtomem/` tree or mutate cross-project enrollment state, so they run from the CLI or the dev-tier Web UI only (ADR-0008). A headless agent that hits an `artifact_transfer` refusal naming one of these (unknown / paused / discovery-only destination) must run the printed `mm context projects …` command at a terminal; there is no MCP equivalent to retry with.
+> **Context writes have no MCP tool.** `mm context init`, `generate`, `sync`, `pull`, `migrate`, `memory-migrate`, `move`, `copy`, `version` and `install`/`update`, and the projects registry (`mm context projects …`), run from the CLI, and some also from the web UI. They write agents' hook settings, skills and instruction files, in projects and in the agents' own configuration, and a consent flag an agent passes as a tool argument is not the person's consent; at the CLI the command goes through the client's own command approval instead. For the transfer verbs see [Moving artifacts between tiers and projects](reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects).
 
 ---
 
 ## Next Steps
 
+- [Plugin quickstart](plugin-quickstart.md) — Claude Code and Codex CLI plugin-first onboarding
 - [한국어 바이브코딩 빠른 시작](vibe-coding-getting-started-ko.md) — Claude Code·Codex CLI plugin-first onboarding
 - [Configuration](configuration.md) — All `MEMTOMEM_*` environment variables
 - [Embeddings](embeddings.md) — ONNX, Ollama, OpenAI providers

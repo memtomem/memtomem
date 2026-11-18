@@ -20,7 +20,7 @@ from __future__ import annotations
 import pytest
 
 from memtomem.embedding.onnx import _truncated_input_indexes
-from memtomem.tools.memory_writer import append_entry
+from helpers import append_judged
 
 pytest.importorskip(
     "fastembed",
@@ -39,12 +39,12 @@ class TestOnnxGoldenPath:
         comp, mem_dir = onnx_components
 
         target = mem_dir / "english.md"
-        append_entry(
+        append_judged(
             target,
             "Chose Redis for caching due to its low latency and LRU eviction.",
             title="Cache Decision",
         )
-        append_entry(
+        append_judged(
             target,
             "PostgreSQL remains our primary relational database.",
             title="Database Decision",
@@ -67,7 +67,7 @@ class TestOnnxGoldenPath:
         assert "PostgreSQL" in contents
 
     async def test_fastembed_tokenizer_safety_cap_contract(self, onnx_components):
-        """Pinned FastEmbed 0.8 keeps the tokenizer path used by #1786."""
+        """The locked FastEmbed keeps the tokenizer path used by #1786."""
         comp, _ = onnx_components
         await comp.embedder.embed_texts(["load the real tokenizer"])
         tokenizer = comp.embedder._tokenizer
@@ -89,12 +89,12 @@ class TestOnnxGoldenPath:
         comp, mem_dir = onnx_components
 
         target = mem_dir / "korean.md"
-        append_entry(
+        append_judged(
             target,
             "쿠버네티스 클러스터 모니터링 설정을 완료했다.",
             title="모니터링",
         )
-        append_entry(
+        append_judged(
             target,
             "그라파나 대시보드로 메트릭을 시각화한다.",
             title="대시보드",

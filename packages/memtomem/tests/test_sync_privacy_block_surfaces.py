@@ -3,17 +3,12 @@
 
 Pre-fold, ``raise_or_collect`` raised ``click.ClickException`` directly
 from generic generator code; the CLI auto-handled the message but the
-web routes and MCP context tool both fell through to their generic
-exception handlers and turned a user-actionable privacy block into a
-500 "Internal server error".
+web routes fell through to their generic exception handlers and turned a
+user-actionable privacy block into a 500 "Internal server error".
 
-These tests pin:
-
-* Web ``/api/context/{agents,commands,skills}/sync`` translates the
-  block into HTTP 422 with the formatted user message in the body.
-* MCP ``mem_context_generate`` / ``mem_context_sync`` returns a
-  ``"privacy block: ..."`` string instead of letting the exception
-  propagate to the tool harness.
+These tests pin that web ``/api/context/{agents,commands,skills}/sync``
+translates the block into HTTP 422 with the formatted user message in the
+body. (The MCP generate/sync tools that did the same are gone, ADR-0044.)
 """
 
 from __future__ import annotations
@@ -31,11 +26,7 @@ from memtomem.context.privacy_scan import FileScan, PrivacyBlockedError
 _LEAK_PATH = "/tmp/p/.memtomem/agents/leak.md"
 _FAKE_BLOCKED = FileScan(Path(_LEAK_PATH), "blocked", 1)
 # Mirror the real engine remediation, which ends with the absolute canonical
-# path (``privacy_scan.py``). The web 422 must NOT echo it (#1385 finding 1);
-# the MCP tool surface deliberately still round-trips the full message — not
-# because MCP is a weaker boundary (#1539 redacts its incidental error/reason
-# paths), but because this message IS the remediation: the caller must know
-# exactly which file to fix.
+# path (``privacy_scan.py``). The web 422 must NOT echo it (#1385 finding 1).
 _FAKE_MSG = (
     "Gate A: leak.md contains 1 privacy pattern hit(s); fan-out rejected. "
     f"Or remove the secret from {_LEAK_PATH} before re-running the push."
@@ -389,51 +380,3 @@ class TestSyncPhaseErrorHandlerContract:
         # parse error) keeps the historical bare ``{"detail": …}`` shape.
         res = self._client("parse failed", None).post("/boom")
         assert res.json() == {"detail": "parse failed"}
-
-
-class TestMcpContextToolTranslates:
-    """The MCP context tool returns a string body; on privacy block it must
-    return a ``"privacy block: ..."`` prefix instead of raising into the
-    tool harness. Lazy imports inside the tool body pick up the
-    monkeypatched generator at call time.
-    """
-
-    def _setup_project(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        # ``_find_project_root`` walks up for a ``.git`` parent — give it one.
-        project = tmp_path / "proj"
-        project.mkdir()
-        (project / ".git").mkdir()
-        monkeypatch.chdir(project)
-        return project
-
-    @pytest.mark.anyio
-    async def test_generate_tool_skills_block(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from memtomem.context import skills as ctx_skills
-        from memtomem.server.tools.context import mem_context_generate
-
-        self._setup_project(tmp_path, monkeypatch)
-        monkeypatch.setattr(ctx_skills, "generate_all_skills", _raise_privacy_block)
-
-        result = await mem_context_generate(include="skills")
-
-        assert isinstance(result, str)
-        assert result.startswith("privacy block:"), result
-        assert _FAKE_MSG in result
-
-    @pytest.mark.anyio
-    async def test_sync_tool_agents_block(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from memtomem.context import agents as ctx_agents
-        from memtomem.server.tools.context import mem_context_sync
-
-        self._setup_project(tmp_path, monkeypatch)
-        monkeypatch.setattr(ctx_agents, "generate_all_agents", _raise_privacy_block)
-
-        result = await mem_context_sync(include="agents")
-
-        assert isinstance(result, str)
-        assert result.startswith("privacy block:"), result
-        assert _FAKE_MSG in result

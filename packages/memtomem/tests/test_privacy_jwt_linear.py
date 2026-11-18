@@ -42,8 +42,8 @@ STRUCTURED = [
     "eyJAAAAAAAA.BBBBBBBB.CCCCCCCC-",
     "_eyJAAAAAAAA.BBBBBBBB.CCCCCCCC",
     "éeyJAAAAAAAA.BBBBBBBB.CCCCCCCC",
-    # ``é`` is a word character, so the first ``eyJ`` is not on a boundary and
-    # the old rule begins at the second one.
+    # ``é`` is not an ASCII word character, so the first ``eyJ`` is on a
+    # boundary and the old rule begins there.
     "éeyJAAAAAAAA-eyJBBBBBBBB.CCCCCCCC.DDDDDDDD",
     "ab-eyJAAAAAAAA-eyJBBBBBBBB.CCCCCCCC.DDDDDDDD",
     "eyJAAAAAAAA.BBBBBBBB.CCCCCCCC-eyJAAAAAAAA-eyJBBBBBBBB.CCCCCCCC.DDDDDDDD",

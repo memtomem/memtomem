@@ -595,6 +595,60 @@ async def test_the_bind_step_success_forms_are_what_the_tool_prints(bound_setup)
     assert again.splitlines()[0] == again_form.replace("<root>", str(root)), again
 
 
+# search, recall and remember fall back to user scope on one bind result instead of
+# stopping; the prefix they quote is what the tool prints for an unregistered root.
+_FALLBACK_WORKFLOWS = ("search", "recall", "remember")
+
+
+def _fallback_prefix(workflow_id: str) -> str:
+    source = (_REPO / f"packages/memtomem-plugin-assets/workflows/{workflow_id}.md").read_text(
+        encoding="utf-8"
+    )
+    block = source.split("<!-- scope:bound -->", 1)[1].split("<!-- /scope -->", 1)[0]
+    prefixes = re.findall(r"first line starts with `([^`]+)`", " ".join(block.split()))
+    assert len(prefixes) == 1, (workflow_id, prefixes)
+    return prefixes[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workflow_id", _FALLBACK_WORKFLOWS)
+async def test_the_fallback_prefix_is_what_an_unregistered_bind_prints(
+    bound_setup, tmp_path: Path, workflow_id: str
+) -> None:
+    app, ctx, _root, _tier = bound_setup
+    bare = tmp_path / "bare"
+    (bare / ".git").mkdir(parents=True)
+    out = await mem_do(action="project_bind", params={"project_root": str(bare)}, ctx=ctx)
+    assert out.splitlines()[0].startswith(_fallback_prefix(workflow_id)), out
+    assert app.bound_project_root is None
+
+
+@pytest.mark.asyncio
+async def test_an_unregistered_bind_does_not_mean_the_server_has_no_project(
+    bm25_only_components, tmp_path: Path, stdio, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Why the bound remember stops at this result instead of reaching its project rules.
+
+    The registration check runs before the working-directory check, so a server started
+    inside a registered project answers "no registered tier" for an unregistered one and
+    keeps its own project: a write that went on to ask it for the current project would
+    land in that other project.
+    """
+    comp, _ = bm25_only_components
+    cwd_root, cwd_tier = _make_project(tmp_path, "cwd-proj")
+    bare = tmp_path / "bare"
+    (bare / ".git").mkdir(parents=True)
+    comp.config.indexing.project_memory_dirs = [cwd_tier]
+    monkeypatch.chdir(cwd_root)
+    app = AppContext.from_components(comp)
+    ctx = StubCtx(app)
+
+    out = await mem_project_bind(project_root=str(bare), ctx=ctx)
+    assert out.startswith(_fallback_prefix("remember")), out
+    assert app.bound_project_root is None
+    assert _resolve_project_context_root(app) == cwd_root
+
+
 @pytest.mark.asyncio
 async def test_a_repository_under_a_registered_parent_binds_the_parent(
     bm25_only_components, tmp_path: Path, stdio, plugin_cwd

@@ -1,0 +1,50 @@
+[project]
+name = "langchain-memtomem"
+version = "0.2.1"
+description = "A LangGraph BaseStore whose query search runs the memtomem pipeline over Markdown projections"
+authors = [
+    {name = "DAPADA Inc.", email = "contact@dapada.co.kr"},
+    {name = "memtomem contributors"},
+]
+license = {text = "Apache-2.0"}
+keywords = ["langgraph", "langchain", "memory", "memtomem", "store", "markdown"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+readme = "README.md"
+requires-python = ">=3.12"
+# The memtomem bound is a compatibility floor, not a version pin: a core version
+# bump must not move it unless the package starts needing a newer name. The true
+# floor is 0.7.9, the first release whose ``create_components`` takes the
+# ``bm25_path_fallback`` and ``chunk_source_labels`` keywords the store passes
+# (#3205, #3209). 0.7.4 was the first carrying the ADR-0042 public names
+# (memtomem.runtime.files with norm_path, MemtomemBaseStore.write_record,
+# matches_filter, the instance-local FTS tokenizer);
+# ``langchain_memtomem/__init__.py`` refuses to import against a memtomem that
+# lacks those names.
+dependencies = [
+    "langgraph>=1.0,<2",
+    "memtomem>=0.7.9,<0.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/memtomem/memtomem"
+Repository = "https://github.com/memtomem/memtomem"
+Issues = "https://github.com/memtomem/memtomem/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/langchain_memtomem"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/langchain_memtomem", "docs", "README.md", "LICENSE", "CHANGELOG.md"]

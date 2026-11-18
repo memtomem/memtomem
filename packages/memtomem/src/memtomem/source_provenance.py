@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, Protocol
 
+from memtomem.storage.sqlite_helpers import fold_path_form
+
 
 # Covers both reasons a chunk's source may not be rewritten here, because the
 # gates that raise it cannot always tell them apart: the chunk is a fragment or
@@ -40,11 +42,93 @@ EXCLUDED_SOURCE_DETAIL = (
 )
 
 
+_EXCLUDED_MID_WRITE_REMEDY = (
+    "If an exclude pattern or a nested worktree matched, remove the pattern or register the "
+    "worktree as its own memory directory, then re-index the file; a file a built-in rule "
+    "skips stays unindexed."
+)
+
+
+def excluded_after_write_notice(op: str) -> str:
+    """What a by-id rewrite tells its caller when the source became excluded while it ran.
+
+    The check before the write passed, so the exclusion was installed between it
+    and the re-index. The re-index removed the file's stored chunks rather than
+    leaving the pre-rewrite ones searchable beside the new bytes (#3163).
+    """
+    return (
+        f"The {op} is on disk, but indexing started skipping this source (an exclude "
+        "pattern, a built-in rule, or a nested git worktree) while it ran, so the file's "
+        f"stored chunks were removed instead of re-indexed. {_EXCLUDED_MID_WRITE_REMEDY}"
+    )
+
+
+def relinked_after_write_notice(op: str, stored_key: str) -> str:
+    """What a write tells its caller when its path stopped holding the file while it ran.
+
+    The write refused a path that no longer held the file it read (#2923,
+    #3289), so the file was replaced between the write and the re-index: by a
+    symlink at the leaf, a parent directory turned into a link, or another
+    file saved over it. The re-index held the rows under the written file's
+    key instead of indexing what the path holds now (#3172, #3320).
+
+    ``stored_key`` is the chunk's source key. The hold is placed under the
+    folded spelling, so rows stored under a key from before Unicode folding
+    are not held and stay searchable (#2907); the text says so rather than
+    claiming they are hidden. No remedy is named for those rows: a re-index
+    does not find them either (#2926).
+    """
+    lead = (
+        f"The {op} was written, but the file was replaced at its path (by a symbolic link or "
+        "another file) before it was re-indexed, so what the path holds now was not indexed "
+        "in its place"
+    )
+    if stored_key != fold_path_form(stored_key):
+        return (
+            f"{lead}. The file's earlier chunks could not be hidden: they are stored under a "
+            "path spelling from before Unicode normalization, which the hold does not match, "
+            "so they stay searchable."
+        )
+    return (
+        f"{lead} and the file's chunks are held (hidden from search). Put a regular file back "
+        "at the path and re-index it to lift the hold."
+    )
+
+
+# What an append tells its caller when the target became excluded while it ran.
+# The check before the append passed, so the exclusion was installed between it
+# and the re-index, which then skipped the file. The file's earlier chunks still
+# describe bytes that are there, so they stay (#3165).
+EXCLUDED_AFTER_APPEND_NOTICE = (
+    "The new entry is on disk, but indexing started skipping this file (an exclude "
+    "pattern, a built-in rule, or a nested git worktree) while it was written, so the "
+    f"entry was not indexed. {_EXCLUDED_MID_WRITE_REMEDY}"
+)
+
+
 READ_ONLY_TARGET_DETAIL = (
     "read_only_target: this destination is under a read-only index root "
     "(indexing.read_only_memory_dirs), so memtomem will not write it. Nothing was written. "
     "Write to a different memory directory, or remove the root from read_only_memory_dirs."
 )
+
+
+# ``index_file`` takes any path, and a memory directory can be unregistered
+# after its files were indexed, so a chunk can name a file memtomem was only
+# asked to read. Such a source stays searchable; edit and delete by chunk id
+# refuse it.
+UNMANAGED_SOURCE_DETAIL = (
+    "source_unmanaged: this chunk's source file is not under a directory memtomem manages, so "
+    "memtomem will not rewrite it. Nothing was written. Either it was indexed from an explicit "
+    "path or its directory is no longer registered (edit the file itself, or register its "
+    "directory as a memory directory to edit it here), or its project memory directory is a "
+    "symbolic link or junction (replace the link with a real directory)."
+)
+
+
+#: Where the web upload route saves files. Not an index root, and still a
+#: directory memtomem keeps memory files in, so their chunks stay editable by id.
+UPLOAD_DIR = Path("~/.memtomem/uploads")
 
 
 EXCLUDED_TARGET_DETAIL = (
@@ -89,6 +173,15 @@ class ReadOnlySourceError(ValueError):
     The per-chunk ``source_read_only`` gates catch the common case earlier; this
     is the backstop that also covers a file indexed *before* its root was
     declared read-only, whose stored chunks still carry the flag unset.
+    """
+
+
+class UnmanagedSourceError(ValueError):
+    """A rewrite refused before writing: the source is outside every memory directory.
+
+    Raised by the shared mutation helper for the reason
+    :class:`ReadOnlySourceError` is: a caller that reaches it without having
+    asked ``is_managed_source`` still refuses.
     """
 
 

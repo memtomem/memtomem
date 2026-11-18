@@ -261,7 +261,7 @@ async def test_mem_do_merge_refuses_malformed_dry_run(mcp_app, components):
 # arg model, which is LAX by default and would coerce "false" / 0 → False
 # before the body's strict_bool runs — reaching apply without a literal JSON
 # false. StrictBool annotations close that. Built via func_metadata so this
-# runs in every tool mode (see test_server_tools_context_pull.py).
+# runs in every tool mode, where the tool itself may be pruned from ``mcp``.
 
 _TAG_TOOLS = {
     "rename": (mem_tag_rename, {"old_tag": "a", "new_tag": "b"}),

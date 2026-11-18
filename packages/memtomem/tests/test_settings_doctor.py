@@ -1335,8 +1335,11 @@ class TestSyncWarning:
             sync_cmd,
             ["--include=settings", "--scope=user", "--yes"],
         )
-        assert result.exit_code == 0, result.output
+        # The warning runs before the fan-out, so it is still shown, redacted,
+        # when Gate A then refuses the secret-bearing canonical (#3343).
+        assert result.exit_code == 1, result.output
         assert "contains non-portable absolute home path" in result.output
+        assert "Gate A" in result.output
         assert secret not in result.output
         assert "<redacted: secret-shape>" in result.output
 

@@ -19,7 +19,7 @@ import logging
 
 from croniter import croniter  # type: ignore[import-untyped]
 
-from memtomem.scheduler.jobs import JOB_KINDS, run_outcome
+from memtomem.scheduler.jobs import JOB_KINDS, run_job, run_outcome, validate_new_params
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -63,7 +63,8 @@ async def mem_schedule_register(
         cron: Five-field cron expression interpreted in UTC (e.g. ``"0 3 * * 0"``).
         job_kind: One of the registered ``JOB_KINDS`` keys (e.g. ``"compaction"``).
         params: Optional dict of parameters validated against the job's
-            ``params_model`` before storage.
+            ``params_model`` before storage. A key the model does not declare
+            is refused.
     """
     if not croniter.is_valid(cron):
         return json.dumps({"ok": False, "reason": f"invalid cron expression: {cron!r}"})
@@ -74,7 +75,7 @@ async def mem_schedule_register(
             {"ok": False, "reason": f"unknown job_kind {job_kind!r}; available: {kinds}"}
         )
     try:
-        spec.params_model.model_validate(params or {})
+        validate_new_params(spec, params or {})
     except Exception as exc:
         return json.dumps({"ok": False, "reason": f"invalid params: {exc}"})
 
@@ -131,14 +132,16 @@ async def mem_schedule_run_now(id: str, ctx: CtxType = None) -> str:
     # idempotent maintenance jobs so this is a known, accepted limit
     # for Phase A; non-idempotent jobs added later (e.g.
     # ``embedding_rebuild``) need a per-schedule lock here. Tracked for
-    # Phase C alongside disable/enable.
+    # Phase C alongside disable/enable. A ``dedup_scan`` walk's position
+    # is last-finisher-wins across such runs: they repeat a pool, and one
+    # that finishes late moves the position back to the end of its own.
     try:
-        result = await asyncio.wait_for(
-            spec.runner(app, **validated.model_dump()),
+        result, state_update = await asyncio.wait_for(
+            run_job(spec, app, validated, sched.get("state")),
             timeout=timeout,
         )
         status, recorded = run_outcome(result)
-        await app.storage.schedule_mark_run(id, status, result=recorded)
+        await app.storage.schedule_mark_run(id, status, result=recorded, state=state_update)
         return json.dumps({"ok": True, "reason": "ran", "result": result})
     except asyncio.TimeoutError:
         reason = f"exceeded {timeout}s"

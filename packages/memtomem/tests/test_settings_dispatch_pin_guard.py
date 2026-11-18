@@ -508,12 +508,12 @@ def _python_files() -> list[Path]:
 #: would still clear a global ``>= 3`` on the settings dispatchers alone.
 #: ``apply_migration`` is 0 by design — it has no threaded dispatcher yet.
 _MIN_SITES = {
-    "generate_all_settings": 3,  # web sync + two MCP context tools
+    "generate_all_settings": 1,  # web sync (the MCP tools left with ADR-0044)
     "apply_hook_copy": 1,  # the web copy route
     "apply_migration": 0,
     "_locked_cas_write": 3,  # resolve / delete / promote
-    "generate_all_skills": 3,  # web sync core + two MCP context tools
-    "extract_skills_to_canonical": 4,  # three web import routes + one MCP tool
+    "generate_all_skills": 1,  # web sync core (the MCP tools left with ADR-0044)
+    "extract_skills_to_canonical": 3,  # three web import routes
     # Two each: the skills routes and the shared agents/commands routes in
     # ``_atomic_kind``. A floor of 1 would stay green with an entire mirror
     # gone, which is exactly the drift a shared-name closure invites.

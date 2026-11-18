@@ -11,7 +11,7 @@ These tests pin:
 
 * unknown ``on_drop`` → FastAPI-native 422 (field_validator against the
   engine's ``ON_DROP_LEVELS`` — one vocabulary owner, mirroring CLI
-  ``click.Choice`` and MCP ``_validate_on_drop``);
+  ``click.Choice``);
 * ``on_drop="error"`` with a dropping canonical → 422 with a structured
   ``{reason_code: "strict_drop", message, generated}`` detail naming the
   writes that landed before the abort, which remain on disk;
@@ -36,7 +36,7 @@ from memtomem.context.commands import CANONICAL_COMMAND_ROOT
 from .helpers import set_home
 
 # Carries Gemini-only AND Claude-only fields so some field drops for every
-# runtime (same shape as test_server_tools_context_on_drop.py).
+# runtime.
 _FULL_AGENT = """---
 name: beta-full
 description: Reviews staged code for quality

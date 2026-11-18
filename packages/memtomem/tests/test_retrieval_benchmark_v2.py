@@ -572,14 +572,16 @@ def _fake_track_runtime(
 ) -> dict:
     """Swap ``create_components`` for a stub that indexes and searches nothing real."""
     import memtomem.runtime as runtime
-    from memtomem.storage.fts_tokenizer import get_tokenizer
 
     seen: dict = {"closed": 0}
+
+    class _Storage:
+        fts_tokenizer_effective = "unset"
 
     class _IndexEngine:
         async def index_path(self, root: Path, recursive: bool):
             if on_index is not None:
-                on_index()
+                on_index(_Components.storage)
             return _FakeIndexStats(len(list(root.rglob("*.md"))))
 
     class _SearchPipeline:
@@ -587,13 +589,15 @@ def _fake_track_runtime(
             return [], search_stats
 
     class _Components:
+        storage = _Storage()
         index_engine = _IndexEngine()
         search_pipeline = _SearchPipeline()
 
     async def create_components(config, **kwargs):
         seen["kwargs"] = kwargs
-        seen["tokenizer_at_create"] = get_tokenizer()
         seen["config"] = config
+        # What ``create_storage`` does with ``search.tokenizer``.
+        _Components.storage.fts_tokenizer_effective = config.search.tokenizer
         if create_error is not None:
             raise create_error
         return _Components()
@@ -630,21 +634,17 @@ def _run_fake_track(benchmark, tokenizer: str, reranker_model: str | None) -> di
 
 @pytest.fixture
 def _benchmark_track(monkeypatch: pytest.MonkeyPatch):
-    from memtomem.storage.fts_tokenizer import get_tokenizer, set_tokenizer
-
     monkeypatch.chdir(ROOT)  # the fixture corpus and ir_metrics paths are repo-relative
-    set_tokenizer("unicode61")
-    yield _load("benchmark_v2_track", "tools/retrieval-eval/benchmark_v2.py")
-    assert get_tokenizer() == "unicode61"
+    return _load("benchmark_v2_track", "tools/retrieval-eval/benchmark_v2.py")
 
 
-def test_v2_track_runs_ambient_free_with_its_tokenizer_and_resets_it(
+def test_v2_track_runs_ambient_free_with_its_tokenizer(
     _benchmark_track, monkeypatch: pytest.MonkeyPatch
 ):
     seen = _fake_track_runtime(monkeypatch, search_stats=_FakeSearchStats("rerank", "jina"))
     report = _run_fake_track(_benchmark_track, "kiwipiepy", "jina")
     assert seen["kwargs"] == {"load_ambient_config": False, "entity_backfill": False}
-    assert seen["tokenizer_at_create"] == "kiwipiepy"
+    assert seen["config"].search.tokenizer == "kiwipiepy"
     assert seen["closed"] == 1
     assert report["reranker"]["searches"] == 3
     assert report["reranker"]["searches_reranked"] == 3
@@ -666,21 +666,20 @@ def test_v2_track_refuses_a_rerank_fallback(_benchmark_track, monkeypatch: pytes
 def test_v2_track_refuses_a_silent_tokenizer_fallback(
     _benchmark_track, monkeypatch: pytest.MonkeyPatch
 ):
-    from memtomem.storage.fts_tokenizer import set_tokenizer
+    def fall_back(storage) -> None:
+        # What the backend reports once kiwipiepy has failed to import.
+        storage.fts_tokenizer_effective = "unicode61"
 
-    # What fts_tokenizer._get_kiwi does when kiwipiepy fails to import.
     _fake_track_runtime(
         monkeypatch,
         search_stats=_FakeSearchStats("rrf", None),
-        on_index=lambda: set_tokenizer("unicode61"),
+        on_index=fall_back,
     )
     with pytest.raises(RuntimeError, match="korean indexed with unicode61, not kiwipiepy"):
         _run_fake_track(_benchmark_track, "kiwipiepy", None)
 
 
-def test_v2_track_resets_the_tokenizer_when_components_fail(
-    _benchmark_track, monkeypatch: pytest.MonkeyPatch
-):
+def test_v2_track_cleans_up_when_components_fail(_benchmark_track, monkeypatch: pytest.MonkeyPatch):
     seen = _fake_track_runtime(
         monkeypatch,
         search_stats=_FakeSearchStats("rrf", None),

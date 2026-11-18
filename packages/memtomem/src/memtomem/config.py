@@ -466,6 +466,16 @@ class IndexingConfig(ConfigModel):
     # polling is slower but gives the indexer a reliable default there.  Other
     # platforms retain their native backend unless explicitly overridden.
     watcher_backend: Literal["auto", "native", "polling"] = "auto"
+    # How often the polling backend rescans the watched roots; the native
+    # backend ignores it.  Every pass walks and stats each root's whole tree,
+    # in every server process that runs a watcher, so a longer interval
+    # means fewer of those passes.  It also delays an edit made outside
+    # memtomem: one that lands right after a pass waits the whole interval,
+    # then ``watcher_debounce_ms``.  A file created and deleted between two
+    # passes is never seen.  Read when an observer is built: a running MCP
+    # server keeps the value it started with, and ``mm web`` stores an
+    # edited value and uses it for the next observer it builds.
+    watcher_poll_interval_ms: int = Field(default=10000, ge=100, le=60000)
     watcher_debounce_ms: int = Field(default=5000, ge=1, le=30000)
     watcher_max_wait_ms: int = Field(default=30000, ge=1, le=30000)
 
@@ -823,10 +833,11 @@ class RerankConfig(ConfigModel):
     timeout_s: float = 30.0
 
     # Candidate pool (Stage 3b oversample) — the reranker sees
-    # ``max(min_pool, min(max_pool, int(oversample * response_top_k)))``
-    # items, then returns the caller's response top_k. Defaults give the
-    # classic 2× oversample at top_k=10 (pool=20) while scaling with
-    # larger requests.
+    # ``max(top_k, min_pool, min(max_pool, int(oversample * top_k)))``
+    # items (top_k = the response size), then returns up to top_k. Defaults give
+    # the classic 2× oversample at top_k=10 (pool=20) while scaling with
+    # larger requests. ``max_pool`` is the ceiling of the oversampled pool;
+    # a larger top_k overrides it, so it no longer caps the response size.
     oversample: float = 2.0
     min_pool: int = 20
     max_pool: int = 200
@@ -1212,6 +1223,19 @@ class ContextGatewayConfig(ConfigModel):
     auto_display_configured_projects: bool = True
 
 
+class MaintenanceConfig(ConfigModel):
+    """Settings for the maintenance scans (``mem_dedup_scan`` and its siblings)."""
+
+    # Off by default and outside ``MUTABLE_FIELDS``: it is set in ``config.json``
+    # or the environment, not by ``mem_config``. When true, ``mem_dedup_scan``
+    # prints the stored evidence for each member of a candidate pair (heading,
+    # namespace, scope, tags, validity, position in the source, relations and
+    # links) and the fields the two members differ on. The scan itself, its
+    # ordering and what it selects are unchanged; the output is about three
+    # times as long.
+    experimental_duplicate_brief: bool = False
+
+
 class SessionTraceConfig(ConfigModel):
     """Configuration for session command execution tracing."""
 
@@ -1300,6 +1324,7 @@ class Mem2MemConfig(BaseSettings):
     session_summary: SessionSummaryConfig = Field(default_factory=SessionSummaryConfig)
     context_gateway: ContextGatewayConfig = Field(default_factory=ContextGatewayConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
     session_trace: SessionTraceConfig = Field(default_factory=SessionTraceConfig)
 
     # Sections the loaders read, rejected and therefore ignored (#2385 item 3).
@@ -1330,6 +1355,48 @@ class Mem2MemConfig(BaseSettings):
 
         apply_e5_defaults(self)
         return self
+
+    @classmethod
+    def without_environment(cls, **data: Any) -> "Mem2MemConfig":
+        """A config built from ``data`` alone: no ``MEMTOMEM_*`` variables.
+
+        ``Mem2MemConfig()`` and ``Mem2MemConfig.model_validate`` both fill any
+        setting the given values leave out from the process environment
+        (pydantic-settings reads ``MEMTOMEM_*`` in either path; explicit values
+        still win), and ``model_construct`` skips every validator. A host that embeds memtomem beside its own configuration
+        (ADR-0042) needs the third option: the given values, fully validated,
+        and nothing from the operator's shell.
+
+        The guarantee covers the ``MEMTOMEM_*`` settings sources only. The
+        Langfuse validator still reads ``LANGFUSE_PUBLIC_KEY`` and
+        ``LANGFUSE_SECRET_KEY`` from the environment when tracing is enabled
+        without explicit keys, as it does for every constructor.
+
+        The instance is a module-level subclass of ``Mem2MemConfig`` (so it
+        pickles) and passes ``isinstance`` checks; its ``repr`` names
+        ``ExplicitMem2MemConfig``.
+        """
+        return ExplicitMem2MemConfig(**data)
+
+
+class ExplicitMem2MemConfig(Mem2MemConfig):
+    """:meth:`Mem2MemConfig.without_environment`'s concrete type.
+
+    pydantic-settings chooses its value sources per class, so skipping the
+    environment needs a class whose sources are the init values alone. It is
+    module-level, not created inside the classmethod, so instances pickle.
+    """
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        return (init_settings,)
 
 
 # ---------------------------------------------------------------------------
@@ -2241,6 +2308,104 @@ def _validate_loaded_section(
         raise generic_error
 
 
+class RelativeConfigPathError(ValueError):
+    """A configured path is relative in a process that refuses relative paths."""
+
+
+# Set only by a shared daemon (``memtomem.server.daemon``). A daemon runs in a
+# neutral working directory and serves clients in many others, so a relative
+# configured path has no meaning there; every other process keeps today's
+# meaning, relative to its own working directory.
+_refuse_relative_paths = False
+
+# The configured filesystem paths, per section class. A relative value in a
+# neutral working directory would open, watch or write the wrong place, or, for
+# the masking manifest, stop applying it silently.
+_RELATIVE_PATH_FIELDS: dict[type, tuple[str, ...]] = {
+    StorageConfig: ("sqlite_path",),
+    IndexingConfig: (
+        "memory_dirs",
+        "project_memory_dirs",
+        "read_only_memory_dirs",
+        "retain_missing_dirs",
+        "index_masking_manifest_path",
+        "chunk_tokenizer_path",
+    ),
+    EmbeddingConfig: ("onnx_artifact_path",),
+    ContextGatewayConfig: ("known_projects_path",),
+    SessionTraceConfig: ("jsonl_path",),
+}
+
+_SECTION_NAMES: dict[type, str] = {
+    StorageConfig: "storage",
+    IndexingConfig: "indexing",
+    EmbeddingConfig: "embedding",
+    ContextGatewayConfig: "context_gateway",
+    SessionTraceConfig: "session_trace",
+}
+
+
+def refuse_relative_config_paths() -> None:
+    """Make every later config build and section assignment refuse relative paths."""
+    global _refuse_relative_paths
+    _refuse_relative_paths = True
+
+
+def _is_relative_path_value(field: str, value: object) -> bool:
+    text = str(value)
+    if text == "":
+        return False
+    if field == "sqlite_path" and (text == ":memory:" or text.startswith("file:")):
+        # Not paths; a daemon refuses them separately, as stores it cannot name.
+        return False
+    if field == "chunk_tokenizer_path":
+        from memtomem.embedding.profiles import is_tokenizer_identifier
+
+        if is_tokenizer_identifier(text):
+            return False
+    return not Path(text).expanduser().is_absolute()
+
+
+def relative_section_paths(section_obj: object) -> list[str]:
+    """The dotted names of ``section_obj``'s configured paths that are relative."""
+    section_cls = type(section_obj)
+    fields = _RELATIVE_PATH_FIELDS.get(section_cls, ())
+    found: list[str] = []
+    for field in fields:
+        value = getattr(section_obj, field)
+        values = value if isinstance(value, list) else [value]
+        if any(_is_relative_path_value(field, item) for item in values):
+            found.append(f"{_SECTION_NAMES[section_cls]}.{field}")
+    return found
+
+
+def relative_config_paths(config: Mem2MemConfig) -> list[str]:
+    """The dotted names of every configured path in ``config`` that is relative."""
+    found: list[str] = []
+    for section_name in _SECTION_NAMES.values():
+        found.extend(relative_section_paths(getattr(config, section_name)))
+    return found
+
+
+def _relative_paths_error(names: list[str]) -> RelativeConfigPathError:
+    return RelativeConfigPathError(
+        "a shared daemon cannot use a relative configured path, because it has no "
+        "working directory of its own: " + ", ".join(names) + ". Use an absolute path or ~."
+    )
+
+
+def check_relative_config_paths(config: Mem2MemConfig) -> None:
+    """Raise :class:`RelativeConfigPathError` if refusing and ``config`` has one."""
+    if not _refuse_relative_paths:
+        return
+    try:
+        found = relative_config_paths(config)
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise RelativeConfigPathError(f"a configured path cannot be checked: {exc}") from exc
+    if found:
+        raise _relative_paths_error(found)
+
+
 def assign_section_fields(section_obj: object, updates: Mapping[str, object]) -> dict[str, object]:
     """Assign already-coerced values to one config section, invariants enforced.
 
@@ -2271,6 +2436,15 @@ def assign_section_fields(section_obj: object, updates: Mapping[str, object]) ->
     for key, value in updates.items():
         setattr(section_obj, key, value)
     invalid = section_invariant_error(section_obj, updates.keys())
+    if invalid is None and _refuse_relative_paths:
+        try:
+            relative = relative_section_paths(section_obj)
+        except (RuntimeError, ValueError, OSError) as exc:
+            # ``expanduser`` of an unknown ``~user`` raises; refuse, and roll back below.
+            invalid = f"a configured path cannot be checked: {exc}"
+        else:
+            if relative:
+                invalid = str(_relative_paths_error(relative))
     if invalid is not None:
         for key, old in old_values.items():
             setattr(section_obj, key, old)
@@ -3069,6 +3243,7 @@ def classify_scope(
     project_memory_dirs: Iterable[Path | str] | None = None,
     *,
     resolved_roots: frozenset[Path] | None = None,
+    resolved: bool = False,
 ) -> tuple[str, Path | None]:
     """Classify ``path`` into a scope tier and project root (ADR-0011).
 
@@ -3092,6 +3267,11 @@ def classify_scope(
     passes it so the roots are resolved once rather than once per path. When
     given, it wins over ``project_memory_dirs``, and an empty set still
     enforces registration: every project-shaped path comes back ``user``.
+
+    ``resolved=True`` says ``path`` is already the resolution the caller judges
+    under: the registration check compares it as given instead of resolving it
+    again, so a leaf replaced by a symlink since that resolution is not followed
+    (#3191). The registered roots are still resolved here.
     """
     s = str(path).replace("\\", "/").rstrip("/")
     for scope_name, pat in _PROJECT_SCOPE_PATTERNS:
@@ -3107,10 +3287,13 @@ def classify_scope(
         if registered_roots is None and project_memory_dirs is not None:
             registered_roots = resolve_project_memory_dirs(project_memory_dirs)
         if registered_roots is not None:
-            try:
-                resolved_path = Path(str(path)).expanduser().resolve()
-            except OSError:
+            if resolved:
                 resolved_path = Path(str(path))
+            else:
+                try:
+                    resolved_path = Path(str(path)).expanduser().resolve()
+                except OSError:
+                    resolved_path = Path(str(path))
             # The path qualifies if any registered project_memory_dir is
             # an ancestor (the registered dir is the ``memories[/.local]``
             # subdir, so ``path`` must live at or under it).

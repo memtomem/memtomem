@@ -210,8 +210,8 @@ class AtomicSyncRequest(HostWriteSyncRequest):
     # silently behaved as "ignore" (#1247 id 47) — reject at the boundary
     # instead (FastAPI renders the ValueError as a native 422). Validates
     # against the engine's ON_DROP_LEVELS so the vocabulary has one owner
-    # (no Literal duplication; CLI click.Choice and MCP _validate_on_drop
-    # already gate the same way).
+    # (no Literal duplication; the CLI's click.Choice already gates the same
+    # way).
     @field_validator("on_drop")
     @classmethod
     def _check_on_drop(cls, value: str) -> str:

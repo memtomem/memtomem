@@ -20,6 +20,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from memtomem.errors import FeedbackConflictError
 from memtomem.web.deps import get_project_context_root, get_search_pipeline, get_storage
+from memtomem.web.routes._writer_wait import (
+    WRITER_BUSY_NOTHING_CHANGED_DETAIL,
+    WRITER_BUSY_READ_DETAIL,
+    writer_busy_as_503,
+)
 from memtomem.web.schemas.search_runs import (
     FeedbackIn,
     FeedbackOut,
@@ -42,9 +47,10 @@ async def list_search_runs(
 ) -> SearchRunListResponse:
     """Newest-first summaries of observed search runs."""
     await pipeline.flush_observation()
-    rows = await storage.get_search_runs(
-        limit=limit, since=since, project_context_root=project_context_root
-    )
+    with writer_busy_as_503(WRITER_BUSY_READ_DETAIL):
+        rows = await storage.get_search_runs(
+            limit=limit, since=since, project_context_root=project_context_root
+        )
     runs = [SearchRunSummary(**r) for r in rows]
     return SearchRunListResponse(runs=runs, total=len(runs))
 
@@ -58,13 +64,12 @@ async def get_search_run(
 ) -> SearchRunDetailResponse:
     """One run: query, observation metadata, ranked snapshot + judgments."""
     await pipeline.flush_observation(run_id)
-    run = await storage.get_search_run(run_id, project_context_root=project_context_root)
-    judgments = {
-        j["chunk_id"]: j
-        for j in await storage.get_search_feedback(
+    with writer_busy_as_503(WRITER_BUSY_READ_DETAIL):
+        run = await storage.get_search_run(run_id, project_context_root=project_context_root)
+        feedback = await storage.get_search_feedback(
             run_id, project_context_root=project_context_root
         )
-    }
+    judgments = {j["chunk_id"]: j for j in feedback}
     results = []
     for entry in run["result_snapshot"]:
         judgment = judgments.get(entry.get("chunk_id"))
@@ -95,13 +100,14 @@ async def save_search_feedback(
     """Record one relevance judgment for a snapshotted result."""
     await pipeline.flush_observation(run_id)
     try:
-        saved = await storage.save_search_feedback(
-            run_id,
-            body.chunk_id,
-            body.judgment,
-            replace=body.replace,
-            project_context_root=project_context_root,
-        )
+        with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
+            saved = await storage.save_search_feedback(
+                run_id,
+                body.chunk_id,
+                body.judgment,
+                replace=body.replace,
+                project_context_root=project_context_root,
+            )
     except FeedbackConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return FeedbackOut(**saved)

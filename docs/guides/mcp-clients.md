@@ -123,13 +123,13 @@ Both write to `~/.claude.json` — no need to edit that file by hand.
 
 These commands reuse the persistent environment that provides `mm`. If you
 intentionally do not install memtomem, replace `memtomem-server` with `uvx
---isolated --from "memtomem[all]==0.7.3" memtomem-server`.
+--isolated --from "memtomem[all]==0.7.11" memtomem-server`.
 
 For the safe plugin experience (bundled MCP server plus nine focused skills),
 install `/plugin install memtomem@memtomem`. Prompt retrieval and write-time
 indexing are a separate opt-in `/plugin install memtomem-automation@memtomem`.
 Note that both manual commands above differ from the plugin's pinned launch
-command (`uvx --from 'memtomem[onnx]==0.7.3' memtomem-server`), so installing the
+command (`uvx --from 'memtomem[onnx]==0.7.11' memtomem-server`), so installing the
 plugin on top of a manual entry runs **two** servers against the same store.
 The [Claude Code integration guide](integrations/claude-code.md) shows how to
 check for the duplicate and which registration to keep.
@@ -362,9 +362,9 @@ Call mem_status to check the memtomem connection status
 
 ## 8. OpenCode
 
-The npm plugin for this core version is `opencode-memtomem@0.3.26` (bundling
-core `0.7.3`). Add it through OpenCode's plugin form —
-`{"plugin": ["opencode-memtomem@0.3.26"]}` in `opencode.json`. The plugin
+The npm plugin for this core version is `opencode-memtomem@0.3.38` (bundling
+core `0.7.11`). Add it through OpenCode's plugin form —
+`{"plugin": ["opencode-memtomem@0.3.38"]}` in `opencode.json`. The plugin
 supplies an exact-pinned MCP server, nine commands, three read-only skills,
 and conservative permissions. Upgrade any pin still on `0.1.3` or older:
 those bundle pre-`0.3.14` cores, whose `mcp` dependency has no `<2` upper
@@ -379,7 +379,7 @@ skills — configure the released MCP server directly instead:
   "mcp": {
     "memtomem": {
       "type": "local",
-      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.7.3", "memtomem-server"],
+      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.7.11", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
       "environment": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
@@ -484,11 +484,12 @@ agy plugin install https://github.com/memtomem/memtomem/tree/main/packages/memto
 ```
 
 agy starts a plugin's server in the plugin directory, so the plugin's server
-starts at user scope (absolute paths for indexing). Its handoff, brief and
-update workflows first bind that server to your repository with
-`mem_project_bind`, which needs the repository's tier registered
-(`mm mem init --scope project_local`). The binding lasts until the server
-process restarts. Use one of the two, not both: a hand-registered `memtomem` entry
+starts at user scope (absolute paths for indexing). Its handoff, brief, update,
+search, recall and remember workflows first bind that server to your repository
+with `mem_project_bind`, which needs the repository's tier registered
+(`mm mem init --scope project_local`). Without a registered tier, or outside a
+Git repository, search and recall read user scope only and remember saves only
+cross-project memories. The binding lasts until the server process restarts. Use one of the two, not both: a hand-registered `memtomem` entry
 and the plugin's server (which agy names `memtomem_memtomem`) both run, and
 with a relative storage path in your memtomem config they open different
 stores — compare the DB path `mem_status` reports before removing either. See
@@ -602,19 +603,19 @@ uses, so the output is identical. Useful as a sanity check between
 | **Schedule** | `mem_schedule_register`, `mem_schedule_list`, `mem_schedule_run_now`, `mem_schedule_delete` (cron-driven compaction, decay, dead-link cleanup, dedup; also reachable as `mem_do` actions) |
 | **Health** | `mem_watchdog`, `mem_cleanup_orphans` |
 | **Import** | `mem_import_notion`, `mem_import_obsidian` |
-| **Maintenance** | `mem_dedup_scan`, `mem_dedup_merge`, `mem_decay_scan`, `mem_decay_expire`, `mem_update_coverage` (which commits the `update` workflow has reviewed for this project; exposed individually to plugin hosts through `MEMTOMEM_EXTRA_TOOLS`) |
+| **Maintenance** | `mem_dedup_scan`, `mem_dedup_merge`, `mem_dedup_remove`, `mem_decay_scan`, `mem_decay_expire`, `mem_update_coverage` (which commits the `update` workflow has reviewed for this project; exposed individually to plugin hosts through `MEMTOMEM_EXTRA_TOOLS`) |
 | **Data** | `mem_export`, `mem_import` |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* |
 | **Evaluation** | `mem_eval` |
 | **Quality Lab** | `mem_quality_replay` (replay stored eval cases into a deterministic retrieval-quality report; promote/compare stay on `mm quality`) |
-| **Context** | `mem_context_detect`, `mem_context_init`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync`, `mem_context_memory_migrate`, `mem_context_artifact_migrate`, `mem_context_artifact_transfer`, `mem_context_version`, `mem_context_promote`, `mem_context_pull` — cross-runtime artifact push and pull (`mm context`). Parameters: [Context tool reference](reference.md#context-tool-parameters); workflow: [Context Gateway](context-gateway.md) |
+| **Context** | `mem_context_detect`, `mem_context_diff` — read only: which agent files and runtimes a project has, and how each runtime's copy compares with the canonical artifacts. Every context write (`init`, `generate`, `sync`, `pull`, migrate, transfer, versions) has no MCP tool; it runs from the CLI (`mm context`), and some also from the web UI. Parameters: [Context tool reference](reference.md#context-tool-parameters); workflow: [Context Gateway](context-gateway.md) |
 | **Pinned Context** | `mem_pinned_list`, `mem_pinned_get`, `mem_pinned_set`, `mem_pinned_delete`, `mem_context_compose` |
 | **Formation** | `mem_formation_scan`, `mem_candidate_propose`, `mem_candidate_list`, `mem_candidate_evidence`, `mem_candidate_review`, `mem_candidate_recover` |
 
 
 \* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions stay reachable in `core` and `standard` mode through the dispatcher — `mem_do(action="config", params={...})`, `mem_do(action="embedding_reset", params={...})`, `mem_do(action="reset", params={...})` — and the CLI equivalents are `mm config`, `mm embedding-reset`, and `mm reset`.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (39 names), or `full` (102 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents. `MEMTOMEM_EXTRA_TOOLS` names registered tools a deployment exposes individually on top of its mode (see [Configuration](configuration.md#tool-mode)).
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (39 names), or `full` (94 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents. `MEMTOMEM_EXTRA_TOOLS` names registered tools a deployment exposes individually on top of its mode (see [Configuration](configuration.md#tool-mode)).
 
 `mem_candidate_propose(content, source, source_ref, idempotency_key)` lets an
 external agent submit a review candidate without writing durable memory.
@@ -984,7 +985,11 @@ listing both pids. Two readings, both real:
 
 - **Multiple editor sessions are open.** One MCP server per session is
   normal — several Claude Code windows against one user store will show
-  this warning, and no action is needed.
+  this warning, and no action is needed. On macOS and Linux the sessions
+  can instead be served by one process: see
+  [Share one server between sessions](shared-daemon.md), an opt-in option.
+  Sessions that joined one shared daemon do not raise the warning; a
+  session beside them that did not join does, in all of them.
 - **One client has two memtomem registrations** (e.g. a manual
   `claude mcp add` entry *and* the plugin — see the client sections
   above). With a single editor session open, this is the likely cause:
@@ -1013,7 +1018,7 @@ Use the coexistence diagnostic before starting a new client session.
 
 The `--mcp-client`, `--reconcile` and `--apply` options below need memtomem
 0.7.1 or later (`mm --version`). Without `mm` on your `PATH`, as in a uvx-only
-setup, run each command as `uvx --from 'memtomem==0.7.3' mm doctor …`:
+setup, run each command as `uvx --from 'memtomem==0.7.11' mm doctor …`:
 
 ```bash
 mm doctor --mcp-client claude
@@ -1103,7 +1108,7 @@ checks predict configuration behavior; they do not prove process count or store 
 3. Verify the install is reachable: `mm --version` (or `uvx --from memtomem mm --version` for uvx-only setups) — side-effect-free
 4. From inside the editor, ask it to call the `mem_status` tool — a successful response confirms the MCP handshake reached the server
 
-> Running `uvx --isolated --from "memtomem[all]==0.7.3" memtomem-server`
+> Running `uvx --isolated --from "memtomem[all]==0.7.11" memtomem-server`
 > bare in a terminal prints
 > a setup hint (MCP client configuration plus the network-transport
 > examples from §12) and exits — it is **not** a "does it serve?" smoke

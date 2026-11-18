@@ -660,7 +660,7 @@ DIR_LAYOUT_MATRIX = [
             "make_dir": _make_canonical_agent_dir,
             "dir_body": lambda n: _agent_content(n).replace("Body", "DIR BODY"),
             "flat_body": lambda n: _agent_content(n).replace("Body", "FLAT BODY"),
-            "warn_fragment": "agents/both: reverse-sync updates dir layout",
+            "warn_fragment": "agents/both: pull updates dir layout",
         },
         id="agents-dir-layout",
     ),
@@ -677,7 +677,7 @@ DIR_LAYOUT_MATRIX = [
             "make_dir": _make_canonical_command_dir,
             "dir_body": lambda n: _command_content().replace("Body", "DIR BODY"),
             "flat_body": lambda n: _command_content().replace("Body", "FLAT BODY"),
-            "warn_fragment": "commands/both: reverse-sync updates dir layout",
+            "warn_fragment": "commands/both: pull updates dir layout",
         },
         id="commands-dir-layout",
     ),
@@ -837,6 +837,24 @@ async def test_POST_rejects_secret_shaped_content(
     # proves the ADR-0022 create_version snapshot never fired.
     assert not adapter["created_working"](gateway_root, "leaky").exists()
     assert not (gateway_root / ".memtomem" / adapter["type"] / "leaky").exists()
+
+
+@pytest.mark.parametrize("adapter", TYPE_MATRIX)
+@pytest.mark.anyio
+async def test_POST_rejects_a_key_id_with_a_particle_attached(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    """A token written against Hangul has no ASCII neighbour on that side, and
+    is refused like one between spaces (#3298)."""
+    key_id = "AKIA" + "IOSFODNN7" + "EXAMPLE"
+    body = adapter["create_body"]("leaky")
+    body["content"] += f"\n배포 키 {key_id}를 사용한다\n"
+    r = await client.post(adapter["list_url"], json=body)
+    assert r.status_code == 422, (adapter["type"], r.text)
+    assert r.json()["reason_code"] == "privacy_blocked", r.text
+    assert not adapter["created_working"](gateway_root, "leaky").exists()
 
 
 @pytest.mark.parametrize("adapter", TYPE_MATRIX)

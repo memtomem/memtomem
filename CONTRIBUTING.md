@@ -8,7 +8,10 @@ Thank you for your interest in contributing to memtomem!
    [`good first issue`](https://github.com/memtomem/memtomem/labels/good%20first%20issue).
    Each one names the files to change, what to test, and the test file to run.
 2. Comment on the issue to claim it. You don't need to be assigned: the
-   comment is the claim. If someone has already claimed it, pick another one.
+   comment is the claim. If someone has already claimed it, or an open pull
+   request will already close it, pick another one. When there is such a pull
+   request, a bot comments on the issue with its number, once per issue, so
+   look for that comment too.
 3. Set up with [Development Setup](#development-setup). While you work,
    running only the test file the issue names is enough; before you open the
    pull request, run the checks in
@@ -42,11 +45,11 @@ uv run pytest -m "not ollama"          # skip Ollama-dependent tests
 uv run pytest                          # full suite (requires running Ollama)
 
 # Lint and format (same paths CI checks)
-uv run ruff check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py --fix
-uv run ruff format packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
+uv run ruff check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py --fix
+uv run ruff format packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
 
 # Type check
-uv run mypy packages/memtomem/src
+uv run mypy packages/memtomem/src packages/langchain-memtomem/src
 ```
 
 ## Project Structure
@@ -59,7 +62,10 @@ uv run mypy packages/memtomem/src
 - `packages/memtomem-kimi-skills/` — Kimi Code skill bundle (not a plugin)
 - `packages/memtomem-hermes-plugin/` — Hermes Agent portable plugin (user scope: MCP server + six workflow skills)
 - `packages/memtomem-antigravity-plugin/` — Antigravity CLI (`agy`) plugin (MCP server + six user-scope workflow skills + three project workflows that bind the server with `mem_project_bind`)
-- `packages/memtomem-hermes-memory/` — Hermes Agent memory provider `memtomem-memory` (recall-only, through Hermes's own memtomem MCP connection; standard library, Python 3.11+)
+- `packages/memtomem-cursor-plugin/` — Cursor plugin (the Antigravity skill set, with the explicit-only workflows marked `disable-model-invocation`; the repo-root `.cursor-plugin/marketplace.json` lists it)
+- `packages/memtomem-openclaw-bundle/` — OpenClaw plugin bundle in the Codex bundle format (the Hermes user-scope skill set and launch line; `openclaw.plugin.json` carries the ClawHub name and category)
+- `packages/langchain-memtomem/` — `langchain-memtomem`: a LangGraph `BaseStore` whose query search runs the memtomem pipeline in an index the store owns (ADR-0042); second workspace member, own version line
+- `packages/memtomem-hermes-memory/` — Hermes Agent memory provider `memtomem-memory` (recall on eligible user turns, plus optional mirroring of Hermes's built-in memory with `mirror_writes`, through Hermes's own memtomem MCP connection; standard library, Python 3.11+)
 - `packages/memtomem-plugin-assets/` — shared plugin contract (`contract.toml`) and workflow sources rendered into the plugins by `tools/render_plugin_assets.py`
 
 The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](https://github.com/memtomem/memtomem-stm).
@@ -69,8 +75,8 @@ The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](ht
 1. Create a feature branch from `main`
 2. Keep changes focused — one feature or fix per PR
 3. Add tests for new functionality
-4. Ensure `uv run ruff check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py` and
-   `uv run ruff format --check packages/memtomem/src packages/memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py` pass
+4. Ensure `uv run ruff check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py` and
+   `uv run ruff format --check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py` pass
 5. Ensure `uv run pytest -m "not ollama"` passes
 6. Write a clear commit message describing the "why"
 7. Sign the CLA on your first pull request (see below)
@@ -130,8 +136,13 @@ uv run pytest packages/memtomem/tests/web/
 # Run everything; tests carrying ``@pytest.mark.browser`` auto-skip when
 # pytest-playwright or Chromium aren't available, so the full suite
 # stays green on contributor laptops that haven't run the install
-# above (see ``packages/memtomem/tests/conftest.py:108``).
+# above (see ``_playwright_browser_unavailable`` in
+# ``packages/memtomem/tests/conftest.py``; the skip reason names the error).
 uv run pytest -m "not ollama"
+
+# Make a Chromium that cannot launch an error instead of a skip, as the
+# CI ``browser`` job does.
+MEMTOMEM_TEST_REQUIRE_BROWSER=1 uv run pytest packages/memtomem/tests/web -m browser
 ```
 
 ### Harness shape

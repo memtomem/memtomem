@@ -529,6 +529,16 @@ def unlink_stale_pid_file(pid_file: Path) -> StalePidUnlink:
         barrier.release()
 
 
+def unlink_stale_pid_file_holding_barrier(pid_file: Path) -> StalePidUnlink:
+    """:func:`unlink_stale_pid_file` for a caller that holds the barrier exclusive.
+
+    ``mm uninstall`` deletes while it holds the lifecycle barrier exclusive;
+    the shared hold :func:`unlink_stale_pid_file` takes would contend with it,
+    in this process as in any other. The lock-then-delete rule is the same.
+    """
+    return _unlink_locked_pid_file(pid_file)
+
+
 def _unlink_locked_pid_file(pid_file: Path) -> StalePidUnlink:
     opened = _open_verified_regular(pid_file, writable=True)
     if opened is None:
@@ -870,6 +880,103 @@ def enumerate_server_liveness_inventory() -> tuple[list[ServerState], str | None
     if legacy_state.alive:
         states.append(_with_probe_warning(legacy_state, warning))
     return states, warning
+
+
+@dataclass(frozen=True)
+class DaemonState:
+    """One shared daemon's lifetime lock (#3381): its probe and its socket path."""
+
+    name: str
+    state: ServerState
+    socket_path: Path
+
+
+@dataclass(frozen=True)
+class DaemonInventory:
+    """What :func:`enumerate_daemons` found.
+
+    ``error`` is set when the runtime roots could not be enumerated: the list
+    is then incomplete, and a caller that would act on "no daemon" must refuse
+    instead. ``warnings`` are diagnostics of a pass that did complete: a
+    runtime candidate skipped as unsafe, or a ``server-daemon-*.pid`` file
+    whose name this version cannot parse, which is reported and not guessed at.
+    """
+
+    daemons: list[DaemonState]
+    error: str | None = None
+    warnings: tuple[str, ...] = ()
+
+
+def enumerate_daemons() -> DaemonInventory:
+    """Every daemon lifetime lock in the runtime roots, live or stale, sorted."""
+    from memtomem._daemon_paths import (
+        LIFETIME_LOCK_PREFIX,
+        name_from_lifetime_lock,
+        socket_path,
+    )
+
+    globbed, detail = _glob_server_pid_files()
+    if globbed is None:
+        return DaemonInventory([], error=f"could not enumerate server-*.pid ({detail})")
+    warnings: list[str] = [detail] if detail else []
+    daemons: list[DaemonState] = []
+    for pid_file in globbed:
+        if not pid_file.name.startswith(LIFETIME_LOCK_PREFIX):
+            continue
+        name = name_from_lifetime_lock(pid_file.name)
+        if name is None:
+            warnings.append(f"{scrub_text(str(pid_file))}: not a daemon name this version knows")
+            continue
+        daemons.append(
+            DaemonState(
+                name=name,
+                state=probe_pid_file(pid_file),
+                socket_path=socket_path(pid_file.parent, name),
+            )
+        )
+    return DaemonInventory(daemons, warnings=tuple(warnings))
+
+
+def live_daemon_for_pid(pid: int | None) -> str | None:
+    """The name of the live daemon whose lifetime lock records *pid*, or ``None``.
+
+    Only for naming a daemon in a message: it adds a name and a stop command to
+    a refusal that is already decided, and never decides one.
+    """
+    if pid is None:
+        return None
+    try:
+        daemons = enumerate_daemons().daemons
+    except (OSError, _UnsafeProbePathError):
+        return None
+    for daemon in daemons:
+        state = daemon.state
+        if state.alive and state.probe_error is None and state.pid == pid:
+            return daemon.name
+    return None
+
+
+def running_daemons_hint() -> str | None:
+    """A sentence naming the running shared daemons and their stop command, or ``None``.
+
+    For refusal messages only: it never decides a refusal, so a listing that
+    fails adds nothing rather than raising.
+    """
+    try:
+        inventory = enumerate_daemons()
+    except (OSError, _UnsafeProbePathError):
+        return None
+    if inventory.error is not None:
+        return None
+    live = [d for d in inventory.daemons if d.state.alive and d.state.probe_error is None]
+    if not live:
+        return None
+    names = ", ".join(
+        f"'{d.name}' (pid {d.state.pid if d.state.pid is not None else '?'})" for d in live
+    )
+    if len(live) == 1:
+        return f"Shared daemon {names} is running; stop it with `mm daemon stop {live[0].name}`."
+    return f"Shared daemons {names} are running; stop them with `mm daemon stop`."
 
 
 def check_server_liveness(db_path: Path | None = None) -> ServerState:

@@ -38,6 +38,9 @@ class NamespaceMixedUnderForceError(Exception):
 #: it applies only to sources with no stored rows. An already-indexed file
 #: keeps its namespace, so a bulk re-index under a session cannot move content
 #: the session did not write.
+#: ``declared_by_name`` is a source with no stored rows whose day-file name
+#: decoded to the namespace it was written for (ADR-0043) — how a rebuilt
+#: store gets its namespaces back.
 NamespaceDecisionReason = Literal[
     "explicit",
     "preserved",
@@ -46,6 +49,7 @@ NamespaceDecisionReason = Literal[
     "reassigned",
     "mixed_force_refused",
     "bound_new_source",
+    "declared_by_name",
 ]
 
 
@@ -62,6 +66,9 @@ class NamespaceDecision:
     target: str | None
     stored: tuple[str, ...] = ()
     reason: NamespaceDecisionReason = "resolved"
+    #: A row-less source named like a day file whose name did not decode, so it
+    #: fell back to the session binding or the rules (ADR-0043).
+    undecoded_name: bool = False
 
 
 def _reject_reassign_with_explicit_ns(
@@ -108,6 +115,8 @@ class _NamespaceTally:
 
     preserved_against_rules: int = 0
     reassigned: int = 0
+    restored_from_name: int = 0
+    undecoded_names: int = 0
     moves: dict[tuple[str, str], int] = dataclasses.field(default_factory=dict)
 
     def record(
@@ -117,6 +126,16 @@ class _NamespaceTally:
         written: bool,
         canonical: Callable[[str | None], str],
     ) -> None:
+        if decision.undecoded_name:
+            # Committed writes only, like a move: the advisory says the file was
+            # indexed into a fallback namespace, which a failed embed did not do.
+            if written:
+                self.undecoded_names += 1
+            return
+        if decision.reason == "declared_by_name":
+            if written:
+                self.restored_from_name += 1
+            return
         if decision.reason == "preserved_against_rules":
             # Counted whether or not a write followed: an unchanged file that
             # kept a namespace the current rules disagree with is exactly the

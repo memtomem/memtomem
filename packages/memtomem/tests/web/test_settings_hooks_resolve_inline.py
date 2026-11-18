@@ -402,3 +402,100 @@ def test_resolve_http_error_keeps_card_and_emits_error_toast(page, mm_web_url: s
     assert len(resolve_calls) >= 1, (
         f"Route stub must have intercepted the resolve POST, got {resolve_calls!r}"
     )
+
+
+# ── Gate A refusals carry a code the UI localizes (#3343) ──────────────────
+
+PRIVACY_SETTINGS_HINT_PREFIX = "A secret was detected in the shared hook settings"
+_SERVER_ENGLISH = "Privacy scan blocked this settings sync: server text"
+_PRIVACY_422 = {"detail": _SERVER_ENGLISH, "reason_code": "privacy_blocked"}
+
+
+def _error_toast_text(page) -> str:
+    page.wait_for_selector("#toast-container .toast.toast-error", timeout=4_000)
+    return (
+        page.locator("#toast-container .toast.toast-error .toast-msg").first.text_content() or ""
+    ).strip()
+
+
+def test_resolve_privacy_refusal_shows_the_localized_hint(page, mm_web_url: str) -> None:
+    """A coded 422 from resolve shows the settings hint, not the server's English,
+    and leaves the conflict card in place with no reload."""
+    install_default_stubs(page)
+    get_state = _stub_settings_sync_get(page, _CONFLICTS_GET)
+    page.route(
+        "**/api/context/settings/resolve",
+        lambda route: route.fulfill(
+            status=422, content_type="application/json", body=json.dumps(_PRIVACY_422)
+        ),
+    )
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+    page.wait_for_function(
+        "() => document.querySelectorAll('.hooks-sync-conflict').length === 1",
+        timeout=4_000,
+    )
+    initial_get_count = get_state["get_count"]
+    page.locator(".hooks-sync-conflict .hooks-resolve-btn").click()
+    page.wait_for_function("() => !document.getElementById('confirm-modal').hidden", timeout=2_000)
+    page.locator("#confirm-ok-btn").click()
+
+    toast_text = _error_toast_text(page)
+    assert toast_text.startswith(PRIVACY_SETTINGS_HINT_PREFIX), toast_text
+    assert _SERVER_ENGLISH not in toast_text
+    assert page.locator(".hooks-sync-conflict").count() == 1
+    assert get_state["get_count"] == initial_get_count
+
+
+def _stub_sync(page, post_status: int, post_body: dict) -> None:
+    def _handler(route):
+        if route.request.method == "GET":
+            route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(_CONFLICTS_GET)
+            )
+            return
+        route.fulfill(
+            status=post_status, content_type="application/json", body=json.dumps(post_body)
+        )
+
+    page.route("**/api/settings-sync*", _handler)
+
+
+@pytest.mark.parametrize(
+    "post_status,post_body",
+    [
+        pytest.param(422, _PRIVACY_422, id="refused-before-any-write"),
+        pytest.param(
+            200,
+            {
+                "results": [
+                    {"name": "claude_settings", "status": "ok", "reason": "", "warnings": []},
+                    {
+                        "name": "codex_settings",
+                        "status": "error",
+                        "reason": _SERVER_ENGLISH,
+                        "warnings": [],
+                        "reason_code": "privacy_blocked",
+                    },
+                ],
+                "duplicate_tier_warnings": [],
+            },
+            id="refused-mid-sync-row",
+        ),
+    ],
+)
+def test_sync_privacy_refusal_shows_the_localized_hint(
+    page, mm_web_url: str, post_status: int, post_body: dict
+) -> None:
+    install_default_stubs(page)
+    _stub_sync(page, post_status, post_body)
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+    page.locator("#hooks-sync-btn").click()
+
+    toast_text = _error_toast_text(page)
+    assert PRIVACY_SETTINGS_HINT_PREFIX in toast_text, toast_text
+    assert _SERVER_ENGLISH not in toast_text
+    assert not page.locator("#toast-container .toast.toast-success").count()

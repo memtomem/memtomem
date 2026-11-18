@@ -15,6 +15,7 @@ from memtomem.server.tools._id_access import (
     not_found,
     resolve_chunk,
 )
+from memtomem.tools.temporal import format_source_name
 
 
 @mcp.tool()
@@ -165,7 +166,7 @@ async def mem_related(
             lines.append(f"  - [{rel_type}] {related_id_text} (deleted)")
             continue
         preview = related.content[:80].replace("\n", " ")
-        source = str(related.metadata.source_file).split("/")[-1]
+        source = format_source_name(related.metadata.source_file)
         lines.append(f"  - [{rel_type}] {related_id_text[:8]}... ({source})")
         lines.append(f"    {preview}...")
 

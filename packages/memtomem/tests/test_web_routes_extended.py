@@ -8,6 +8,7 @@ with mocked app.state dependencies.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,7 +22,7 @@ from httpx import ASGITransport, AsyncClient
 from memtomem.constants import InvalidNameError, validate_namespace
 from memtomem.errors import NamespaceConflictError, NamespaceMutationBusyError
 from memtomem.models import Chunk, ChunkMetadata
-from memtomem.search.dedup import DedupCoverage
+from memtomem.search.dedup import DedupCoverage, DedupScanner
 from memtomem.storage.base import NamespaceRenameResult
 from memtomem.web.app import create_app
 from .helpers import clean_preflight, isolate_config_paths, set_home
@@ -199,6 +200,10 @@ def app(_isolated_config_paths: Path):
     import asyncio as _asyncio
 
     storage._tag_write_lock = _asyncio.Lock()
+    # Routes that wait for the writer enter ``storage.transaction(wait=...)``.
+    import contextlib as _contextlib
+
+    storage.transaction = MagicMock(side_effect=lambda **_: _contextlib.nullcontext())
 
     # timeline / recall
     storage.recall_chunks = AsyncMock(return_value=[_make_test_chunk()])
@@ -274,6 +279,7 @@ def app(_isolated_config_paths: Path):
     # coroutine and read as "excluded" to every write guard (#2488).
     index_engine.is_excluded = MagicMock(return_value=False)
     index_engine.is_read_only_source = MagicMock(return_value=False)
+    index_engine.is_managed_source = MagicMock(return_value=True)
     index_engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
     index_engine.rewrite_refusal = AsyncMock(return_value=None)
 
@@ -282,7 +288,7 @@ def app(_isolated_config_paths: Path):
     dedup_scanner.scan_with_coverage = AsyncMock(
         return_value=(
             [],
-            DedupCoverage(pool=0, near_search_enabled=True, probed=0, without_vector=0),
+            DedupCoverage(pool=0, eligible=0, near_search_enabled=True, probed=0, without_vector=0),
         )
     )
 
@@ -503,6 +509,41 @@ class TestTimeline:
         assert len(data["chunks"]) == 3
         assert data["has_more"] is True
 
+    async def test_timeline_blank_namespace_normalizes_to_default_view(
+        self, app, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Call timeline with omitted namespace
+        await client.get("/api/timeline")
+        omitted_filter = app.state.storage.recall_chunks.await_args.kwargs["namespace_filter"]
+
+        # Call timeline with blank namespace param
+        resp = await client.get("/api/timeline", params={"namespace": ""})
+        assert resp.status_code == 200
+        blank_filter = app.state.storage.recall_chunks.await_args.kwargs["namespace_filter"]
+
+        # Blank namespace must normalize to None, matching the omitted namespace behavior (#3275)
+        assert blank_filter == omitted_filter
+
+        # Also verify with configured system prefixes
+        monkeypatch.setattr(
+            app.state.config.search,
+            "system_namespace_prefixes",
+            ["archive:", "agent-runtime:"],
+        )
+        resp_sys = await client.get("/api/timeline", params={"namespace": ""})
+        assert resp_sys.status_code == 200
+        sys_filter = app.state.storage.recall_chunks.await_args.kwargs["namespace_filter"]
+        assert sys_filter.namespaces == ()
+        assert sys_filter.exclude_prefixes == ("archive:", "agent-runtime:")
+
+    async def test_timeline_malformed_namespace_is_422(self, app, client: AsyncClient):
+        # Same status as /api/search, /api/procedures and /api/chunks/{id}/similar
+        # for filter syntax that cannot be parsed (#3288).
+        resp = await client.get("/api/timeline", params={"namespace": "a,b*"})
+        assert resp.status_code == 422
+        assert "comma list" in resp.json()["detail"]
+        app.state.storage.recall_chunks.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # GET /api/eval  (evaluation / health report)
@@ -613,7 +654,9 @@ class TestDedup:
         app.state.dedup_scanner.scan_with_coverage = AsyncMock(
             return_value=(
                 [],
-                DedupCoverage(pool=37, near_search_enabled=True, probed=30, without_vector=7),
+                DedupCoverage(
+                    pool=37, eligible=412, near_search_enabled=True, probed=30, without_vector=7
+                ),
             )
         )
         resp = await client.get(
@@ -623,12 +666,140 @@ class TestDedup:
         assert resp.status_code == 200
         data = resp.json()
         assert data["scanned_chunks"] == 37
+        assert data["eligible_chunks"] == 412
         assert data["probed_chunks"] == 30
         assert data["chunks_without_vector"] == 7
         assert data["near_search_enabled"] is True
+        assert data["same_source_read_only_pairs"] == 0
+        # No cursor was sent and none comes back; the defaults of a coverage
+        # that names no position.
+        assert (data["after"], data["next_after"]) == (None, None)
+        assert (data["remaining_chunks"], data["pairs_found"]) == (0, 0)
         app.state.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
-            threshold=0.85, limit=50, max_scan=200
+            threshold=0.85, limit=50, max_scan=200, after=None
         )
+
+    @pytest.mark.parametrize(
+        "typed",
+        ["00000000-0000-0000-0000-0000000001f4", "{00000000-0000-0000-0000-0000000001F4}"],
+        ids=["as-printed", "braces-uppercase"],
+    )
+    async def test_dedup_scan_continues_after_a_chunk_id(self, app, client: AsyncClient, typed):
+        cursor, following = uuid.UUID(int=500), uuid.UUID(int=1000)
+        app.state.dedup_scanner.scan_with_coverage = AsyncMock(
+            return_value=(
+                [],
+                DedupCoverage(
+                    pool=500,
+                    eligible=39458,
+                    near_search_enabled=True,
+                    probed=500,
+                    without_vector=0,
+                    pairs_found=57,
+                    after=cursor,
+                    remaining=38458,
+                    next_after=following,
+                ),
+            )
+        )
+
+        resp = await client.get("/api/dedup/candidates", params={"after": typed})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["after"] == "00000000-0000-0000-0000-0000000001f4"
+        assert data["next_after"] == "00000000-0000-0000-0000-0000000003e8"
+        assert data["remaining_chunks"] == 38458
+        # ``total`` is what came back; ``pairs_found`` is what ``limit`` cut from.
+        assert (data["total"], data["pairs_found"]) == (0, 57)
+        app.state.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
+            threshold=0.92, limit=100, max_scan=500, after=cursor
+        )
+
+    @pytest.mark.parametrize("typed", ["not-an-id", "", "500"])
+    async def test_dedup_scan_rejects_an_after_that_is_not_a_chunk_id(
+        self, app, client: AsyncClient, typed
+    ):
+        resp = await client.get("/api/dedup/candidates", params={"after": typed})
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == f"after must be a chunk id, got {typed!r}"
+        app.state.dedup_scanner.scan_with_coverage.assert_not_awaited()
+
+    async def test_dedup_scan_walks_a_real_store_with_next_after(
+        self, app, client: AsyncClient, bm25_only_components
+    ):
+        # The tests above stand in for the scanner. This one runs the route
+        # over a SQLite store: each response's ``next_after``, sent back as
+        # ``after``, selects the chunks after the last pool.
+        comp, mem_dir = bm25_only_components
+
+        async def index(name: str, body: str) -> str:
+            path = mem_dir / name
+            path.write_text(body, encoding="utf-8")
+            assert not (await comp.index_engine.index_file(path)).errors
+            (row,) = await comp.storage.list_chunks_by_source(path.resolve(), limit=None)
+            return str(row.id)
+
+        ids = sorted(
+            [await index(f"note-{i}.md", f"# Topic {i}\n\nbody number {i}.\n") for i in range(4)]
+        )
+        # Two copies whose ids sort above every other chunk's, so the walk
+        # reaches the pair in its last pool.
+        indexed = [
+            await index(f"copy-{n}.md", "# Topic\n\nduplicateword shared body.\n") for n in range(2)
+        ]
+        copies = [f"ffffffff-ffff-4fff-8fff-00000000000{n}" for n in range(2)]
+        db = comp.storage._get_db()
+        for stored, moved in zip(indexed, copies, strict=True):
+            db.execute("UPDATE chunks SET id=? WHERE id=?", (moved, stored))
+        db.commit()
+        app.state.dedup_scanner = DedupScanner(comp.storage)
+
+        walked: list[dict] = []
+        after = None
+        for _ in range(4):
+            params = {"max_scan": 2} if after is None else {"max_scan": 2, "after": after}
+            resp = await client.get("/api/dedup/candidates", params=params)
+            assert resp.status_code == 200
+            walked.append(resp.json())
+            after = walked[-1]["next_after"]
+            if after is None:
+                break
+
+        assert [
+            (d["after"], d["scanned_chunks"], d["remaining_chunks"], d["next_after"])
+            for d in walked
+        ] == [
+            (None, 2, 4, ids[1]),
+            (ids[1], 2, 2, ids[3]),
+            (ids[3], 2, 0, None),
+        ]
+        assert [(d["eligible_chunks"], d["total"]) for d in walked] == [(6, 0), (6, 0), (6, 1)]
+        (pair,) = walked[2]["candidates"]
+        assert {pair["chunk_a"]["id"], pair["chunk_b"]["id"]} == set(copies)
+
+    async def test_dedup_scan_reports_left_out_read_only_pairs(self, app, client: AsyncClient):
+        # #3418: pairs of read-only chunks from one file are not candidates; the
+        # count is the panel's only sign that the scan hid any.
+        app.state.dedup_scanner.scan_with_coverage = AsyncMock(
+            return_value=(
+                [],
+                DedupCoverage(
+                    pool=5,
+                    eligible=5,
+                    near_search_enabled=True,
+                    probed=5,
+                    without_vector=0,
+                    same_source_read_only=3,
+                ),
+            )
+        )
+        resp = await client.get("/api/dedup/candidates")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 0
+        assert data["same_source_read_only_pairs"] == 3
 
     @pytest.mark.parametrize("max_scan", [0, -1])
     async def test_dedup_scan_rejects_non_positive_max_scan(
@@ -646,7 +817,9 @@ class TestDedup:
     ):
         async def slow_scan(**_kwargs):
             await asyncio.sleep(0.05)
-            return [], DedupCoverage(pool=0, near_search_enabled=True, probed=0, without_vector=0)
+            return [], DedupCoverage(
+                pool=0, eligible=0, near_search_enabled=True, probed=0, without_vector=0
+            )
 
         app.state.dedup_scanner.scan_with_coverage = AsyncMock(side_effect=slow_scan)
         monkeypatch.setattr("memtomem.web.routes.dedup._DEDUP_SCAN_TIMEOUT", 0.001)
@@ -2381,6 +2554,7 @@ class TestNamespaceProdTier:
     async def prod_client(self):
         application = create_app(lifespan=None, mode="prod")
         storage = AsyncMock()
+        storage.transaction = MagicMock(side_effect=lambda **_: contextlib.nullcontext())
         storage.list_namespace_meta = AsyncMock(
             return_value=[
                 {

@@ -407,15 +407,19 @@ class SourceHoldOps:
             ).fetchone()
             return int(row[0]) if row else 0
 
-    async def source_hold_snapshot(self, source_file: Path) -> int | None:
+    async def source_hold_snapshot(
+        self, source_file: Path, *, as_stored: bool = False
+    ) -> int | None:
         """Return one source's generation only when it is hidden.
 
         Visibility and generation come from one SQLite statement so a watcher
         delete cannot slip between separate reads at index start. Takes the
-        filesystem path being indexed, normalised like :meth:`is_source_pending`.
+        filesystem path being indexed, normalised like :meth:`is_source_pending`,
+        or with ``as_stored`` a key the caller already resolved: resolved after
+        the lease, a path relinked meanwhile would name another source (#3180).
         """
         async with self._lease_read_db() as db:
-            source = norm_path(source_file)
+            source = str(source_file) if as_stored else norm_path(source_file)
             row = db.execute(
                 "SELECT COALESCE((SELECT generation FROM source_visibility_generations "
                 "WHERE source_file=?), 0) "

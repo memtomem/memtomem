@@ -384,6 +384,14 @@ async def mem_consolidate_apply(
     run_namespaces = [group.get("namespace") or "default"]
 
     async def link_published(add_result: str, stats: IndexingStats) -> _ApplyOutcome:
+        # ``new_chunk_ids``, not ``appended_chunk_ids`` (#3315): the summary goes
+        # to a file named for this apply alone (``consolidation_file_name``: run
+        # id plus a random token), so nothing else is in it to re-index, no
+        # pending edit and no stored row whose id it could keep, and the new ids
+        # are the summary's chunks. The name is generated fresh, not checked: a
+        # file already at that path would be appended to like any other. The
+        # append attribution adds nothing here and is ``unverified`` whenever
+        # chunk overlap is on and the summary spans several chunks.
         if not stats.new_chunk_ids:
             logger.warning(
                 "mem_consolidate_apply: mem_add produced no new chunk ids — "

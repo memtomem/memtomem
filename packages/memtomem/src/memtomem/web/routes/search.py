@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from memtomem.models import InvalidFilterSyntaxError, NamespaceFilter, ScopeFilter
 from memtomem.services.search_service import validate_scope_vocabulary
 from memtomem.web.deps import get_project_context_root, get_search_pipeline
+from memtomem.web.middleware.csrf import request_carries_csrf_token
 from memtomem.web.schemas.core import RetrievalStatsOut, to_result_out
 from memtomem.web.schemas.search import SearchResponse
 
@@ -20,6 +21,8 @@ router = APIRouter(tags=["search"])
 
 @router.get("/search", response_model=SearchResponse)
 async def search(
+    request: Request,
+    response: Response,
     q: str | None = Query(None, description="Search query", max_length=10_000),
     top_k: int | None = Query(None, ge=1, le=500),
     source_filter: str | None = Query(None),
@@ -104,6 +107,13 @@ async def search(
             ),
         )
 
+    # A search is recorded (access counts, search history, a run id for
+    # feedback) only when the request carries the CSRF token. A GET needs no
+    # token to be answered, and one with neither ``Origin`` nor ``Referer``
+    # passes the origin check as a script would, so without this any page could
+    # write those records through the user's browser. The UI sends the token on
+    # its searches.
+    recorded = request_carries_csrf_token(request)
     try:
         results, rstats = await pipeline.search(
             query=q,
@@ -119,10 +129,16 @@ async def search(
             context_window=context_window if context_window > 0 else None,
             project_context_root=project_context_root,
             origin="web",
+            record=recorded,
         )
     except Exception as exc:
         logger.error("Search failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="Search failed") from exc
+    if not recorded and request.headers.get("X-Memtomem-CSRF"):
+        # A token was sent and is not this process's (the server restarted
+        # since the page fetched it). Say so, so the UI can fetch the current
+        # one and search again instead of going on unrecorded.
+        response.headers["X-Memtomem-CSRF-Stale"] = "1"
     out = [to_result_out(r) for r in results]
     return SearchResponse(
         results=out,

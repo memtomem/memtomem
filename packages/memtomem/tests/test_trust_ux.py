@@ -28,7 +28,7 @@ from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.component_factory import close_components, create_components
 from memtomem.server.formatters import _format_structured_results
 from memtomem.server.helpers import _announce_dim_mismatch_once, _dim_mismatch_hint
-from memtomem.tools.memory_writer import append_entry
+from helpers import append_judged
 
 from helpers import make_chunk
 
@@ -548,8 +548,8 @@ class TestSmokeFlow:
 
         # (2) index — a file full of notes.
         target = mem_dir / "notes.md"
-        append_entry(target, "Redis LRU eviction policy for the cache tier.", title="Cache")
-        append_entry(target, "Postgres logical replication for the audit log.", title="Audit")
+        append_judged(target, "Redis LRU eviction policy for the cache tier.", title="Cache")
+        append_judged(target, "Postgres logical replication for the audit log.", title="Audit")
         idx = await comp.index_engine.index_file(target)
         assert idx.indexed_chunks >= 2
 
@@ -560,7 +560,7 @@ class TestSmokeFlow:
 
         # (4) add — hand-rolled append mirroring mem_add's file step.
         followup = mem_dir / "followup.md"
-        append_entry(followup, "New vector store review session scheduled.", title="Review")
+        append_judged(followup, "New vector store review session scheduled.", title="Review")
         await comp.index_engine.index_file(followup)
 
         # (5) recall — the new entry shows up in time-ordered recall.
@@ -572,7 +572,7 @@ class TestSmokeFlow:
         # Now archive something and re-run step (3): the global search should
         # flag the hidden chunk.
         archived = mem_dir / "archive.md"
-        append_entry(archived, "Old caching doc preserved for history.", title="Archive")
+        append_judged(archived, "Old caching doc preserved for history.", title="Archive")
         await comp.index_engine.index_file(archived, namespace="archive:2024")
 
         _, stats_after = await comp.search_pipeline.search("caching", top_k=3)

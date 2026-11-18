@@ -95,28 +95,32 @@
               "status": "str",
               "reason": "str",
               "warnings": [],
-              "target": "null"
+              "target": "null",
+              "reason_code": "null"
             },
             {
               "name": "str",
               "status": "str",
               "reason": "str",
               "warnings": [],
-              "target": "null"
+              "target": "null",
+              "reason_code": "null"
             },
             {
               "name": "str",
               "status": "str",
               "reason": "str",
               "warnings": [],
-              "target": "null"
+              "target": "null",
+              "reason_code": "null"
             },
             {
               "name": "str",
               "status": "str",
               "reason": "str",
               "warnings": [],
-              "target": "null"
+              "target": "null",
+              "reason_code": "null"
             }
           ],
           "duplicate_tier_warnings": []
@@ -202,28 +206,32 @@
               "status": "str",
               "reason": "str",
               "warnings": [],
-              "target": "null"
+              "target": "null",
+              "reason_code": "null"
             },
             {
               "name": "str",
               "status": "str",
               "reason": "str",
               "warnings": [],
-              "target": "null"
+              "target": "null",
+              "reason_code": "null"
             },
             {
               "name": "str",
               "status": "str",
               "reason": "str",
               "warnings": [],
-              "target": "null"
+              "target": "null",
+              "reason_code": "null"
             },
             {
               "name": "str",
               "status": "str",
               "reason": "str",
               "warnings": [],
-              "target": "null"
+              "target": "null",
+              "reason_code": "null"
             }
           ],
           "duplicate_tier_warnings": []

@@ -235,11 +235,13 @@ def comment_command(event: dict[str, Any], signature_text: str) -> str | None:
     if "comment" not in event:
         return None
     body = event["comment"].get("body", "").strip()
-    # The workflow `if` already filters comments. This keeps direct script
-    # invocations safe, and quoted instructions do not equal the bare signature.
+    # The workflow `if` only checks that the body contains a command, so this is the
+    # decision: a quoted instruction contains the signature without equalling it.
     if body == signature_text:
         return "sign"
-    if body.lower() == "recheck":
+    # ASCII only: Python lowercases U+212A KELVIN SIGN to `k`, which the workflow's
+    # case-insensitive `contains` is not documented to do, so the `if` could skip it.
+    if body.isascii() and body.lower() == "recheck":
         return "recheck"
     return "ignore"
 

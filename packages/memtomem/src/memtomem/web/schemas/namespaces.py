@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, StrictBool
 
+from memtomem.constants import NAMESPACE_COLOR_PATTERN
+
 __all__ = [
     "NamespaceOut",
     "NamespacesListResponse",
@@ -28,7 +30,7 @@ class NamespacesListResponse(BaseModel):
 
 class NamespaceMetaRequest(BaseModel):
     description: str | None = Field(None, max_length=500)
-    color: str | None = Field(None, pattern=r"^#[0-9a-fA-F]{3,8}$|^$")
+    color: str | None = Field(None, pattern=rf"^{NAMESPACE_COLOR_PATTERN}$|^$")
 
 
 class RenameRequest(BaseModel):

@@ -13,6 +13,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from collections import deque
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -27,15 +28,18 @@ from memtomem.errors import (
     EmbeddingDimensionMismatchError,
     EmbeddingPolicyChangedError,
     SchemaDowngradeError,
+    SearchDeadlineExceeded,
     StorageError,
     StorageStartupError,
     TransactionOwnedError,
 )
 from memtomem.storage.base import (
+    WRITER_WAIT_S,
     ChunkKeyRow,
     NamespaceAssignResult,
     NamespaceChunkCandidate,
     NamespaceRenameResult,
+    VisiblePool,
 )
 from memtomem.models import (
     CONSOLIDATED_SUFFIX,
@@ -43,11 +47,15 @@ from memtomem.models import (
     Chunk,
     ChunkMetadata,
     ChunkType,
+    NamespaceFilter,
+    ScopeFilter,
 )
 from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
     deserialize_f32,
+    fts_source_text,
     match_source_filter_value,
+    namespace_sql,
     norm_path,
     placeholders,
     quote_ident,
@@ -91,6 +99,7 @@ from memtomem.storage.mixins import (
     EntityMixin,
     EvalCaseMixin,
     FormationMixin,
+    HermesMirrorMixin,
     HistoryMixin,
     IdempotencyMixin,
     MaintenanceRunMixin,
@@ -115,6 +124,17 @@ _SQL_MAX_PARAMS = 900
 _T = TypeVar("_T")
 
 
+def _path_held_or_pending(db: sqlite3.Connection, source: str) -> bool:
+    return (
+        db.execute(
+            "SELECT 1 FROM held_sources WHERE source_file=? "
+            "UNION ALL SELECT 1 FROM pending_source_checks WHERE source_file=? LIMIT 1",
+            (source, source),
+        ).fetchone()
+        is not None
+    )
+
+
 def _param_batches(values: Sequence[_T]) -> Iterator[Sequence[_T]]:
     """Slice *values* into runs that fit one ``IN (...)`` clause.
 
@@ -136,6 +156,10 @@ __all__ = ["SqliteBackend"]
 # corpus size (issue #278). 1000 rows × typical chunk width stays well under
 # a megabyte while keeping round-trip overhead negligible.
 _REBUILD_FTS_BATCH_SIZE = 1000
+
+# How many times one rebuild_fts call redoes its pass when the backend's
+# tokenizer changes underneath it before it gives up (see rebuild_fts).
+_REBUILD_FTS_ATTEMPTS = 3
 
 
 # Prefix for per-source AI summary records in the ``_memtomem_meta`` k/v
@@ -254,6 +278,7 @@ class SqliteBackend(
     FormationMixin,
     MaintenanceRunMixin,
     UpdateCoverageMixin,
+    HermesMirrorMixin,
 ):
     def __init__(
         self,
@@ -267,8 +292,20 @@ class SqliteBackend(
         strict_dim_check: bool = True,
         adopt_unpopulated_embedding_stamp: bool = False,
         chunk_budget_config: "IndexingConfig | None" = None,
+        fts_tokenizer: str = "unicode61",
+        bm25_path_fallback: bool = True,
     ) -> None:
         self._config = config
+        # This backend's FTS tokenizer, from ``search.tokenizer``. Index-time
+        # and query-time tokenization have to agree per database, and the
+        # backend that indexes a database is the one that queries it, so the
+        # choice lives here rather than in a process global (#3018).
+        self._fts_tokenizer = _fts.validate_tokenizer(fts_tokenizer)
+        # Whether ``bm25_search`` falls back to the ``source_file`` column when
+        # no chunk's content matches (#2224). Off for a store whose file names
+        # are its own bookkeeping, which can still spell a word a caller types
+        # (#3205).
+        self._bm25_path_fallback = bm25_path_fallback
         self._chunk_budget_config = chunk_budget_config
         self._dimension = dimension
         self._chunk_column_positions: dict[str, int] = {}
@@ -422,6 +459,7 @@ class SqliteBackend(
                 lambda: self._in_transaction,
                 self._get_read_db,
                 lease_read_db=self._lease_read_db,
+                get_db_after_wait=lambda: self._get_db_after_wait(wait=WRITER_WAIT_S),
             )
 
             if self._adopt_unpopulated_embedding_stamp:
@@ -557,6 +595,78 @@ class SqliteBackend(
             )
         self._check_schema_current(self._db)
         return self._db
+
+    async def _wait_for_writer_idle(self, *, wait: float) -> None:
+        """Return once no other task owns the writer, waiting at most ``wait`` seconds.
+
+        The lock-wait half of :meth:`_get_db_when_idle`, for callers that do
+        not read through the writer connection themselves but are refused
+        while another task owns it: ``rebuild_fts`` and
+        ``reset_embedding_meta`` through ``_require_transaction_idle``, and the
+        synchronous ``stored_embedding_info`` property. It waits in
+        ``_writer_lock``'s FIFO queue only while a foreign task owns the
+        writer, then hands the lock straight on, so nothing can become owner
+        before the caller's next synchronous step. The caller must reach the
+        guarded access without an ``await`` in between. Raises
+        ``TransactionOwnedError`` when the wait runs out, or "Database is
+        closing" on a closing store.
+        """
+        owner = self._transaction_owner
+        if owner is None or owner is self._current_task():
+            return
+        # ``wait > 0`` rather than ``wait <= 0`` so NaN refuses too.
+        budget = wait if wait > 0 else 0.0
+        try:
+            async with asyncio.timeout(budget):
+                await self._writer_lock.acquire()
+        except TimeoutError:
+            if getattr(self, "_closing", False):
+                raise StorageError("Database is closing") from None
+            raise TransactionOwnedError(
+                "SQLite transaction is owned by another task; timed out waiting for writer lock"
+            ) from None
+        self._writer_lock.release()
+
+    async def _get_db_after_wait(self, *, wait: float) -> sqlite3.Connection:
+        """``_get_db()`` after :meth:`_wait_for_writer_idle`.
+
+        For writer reads that used ``_get_db()`` and should wait for another
+        task's transaction instead of being refused at once (#3182). Unlike
+        :meth:`_get_db_when_idle` it adds no refusal of a connection left in an
+        unowned transaction, so such a read behaves as it did, only later. The
+        caller must read without an ``await`` in between.
+        """
+        await self._wait_for_writer_idle(wait=wait)
+        return self._get_db()
+
+    async def _get_db_when_idle(self, *, wait: float) -> sqlite3.Connection:
+        """The writer connection for synchronous reads, once no other task owns it.
+
+        ``_get_db()`` refuses at once while another task owns ``transaction()``.
+        This waits instead, in ``_writer_lock``'s FIFO queue, for at most
+        ``wait`` seconds, then hands the lock straight on and returns the
+        connection. Nothing suspends between that release and the hand-out, so
+        no task can become owner in between; the caller's reads must run
+        without an ``await`` in between, as with any ``_get_db()`` result.
+
+        It waits only while another task owns the writer. It does not queue
+        behind a writer that has been granted the lock but has not resumed:
+        it never holds the lock, so a read in that moment delays nobody, and
+        it sees no uncommitted state, since the last owner has finished and
+        the next has not begun. It takes no SQLite lock, so other processes
+        are not held up either.
+
+        Like ``transaction()``, it refuses a connection left in a transaction
+        that no task owns, rather than read another writer's uncommitted rows,
+        and leaves that transaction as it is.
+        """
+        await self._wait_for_writer_idle(wait=wait)
+        db = self._get_db()
+        if db.in_transaction and not self._in_transaction:
+            raise StorageError(
+                "writer read refused: the connection already has an open transaction"
+            )
+        return db
 
     def _check_schema_current(self, conn: sqlite3.Connection, *, force: bool = False) -> None:
         """Stop this process once another one has migrated the DB past it (#2564).
@@ -727,10 +837,29 @@ class SqliteBackend(
         return self._get_db() if self._in_transaction else self._get_read_db()
 
     @asynccontextmanager
-    async def _lease_read_db(self) -> AsyncIterator[sqlite3.Connection]:
-        """Lease an idle read-pool connection with exclusive checkout and drain tracking."""
+    async def _lease_read_db(
+        self, *, deadline: float | None = None
+    ) -> AsyncIterator[sqlite3.Connection]:
+        """Lease an idle read-pool connection with exclusive checkout and drain tracking.
+
+        ``deadline`` (a ``time.monotonic()`` instant, from a search's
+        ``deadline_ms``) bounds only the wait for a free connection: past it the
+        lease raises ``SearchDeadlineExceeded`` having acquired nothing. A read
+        that already holds a connection is never cut short by it.
+        """
         if getattr(self, "_closing", False):
             raise StorageError("Database is closing")
+        if deadline is None:
+            # The budget of a search running in this task, for the reads it makes itself
+            # (visibility epoch, hidden counts, summary lookup, boosts) — see search/deadline.py.
+            from memtomem.search.deadline import ambient_read_deadline
+
+            deadline = ambient_read_deadline()
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SearchDeadlineExceeded(
+                "search deadline exceeded before a read connection was taken; "
+                "no results were returned"
+            )
         if "_get_read_db" in self.__dict__ or not self._read_pool:
             direct_conn = self._get_read_db()
             self._increment_active_readers()
@@ -744,6 +873,14 @@ class SqliteBackend(
         while conn is None:
             if getattr(self, "_closing", False):
                 raise StorageError("Database is closing")
+            # Admission, not only the wait: an expired request takes no reader, free or not,
+            # and one woken after its deadline does not take the reader it was woken for.
+            if deadline is not None and time.monotonic() >= deadline:
+                self._notify_reader_waiters()
+                raise SearchDeadlineExceeded(
+                    "search deadline exceeded before a read connection was taken; "
+                    "no results were returned"
+                )
             if not self._read_pool:
                 fallback = self._get_db()
                 self._increment_active_readers()
@@ -766,7 +903,10 @@ class SqliteBackend(
                 waiter: asyncio.Future[None] = loop.create_future()
                 self._reader_waiters.append(waiter)
                 try:
-                    await waiter
+                    if deadline is None:
+                        await waiter
+                    else:
+                        await self._await_reader_until(waiter, deadline)
                 except BaseException:
                     if waiter.done() and not waiter.cancelled():
                         self._notify_reader_waiters()
@@ -788,6 +928,18 @@ class SqliteBackend(
                 self._in_use_readers.discard(id(conn))
             self._decrement_active_readers()
             self._notify_reader_waiters()
+
+    @staticmethod
+    async def _await_reader_until(waiter: asyncio.Future[None], deadline: float) -> None:
+        """Wait for a free reader until ``deadline``; the caller's handler settles the waiter."""
+        try:
+            async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
+                await waiter
+        except TimeoutError:
+            raise SearchDeadlineExceeded(
+                "search deadline exceeded while waiting for a read connection; "
+                "no results were returned"
+            ) from None
 
     @asynccontextmanager
     async def _lease_txn_read_db(self) -> AsyncIterator[sqlite3.Connection]:
@@ -1141,6 +1293,39 @@ class SqliteBackend(
         return Path(self._config.sqlite_path).expanduser()
 
     @property
+    def fts_tokenizer(self) -> str:
+        """The FTS tokenizer this backend is configured with."""
+        return self._fts_tokenizer
+
+    @property
+    def bm25_path_fallback(self) -> bool:
+        """Whether ``bm25_search`` falls back to matching chunk paths."""
+        return self._bm25_path_fallback
+
+    @property
+    def fts_tokenizer_effective(self) -> str:
+        """The tokenizer this backend's FTS calls actually run.
+
+        Differs from :attr:`fts_tokenizer` only once ``kiwipiepy`` has failed
+        to import in this process (see ``fts_tokenizer.effective_tokenizer``).
+        """
+        return _fts.effective_tokenizer(self._fts_tokenizer)
+
+    def set_fts_tokenizer(self, name: str) -> None:
+        """Switch this backend's FTS tokenizer; the caller rebuilds the index.
+
+        Synchronous on purpose: the runtime config fanout in
+        ``web/hot_reload.py`` must apply it without yielding.
+
+        It switches this backend only. Another backend open on the same
+        database — another component stack in this process, or another
+        process such as ``mm web`` beside the MCP server — keeps the
+        tokenizer it was built with until it is recreated; stacks sharing a
+        database must be configured alike.
+        """
+        self._fts_tokenizer = _fts.validate_tokenizer(name)
+
+    @property
     def stored_embedding_info(self) -> dict:
         """Return the embedding config actually stored in the DB."""
         assert self._meta is not None
@@ -1348,6 +1533,9 @@ class SqliteBackend(
         purpose — no ``await`` may land between the DROP and the commit, or a
         concurrent ``dense_search`` could observe ``chunks_vec`` missing
         (``test_qa_audit_pins.py::test_reset_embedding_meta_is_single_atomic_transaction``).
+        A caller that should wait out another task's transaction calls
+        ``_wait_for_writer_idle`` immediately before this method; with no
+        ``await`` in here, nothing can take the writer in between.
         """
         assert self._meta is not None
         self._require_transaction_idle("reset_embedding_meta")
@@ -1714,6 +1902,8 @@ class SqliteBackend(
         if not chunks:
             return 0
 
+        # One tokenizer for the whole call, so a switch cannot split its rows.
+        tokenizer = self._fts_tokenizer
         db = self._get_db()
         try:
             chunk_ids = [str(c.id) for c in chunks]
@@ -1862,8 +2052,8 @@ class SqliteBackend(
                     "UPDATE chunks_fts SET content=?, source_file=? WHERE rowid=?",
                     [
                         (
-                            _fts.tokenize_for_fts(c.retrieval_content),
-                            norm_sources[c.metadata.source_file],
+                            _fts.tokenize_for_fts(c.retrieval_content, tokenizer=tokenizer),
+                            fts_source_text(norm_sources[c.metadata.source_file]),
                             rowid,
                         )
                         for c, rowid in to_update
@@ -1984,8 +2174,8 @@ class SqliteBackend(
                         [
                             (
                                 new_rowid_map[str(c.id)],
-                                _fts.tokenize_for_fts(c.retrieval_content),
-                                norm_sources[c.metadata.source_file],
+                                _fts.tokenize_for_fts(c.retrieval_content, tokenizer=tokenizer),
+                                fts_source_text(norm_sources[c.metadata.source_file]),
                             )
                             for c in to_insert
                             if str(c.id) in new_rowid_map
@@ -2188,7 +2378,9 @@ class SqliteBackend(
                 ) from exc
         return len(changed)
 
-    async def get_chunk(self, chunk_id: UUID, *, exclude_withheld: bool = False) -> Chunk | None:
+    async def get_chunk(
+        self, chunk_id: UUID, *, exclude_withheld: bool = False, read_writer: bool = False
+    ) -> Chunk | None:
         """Fetch one chunk by id.
 
         ``exclude_withheld=True`` is the read for a caller that will hand the
@@ -2196,13 +2388,23 @@ class SqliteBackend(
         statement, so a returned row was not withheld at the instant it was
         read. A separate check afterwards could not say that — a hold can be
         committed, or released together with the row's deletion, in between.
+
+        ``read_writer=True`` is the read for a caller about to act on the row:
+        the re-fetch under a source's locks, whose scope decides the Gate-B
+        consent check and whose line range decides what is cut from the file.
+        A pool connection another thread still has a statement open on serves
+        the snapshot from before later commits (#3202). The writer is read once
+        no other task owns it, waiting up to ``WRITER_WAIT_S`` and then raising
+        ``TransactionOwnedError``.
         """
         withheld = f" AND {NOT_WITHHELD_CHUNKS}" if exclude_withheld else ""
-        async with self._lease_read_db() as db:
-            row = db.execute(
-                f"SELECT * FROM chunks WHERE id=?{withheld}",  # nosec B608
-                (str(chunk_id),),
-            ).fetchone()
+        sql = f"SELECT * FROM chunks WHERE id=?{withheld}"  # nosec B608
+        if read_writer:
+            writer = await self._get_db_when_idle(wait=WRITER_WAIT_S)
+            row = writer.execute(sql, (str(chunk_id),)).fetchone()
+        else:
+            async with self._lease_read_db() as db:
+                row = db.execute(sql, (str(chunk_id),)).fetchone()
         if not row:
             return None
         return self._row_to_chunk(row)
@@ -2373,11 +2575,20 @@ class SqliteBackend(
         return len(rows)
 
     def _delete_policy_summaries_for_source(self, db: sqlite3.Connection, source: str) -> int:
-        """Remove policy-owned derived chunks after their last source chunk goes."""
+        """Remove policy-owned derived chunks after their last source chunk goes.
+
+        A summary path that is held or pending in its own right is kept, with
+        its hold, for recovery like any other held source (#3120);
+        ``delete_by_source`` on its parent still removes it. The check is in the
+        statement that selects the rows, under the writer lock the caller's
+        delete already holds.
+        """
         summary_source = source + CONSOLIDATED_SUFFIX
         rows = db.execute(
-            "SELECT id, rowid FROM chunks WHERE source_file=? AND origin=?",
-            (summary_source, ORIGIN_CONSOLIDATION_POLICY),
+            "SELECT id, rowid FROM chunks WHERE source_file=? AND origin=? "
+            "AND NOT EXISTS (SELECT 1 FROM held_sources h WHERE h.source_file=?) "
+            "AND NOT EXISTS (SELECT 1 FROM pending_source_checks p WHERE p.source_file=?)",
+            (summary_source, ORIGIN_CONSOLIDATION_POLICY, summary_source, summary_source),
         ).fetchall()
         for batch in _param_batches(rows):
             ids = [row[0] for row in batch]
@@ -2557,9 +2768,11 @@ class SqliteBackend(
         assert self._holds is not None
         return await self._holds.source_hold_generation(source_file)
 
-    async def source_hold_snapshot(self, source_file: Path) -> int | None:
+    async def source_hold_snapshot(
+        self, source_file: Path, *, as_stored: bool = False
+    ) -> int | None:
         assert self._holds is not None
-        return await self._holds.source_hold_snapshot(source_file)
+        return await self._holds.source_hold_snapshot(source_file, as_stored=as_stored)
 
     def queue_source_check_sync(self, source_file: Path) -> bool:
         assert self._holds is not None
@@ -2628,10 +2841,14 @@ class SqliteBackend(
         """Return the distinct persisted scopes for chunks from ``source_file``.
 
         ``as_stored`` as in :meth:`delete_by_source`, so a consent probe reads the
-        rows that the delete it guards removes.
+        rows that the delete it guards removes. A caller that owns
+        ``transaction()`` reads the writer: a pool connection can still hold a
+        snapshot from before a commit made while the caller waited for the
+        writer, and the consent decision would then judge rows the delete no
+        longer removes (#3182).
         """
         key = str(source_file) if as_stored else norm_path(source_file)
-        async with self._lease_read_db() as db:
+        async with self._lease_txn_read_db() as db:
             rows = db.execute(
                 "SELECT DISTINCT COALESCE(scope, 'user') FROM chunks WHERE source_file=?",
                 (key,),
@@ -2645,9 +2862,12 @@ class SqliteBackend(
         bulk deletes that would remove ``project_shared`` chunks without
         ``confirm_project_shared=True``. Project-shared memories can sit
         in the same default namespace as user memories, so the
-        namespace string alone does not imply the trust tier.
+        namespace string alone does not imply the trust tier. A caller that
+        owns ``transaction()`` reads the writer, so the probe sees the rows the
+        delete it guards removes; a pool connection can still hold a snapshot
+        from before a commit (#3202).
         """
-        async with self._lease_read_db() as db:
+        async with self._lease_txn_read_db() as db:
             rows = db.execute(
                 "SELECT DISTINCT COALESCE(scope, 'user') FROM chunks WHERE namespace=?",
                 (namespace,),
@@ -2723,16 +2943,11 @@ class SqliteBackend(
             # A bound parameter, not CURRENT_TIMESTAMP: SQLite renders that as
             # a space-separated, offset-less string, which sorts before every
             # canonical ISO row and skews lexical MAX(updated_at) orderings.
+            stamp = utc_stamp(datetime.now(timezone.utc))
             db.execute(
                 "UPDATE chunks SET source_file=?, scope=?, project_root=?, "
                 "updated_at=? WHERE source_file=?",
-                (
-                    new_norm,
-                    new_scope,
-                    project_root,
-                    utc_stamp(datetime.now(timezone.utc)),
-                    old_norm,
-                ),
+                (new_norm, new_scope, project_root, stamp, old_norm),
             )
             # Batched (#2265): ``rowids`` is the file's whole row set. The
             # extra ``new_norm`` parameter rides along in each batch, so the
@@ -2742,7 +2957,7 @@ class SqliteBackend(
                 db.execute(
                     f"UPDATE chunks_fts SET source_file=? "
                     f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
-                    [new_norm, *rowid_batch],
+                    [fts_source_text(new_norm), *rowid_batch],
                 )
             # Move the AI summary cache row alongside the chunks. The
             # cache key is derived from the source path, so an in-place
@@ -2764,21 +2979,8 @@ class SqliteBackend(
             # by ``old`` because that's the one whose signature matched
             # the chunk hashes we just rewrote. After the swap, delete
             # the old key so the orphan can't drift back in.
-            old_summary_key = f"{_AI_SUMMARY_KEY_PREFIX}{old_norm}"
-            new_summary_key = f"{_AI_SUMMARY_KEY_PREFIX}{new_norm}"
-            old_summary = db.execute(
-                "SELECT value FROM _memtomem_meta WHERE key=?",
-                (old_summary_key,),
-            ).fetchone()
-            if old_summary is not None:
-                db.execute(
-                    "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
-                    (new_summary_key, old_summary[0]),
-                )
-                db.execute(
-                    "DELETE FROM _memtomem_meta WHERE key=?",
-                    (old_summary_key,),
-                )
+            self._move_ai_summary_cache(db, old_norm, new_norm)
+            self._carry_policy_summary(db, old_norm, new_norm, new_scope, project_root, stamp)
             if owns_txn:
                 db.commit()
         except Exception as exc:
@@ -2789,8 +2991,71 @@ class SqliteBackend(
             ) from exc
         return len(rowids)
 
+    @staticmethod
+    def _move_ai_summary_cache(db: sqlite3.Connection, old_norm: str, new_norm: str) -> None:
+        for prefix in (_AI_SUMMARY_KEY_PREFIX, f"chunk_descriptions:{_AI_SUMMARY_KEY_PREFIX}"):
+            old_key = f"{prefix}{old_norm}"
+            row = db.execute("SELECT value FROM _memtomem_meta WHERE key=?", (old_key,)).fetchone()
+            if row is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO _memtomem_meta(key, value) VALUES (?, ?)",
+                    (f"{prefix}{new_norm}", row[0]),
+                )
+                db.execute("DELETE FROM _memtomem_meta WHERE key=?", (old_key,))
+
+    def _carry_policy_summary(
+        self,
+        db: sqlite3.Connection,
+        old_norm: str,
+        new_norm: str,
+        new_scope: str,
+        project_root: str | None,
+        stamp: str,
+    ) -> None:
+        """Move a source's policy summary with it, inside the caller's transaction (#3128).
+
+        Left behind, the summary is detached: an orphan scan holds it, and the
+        originals' ``consolidated_into`` edges point at a summary that is not at
+        the source's summary path, so the policy reads them as another
+        summary's coverage and never consolidates the source again. Ids are
+        kept, so those edges follow. The summary stays where it is when the
+        old path also holds rows the policy does not own, when it is held or
+        pending in its own right (#3120), or when the new path is occupied.
+        """
+        old_summary = old_norm + CONSOLIDATED_SUFFIX
+        new_summary = new_norm + CONSOLIDATED_SUFFIX
+        rows = db.execute(
+            "SELECT rowid, origin FROM chunks WHERE source_file=?", (old_summary,)
+        ).fetchall()
+        if not rows:
+            return
+        reason = None
+        if any(row[1] != ORIGIN_CONSOLIDATION_POLICY for row in rows):
+            reason = "the path also holds rows the policy does not own"
+        elif _path_held_or_pending(db, old_summary):
+            reason = "its path is held or pending"
+        elif db.execute(
+            "SELECT 1 FROM chunks WHERE source_file=? LIMIT 1", (new_summary,)
+        ).fetchone() is not None or _path_held_or_pending(db, new_summary):
+            reason = "the destination path is occupied"
+        if reason is not None:
+            logger.info("Not moving the policy summary of %s with it: %s", old_norm, reason)
+            return
+        db.execute(
+            "UPDATE chunks SET source_file=?, scope=?, project_root=?, updated_at=? "
+            "WHERE source_file=?",
+            (new_summary, new_scope, project_root, stamp, old_summary),
+        )
+        for rowid_batch in _param_batches([row[0] for row in rows]):
+            db.execute(
+                f"UPDATE chunks_fts SET source_file=? "
+                f"WHERE rowid IN ({placeholders(len(rowid_batch))})",
+                [fts_source_text(new_summary), *rowid_batch],
+            )
+        self._move_ai_summary_cache(db, old_summary, new_summary)
+
     async def rebuild_fts(self) -> int:
-        """Rebuild the FTS5 index from chunks table using current tokenizer.
+        """Rebuild the FTS5 index from the chunks table with this backend's tokenizer.
 
         Returns the number of rows rebuilt.
 
@@ -2803,7 +3068,22 @@ class SqliteBackend(
         the main connection. Running it while this backend owns a transaction
         is rejected before dispatch so the worker cannot self-contend or evade
         the backend's task-affine transaction contract.
+
+        Each pass commits rows in one tokenizer. The worker reads the tokenizer
+        after its ``DELETE`` holds the write lock, so a rebuild that queued
+        behind a newer one uses the newer value, and reads it again before
+        committing: if the backend was switched during the pass, the pass is
+        rolled back and redone with the new value. A switch landing between
+        that check and the commit is not caught here; the rebuild that switch
+        schedules waits on the write lock and then rewrites the index. Once
+        the rebuilds for overlapping runtime switches finish, the index is in
+        the tokenizer that won, never the one that lost (#3018).
+
+        While another task owns ``transaction()``, it first waits for the
+        writer, up to ``WRITER_WAIT_S``, instead of being refused at once
+        (#3182). A caller that owns a transaction itself is still refused.
         """
+        await self._wait_for_writer_idle(wait=WRITER_WAIT_S)
         self._require_transaction_idle("rebuild_fts")
         assert self._db is not None
         db_path = str(Path(self._config.sqlite_path).expanduser())
@@ -2813,38 +3093,47 @@ class SqliteBackend(
             try:
                 self._check_schema_current(conn, force=True)
                 conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("DELETE FROM chunks_fts")
-                cursor = conn.execute(
-                    "SELECT rowid, content, source_file, heading_hierarchy, retrieval_context FROM chunks"
+                for _attempt in range(_REBUILD_FTS_ATTEMPTS):
+                    conn.execute("DELETE FROM chunks_fts")
+                    tokenizer = self._fts_tokenizer
+                    cursor = conn.execute(
+                        "SELECT rowid, content, source_file, heading_hierarchy, retrieval_context FROM chunks"
+                    )
+                    total = 0
+                    try:
+                        while True:
+                            batch = cursor.fetchmany(_REBUILD_FTS_BATCH_SIZE)
+                            if not batch:
+                                break
+                            conn.executemany(
+                                "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
+                                [
+                                    (
+                                        r[0],
+                                        _fts.tokenize_for_fts(
+                                            (
+                                                f"{r[4]}\n\n{r[1]}"
+                                                if r[4]
+                                                else _rebuild_fts_retrieval(r[1], r[3])
+                                            ),
+                                            tokenizer=tokenizer,
+                                        ),
+                                        fts_source_text(r[2]),
+                                    )
+                                    for r in batch
+                                ],
+                            )
+                            total += len(batch)
+                    finally:
+                        cursor.close()
+                    if tokenizer == self._fts_tokenizer:
+                        conn.commit()
+                        return total
+                    conn.rollback()
+                raise RuntimeError(
+                    "the FTS tokenizer changed during every rebuild attempt; "
+                    "the index was left as it was — run the rebuild again"
                 )
-                total = 0
-                try:
-                    while True:
-                        batch = cursor.fetchmany(_REBUILD_FTS_BATCH_SIZE)
-                        if not batch:
-                            break
-                        conn.executemany(
-                            "INSERT INTO chunks_fts(rowid, content, source_file) VALUES (?,?,?)",
-                            [
-                                (
-                                    r[0],
-                                    _fts.tokenize_for_fts(
-                                        (
-                                            f"{r[4]}\n\n{r[1]}"
-                                            if r[4]
-                                            else _rebuild_fts_retrieval(r[1], r[3])
-                                        )
-                                    ),
-                                    r[2],
-                                )
-                                for r in batch
-                            ],
-                        )
-                        total += len(batch)
-                finally:
-                    cursor.close()
-                conn.commit()
-                return total
             except Exception:
                 conn.rollback()
                 raise
@@ -3442,6 +3731,44 @@ class SqliteBackend(
             rows = db.execute("SELECT DISTINCT source_file FROM chunks").fetchall()
         return {Path(row[0]) for row in rows}
 
+    async def list_visible_chunks_by_id(self, limit: int, after: str | None = None) -> VisiblePool:
+        """The first ``limit`` visible chunks in ascending id order, with the counts around them.
+
+        ``after`` is an exclusive cursor: only chunks whose stored id text
+        sorts above it are read. It need not name a stored chunk, so a walk
+        continues from the position of a chunk deleted since the last read.
+
+        The order is a property of the stored rows alone, so every process
+        selects the same chunks from the same store. The visibility rule is the
+        path-level one a listing uses (``VISIBLE_SOURCE_PATH``). One statement
+        returns the rows and both counts, so all three describe one snapshot
+        (a lease hands out a connection, not a snapshot, so two statements
+        could straddle a commit). The counts sit on their own row with the pool
+        joined to it, so they come back when the pool is empty: with a cursor
+        that no longer means nothing is visible. The statement reads stored
+        keys and takes no path as input, so there is none to resolve.
+        """
+        above = "" if after is None else " AND chunks.id > ?"
+        sql = (
+            "SELECT n.visible, n.above_cursor, pool.* FROM ("  # nosec B608
+            f"SELECT (SELECT COUNT(*) FROM chunks WHERE {VISIBLE_SOURCE_PATH}) AS visible, "
+            f"(SELECT COUNT(*) FROM chunks WHERE {VISIBLE_SOURCE_PATH}{above}) AS above_cursor"
+            ") AS n LEFT JOIN ("
+            f"SELECT chunks.* FROM chunks WHERE {VISIBLE_SOURCE_PATH}{above} "
+            "ORDER BY chunks.id LIMIT ?"
+            ") AS pool ON 1 ORDER BY pool.id"
+        )
+        params = (limit,) if after is None else (after, after, limit)
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(sql, params).fetchall()
+        # The counts row always comes back; an empty pool leaves its chunk
+        # columns NULL.
+        return VisiblePool(
+            chunks=[self._row_to_chunk(row[2:]) for row in rows if row[2] is not None],
+            visible=int(rows[0][0]),
+            above_cursor=int(rows[0][1]),
+        )
+
     async def get_orphan_candidate_source_files(self) -> set[Path]:
         """Exclude attached virtual summaries from filesystem checks.
 
@@ -3632,8 +3959,26 @@ class SqliteBackend(
         self,
         *,
         project_context_root: Path | None = None,
+        scope_filter: ScopeFilter | None = None,
+        namespace_filter: NamespaceFilter | None = None,
     ) -> list[tuple[str, int]]:
-        scope_frag, scope_params = scope_context_sql(None, project_context_root, column_alias="c.")
+        """Tag counts within one search boundary.
+
+        ``scope_filter`` and ``namespace_filter`` are the outer search's, so
+        query expansion names only tags that search could return. Without
+        them the count is the project-context boundary alone, as for the tag
+        listings.
+        """
+        scope_frag, scope_params = scope_context_sql(
+            scope_filter, project_context_root, column_alias="c."
+        )
+        ns_frag: str = ""
+        ns_params: list = []
+        if namespace_filter is not None:
+            # ``json_each`` has no ``namespace`` column, so the bare name is
+            # the chunk's.
+            ns_frag, ns_params = namespace_sql(namespace_filter)
+        ns_clause = f"AND ({ns_frag}) " if ns_frag else ""
         async with self._lease_read_db() as db:
             rows = db.execute(
                 "SELECT value, COUNT(*) as cnt "
@@ -3641,13 +3986,13 @@ class SqliteBackend(
                 # Held sources are out of the counts like they are out of search:
                 # a tag only held chunks carry would otherwise list a tag no
                 # query can return, and name it in query expansion.
-                f"WHERE {scope_frag} {_VISIBLE_SOURCE_C} "  # nosec B608
+                f"WHERE {scope_frag} {ns_clause}{_VISIBLE_SOURCE_C} "  # nosec B608
                 # ``value ASC`` breaks count ties deterministically so tag-strategy
                 # query expansion (which truncates to max_terms) is order-stable
                 # across runs — a replay-determinism requirement (#1802). Completes
                 # the #516/#1817 tie-break series for the tags leg.
                 "GROUP BY value ORDER BY cnt DESC, value ASC",
-                scope_params,
+                scope_params + ns_params,
             ).fetchall()
         return [(row[0], row[1]) for row in rows]
 
@@ -3712,10 +4057,13 @@ class SqliteBackend(
         return await self._ns.count_chunks_by_ns_prefix(prefixes)
 
     async def count_chunks_by_ns_prefix_detail(
-        self, prefixes: Sequence[str]
+        self,
+        prefixes: Sequence[str],
+        *,
+        boundary: tuple[ScopeFilter | None, Path | None] | None = None,
     ) -> tuple[int, dict[str, int]]:
         assert self._ns is not None
-        return await self._ns.count_chunks_by_ns_prefix_detail(prefixes)
+        return await self._ns.count_chunks_by_ns_prefix_detail(prefixes, boundary=boundary)
 
     async def delete_by_namespace(self, namespace: str) -> int:
         ns = self._ns
@@ -3785,9 +4133,11 @@ class SqliteBackend(
         namespace: str,
         description: str | None = None,
         color: str | None = None,
+        *,
+        surface: str = "storage",
     ) -> None:
         assert self._ns is not None
-        return await self._ns.set_namespace_meta(namespace, description, color)
+        return await self._ns.set_namespace_meta(namespace, description, color, surface=surface)
 
     async def list_namespace_meta(self) -> list[dict]:
         assert self._ns is not None

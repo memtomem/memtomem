@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from memtomem.tools.memory_writer import append_entry
+from helpers import append_judged
 
 pytestmark = pytest.mark.ollama
 
@@ -26,7 +26,7 @@ class TestDeveloperCRUD:
     async def test_add_then_search(self, components, memory_dir):
         """mem_add → mem_search: newly added content is immediately searchable."""
         target = memory_dir / "decisions.md"
-        append_entry(target, "Chose Flask over FastAPI for rapid prototyping", title="Framework")
+        append_judged(target, "Chose Flask over FastAPI for rapid prototyping", title="Framework")
         await components.index_engine.index_file(target)
 
         results, _ = await components.search_pipeline.search("Flask framework choice", top_k=5)
@@ -37,7 +37,7 @@ class TestDeveloperCRUD:
         """Two mem_add calls to same file → two separate chunks with own tags."""
         target = memory_dir / "arch.md"
 
-        append_entry(target, "Redis for caching", title="Cache Decision", tags=["cache"])
+        append_judged(target, "Redis for caching", title="Cache Decision", tags=["cache"])
         await components.index_engine.index_file(target)
 
         # Apply tags to newest chunk
@@ -46,7 +46,7 @@ class TestDeveloperCRUD:
         chunks[0] = _apply_tags(chunks[0], {"cache"})
         await components.storage.upsert_chunks(chunks)
 
-        append_entry(target, "PostgreSQL for persistence", title="DB Decision", tags=["database"])
+        append_judged(target, "PostgreSQL for persistence", title="DB Decision", tags=["database"])
         await components.index_engine.index_file(target)
 
         chunks = await components.storage.list_chunks_by_source(target)
@@ -56,7 +56,7 @@ class TestDeveloperCRUD:
         """tag_filter narrows results to tagged content only."""
         # Add tagged content
         f1 = memory_dir / "tagged.md"
-        append_entry(f1, "Redis LRU eviction policy", title="Redis Note", tags=["redis"])
+        append_judged(f1, "Redis LRU eviction policy", title="Redis Note", tags=["redis"])
         await components.index_engine.index_file(f1)
         chunks = await components.storage.list_chunks_by_source(f1)
         chunks[-1] = _apply_tags(chunks[-1], {"redis"})
@@ -64,7 +64,7 @@ class TestDeveloperCRUD:
 
         # Add untagged content
         f2 = memory_dir / "untagged.md"
-        append_entry(f2, "Memcached is also a caching option", title="Memcached")
+        append_judged(f2, "Memcached is also a caching option", title="Memcached")
         await components.index_engine.index_file(f2)
 
         # Search with tag filter
@@ -76,7 +76,7 @@ class TestDeveloperCRUD:
     async def test_recall_by_date(self, components, memory_dir):
         """mem_recall returns memories ordered by creation date."""
         target = memory_dir / "daily.md"
-        append_entry(target, "Today's standup: discussed auth refactor", title="Standup")
+        append_judged(target, "Today's standup: discussed auth refactor", title="Standup")
         await components.index_engine.index_file(target)
 
         from datetime import datetime, timezone

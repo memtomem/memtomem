@@ -21,16 +21,6 @@ _ALIASES: dict[str, str] = {
     "namespace_assign": "ns_assign",
     "tag_auto": "auto_tag",
     "orphans": "cleanup_orphans",
-    # Discoverability shortcut for the artifact-migration tool (#1147 B5-1).
-    "artifact_migrate": "context_artifact_migrate",
-    # Discoverability shortcut for the ADR-0022 promote tool (PR2). There is
-    # deliberately NO "version" alias: the bare ``version`` action is already
-    # taken by ``mem_version`` (protocol negotiation for memtomem-stm), and
-    # aliases resolve BEFORE real actions in ``mem_do`` (see below), so a
-    # "version" alias would silently shadow it. Use the canonical
-    # ``context_version`` action instead. The alias-collision guard in
-    # test_meta_tool.py pins this invariant for every alias.
-    "promote": "context_promote",
 }
 
 

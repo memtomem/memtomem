@@ -25,6 +25,30 @@ _CLEAN = "## A\n\nalpha entry about deploys\n\n## B\n\nbeta entry about reviews\
 _SECRET_SECTION = f"\n## K\n\naws {_KEY}\n"
 
 
+def _intruder_after_the_append(monkeypatch, line: str) -> None:
+    """Right after the append, another program writes ``line`` into the file.
+
+    The write guard reads every byte ``append_entry`` writes, so a refusal by
+    the re-index after the append needs bytes the guard never saw.
+    """
+    import memtomem.tools.memory_writer as memory_writer
+
+    real = memory_writer.append_blocks
+
+    def append_then_intruder(file_path, blocks, *, judged):
+        appended = real(file_path, blocks, judged=judged)
+        with open(file_path, "a", encoding="utf-8") as fh:
+            fh.write(f"\n## Intruder\n\n{line}\n")
+        return appended
+
+    monkeypatch.setattr(memory_writer, "append_blocks", append_then_intruder)
+
+
+def _preflight(engine, path, pre_image):
+    """The preflight as the memory tools call it: the source path resolved with the read."""
+    return engine.preflight_mutation(path, pre_image, source_path=path.resolve())
+
+
 @pytest.fixture(autouse=True)
 def _reset_counters():
     privacy.reset_for_tests()
@@ -152,16 +176,19 @@ class TestTheValveCoversOnlyTheCallersOwnWrite:
         assert _KEY in await _stored_text(comp, target)
 
     @pytest.mark.asyncio
-    async def test_unscanned_title_is_refused_after_the_append(self, bm25_only_components):
-        """A post-write refusal: the title is not part of the ingress scan."""
+    async def test_unscanned_bytes_are_refused_after_the_append(
+        self, bm25_only_components, monkeypatch
+    ):
+        """A post-write refusal: bytes the ingress scan never saw reach the re-index."""
         comp, mem_dir = bm25_only_components
         target = mem_dir / "titled.md"
         target.write_text(_CLEAN, encoding="utf-8")
         await comp.index_engine.index_file(target)
+        _intruder_after_the_append(monkeypatch, "password: hunter2-title-value")
 
         result = await mem_add(  # type: ignore[arg-type]
             content="delta entry",
-            title="password: hunter2-title-value",
+            title="clean title",
             file=str(target),
             ctx=StubCtx(AppContext.from_components(comp)),
         )
@@ -181,21 +208,19 @@ _DECLARED = (
 class TestPreflight:
     def test_a_new_file_is_clean(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
-        pf = comp.index_engine.preflight_mutation(mem_dir / "new.md", b"")
+        pf = _preflight(comp.index_engine, mem_dir / "new.md", b"")
         assert (pf.rejection, pf.masking_locked, pf.valve_ok) == (None, False, True)
 
     def test_a_clean_file_lets_the_valve_through(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
-        pf = comp.index_engine.preflight_mutation(mem_dir / "a.md", _CLEAN.encode())
+        pf = _preflight(comp.index_engine, mem_dir / "a.md", _CLEAN.encode())
         assert (pf.rejection, pf.masking_locked, pf.valve_ok) == (None, False, True)
 
     def test_unscanned_content_is_refused_and_nothing_is_recorded(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         before = privacy.snapshot()
 
-        pf = comp.index_engine.preflight_mutation(
-            mem_dir / "a.md", (_CLEAN + _SECRET_SECTION).encode()
-        )
+        pf = _preflight(comp.index_engine, mem_dir / "a.md", (_CLEAN + _SECRET_SECTION).encode())
 
         assert pf.rejection is not None and pf.rejection.decision == "blocked"
         assert pf.rejection.held is None
@@ -204,16 +229,16 @@ class TestPreflight:
 
     def test_a_declared_label_passes_but_keeps_the_valve_off(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
-        pf = comp.index_engine.preflight_mutation(mem_dir / "d.md", _DECLARED.encode())
+        pf = _preflight(comp.index_engine, mem_dir / "d.md", _DECLARED.encode())
         assert pf.rejection is None
         assert pf.valve_ok is False
 
     def test_crlf_and_invalid_utf8_are_read_as_the_engine_reads_them(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         crlf = _CLEAN.replace("\n", "\r\n").encode()
-        assert comp.index_engine.preflight_mutation(mem_dir / "c.md", crlf).valve_ok
+        assert _preflight(comp.index_engine, mem_dir / "c.md", crlf).valve_ok
         broken = b"## A\n\nbad byte \xff here\n" + _SECRET_SECTION.encode()
-        assert comp.index_engine.preflight_mutation(mem_dir / "b.md", broken).rejection
+        assert _preflight(comp.index_engine, mem_dir / "b.md", broken).rejection
 
     @pytest.mark.asyncio
     async def test_a_reviewed_masking_manifest_locks_the_file(self, bm25_only_components, tmp_path):
@@ -240,7 +265,7 @@ class TestPreflight:
         )
         comp.index_engine._config.index_masking_manifest_path = str(manifest)
 
-        pf = comp.index_engine.preflight_mutation(target, text.encode())
+        pf = _preflight(comp.index_engine, target, text.encode())
         assert pf.rejection is None
         assert pf.masking_locked
         result = await mem_add(  # type: ignore[arg-type]
@@ -257,7 +282,7 @@ class TestRefuseMutation:
     async def test_records_once_and_holds(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         target = await _indexed_then_tampered(comp, mem_dir)
-        pf = comp.index_engine.preflight_mutation(target, target.read_bytes())
+        pf = _preflight(comp.index_engine, target, target.read_bytes())
 
         rejection = await comp.index_engine.refuse_mutation(target, pf)
 
@@ -272,7 +297,7 @@ class TestRefuseMutation:
         comp, mem_dir = bm25_only_components
         target = mem_dir / "declared.md"
         target.write_text(_DECLARED + f"\naws {_KEY}\n", encoding="utf-8")
-        pf = comp.index_engine.preflight_mutation(target, target.read_bytes())
+        pf = _preflight(comp.index_engine, target, target.read_bytes())
         assert pf.rejection is not None
 
         with caplog.at_level(logging.WARNING, logger="memtomem.privacy"):
@@ -408,6 +433,7 @@ class TestRefusalAfterTheWriteReportsTheRestore:
         engine = AsyncMock()
         engine.is_excluded = MagicMock(return_value=False)
         engine.is_read_only_source = MagicMock(return_value=False)
+        engine.is_managed_source = MagicMock(return_value=True)
         engine.preflight_mutation = MagicMock(side_effect=clean_preflight)
         engine.rewrite_refusal = AsyncMock(return_value=None)
         engine.index_file = AsyncMock(side_effect=refusal)
@@ -430,13 +456,16 @@ class TestRefusalAfterTheWriteReportsTheRestore:
 
 class TestAppendedRefusalsSpeakAtEveryPublicTool:
     @pytest.mark.asyncio
-    async def test_reflection_save_names_the_unindexed_append(self, bm25_only_components):
+    async def test_reflection_save_names_the_unindexed_append(
+        self, bm25_only_components, monkeypatch
+    ):
         from memtomem.server.tools.reflection import mem_reflect_save
 
         comp, _ = bm25_only_components
+        _intruder_after_the_append(monkeypatch, "password: tag-value-xyz")
         result = await mem_reflect_save(  # type: ignore[arg-type]
             insight="deploys go smoother on tuesdays",
-            tags=["password: tag-value-xyz"],
+            tags=["clean-tag"],
             ctx=StubCtx(AppContext.from_components(comp)),
         )
 
@@ -522,14 +551,14 @@ class TestAForcedWriteCoversOnlyItsOwnBytes:
 
     def test_appended_text_matches_the_engines_read(self, tmp_path):
         from memtomem.tools.memory_mutation import appended_valve_text
-        from memtomem.tools.memory_writer import append_entry
+        from memtomem.tools.memory_writer import append_entry, read_for_append
 
         target = tmp_path / "n.md"
         target.write_bytes(b"# Notes\r\n\r\nfirst line\r\n")
-        pre = target.read_bytes()
-        appended = append_entry(target, "second entry", title="T")
+        judged = read_for_append(target)
+        appended = append_entry(target, "second entry", title="T", judged=judged)
 
-        assert appended_valve_text(pre, appended) == target.read_text(encoding="utf-8")
+        assert appended_valve_text(judged.data, appended.text) == target.read_text(encoding="utf-8")
 
     def test_a_rewrite_that_read_something_else_cannot_be_bound(self):
         from memtomem.tools.memory_mutation import rewrite_valve_text
@@ -543,15 +572,16 @@ class TestAForcedWriteCoversOnlyItsOwnBytes:
 
 class TestScratchPromotionIsNotRepeatable:
     @pytest.mark.asyncio
-    async def test_mcp(self, bm25_only_components):
+    async def test_mcp(self, bm25_only_components, monkeypatch):
         from memtomem.server.tools.scratch import mem_scratch_promote
 
         comp, mem_dir = bm25_only_components
         ctx = StubCtx(AppContext.from_components(comp))
         await comp.storage.scratch_set("note", "scratch-body-marker")
+        _intruder_after_the_append(monkeypatch, "password: hunter2-title-value")
 
         first = await mem_scratch_promote(  # type: ignore[arg-type]
-            key="note", title="password: hunter2-title-value", ctx=ctx
+            key="note", title="clean title", ctx=ctx
         )
         assert "appended" in first
         retried = await mem_scratch_promote(key="note", title="clean", ctx=ctx)  # type: ignore[arg-type]

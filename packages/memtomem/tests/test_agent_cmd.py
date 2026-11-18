@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -35,13 +35,17 @@ def _mock_components(legacy_namespaces, existing_new_namespaces=(), chunk_counts
         for ns in existing_new_namespaces
     )
     storage = SimpleNamespace(
+        transaction=MagicMock(side_effect=lambda **_: nullcontext()),
         list_namespace_meta=AsyncMock(return_value=rows),
         list_namespace_chunk_candidates=AsyncMock(return_value=[]),
         rename_namespace=AsyncMock(
             return_value=NamespaceRenameResult(chunks_moved=2, metadata_renamed=True, merged=False)
         ),
     )
-    return SimpleNamespace(storage=storage)
+    # The rename service asks the engine where each source's lock lives; the
+    # candidate list here is empty, so the answer is never used.
+    index_engine = SimpleNamespace(is_managed_source=lambda _path: True)
+    return SimpleNamespace(storage=storage, index_engine=index_engine)
 
 
 def _patched_cli_components(comp):

@@ -28,8 +28,8 @@ def privacy_remedy(surface: RemedySurface, *, path: Path, bypassable: bool) -> s
     this exact file: ``mem_index`` defaults to the server's cwd and a relative
     name can resolve elsewhere, so commands carry the full path. ``bypassable``
     is false for ``project_shared``, whose ``force_unsafe`` is refused, so no
-    bypass is offered there. ``mem_index`` has no ``force_unsafe``: an MCP
-    caller's bypass is the CLI's. The web names its own control and the bare
+    bypass is offered there. ``mem_index`` has no ``force_unsafe``, so the MCP
+    remedy names the CLI's bypass. The web names its own control and the bare
     file name only (host paths stay out of web responses).
     """
     if surface in ("cli", "shell", "mcp"):
@@ -79,8 +79,20 @@ class PrivacyRejection(Exception):
 
     retryable = False
 
-    def __init__(self, *, path: Path, hit_count: int, scope: str, decision: str) -> None:
+    def __init__(
+        self,
+        *,
+        path: Path,
+        hit_count: int,
+        scope: str,
+        decision: str,
+        source_key: str | None = None,
+    ) -> None:
         self.path = path
+        # The stored key of the source whose content was refused, taken with the
+        # read. The hold uses it, so a path relinked before the hold still hides
+        # the refused source's rows, not the link target's (#3180).
+        self.source_key = source_key
         self.hit_count = hit_count
         self.scope = scope
         self.decision = decision
@@ -189,15 +201,29 @@ class MutationPreflight:
     ``valve_ok`` — the file holds nothing flagged and nothing masked, so every
     hit in the result of this write comes from the write itself and the
     caller's ``force_unsafe`` may cover it.
+    ``relinked`` — the path no longer resolves to the source that was read, so
+    the write would reach a file nobody judged. Checked before the other two:
+    they describe the file that was read (#3191). The tool calls
+    :meth:`IndexEngine.hold_relinked_mutation`, which holds the source that was
+    read whatever the judge said about its bytes (#3291).
+    ``source_key`` — the stored key of the source that was read, the one a
+    hold is placed under.
     """
 
     rejection: PrivacyRejection | None
     masking_locked: bool
     valve_ok: bool
     replay: Callable[[], object] | None = field(default=None, repr=False, compare=False)
+    relinked: bool = False
+    source_key: str | None = None
 
     def blocker(self, op: str, name: str, *, needs_valve: bool) -> str | None:
         """The refusal text for a write the preflight forbids, other than ``rejection``."""
+        if self.relinked:
+            return (
+                f"Error: {op} refused: {name} now resolves to a different location than "
+                "when it was read; nothing was written. Try again."
+            )
         if self.masking_locked:
             return (
                 f"Error: {op} refused: {name} is under a reviewed masking manifest, "

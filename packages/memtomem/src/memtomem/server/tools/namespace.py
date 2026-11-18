@@ -205,6 +205,7 @@ async def mem_ns_rename(
             app.storage,
             old,
             new,
+            is_managed_source=app.index_engine.is_managed_source,
             merge=merge,
         )
     except NamespaceConflictError as exc:
@@ -259,7 +260,9 @@ async def mem_ns_update(
     """
     validate_namespace(namespace)
     app = await _get_app_initialized(ctx)
-    await app.storage.set_namespace_meta(namespace, description=description, color=color)
+    await app.storage.set_namespace_meta(
+        namespace, description=description, color=color, surface="mem_ns_update"
+    )
     return f"Updated metadata for namespace '{namespace}'"
 
 
@@ -308,6 +311,7 @@ async def mem_ns_assign(
         result = await namespace_management.assign_namespace(
             app.storage,
             namespace,
+            is_managed_source=app.index_engine.is_managed_source,
             source_filter=source_filter,
             old_namespace=old_namespace,
             merge=merge,

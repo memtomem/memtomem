@@ -17,24 +17,33 @@ from pydantic import BaseModel
 
 from memtomem import __version__
 from memtomem._runtime_paths import scrub_text
+from memtomem.constants import NON_SYSTEM_NAMESPACES
 from memtomem._instance_registry import (
     enumerate_live_instances as _enumerate_live_instances,
     store_digest_for as _store_digest_for,
+)
+from memtomem.embedding.identity import (
+    embedding_reset_cost,
+    embedding_reset_counts,
+    store_has_nothing_to_reset,
 )
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.generation import ComponentGeneration
 from memtomem.runtime.components import prune_settled_generations
 from memtomem.server import mcp
+from memtomem.server.client_paths import client_cwd_of
 from memtomem.server.context import CtxType, _get_app_initialized
+from memtomem.server.background import track_task
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
-from memtomem.server.helpers import _set_config_key
+from memtomem.server.helpers import _set_config_key, mcp_saved_fields
 from memtomem.secret_masking import is_secret_key, mask_secrets
 from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources, source_state
 
 if TYPE_CHECKING:
     from memtomem.config import EmbeddingConfig, Mem2MemConfig, SaveReceipt, SearchConfig
     from memtomem.server.context import AppContext
+    from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +205,30 @@ def _web_ui_identity() -> tuple[int, str] | None:
         return None
 
 
+def _watcher_unavailable_fix() -> str:
+    """How to move this server off the failing watcher backend (#3080).
+
+    Names the environment variables that set the backend when there are any:
+    either shape outranks ``config.json``, so advising a file edit over one
+    would change nothing. Names only, never values.
+    """
+    from memtomem.config import env_bindings_for
+
+    tail = "or close other memtomem-server sessions, then restart the server."
+    bindings = env_bindings_for("indexing", "watcher_backend")
+    if not bindings:
+        return (
+            f'Set "indexing": {{"watcher_backend": "polling"}} in ~/.memtomem/config.json, {tail}'
+        )
+    names = " and ".join(
+        f'{b.name} (its "watcher_backend" key)' if b.whole_section else b.name for b in bindings
+    )
+    return (
+        f"The environment sets the watcher backend through {names}, which overrides "
+        f'~/.memtomem/config.json: set it to "polling" there, {tail}'
+    )
+
+
 def _collect_concurrent_writers(db_path: Path) -> dict | None:
     """Build the ``concurrent_server_writers`` warning, or ``None``.
 
@@ -261,23 +294,22 @@ def _collect_concurrent_writers(db_path: Path) -> dict | None:
     return warning
 
 
-def _tokenizer_fallback_warning(configured: str) -> dict | None:
+def _tokenizer_fallback_warning(configured: str, storage: SqliteBackend) -> dict | None:
     """Warn while a ``kiwipiepy`` store is being tokenized as ``unicode61`` (#2647).
 
-    Without ``kiwipiepy`` the tokenizer switches this process to ``unicode61``
-    on first use and keeps writing, so one FTS index ends up holding two token
+    Without ``kiwipiepy`` the store's backend tokenizes as ``unicode61`` from
+    the first kiwipiepy call on and keeps writing, so one FTS index ends up holding two token
     representations and Korean BM25 queries miss rows across them. Two
     signals, either sufficient: the process already fell back (sticky — a
     later install does not undo it), or the module cannot be found (the
     fallback is pending; status never tokenizes, so it would not trip it).
     Neither imports Kiwi. Rows written during a fallback stay damaged after
-    the extra is installed, so the fix ends with a rebuild.
+    the extra is installed, so the fix ends with a rebuild. *storage* is the
+    store's backend; only a kiwipiepy store reads its ``fts_tokenizer_effective``.
     """
     if configured != "kiwipiepy":
         return None
-    from memtomem.storage.fts_tokenizer import get_tokenizer
-
-    active = get_tokenizer()
+    active = storage.fts_tokenizer_effective
     installed = bool(_dependency_state("kiwipiepy")["available"])
     if active == "kiwipiepy" and installed:
         return None
@@ -292,16 +324,54 @@ def _tokenizer_fallback_warning(configured: str) -> dict | None:
         "detail": f"search.tokenizer=kiwipiepy but {state}. Rows it indexes are "
         "tokenized differently from kiwipiepy rows, so Korean keyword search misses "
         "notes across the two.",
-        # The rebuild runs under the CLI's own tokenizer and config, so it has to
-        # run where the server does: a bare ``mm`` may lack the extra (and rebuild
-        # as unicode61), be absent on a uvx-only install, or resolve another
-        # store. Naming the launcher, not a pinned command, covers all three.
+        # The rebuild goes through the server: it rebuilds the store that server
+        # has open, with that server's tokenizer. A shell ``mm`` may lack the
+        # extra (and rebuild as unicode61), be absent on a uvx-only install, or
+        # open another store — a plugin launcher passes the server only some
+        # environment variables, and a relative store path resolves against the
+        # shell's working directory, not the server's. Any process still running
+        # without the extra, or configured with another tokenizer, writes
+        # unicode61 rows into the rebuilt index, so the restart is stated as a
+        # rule; the writers named are examples, not a list. Only MCP servers can
+        # be checked from here: the store does not record which tokenizer built
+        # its keyword index.
+        # The status check comes before the rebuild: the rebuild's reply names
+        # the tokenizer it used, but only after it has rewritten the whole index
+        # with it. The check asks for the tokenizer as well as a clean warning:
+        # a kiwipiepy setting made at runtime and never saved is gone after the
+        # restart, which clears the warning too, and a rebuild from that state
+        # would switch one server while the others keep writing unicode61.
         "fix": "install the korean extra wherever memtomem runs (launch "
-        "memtomem[onnx,korean] instead of memtomem[onnx]), restart every memtomem "
-        "server on this store, then rebuild its keyword index with the server's own "
-        "launcher and environment, running `mm config set search.tokenizer "
-        "kiwipiepy` in place of `memtomem-server`",
+        "memtomem[onnx,korean] instead of memtomem[onnx]). Let running indexing "
+        "commands finish, then restart every process that uses this store, each with "
+        "`search.tokenizer` set to kiwipiepy — MCP servers, `mm web`, `mm shell` and "
+        "applications embedding memtomem, for example. Check `mem_status()` on each "
+        "MCP server and continue only once it shows `search.tokenizer` as kiwipiepy "
+        "and this warning is gone there (a kiwipiepy setting that was never saved is "
+        "lost on restart, and the warning with it). Then rebuild the keyword index "
+        "once, from one of those servers through an MCP client connected to it: "
+        '`mem_do(action="config", params={"key": "search.tokenizer", "value": '
+        '"kiwipiepy"})`; its reply should say `FTS index rebuilt with kiwipiepy`. '
+        "`mm config set search.tokenizer kiwipiepy` does the same only where that "
+        "`mm` has the korean extra and opens the same store (same config, environment "
+        "and working directory)",
     }
+
+
+def _shared_daemon_runtime() -> dict[str, object]:
+    """``{"shared_daemon": {...}}`` inside a shared daemon (#3381), else ``{}``.
+
+    A standalone server has no daemon, and the key is then absent, not null.
+    A standalone server that a ``--shared NAME`` session fell back to carries
+    ``{"shared_fallback": {"name", "reason"}}`` instead.
+    """
+    from memtomem.server.context import shared_daemon_summary, shared_fallback
+
+    summary = shared_daemon_summary()
+    if summary is not None:
+        return {"shared_daemon": summary}
+    fallback = shared_fallback()
+    return {"shared_fallback": fallback} if fallback is not None else {}
 
 
 async def collect_status_report(app: AppContext) -> dict:
@@ -318,7 +388,8 @@ async def collect_status_report(app: AppContext) -> dict:
     stats = await app.storage.get_stats()
     config = app.config
     try:
-        cwd = Path(os.getcwd()).resolve()
+        client_cwd = client_cwd_of(app)
+        cwd = (client_cwd if client_cwd is not None else Path(os.getcwd())).resolve()
     except OSError:
         cwd = None
     from memtomem.server.tools.search import (
@@ -483,14 +554,7 @@ async def collect_status_report(app: AppContext) -> dict:
             except Exception:
                 logger.debug("vector count query failed", exc_info=True)
         chunks = stats["total_chunks"]
-        # Orphan vectors survive with zero chunks, so the two clauses are
-        # independent: what is dropped, and whether a re-index follows.
-        dropped = "all vector rows" if vectors is None else f"{vectors} vector row(s)"
-        if chunks == 0:
-            reindex = "no chunks to re-index."
-        else:
-            reindex = f"{chunks} chunk(s) stay but need `mm index --force <path>` to re-embed."
-        detail = f"Reset drops {dropped}; {reindex}"
+        detail = embedding_reset_cost(chunks, vectors)
         warnings.append(
             {
                 "kind": warning_kind,
@@ -503,7 +567,7 @@ async def collect_status_report(app: AppContext) -> dict:
                 "doc": "docs/guides/configuration.md#reset-flow",
             }
         )
-    tokenizer_warning = _tokenizer_fallback_warning(config.search.tokenizer)
+    tokenizer_warning = _tokenizer_fallback_warning(config.search.tokenizer, app.storage)
     if tokenizer_warning is not None:
         warnings.append(tokenizer_warning)
     # #1619: an explicitly enabled MMR silently does nothing without dense
@@ -545,6 +609,21 @@ async def collect_status_report(app: AppContext) -> dict:
                 }
             )
 
+    # #3080: the server runs, but its file watcher has no observer. Read off
+    # the watcher instance, which a ``from_runtime_owner`` facade shares with
+    # its owner; a context that runs no watcher (``mm status``) has none.
+    watcher = getattr(app, "_watcher", None)
+    observer_error = getattr(watcher, "observer_error", None)
+    if isinstance(observer_error, str):
+        warnings.append(
+            {
+                "kind": "watcher_unavailable",
+                "detail": f"The file watcher could not start ({observer_error}): file "
+                "edits are not picked up live; source checks keep running.",
+                "fix": _watcher_unavailable_fix(),
+            }
+        )
+
     # #1935: two live memtomem-server processes with this store open. The
     # registry probe is filesystem work behind a bounded cross-process
     # lock, so it runs off the event loop; any failure or incomplete pass
@@ -559,6 +638,7 @@ async def collect_status_report(app: AppContext) -> dict:
     from memtomem.indexing.watcher import effective_watcher_backend
 
     return {
+        "inference": _inference_status(config),
         "config": {
             "storage_backend": config.storage.backend,
             "db_path": str(db_path_resolved),
@@ -581,6 +661,7 @@ async def collect_status_report(app: AppContext) -> dict:
             "cwd": str(cwd) if cwd is not None else None,
             "project_context_root": str(project_root) if project_root is not None else None,
             "project_context_source": "bound" if bound_root is not None else "cwd",
+            **_shared_daemon_runtime(),
         },
         "index": {
             "total_chunks": stats["total_chunks"],
@@ -604,6 +685,55 @@ async def collect_status_report(app: AppContext) -> dict:
         },
         "warnings": warnings,
     }
+
+
+def _inference_status(config: Mem2MemConfig) -> dict:
+    """LLM / reranker providers and the configured remote inference endpoints."""
+    from memtomem.inference_endpoints import remote_endpoints
+
+    return {
+        "llm": {"enabled": config.llm.enabled, "provider": config.llm.provider},
+        "rerank": {"enabled": config.rerank.enabled, "provider": config.rerank.provider},
+        "remote_endpoints": [
+            {
+                "component": ep.component,
+                "provider": ep.provider,
+                "host": ep.host,
+                "sends": ep.sends,
+            }
+            for ep in remote_endpoints(config.embedding, config.llm, config.rerank)
+        ],
+    }
+
+
+def _inference_status_lines(inference: dict) -> list[StatusLine]:
+    """``LLM`` / ``Reranker`` rows and the ``Remote inference endpoints`` block."""
+    from memtomem.inference_endpoints import NOT_COVERED
+
+    def provider(section: dict) -> str:
+        return section["provider"] if section["enabled"] else "off"
+
+    lines = [
+        StatusLine("kv", key="LLM:".ljust(11), value=provider(inference["llm"])),
+        StatusLine("kv", key="Reranker:".ljust(11), value=provider(inference["rerank"])),
+        StatusLine("blank"),
+        StatusLine("section", value="Remote inference endpoints", meta={"tone": "plain"}),
+        StatusLine("rule", value="--------------------------", meta={"tone": "plain"}),
+    ]
+    endpoints = inference["remote_endpoints"]
+    if not endpoints:
+        lines.append(StatusLine("source_item", value="  none configured"))
+    for ep in endpoints:
+        lines.append(
+            StatusLine(
+                "source_item",
+                value=(
+                    f"  - {ep['component']} ({ep['provider']}) -> {ep['host']}: sends {ep['sends']}"
+                ),
+            )
+        )
+    lines.append(StatusLine("source_hint", value=f"  {NOT_COVERED}"))
+    return lines
 
 
 # Dense-coverage hints, keyed by ``dense_coverage["state"]``.
@@ -886,6 +1016,11 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             "kv", key="Dense candidates: ", value=str(cfg.get("dense_candidates", "(unavailable)"))
         ),
         StatusLine("kv", key="Watcher:".ljust(11), value=str(cfg["watcher_backend"])),
+    ]
+    # Absent from dicts built before the key existed (tests, older callers).
+    if "inference" in data:
+        lines.extend(_inference_status_lines(data["inference"]))
+    lines += [
         StatusLine("blank"),
         StatusLine("section", value="Runtime context", meta={"tone": "plain"}),
         StatusLine("rule", value="---------------", meta={"tone": "plain"}),
@@ -907,6 +1042,24 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             ),
         ),
     ]
+    if shared := runtime.get("shared_daemon"):
+        lines.append(
+            StatusLine(
+                "kv",
+                key="Shared daemon:".ljust(17),
+                value=(
+                    f"{shared['name']} (pid {shared['pid']}, {shared['connections']} connection(s))"
+                ),
+            )
+        )
+    elif fallback := runtime.get("shared_fallback"):
+        lines.append(
+            StatusLine(
+                "kv",
+                key="Shared daemon:".ljust(17),
+                value=f"{fallback['name']} not joined ({fallback['reason']})",
+            )
+        )
     lines.extend(
         _status_source_lines(
             "User sources",
@@ -1242,6 +1395,9 @@ async def mem_config(
     """
     app = await _get_app_initialized(ctx)
 
+    if key == "rerank.enabled" and value is not None:
+        return await _set_rerank_enabled(app, value, persist)
+
     if key and value is not None:
         snapshot = _ConfigSectionSnapshot.capture(app.config, key) if persist else None
         result = _set_config_key(app.config, key, value)
@@ -1257,21 +1413,10 @@ async def mem_config(
             # ``mm config set`` ordering (persist, then fanout).
             receipt = None
             if persist:
-                from memtomem.config import save_config_overrides
-
                 try:
-                    receipt = save_config_overrides(app.config)
-                except Exception as e:
-                    if snapshot is not None:
-                        snapshot.restore()
-                    if isinstance(e, TimeoutError):
-                        return (
-                            "Could not persist config: another process is writing "
-                            "config.json. Runtime change rolled back; retry in a moment."
-                        )
-                    if isinstance(e, ValueError):
-                        return f"Failed to persist config: {e}. Runtime change rolled back."
-                    raise
+                    receipt = _save_or_restore(app.config, snapshot)
+                except _PersistRefused as refused:
+                    return str(refused)
 
             # Invalidate search cache so changes take effect immediately.
             app.search_pipeline.invalidate_cache()
@@ -1279,11 +1424,25 @@ async def mem_config(
                 publish_onnx_batch_size(app.embedder, app.config.embedding.onnx_batch_size)
             # Rebuild FTS index when tokenizer changes.
             if key == "search.tokenizer":
-                from memtomem.storage.fts_tokenizer import set_tokenizer
-
-                set_tokenizer(app.config.search.tokenizer)
+                requested = app.config.search.tokenizer
+                app.storage.set_fts_tokenizer(requested)
                 count = await app.storage.rebuild_fts()
-                result += f"\nFTS index rebuilt ({count} chunks)."
+                # ``set_fts_tokenizer`` is not the last word: a kiwipiepy
+                # rebuild in a process where the extra cannot be imported
+                # silently falls back to unicode61 mid-pass. Name the
+                # tokenizer the rows were actually built with, and say so when
+                # it is not the one that was asked for — otherwise a fallback
+                # rebuild reports success in the same words as a real one
+                # (mirrors ``mm config set``; #3385).
+                built = app.storage.fts_tokenizer_effective
+                result += f"\nFTS index rebuilt with {built} ({count} chunks)."
+                if built != requested:
+                    result += (
+                        f"\nwarning: {requested} is unavailable (not installed), so this "
+                        f"rebuild and every query in this process fall back to {built}. "
+                        f"Install it, restart the server, and rebuild for a {requested} "
+                        f"index."
+                    )
 
             suffix = _persistence_suffix(key, receipt)
             result += suffix
@@ -1313,6 +1472,112 @@ async def mem_config(
         return obj
 
     return json.dumps(config_dict, indent=2, default=_serialize)
+
+
+#: Closes of rerankers ``_set_rerank_enabled`` built but never installed.
+_UNPUBLISHED_RERANKER_CLOSES: set[asyncio.Task] = set()
+
+
+class _PersistRefused(Exception):
+    """A ``persist=True`` save failed in a way the caller reports, not raises."""
+
+
+def _save_or_restore(config: Mem2MemConfig, snapshot: _ConfigSectionSnapshot | None) -> SaveReceipt:
+    """Save the runtime config, restoring *snapshot* if the save fails.
+
+    Writes only the sections MCP may change (:func:`mcp_saved_fields`), so the
+    file keeps its own ``session_trace`` settings.
+
+    Timeouts and validation failures become :class:`_PersistRefused` with the
+    message ``mem_config`` returns; anything else propagates after the restore.
+    """
+    from memtomem.config import save_config_overrides
+
+    try:
+        return save_config_overrides(config, mcp_saved_fields())
+    except Exception as e:
+        if snapshot is not None:
+            snapshot.restore()
+        if isinstance(e, TimeoutError):
+            raise _PersistRefused(
+                "Could not persist config: another process is writing "
+                "config.json. Runtime change rolled back; retry in a moment."
+            ) from e
+        if isinstance(e, ValueError):
+            raise _PersistRefused(
+                f"Failed to persist config: {e}. Runtime change rolled back."
+            ) from e
+        raise
+
+
+async def _set_rerank_enabled(app: AppContext, value: str, persist: bool) -> str:
+    """Set ``rerank.enabled`` and make the running pipeline match it (#3098).
+
+    The pipeline reranks iff it holds a reranker instance, so changing the
+    config flag alone left it reranking after "off" (sending queries to a
+    remote reranker) or never reranking after "on".
+
+    Toggles are serialized on ``_rerank_toggle_lock``, which spans the model
+    load, so the last call wins. Live config is not touched until the load
+    has finished: other keys are edited without a lock, and an uncommitted
+    ``enabled`` could be saved by their ``persist=True`` or erased by their
+    rollback. From the pipeline re-read to ``swap_reranker``'s publication
+    the commit has no await, and neither has ``_revert_to_stored``'s read of
+    ``rerank.enabled`` through its publication, so the two cannot interleave.
+    The decision compares the requested state with what the pipeline does,
+    not with the old config value, so asking for the state you want also
+    repairs a divergence.
+    """
+    from memtomem.search.reranker.base import close_reranker_safely
+    from memtomem.search.reranker.factory import create_reranker, load_reranker
+
+    key = "rerank.enabled"
+    async with app._rerank_toggle_lock:
+        probe = app.config.model_copy(update={"rerank": app.config.rerank.model_copy(deep=True)})
+        checked = _set_config_key(probe, key, value)
+        if not checked.startswith("Set "):
+            return checked
+        want = probe.rerank.enabled
+        candidate = None
+        try:
+            if want and not app.search_pipeline.rerank_active:
+                try:
+                    candidate = create_reranker(probe.rerank)
+                    await load_reranker(candidate)
+                except Exception as exc:
+                    return f"Cannot enable reranking: {exc}. Nothing was changed."
+
+            # No await from here until swap_reranker has published.
+            pipeline = app.search_pipeline
+            active = pipeline.rerank_active
+            snapshot = _ConfigSectionSnapshot(app.config.rerank)
+            result = _set_config_key(app.config, key, value)
+            if not result.startswith("Set "):
+                return result
+            receipt = None
+            if persist:
+                try:
+                    receipt = _save_or_restore(app.config, snapshot)
+                except _PersistRefused as refused:
+                    return str(refused)
+            result += _persistence_suffix(key, receipt)
+            if want != active:
+                install, candidate = (candidate if want else None), None
+                await pipeline.swap_reranker(install, app.config.rerank if want else None)
+                state = "on" if want else "off"
+                result += f"\nReranking is now {state} for new searches on this server."
+            pipeline.invalidate_cache()
+            return result
+        finally:
+            if candidate is not None:
+                # Unused, refused, or cancelled during the load. Shielded so a
+                # second cancellation cannot skip the close, and tracked so the
+                # task outlives a caller that stops awaiting it.
+                closing = track_task(
+                    asyncio.create_task(close_reranker_safely(candidate)),
+                    _UNPUBLISHED_RERANKER_CLOSES,
+                )
+                await asyncio.shield(closing)
 
 
 def _persistence_suffix(key: str, receipt: "SaveReceipt | None") -> str:
@@ -1556,6 +1821,9 @@ async def _revert_to_stored_locked(
             # ``component_factory.create_components``.
             llm=app.llm_provider,
             generation=new_generation,
+            # A component setting, not a config field: carry it over, or the
+            # rebuilt engine would put the labels back (#3209).
+            chunk_source_labels=comp.index_engine._chunk_source_labels,
         )
         # Storage-only since the scan stopped embedding; rebuilt with the rest
         # so a construction failure still rolls back before any publication.
@@ -1735,7 +2003,20 @@ async def mem_embedding_reset(
             lines.append("\nNo mismatch — DB and config are in sync.")
         else:
             lines.append("\nWarning: Mismatch detected!")
-            lines.append('  -> "apply_current": reset DB to config (destructive, re-index needed)')
+            chunks, vectors = await embedding_reset_counts(app.storage)
+            if store_has_nothing_to_reset(chunks, vectors):
+                # #2423: an empty store loses nothing to the reset; saying
+                # "destructive" there sends the caller looking for a backup.
+                lines.append(
+                    '  -> "apply_current": reset DB to config. This store currently holds '
+                    "no chunks or vectors."
+                )
+            else:
+                lines.append(
+                    '  -> "apply_current": reset DB to config (destructive, re-index needed)'
+                )
+                if chunks is not None:
+                    lines.append(f"     {embedding_reset_cost(chunks, vectors)}")
             if stored and not embedding_identity_complete(stored["provider"], stored["model"]):
                 lines.append(
                     "  Revert-to-stored is unavailable: the stored identity is incomplete."
@@ -1749,6 +2030,7 @@ async def mem_embedding_reset(
     if mode == "apply_current":
         from memtomem.config import embedding_policy_fingerprint
 
+        was_empty = store_has_nothing_to_reset(*await embedding_reset_counts(app.storage))
         await app.storage.reset_embedding_meta(
             dimension=config.embedding.dimension,
             provider=config.embedding.provider,
@@ -1766,6 +2048,15 @@ async def mem_embedding_reset(
         # call holding a client's turn open. It is no longer a safety caveat:
         # both paths preserve each file's stored namespace, including under a
         # session (ADR-0033, #2104).
+        if was_empty:
+            # Counted before the reset, outside its transaction: this says
+            # what was observed, not what the reset itself removed.
+            return (
+                f"DB reset to {config.embedding.provider}/{config.embedding.model} "
+                f"({config.embedding.dimension}d). No chunks or vectors were found when "
+                "checked before the reset. If anything was indexed since, re-embed with "
+                "`mm index --force <memory_dir>` (CLI) or mem_index(force=true)."
+            )
         return (
             f"DB reset to {config.embedding.provider}/{config.embedding.model} "
             f"({config.embedding.dimension}d). All vectors deleted — re-embed "
@@ -1828,6 +2119,9 @@ async def mem_version(
                 "context_compose": {"schema_version": 4},
                 "candidate_propose": {"schema_version": 1},
                 "runtime_profile": {"schema_version": 1},
+                "hermes_mirror": {"schema_version": 1},
+                "search_deadline_ms": True,
+                "namespace_selectors": [NON_SYSTEM_NAMESPACES],
             },
             "runtime_profile": runtime_profile,
         },

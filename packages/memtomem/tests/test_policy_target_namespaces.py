@@ -292,8 +292,8 @@ class TestTemplateTargetsFromTags:
     """A tag can resolve an accepted template to a refused name; that chunk stays."""
 
     async def test_mixed_run_moves_the_rest_and_reports_an_error(self, storage):
-        refused = make_chunk("runtime-tagged", tags=("agent-runtime",))
-        ok = make_chunk("work-tagged", tags=("work",))
+        refused = make_chunk("runtime-tagged", tags=("agent-runtime",), source="refused.md")
+        ok = make_chunk("work-tagged", tags=("work",), source="ok.md")
         await _old_chunks(storage, refused, ok)
 
         result = await run_policy(
@@ -361,10 +361,10 @@ class TestTemplateTargetsFromTags:
 
     @pytest.mark.parametrize("with_movable_chunk", [True, False])
     async def test_dry_run_counts_only_movable_chunks(self, storage, with_movable_chunk):
-        refused = make_chunk("runtime-tagged", tags=("agent-runtime",))
+        refused = make_chunk("runtime-tagged", tags=("agent-runtime",), source="refused.md")
         chunks = [refused]
         if with_movable_chunk:
-            chunks.append(make_chunk("work-tagged", tags=("work",)))
+            chunks.append(make_chunk("work-tagged", tags=("work",), source="ok.md"))
         await _old_chunks(storage, *chunks)
 
         result = await run_policy(
@@ -386,9 +386,9 @@ class TestTemplateTargetsFromTags:
     async def test_each_refused_target_is_logged_once_per_run(self, storage, caplog):
         tag_a, tag_b = "a" * 70, "b" * 70  # over the agent-id cap
         chunks = [
-            make_chunk("first", tags=(tag_a,)),
-            make_chunk("second", tags=(tag_a,)),
-            make_chunk("third", tags=(tag_b,)),
+            make_chunk("first", tags=(tag_a,), source="first.md"),
+            make_chunk("second", tags=(tag_a,), source="second.md"),
+            make_chunk("third", tags=(tag_b,), source="third.md"),
         ]
         await _old_chunks(storage, *chunks)
         config = {"max_age_days": 30, "archive_namespace_template": "agent-runtime:{first_tag}"}
@@ -408,8 +408,8 @@ class TestTemplateTargetsFromTags:
         assert sum(tag_b in w for w in warnings) == 1
 
     async def test_run_all_enabled_continues_and_budgets_only_moved_chunks(self, storage):
-        refused = make_chunk("runtime-tagged", tags=("agent-runtime",))
-        ok = make_chunk("work-tagged", tags=("work",))
+        refused = make_chunk("runtime-tagged", tags=("agent-runtime",), source="refused.md")
+        ok = make_chunk("work-tagged", tags=("work",), source="ok.md")
         await _old_chunks(storage, refused, ok)
         await storage.policy_add(
             "arch-template",

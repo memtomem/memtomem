@@ -14,6 +14,7 @@ from memtomem.storage.mixins.schedules import ScheduleMixin
 from memtomem.storage.mixins.formation import FormationMixin
 from memtomem.storage.mixins.maintenance_runs import MaintenanceRunMixin
 from memtomem.storage.mixins.update_coverage import UpdateCoverageMixin
+from memtomem.storage.mixins.hermes_mirror import HermesMirrorMixin
 
 __all__ = [
     "SessionMixin",
@@ -30,4 +31,5 @@ __all__ = [
     "FormationMixin",
     "MaintenanceRunMixin",
     "UpdateCoverageMixin",
+    "HermesMirrorMixin",
 ]

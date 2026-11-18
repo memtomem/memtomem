@@ -446,6 +446,26 @@ def test_extract_agents_user_scope_blocks_secret_no_flag(
     assert not (home / ".memtomem" / "agents" / "leak").exists()
 
 
+def test_extract_skills_blocks_a_secret_hidden_in_a_json_asset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The asset holds a PEM header with JSON-escaped newlines (#3300).
+    home = tmp_path / "home"
+    set_home(monkeypatch, str(home))
+    proj = _make_project(tmp_path)
+    skill = home / ".claude" / "skills" / "leak"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: leak\n---\nbody\n", encoding="utf-8")
+    (skill / "config.json").write_text('{"key": "BEGIN\\nRSA\\nPRIVATE\\nKEY"}', encoding="utf-8")
+
+    result = extract_skills_to_canonical(proj, scope="user")
+
+    assert result.imported == []
+    assert ("leak", skip_codes.PRIVACY_BLOCKED) in [(n, c) for n, _, c in result.skipped]
+    assert not (home / ".memtomem" / "skills" / "leak").exists()
+
+
 def test_extract_agents_user_scope_force_unsafe_writes_and_audits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

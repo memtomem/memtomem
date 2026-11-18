@@ -4,9 +4,10 @@ Two rules hide a source from the Sources tree: it is held or pending
 (:func:`~memtomem.storage.sqlite_visibility.hidden_source_paths`, #2498), or
 its canonical-residency tier is filtered out (ADR-0015 §4a: ``project_local``
 is hidden unless the caller asks for it by ``target_scope``). The list route,
-the content-match route and the per-root counts in
-``/api/memory-dirs/status`` all ask :meth:`SourceVisibility.check`, so their
-visibility rules cannot drift apart again (#2561, #2567). This does not cover
+the content-match route, the per-root counts in ``/api/memory-dirs/status``
+and the Home dashboard's per-source lists in ``/api/stats`` all ask
+:meth:`SourceVisibility.check`, so their visibility rules cannot drift apart
+again (#2561, #2567, #3109). This does not cover
 paging: the tree fetches at most 10,000 rows, and the counts do not.
 
 The two rules overlap: a held ``project_local`` draft is hidden for both

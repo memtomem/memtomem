@@ -688,11 +688,11 @@ def test_commit_records_under_prepare_surface(
     recorded: list[tuple[str, str]] = []
     monkeypatch.setattr(privacy, "record", lambda outcome, tool: recorded.append((outcome, tool)))
     plan = prepare_pull(
-        "skills", "s", scope="project_shared", project_root=proj, surface="mcp_context_pull"
+        "skills", "s", scope="project_shared", project_root=proj, surface="web_context_pull"
     )
     assert isinstance(plan, PullPlan)
     commit_pull(plan)
-    assert recorded == [("pass", "mcp_context_pull")]
+    assert recorded == [("pass", "web_context_pull")]
 
 
 def test_flat_layout_overwrite_is_snapshot_requires_dir_layout(home: Path, proj: Path) -> None:
