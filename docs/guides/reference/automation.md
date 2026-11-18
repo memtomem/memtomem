@@ -311,12 +311,47 @@ that continues between runs:
 | `last_run_error`  | Error text for `error` / `timeout`                                      |
 | `last_run_result` | The summary the job returned (`null` for `error` / `timeout`)           |
 | `state`           | Where the next run starts, for a job that continues (`dedup_scan`); `null` for the other jobs |
+| `cron_error`      | Why the cron expression cannot be scheduled, or `null` when it can (see below) |
 
 `skipped` means the job returned normally but did no work, and its
 `skipped_reason` says why. For example, `dedup_scan` has no scanner
 (`dedup_scanner_not_initialized`). `mm schedule list` prints the reason next
 to the status. `mm schedule list --json` and `schedule_list` return the whole
 record.
+
+`cron_error` is checked each time the schedule is read, the same way the
+dispatcher finds the next slot: from `last_run_at`, or `created_at` before the
+first run. It does not depend on how the last run ended. It has three kinds of
+value:
+- `null`: the expression can be scheduled.
+- A croniter parse error, such as `CroniterBadCronError: …` or its subclass
+  `CroniterNotAlphaError: …`: croniter cannot read the expression, so the
+  dispatcher skips the schedule on every tick and it never runs on its own.
+  An expression stored with non-ASCII digits or spaces that croniter 6
+  accepted is refused by croniter 7 this way. `mm schedule list` marks such a
+  row `automatic runs blocked`; `mm schedule run-now <id>` still runs it.
+  Under croniter 6 only, a random `R` field whose range leaves the field's
+  bounds (`R(0-60)` for minutes) fails this way only on its out-of-range
+  draws, so such a row can be reported blocked and still run; croniter 7
+  refuses that expression every time.
+- `unchecked: …`: the check did not reach a verdict. That covers a stored
+  timestamp that does not parse, and `CroniterBadDateError` ("failed to find
+  next date"), which croniter raises both for a date that never occurs
+  (`0 0 30 2 *`, which `mm schedule add` accepts) and for one draw of its
+  random `R` field that the next draw may not repeat (`0 0 R(28-30) 2 *`
+  fails only on the draw that lands on the 30th). `mm schedule list` marks
+  such a row `cron check failed`. The message is the same for both causes,
+  so look at the row's `cron_expr`: one with no random field and a date that
+  never occurs is skipped on every tick like a blocked row; replace it the
+  same way.
+
+To replace a blocked schedule, add the corrected one first, written with ASCII
+digits and spaces and for a date that exists, with the same `--job` and the
+`params` that `mm schedule list --json` shows for the old row, passed as JSON
+to `--params`. If `mm schedule add` refuses a key as unsupported, leave it out:
+the job ignores keys it does not define. Then remove the old schedule with
+`mm schedule delete <id>`. The new schedule starts with no run history, and a
+`dedup_scan` walk starts again from the first pool.
 
 A `dedup_scan` result also reports what the scan covered: `pool` (chunks
 selected, at most `max_scan`), `remaining` (scannable chunks after the pool),

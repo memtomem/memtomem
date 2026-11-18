@@ -5,6 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A schedule the dispatcher cannot schedule now says so in every listing (#3459).** A row
+  stored with non-ASCII digits or spaces, which croniter 7 refuses and croniter 6 accepted,
+  was skipped on every dispatcher tick with only a warning in the log, and every listing
+  showed it as ordinary (memtomem requires `croniter>=2.0`, so a fresh install of 0.7.11
+  already runs 7.0.0). Each row that `mm schedule list --json` and `mem_schedule_list`
+  (`schedule_list` through `mem_do`) return now carries `cron_error`: `null` when the
+  expression can be scheduled; the croniter error when croniter cannot parse it, which `mm
+  schedule list` marks `(automatic runs blocked: cron not accepted)` and counts in a closing
+  line naming `mm schedule add` and `mm schedule delete <id>` (under croniter 6 only, a random
+  `R` field whose range leaves the field's bounds fails to parse on its out-of-range draws
+  alone, so such a row can be reported blocked and still run); or `unchecked: …`, marked
+  `(cron check failed)`, when the check reached no verdict. `unchecked` covers a stored
+  timestamp that does not parse and croniter's "failed to find next date", which comes both
+  from a date that never occurs (`0 0 30 2 *`, which `mm schedule add` accepts and the
+  dispatcher skips on every tick) and from one draw of croniter's random `R` field (`0 0
+  R(28-30) 2 *` fails only on the draw that lands on the 30th, and the dispatcher draws again
+  on every tick). Nothing else changes: such rows are skipped as before, `mm schedule run-now
+  <id>` still runs them, and croniter 7's reading of an expression it accepts is its own
+  (`59/15 * * * *` now fires once an hour, at minute 59). To replace a schedule, add the
+  corrected one first with the same `--job` and the old row's `params` as `--params`, leaving
+  out any key `mm schedule add` refuses as unsupported (the job ignored it), then delete the
+  old one; the new schedule starts with no run history, and a `dedup_scan` walk starts from
+  the first pool (`docs/guides/reference/automation.md`).
+
 ### Security
 
 - An advisory against `picomatch` 4.0.7 (npm), which GitHub reviewed on 2026-11-17, lets

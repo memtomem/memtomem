@@ -74,6 +74,39 @@ def _parse_iso_utc(value: str) -> datetime:
     return dt
 
 
+def _cron_error(cron_expr: str, created_at: str, last_run_at: str | None) -> str | None:
+    """Why the dispatcher cannot schedule this row, or ``None`` when it can.
+
+    Repeats the next-slot computation ``schedule_list_due`` makes, from the
+    same base (``last_run_at`` or ``created_at``), once.
+
+    ``CroniterBadCronError`` (and its subclasses) is ``"<error class>:
+    <message>"``: croniter cannot parse the expression. croniter 7 refuses
+    non-ASCII digits and spaces that 6 accepted, so a row stored under 6 lands
+    here, and the dispatcher skips it on every tick. One exception reaches
+    this branch on a single draw: under croniter 6 a random field whose range
+    leaves the field's bounds (``R(0-60)`` for minutes) fails to parse only on
+    the out-of-range draws; croniter 7 refuses such an expression every time.
+
+    Everything else is prefixed ``"unchecked: "``, returned rather than
+    raised so it never fails the listing that carries it.
+    ``CroniterBadDateError`` ("failed to find next date") is one of these: it
+    comes both from a date that never occurs (``0 0 30 2 *``) and from one
+    draw of croniter's random ``R`` field that the next draw may not repeat
+    (``0 0 R(28-30) 2 *`` fails only on the 30th), and croniter offers no
+    public way to tell the two apart. So is a stored timestamp that does not
+    parse.
+    """
+    try:
+        base = _parse_iso_utc(last_run_at or created_at)
+        croniter(cron_expr, base).get_next(datetime)
+    except CroniterBadCronError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    except Exception as exc:
+        return f"unchecked: {type(exc).__name__}: {exc}"
+    return None
+
+
 class ScheduleMixin:
     """Mixin providing scheduled-job CRUD. Requires self._get_db()."""
 
@@ -291,6 +324,7 @@ def _row_to_dict(row: tuple) -> dict:
         "last_run_error": row[8],
         "last_run_result": _decode_result(row[0], row[6], row[9]),
         "state": _decode_state(row[0], row[10]),
+        "cron_error": _cron_error(row[1], row[5], row[6]),
     }
 
 
