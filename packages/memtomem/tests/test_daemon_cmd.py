@@ -109,3 +109,12 @@ def test_doctor_marks_an_unverifiable_daemon_and_says_why(
     (check,) = [c for c in json.loads(result.stdout)["checks"] if c["name"] == "shared-daemons"]
     assert check["data"]["daemons"][0]["unverified"] is True
     assert "t: unverified (denied)" in check["detail"]
+
+
+def test_stop_help_describes_session_end_and_client_reconnect() -> None:
+    result = CliRunner().invoke(cli, ["daemon", "stop", "--help"])
+    assert result.exit_code == 0
+    assert (
+        "Every session connected to a stopped daemon ends (its server exits 1); the\n"
+        "  client may need a reconnect or a restart."
+    ) in result.output
