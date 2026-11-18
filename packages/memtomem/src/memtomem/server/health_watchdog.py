@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from memtomem.scheduler.jobs import JOB_KINDS, run_job, run_outcome
+from memtomem.scheduler.jobs import JOB_KINDS, run_job, run_outcome, stored_params
 from memtomem.server.background import loop_task_error_cb, stop_loop_task
 from memtomem.server.health_checks import (
     DEEP_CHECKS,
@@ -181,7 +181,7 @@ class HealthWatchdog:
             )
             return
         try:
-            params = spec.params_model.model_validate(sched.get("params") or {})
+            params = stored_params(spec, sched)
         except Exception as exc:
             logger.warning(
                 "schedule %s params invalid for %s: %s",

@@ -105,6 +105,20 @@ async def run_job(
     return await spec.runner(app, **kwargs), KEEP_STATE
 
 
+def stored_params(spec: JobSpec, sched: dict[str, Any]) -> BaseModel:
+    """Validate a stored schedule's params for a run.
+
+    Shared by every path that runs a stored schedule, like ``run_job``. A row
+    whose ``params_json`` could not be read carries ``params_error`` and no
+    params; that raises with the reason rather than validating ``{}``, which
+    would run the job with its defaults. The callers record either failure
+    as an ``invalid params`` error before the runner starts.
+    """
+    if sched.get("params_error"):
+        raise ValueError(sched["params_error"])
+    return spec.params_model.model_validate(sched["params"])
+
+
 def validate_new_params(spec: JobSpec, params: object) -> BaseModel:
     """Validate params for a schedule being registered, refusing unknown keys.
 

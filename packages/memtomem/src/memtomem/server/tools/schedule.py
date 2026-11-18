@@ -19,7 +19,13 @@ import logging
 
 from croniter import croniter  # type: ignore[import-untyped]
 
-from memtomem.scheduler.jobs import JOB_KINDS, run_job, run_outcome, validate_new_params
+from memtomem.scheduler.jobs import (
+    JOB_KINDS,
+    run_job,
+    run_outcome,
+    stored_params,
+    validate_new_params,
+)
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -119,7 +125,7 @@ async def mem_schedule_run_now(id: str, ctx: CtxType = None) -> str:
         return json.dumps({"ok": False, "reason": reason})
 
     try:
-        validated = spec.params_model.model_validate(sched.get("params") or {})
+        validated = stored_params(spec, sched)
     except Exception as exc:
         reason = f"invalid params: {exc}"
         await app.storage.schedule_mark_run(id, "error", error=reason)
