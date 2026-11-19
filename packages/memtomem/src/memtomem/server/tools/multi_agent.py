@@ -512,6 +512,10 @@ async def mem_agent_share(
     # means nothing landed and is released below.
     from memtomem.indexing.engine import PrivacyRejection
 
+    from datetime import datetime, timezone
+
+    from memtomem.memory_scope import share_copy_file_name
+
     appended: list[str] = []
     try:
         result, stats = await _mem_add_core(
@@ -523,6 +527,15 @@ async def mem_agent_share(
             template=None,
             ctx=ctx,
             event_type="agent_share",
+            # A file of its own, not the namespace's day file: there a short
+            # copy merges into the entry before it, and when that entry is an
+            # earlier copy, its link stops the re-index (#3324).
+            file_name=share_copy_file_name(
+                target,
+                app.config.namespace.default_namespace,
+                date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            ),
+            new_file_only=True,
             on_appended=appended.append,
         )
     except PrivacyRejection as exc:
@@ -541,10 +554,11 @@ async def mem_agent_share(
     # The link targets the chunk the copy became, as the indexer attributes
     # it to this append (#3315), not ``new_chunk_ids``: that covers the whole
     # file's re-index, so it can hold a pending edit's chunk and misses a copy
-    # whose chunk kept an existing id. Only an ``exact`` attribution links. A
-    # short copy merged into the section before it is not a copy of the
-    # source, and a link on that chunk would make the neighbouring entry's
-    # next edit fail the engine's linked-identity guard (#3324).
+    # whose chunk kept an existing id. Only an ``exact`` attribution links:
+    # a chunk that holds more than the copy is not a copy of the source, and
+    # a link on it would make the other text's next edit fail the engine's
+    # linked-identity guard. The copy's file holds only the copy (#3324), so
+    # that takes an edit to the file by hand.
     #
     # ``stats`` is ``None`` on the early-error paths of ``_mem_add_core``
     # (empty content, oversized, template failure) — those paths also

@@ -5,8 +5,13 @@ list covers the whole re-index of the target day file: a pending edit earlier
 in the file comes first in it, and a copy whose chunk kept an existing id is
 not in it at all. The share now reads the chunk the indexer attributes to its
 append (``appended_chunk_ids``, #3292) and links only an ``exact`` attribution:
-a copy merged into the section before it is not a copy of the source, and a
-link on that chunk would block the neighbouring entry's next edit (#3324).
+a chunk holding more than the copy is not a copy of the source, and a link on it
+would block the other text's next edit.
+
+Each copy goes to a file of its own (#3324). In the namespace's day file a short
+copy merged into the entry before it, and when that entry was an earlier copy,
+its link made the re-index refuse: the copy stayed on disk unindexed and the
+day file stopped indexing.
 
 Every test asserts the link's target id (or its absence) against a real store.
 """
@@ -14,12 +19,14 @@ Every test asserts the link's target id (or its absence) against a real store.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from helpers import StubCtx, make_chunk
 from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE
+from memtomem.memory_scope import SHARE_COPY_DIR, day_file_name
 from memtomem.models import Chunk
 from memtomem.server.context import AppContext
 from memtomem.server.tools import _append_target, memory_crud
@@ -70,10 +77,20 @@ async def _add(ctx, content: str, title: str, tags: list[str] | None = None) -> 
     return _day_file(ctx)
 
 
+def _mem_dir(ctx) -> Path:
+    return Path(ctx.request_context.lifespan_context.config.indexing.memory_dirs[0])
+
+
 def _day_file(ctx) -> Path:
-    mem_dir = Path(ctx.request_context.lifespan_context.config.indexing.memory_dirs[0])
-    (path,) = mem_dir.rglob(f"*--{SHARED_NAMESPACE}-*.md")
-    return path
+    """The namespace's day file, where a plain ``mem_add`` lands."""
+    default = ctx.request_context.lifespan_context.config.namespace.default_namespace
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return _mem_dir(ctx) / day_file_name(SHARED_NAMESPACE, default, date_str=today)
+
+
+def _copy_files(ctx) -> list[Path]:
+    """The share copies' files, one per copy."""
+    return sorted((_mem_dir(ctx) / SHARE_COPY_DIR).glob("*.md"))
 
 
 async def _shared_chunks(comp) -> list[Chunk]:
@@ -137,9 +154,10 @@ class TestLinksItsOwnCopy:
         assert await _link_targets(comp, source) == [copy.id]
 
     @pytest.mark.asyncio
-    async def test_a_pending_edit_indexed_with_the_copy(self, stack, monkeypatch):
-        # The re-index upserts the edited entry too, and it comes first in
-        # ``new_chunk_ids``; it took the link before #3315.
+    async def test_a_pending_edit_in_the_day_file_is_left_alone(self, stack, monkeypatch):
+        # When the copy went to the day file, the share's re-index took an
+        # unindexed edit there too, and it came first in ``new_chunk_ids``; it
+        # took the link before #3315. The copy's own file holds nothing else.
         comp, _, ctx = stack
         comp.index_engine._config.min_chunk_tokens = 0
         path = await _add(ctx, "zqseed body that is already indexed.", "Seed")
@@ -151,36 +169,182 @@ class TestLinksItsOwnCopy:
         await _share(ctx, source)
 
         copy = await _chunk_holding(comp, "zqpending")
-        edited = await _chunk_holding(comp, "zqedited")
-        assert set(seen[0].new_chunk_ids) == {edited.id, copy.id}
+        assert list(seen[0].new_chunk_ids) == [copy.id]
         assert seen[0].appended_chunk_ids == (copy.id,)
         assert await _link_targets(comp, source) == [copy.id]
+        assert not [c for c in await _shared_chunks(comp) if "zqedited" in c.content]
+
+
+# ---------------------------------------------------------------------------
+# Each copy in a file of its own (#3324)
+# ---------------------------------------------------------------------------
+
+
+async def _cli_share(comp, monkeypatch, source: Chunk) -> str | None:
+    """``mm agent share`` of ``source`` into ``shared``: ``None``, or its refusal."""
+    from test_excluded_target_writes import _cli, _patch_cli_components
+
+    from memtomem.cli.agent_cmd import _run_share
+
+    _patch_cli_components(monkeypatch, comp)
+    return await _cli(_run_share(str(source.id), SHARED_NAMESPACE, False))
+
+
+class TestCopiesDoNotShareAFile:
+    @pytest.mark.asyncio
+    async def test_two_short_shares_are_both_indexed_and_linked(self, stack):
+        # The #3324 reproduction: the second copy merged into the first's
+        # linked chunk, and the re-index refused to drop that chunk's id.
+        comp, _, ctx = stack
+        first = await _source(comp, "zqa short")
+        second = await _source(comp, "zqb short")
+        await _share(ctx, first)
+        await _share(ctx, second)
+
+        assert len(_copy_files(ctx)) == 2
+        assert await _link_targets(comp, first) == [(await _chunk_holding(comp, "zqa")).id]
+        assert await _link_targets(comp, second) == [(await _chunk_holding(comp, "zqb")).id]
 
     @pytest.mark.asyncio
-    async def test_a_copy_that_keeps_an_existing_id(self, stack, monkeypatch):
-        # The copy matches a stored chunk by content hash and keeps that id, so
-        # it is not in ``new_chunk_ids``; a pending edit leaves another chunk
-        # holding the copy's text as the only new id. That chunk took the link
-        # before #3315 (or nothing was linked when there was no new id).
+    async def test_the_same_source_shared_twice(self, stack):
         comp, _, ctx = stack
-        comp.index_engine._config.min_chunk_tokens = 0
-        # Tagged, so the entry's metadata blockquote (with its timestamp) is not
-        # part of the chunk, as for the share copy.
-        await _add(ctx, "repeat", "Shared: memory", tags=["seed"])
-        path = await _add(ctx, "prefix", "Other", tags=["seed"])
-        (reused_id,) = [c.id for c in await _shared_chunks(comp) if c.content == "repeat"]
-        # Unindexed: drops the first entry and makes Other hold the copy's text.
-        path.write_text("## Other\n\nprefix repeat\n", encoding="utf-8")
-        seen = _record_stats(monkeypatch)
-
-        source = await _source(comp, "repeat")
+        source = await _source(comp, "zqtwice short")
+        await _share(ctx, source)
         await _share(ctx, source)
 
-        rewritten = await _chunk_holding(comp, "prefix repeat")
-        assert reused_id not in seen[0].new_chunk_ids
-        assert seen[0].appended_chunk_ids == (reused_id,)
-        assert await _link_targets(comp, source) == [reused_id]
-        assert rewritten.id != reused_id
+        copies = [c for c in await _shared_chunks(comp) if "zqtwice" in c.content]
+        assert len(copies) == 2
+        assert sorted(await _link_targets(comp, source)) == sorted(c.id for c in copies)
+
+    @pytest.mark.asyncio
+    async def test_with_chunk_overlap(self, stack):
+        # Overlap borrows text from a neighbouring chunk of the same file only.
+        comp, _, ctx = stack
+        comp.index_engine._config.chunk_overlap_tokens = 16
+        first = await _source(comp, "zqoverlap first copy body.")
+        second = await _source(comp, "zqoverlap second copy body.")
+        await _share(ctx, first)
+        await _share(ctx, second)
+
+        assert len(await _link_targets(comp, first)) == 1
+        assert len(await _link_targets(comp, second)) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_entry_titled_like_the_copy_stays_editable(self, stack):
+        # Same heading as the copy, written after it, then edited: in one day
+        # file the entry merged into the linked copy and every write failed.
+        comp, _, ctx = stack
+        source = await _source(comp, "zqcopy short")
+        await _share(ctx, source)
+        path = await _add(ctx, "zqentry short.", "Shared: memory", tags=["seed"])
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("zqentry", "zqedited"), encoding="utf-8")
+        stats = await comp.index_engine.index_file(path, ingress_guarded=True)
+
+        assert not stats.errors, stats.errors
+        assert await _chunk_holding(comp, "zqedited")
+        assert await _link_targets(comp, source) == [(await _chunk_holding(comp, "zqcopy")).id]
+
+    @pytest.mark.asyncio
+    async def test_mcp_and_cli_copies_each_get_a_file(self, stack, monkeypatch):
+        comp, _, ctx = stack
+        linked = await _source(comp, "zqmcp short")
+        await _share(ctx, linked)
+        assert await _cli_share(comp, monkeypatch, await _source(comp, "zqcli short")) is None
+
+        assert len(_copy_files(ctx)) == 2
+        assert await _link_targets(comp, linked) == [(await _chunk_holding(comp, "zqmcp")).id]
+        assert await _chunk_holding(comp, "zqcli")
+
+
+class TestTheCopyFileIsNew:
+    """The copy must be its file's only entry, so an existing file is refused."""
+
+    @pytest.fixture
+    def taken(self, monkeypatch, stack):
+        _, mem_dir, _ = stack
+        name = f"{SHARE_COPY_DIR}/taken-0123456789ab.md"
+        monkeypatch.setattr("memtomem.memory_scope.share_copy_file_name", lambda *a, **k: name)
+        path = mem_dir / name
+        path.parent.mkdir()
+        path.write_text("## Earlier\n\nzqearlier entry.\n", encoding="utf-8")
+        return path
+
+    @pytest.mark.asyncio
+    async def test_mcp(self, stack, taken):
+        comp, _, ctx = stack
+        source = await _source(comp, "zqrefused short")
+        result = await mem_agent_share(
+            chunk_id=str(source.id), target=SHARED_NAMESPACE, ctx=ctx, idempotency_key="k-taken"
+        )
+
+        assert result.startswith("Error: ") and "already exists; nothing was written" in result
+        assert taken.read_text(encoding="utf-8") == "## Earlier\n\nzqearlier entry.\n"
+        assert await _link_targets(comp, source) == []
+        # Nothing landed, so the key was released and a retry is not "in progress".
+        retry = await mem_agent_share(
+            chunk_id=str(source.id), target=SHARED_NAMESPACE, ctx=ctx, idempotency_key="k-taken"
+        )
+        assert "already exists" in retry, retry
+
+    @pytest.mark.asyncio
+    async def test_cli(self, stack, taken, monkeypatch):
+        comp, _, _ = stack
+        result = await _cli_share(comp, monkeypatch, await _source(comp, "zqrefused short"))
+
+        assert result is not None and "already exists; nothing was written" in result
+        assert taken.read_text(encoding="utf-8") == "## Earlier\n\nzqearlier entry.\n"
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    import os
+
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:  # Windows without the privilege
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+
+class TestALinkedCopyDirectory:
+    """The copies' directory is judged where it resolves, as a day file is (#2807)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("surface", ["mcp", "cli"])
+    @pytest.mark.parametrize("where", ["outside", "nested"])
+    async def test_into_another_tier_is_refused(self, stack, tmp_path, monkeypatch, surface, where):
+        comp, mem_dir, ctx = stack
+        root = {"outside": tmp_path / "proj", "nested": mem_dir / "proj"}[where]
+        tier = root / ".memtomem" / "memories"
+        tier.mkdir(parents=True)
+        comp.config.indexing.project_memory_dirs = [tier]
+        _symlink_or_skip(mem_dir / SHARE_COPY_DIR, tier)
+        source = await _source(comp, "zqtier short")
+
+        if surface == "mcp":
+            result = await mem_agent_share(
+                chunk_id=str(source.id), target=SHARED_NAMESPACE, ctx=ctx
+            )
+            assert result.startswith("Error: ") and "nothing" in result, result
+        else:
+            result = await _cli_share(comp, monkeypatch, source)
+            assert result is not None and "nothing" in result, result
+        assert list(tier.iterdir()) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("surface", ["mcp", "cli"])
+    async def test_inside_its_own_tier_still_writes(self, stack, monkeypatch, surface):
+        comp, mem_dir, ctx = stack
+        real = mem_dir / "elsewhere"
+        real.mkdir()
+        _symlink_or_skip(mem_dir / SHARE_COPY_DIR, real)
+        source = await _source(comp, "zqlinked short")
+
+        if surface == "mcp":
+            await _share(ctx, source)
+        else:
+            assert await _cli_share(comp, monkeypatch, source) is None
+        (written,) = real.glob("*.md")
+        assert "zqlinked" in written.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -190,38 +354,11 @@ class TestLinksItsOwnCopy:
 
 class TestUnsureLinksNothing:
     @pytest.mark.asyncio
-    async def test_a_copy_merged_into_the_entry_before_it(self, stack, monkeypatch, caplog):
-        # A short copy folds into the preceding plain entry under the same
-        # heading. The merged chunk is not a copy of the source, and linking it
-        # would make the plain entry's next edit fail the linked-identity guard
-        # (#3324).
-        comp, _, ctx = stack
-        path = await _add(ctx, "zqneighbour short entry.", "Shared: memory", tags=["seed"])
-        seen = _record_stats(monkeypatch)
-
-        source = await _source(comp, "zqmerged short copy.")
-        with caplog.at_level(logging.WARNING, logger=_LOGGER):
-            await _share(ctx, source)
-
-        merged = await _chunk_holding(comp, "zqmerged")
-        assert "zqneighbour" in merged.content
-        assert seen[0].appended_attribution == "merged"
-        assert seen[0].appended_chunk_ids == (merged.id,)
-        assert await _link_targets(comp, source) == []
-        assert _UNATTRIBUTED in caplog.text
-
-        # The neighbour stays editable.
-        text = path.read_text(encoding="utf-8")
-        path.write_text(text.replace("zqneighbour", "zqrevised"), encoding="utf-8")
-        await comp.index_engine.index_file(path, ingress_guarded=True)
-        assert "zqrevised" in (await _chunk_holding(comp, "zqmerged")).content
-
-    @pytest.mark.asyncio
     async def test_another_writer_between_append_and_re_index(self, stack, monkeypatch, caplog):
         comp, _, ctx = stack
 
         def intrude(_text: str) -> None:
-            path = _day_file(ctx)
+            (path,) = _copy_files(ctx)
             with open(path, "a", encoding="utf-8") as f:
                 f.write("\n## Intruder\n\nzqintruder written by another agent.\n")
 
@@ -271,5 +408,6 @@ class TestUnsureLinksNothing:
         )
 
         assert replay == first + _REPLAY_MARKER
-        assert _day_file(ctx).read_text(encoding="utf-8").count("zqboom") == 1
+        (copy_file,) = _copy_files(ctx)
+        assert copy_file.read_text(encoding="utf-8").count("zqboom") == 1
         assert await _link_targets(comp, source) == []

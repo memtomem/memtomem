@@ -26,7 +26,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from helpers import StubCtx, append_judged, clean_preflight, set_home
-from memtomem.memory_scope import day_file_name, namespace_mix_error, namespace_mix_refusal
+from memtomem.memory_scope import (
+    SHARE_COPY_DIR,
+    day_file_declaration,
+    day_file_name,
+    namespace_mix_error,
+    namespace_mix_refusal,
+)
 
 
 @pytest.fixture
@@ -864,7 +870,7 @@ class TestAgentShareSurface:
     though it takes no ``--namespace`` flag."""
 
     @pytest.mark.asyncio
-    async def test_share_writes_to_the_targets_own_day_file(
+    async def test_share_writes_to_a_file_of_its_own_named_for_the_target(
         self, bm25_only_components, monkeypatch
     ):
         from contextlib import asynccontextmanager
@@ -886,10 +892,14 @@ class TestAgentShareSurface:
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake)
         await _run_share(str(chunk.id), "shared")
 
-        expected = day_file_name(
+        # Not the target's day file (#3324): a file of its own, named after it.
+        day_stem = day_file_name(
             "shared", comp.config.namespace.default_namespace, date_str=_today()
-        )
-        assert (mem_dir / expected).exists(), sorted(p.name for p in mem_dir.glob("*.md"))
+        ).removesuffix(".md")
+        assert not (mem_dir / f"{day_stem}.md").exists()
+        (copy,) = (mem_dir / SHARE_COPY_DIR).glob(f"{day_stem}-*.md")
+        assert await comp.storage.namespaces_for_source(copy) == ["shared"]
+        assert day_file_declaration(copy) == ("shared", True)
         # The default day file it was shared *from* keeps its own namespace.
         assert await comp.storage.namespaces_for_source(day) == ["default"]
 

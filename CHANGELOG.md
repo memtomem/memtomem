@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A second short `mem_agent_share` into the same namespace on the same day is indexed (#3324).**
+  Every copy went to the namespace's day file, and a short copy merged into the chunk of the
+  entry before it. When that entry was an earlier copy, its `chunk_links` row made the re-index
+  refuse with `Reindex would remove linked chunk identities; explicit link migration is
+  required`: the copy stayed on disk unindexed, and every later write to that day file failed
+  the same way. `mem_agent_share` and `mm agent share` now write each copy to a file of its own,
+  `shared-copies/<day file name without .md>-<12 hex>.md`, and refuse to write into a file that
+  already exists. A rebuild reads the copy's namespace back from that name, as it does for a day
+  file. A day file already stuck this way stays stuck. In the measured case, two short
+  `## Shared: memory` sections with no chunk overlap, renaming the second section's heading and
+  re-indexing the file restores it, and the first copy keeps its id and link.
+
 - **One schedule with a stored value memtomem cannot read no longer stops every other
   schedule (#3440).** Each schedule read decodes every row it returns, and one row could raise
   out of it. `params_json` that is not JSON, or `params_json` or `last_run_result` nested too
