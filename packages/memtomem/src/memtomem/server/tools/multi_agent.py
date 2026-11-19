@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
@@ -343,33 +344,53 @@ async def mem_agent_search(
 
 _SHARED_FROM_TAG_PREFIX = "shared-from="
 _SHARED_TITLE_PREFIX = "Shared: "
+_HEADING_MARKER_RE = re.compile(r"^[ ]{0,3}#{1,6}\s+")
 
 
-def _build_shared_title(heading_hierarchy: tuple[str, ...] | list[str]) -> str:
+def _clean_single_heading(text: str) -> str:
+    """Strip leading markdown heading markers and ``Shared: `` prefixes."""
+    stripped = text.strip()
+    while True:
+        prev = stripped
+        stripped = _HEADING_MARKER_RE.sub("", stripped).strip()
+        while stripped.startswith(_SHARED_TITLE_PREFIX):
+            stripped = stripped[len(_SHARED_TITLE_PREFIX) :].strip()
+        if stripped == prev:
+            break
+    return stripped
+
+
+def _clean_heading_entry(heading: str) -> str:
+    """Clean a heading entry, preserving inner `` > `` hierarchy segments."""
+    parts = heading.split(" > ")
+    cleaned_parts = [_clean_single_heading(p) for p in parts]
+    return " > ".join(p for p in cleaned_parts if p)
+
+
+def _build_shared_title(heading_hierarchy: tuple[str, ...] | list[str] | None) -> str:
     """Return the ``mem_agent_share`` copy's title.
 
-    Strips any leading ``Shared: `` prefixes from each heading entry
-    before re-prepending a single one. Without this, a chain of re-shares
-    would produce ``Shared: Shared: Shared: ...`` because the source
-    chunk's heading already includes the ``Shared: `` prefix from the
-    previous share, and the naive ``f"Shared: {join}"`` doubles up on
-    every hop. Mirrors the audit-tag chain in :func:`_build_shared_tags`
-    which also collapses re-share history (immediate parent only).
+    Strips markdown heading markers (e.g. ``## ``) and any leading
+    ``Shared: `` prefixes from each heading entry before re-prepending a
+    single one. Without this, a chain of re-shares accumulates
+    ``Shared: ## Shared: ...`` because indexed hierarchy entries carry
+    their Markdown heading markers, preventing naive prefix matching.
+    Preserves multi-level hierarchy paths joined with `` > ``.
+    Mirrors the audit-tag chain in :func:`_build_shared_tags` which also
+    collapses re-share history (immediate parent only).
     """
-
     if not heading_hierarchy:
         return f"{_SHARED_TITLE_PREFIX}memory"
 
     cleaned: list[str] = []
     for heading in heading_hierarchy:
-        # Strip every leading ``Shared: `` so an N-hop chain — even one
-        # that already accumulated to ``Shared: Shared: Cache ...`` under
-        # the pre-fix code — collapses to a single prefix on the next
-        # share.
-        stripped = heading
-        while stripped.startswith(_SHARED_TITLE_PREFIX):
-            stripped = stripped[len(_SHARED_TITLE_PREFIX) :]
-        cleaned.append(stripped)
+        c = _clean_heading_entry(heading)
+        if c:
+            cleaned.append(c)
+
+    if not cleaned:
+        return f"{_SHARED_TITLE_PREFIX}memory"
+
     return f"{_SHARED_TITLE_PREFIX}{' > '.join(cleaned)}"
 
 
