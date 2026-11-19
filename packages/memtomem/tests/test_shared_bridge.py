@@ -1484,7 +1484,7 @@ def test_input_that_cannot_reach_the_daemon_is_not_a_normal_end(
     """The client left after writing, and the write to the daemon failed: its bytes are lost."""
     import memtomem._bridge as bridge
 
-    released = threading.Event()
+    released, fail = threading.Event(), threading.Event()
 
     class Deaf:
         """A connection whose daemon takes nothing more and says nothing, not even EOF."""
@@ -1494,7 +1494,7 @@ def test_input_that_cannot_reach_the_daemon_is_not_a_normal_end(
             return b""
 
         def sendall(self, data: bytes) -> None:
-            time.sleep(0.2)  # the client's EOF is long recorded by the time this fails
+            fail.wait(30)  # set once the client's EOF is recorded
             raise BrokenPipeError
 
         def shutdown(self, how: int) -> None:
@@ -1502,12 +1502,29 @@ def test_input_that_cannot_reach_the_daemon_is_not_a_normal_end(
 
         def close(self) -> None:
             released.set()
+            fail.set()
 
+    def reported(*events: str) -> bool:
+        """Whether the session's reports so far are *events*, in order, within 10 s."""
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with s.events.mutex:
+                if tuple(s.events.queue) == events:
+                    return True
+            time.sleep(0.01)
+        return False
+
+    # Nothing answers, so the wait ends at the drain deadline. Both reports are
+    # queued before the wait starts, and a report already queued is read before
+    # the deadline counts: how fast the threads run cannot move the failure past it.
     monkeypatch.setattr(bridge, "CONNECTION_DRAIN_S", 0.3)
     s = _Session(ours=Deaf())
     session.append(s)
 
     s.write_stdin(b"a request", close=True)
+    assert reported("stdin-eof")
+    fail.set()
+    assert reported("stdin-eof", "error")
 
     assert s.exit_code() == 1
 
