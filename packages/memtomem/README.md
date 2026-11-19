@@ -4,7 +4,7 @@
 
 > 🧪 **Beta** — the nine core MCP tools, the `mm` CLI, and the format of your memory files and config files change only with an `Upgrading` note in the [CHANGELOG](https://github.com/memtomem/memtomem/blob/main/CHANGELOG.md), and behind a deprecation window where one is possible. Features marked **experimental** can change or go away without either — see [Stability](https://github.com/memtomem/memtomem#stability). Feedback and issue reports are especially welcome at [github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
 
-Long-term memory for AI coding agents, kept as Markdown you own. Core usage is hook-free by default: your `.md` files are the source of truth, the search index is rebuilt from them (tag edits and working state live only in the database), and memory changes happen only when you or your agent explicitly call memtomem. Optional client hooks are separate, visible integrations.
+Local-first long-term memory for AI coding agents: Markdown files you own, found again with hybrid keyword + semantic search. Core usage is hook-free by default: your `.md` files are the source of truth, the search index is rebuilt from them (tag edits and working state live only in the database), and memory changes happen only when you or your agent explicitly call memtomem. Optional client hooks are separate, visible integrations.
 
 ## The session loop
 
