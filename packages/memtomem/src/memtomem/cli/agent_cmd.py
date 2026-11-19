@@ -410,27 +410,19 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         if chunk is None:
             raise click.ClickException(f"Chunk {chunk_id} not found.")
 
-        # Build the copy's tags using the same dedup contract as the MCP
-        # tool — keep them in lock-step via the helper so future tweaks
+        # Build the copy's tags and title using the same contract as the MCP
+        # tool — keep them in lock-step via the helpers so future tweaks
         # stay in one place.
-        try:
-            from memtomem.server.tools.multi_agent import _build_shared_tags
+        from memtomem.server.tools.multi_agent import _build_shared_tags, _build_shared_title
 
-            tags = _build_shared_tags(chunk.metadata.tags, chunk_id)
-        except ImportError:
-            # Fallback for branches that pre-date PR-3 — append the bare
-            # audit tag without dedup. The CLI must keep working even
-            # before the helper lands.
-            tags = list(chunk.metadata.tags) + [f"shared-from={chunk_id}"]
+        tags = _build_shared_tags(chunk.metadata.tags, chunk_id)
+        title = _build_shared_title(
+            chunk.metadata.heading_hierarchy,
+            chunk_type=chunk.metadata.chunk_type,
+        )
 
         from memtomem import privacy
         from memtomem.tools.memory_writer import append_entry, entry_guard_text
-
-        title = (
-            "Shared: " + " > ".join(chunk.metadata.heading_hierarchy)
-            if chunk.metadata.heading_hierarchy
-            else "Shared: memory"
-        )
 
         # The copy as it is written: the heading path becomes its title and
         # the source's tags go with it.

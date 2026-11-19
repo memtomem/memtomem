@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
@@ -11,6 +12,7 @@ from memtomem.constants import (
     validate_agent_id,
     validate_namespace,
 )
+from memtomem.models import ChunkType
 from memtomem.server import mcp
 from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -343,33 +345,52 @@ async def mem_agent_search(
 
 _SHARED_FROM_TAG_PREFIX = "shared-from="
 _SHARED_TITLE_PREFIX = "Shared: "
+_HEADING_MARKER_RE = re.compile(r"^#{1,6} ")
 
 
-def _build_shared_title(heading_hierarchy: tuple[str, ...] | list[str]) -> str:
+def _clean_heading_entry(text: str, is_markdown: bool) -> str:
+    """Strip leading markdown heading marker (if markdown) and ``Shared: `` prefixes."""
+    stripped = text.strip()
+    if is_markdown:
+        stripped = _HEADING_MARKER_RE.sub("", stripped)
+    while stripped.startswith(_SHARED_TITLE_PREFIX):
+        stripped = stripped[len(_SHARED_TITLE_PREFIX) :]
+        if is_markdown:
+            stripped = _HEADING_MARKER_RE.sub("", stripped)
+    return stripped
+
+
+def _build_shared_title(
+    heading_hierarchy: tuple[str, ...] | list[str] | None,
+    *,
+    chunk_type: ChunkType | str | None = None,
+) -> str:
     """Return the ``mem_agent_share`` copy's title.
 
-    Strips any leading ``Shared: `` prefixes from each heading entry
-    before re-prepending a single one. Without this, a chain of re-shares
-    would produce ``Shared: Shared: Shared: ...`` because the source
-    chunk's heading already includes the ``Shared: `` prefix from the
-    previous share, and the naive ``f"Shared: {join}"`` doubles up on
-    every hop. Mirrors the audit-tag chain in :func:`_build_shared_tags`
-    which also collapses re-share history (immediate parent only).
+    Strips markdown heading markers (e.g. ``## ``) and any leading
+    ``Shared: `` prefixes from each heading entry before re-prepending a
+    single one. Gated on markdown chunks so non-markdown hierarchy entries
+    (JSON/YAML keys, reST titles) preserve their text. Without this,
+    a chain of re-shares accumulates ``Shared: ## Shared: ...`` because
+    indexed Markdown entries carry their heading markers.
+    Preserves multi-level hierarchy paths joined with `` > ``.
+    Mirrors the audit-tag chain in :func:`_build_shared_tags` which also
+    collapses re-share history (immediate parent only).
     """
-
     if not heading_hierarchy:
         return f"{_SHARED_TITLE_PREFIX}memory"
 
+    is_markdown = chunk_type is ChunkType.MARKDOWN_SECTION or chunk_type == "markdown_section"
+
     cleaned: list[str] = []
     for heading in heading_hierarchy:
-        # Strip every leading ``Shared: `` so an N-hop chain — even one
-        # that already accumulated to ``Shared: Shared: Cache ...`` under
-        # the pre-fix code — collapses to a single prefix on the next
-        # share.
-        stripped = heading
-        while stripped.startswith(_SHARED_TITLE_PREFIX):
-            stripped = stripped[len(_SHARED_TITLE_PREFIX) :]
-        cleaned.append(stripped)
+        c = _clean_heading_entry(heading, is_markdown)
+        if c:
+            cleaned.append(c)
+
+    if not cleaned:
+        return f"{_SHARED_TITLE_PREFIX}memory"
+
     return f"{_SHARED_TITLE_PREFIX}{' > '.join(cleaned)}"
 
 
@@ -520,7 +541,10 @@ async def mem_agent_share(
     try:
         result, stats = await _mem_add_core(
             content=chunk.content,
-            title=_build_shared_title(chunk.metadata.heading_hierarchy),
+            title=_build_shared_title(
+                chunk.metadata.heading_hierarchy,
+                chunk_type=chunk.metadata.chunk_type,
+            ),
             tags=inherited_tags,
             file=None,
             namespace=target,
