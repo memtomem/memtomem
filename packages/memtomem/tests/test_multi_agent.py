@@ -48,6 +48,7 @@ import pytest
 
 from memtomem.chunking.markdown import MarkdownChunker
 from memtomem.config import Mem2MemConfig
+from memtomem.models import ChunkType
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     SHARED_NAMESPACE,
@@ -348,7 +349,10 @@ class TestBuildSharedTitle:
         )
         assert chunks[0].metadata.heading_hierarchy == ("## Cache strategy decision",)
         assert (
-            _build_shared_title(chunks[0].metadata.heading_hierarchy)
+            _build_shared_title(
+                chunks[0].metadata.heading_hierarchy,
+                chunk_type=chunks[0].metadata.chunk_type,
+            )
             == "Shared: Cache strategy decision"
         )
 
@@ -358,8 +362,48 @@ class TestBuildSharedTitle:
         )
         assert chunks[1].metadata.heading_hierarchy == ("# Top level", "## Sub heading")
         assert (
-            _build_shared_title(chunks[1].metadata.heading_hierarchy)
+            _build_shared_title(
+                chunks[1].metadata.heading_hierarchy,
+                chunk_type=chunks[1].metadata.chunk_type,
+            )
             == "Shared: Top level > Sub heading"
+        )
+
+    def test_preserves_single_hash_in_markdown_heading_text(self):
+        chunks = MarkdownChunker().chunk_file(Path("users.md"), "## # of users\n\nContent.\n")
+        assert chunks[0].metadata.heading_hierarchy == ("## # of users",)
+        assert (
+            _build_shared_title(
+                chunks[0].metadata.heading_hierarchy,
+                chunk_type=chunks[0].metadata.chunk_type,
+            )
+            == "Shared: # of users"
+        )
+
+    def test_does_not_split_inner_arrow_in_heading_text(self):
+        chunks = MarkdownChunker().chunk_file(
+            Path("cache.md"), "## Cache > Shared: notes\n\nContent.\n"
+        )
+        assert chunks[0].metadata.heading_hierarchy == ("## Cache > Shared: notes",)
+        assert (
+            _build_shared_title(
+                chunks[0].metadata.heading_hierarchy,
+                chunk_type=chunks[0].metadata.chunk_type,
+            )
+            == "Shared: Cache > Shared: notes"
+        )
+
+    def test_non_markdown_raw_text_preserves_leading_hash(self):
+        # Structured JSON/YAML keys like '# cache' do not carry markdown markers
+        assert (
+            _build_shared_title(("settings", "# cache"), chunk_type=ChunkType.RAW_TEXT)
+            == "Shared: settings > # cache"
+        )
+
+    def test_non_markdown_rst_preserves_leading_hash(self):
+        # reST section titles like '# cache' do not carry markdown markers
+        assert (
+            _build_shared_title(("# cache",), chunk_type=ChunkType.RST_SECTION) == "Shared: # cache"
         )
 
     def test_collapses_reshare_prefix_from_real_shared_chunk(self):
@@ -368,7 +412,10 @@ class TestBuildSharedTitle:
         )
         assert chunks[0].metadata.heading_hierarchy == ("## Shared: Cache strategy decision",)
         assert (
-            _build_shared_title(chunks[0].metadata.heading_hierarchy)
+            _build_shared_title(
+                chunks[0].metadata.heading_hierarchy,
+                chunk_type=chunks[0].metadata.chunk_type,
+            )
             == "Shared: Cache strategy decision"
         )
 
@@ -378,7 +425,10 @@ class TestBuildSharedTitle:
         )
         assert chunks[0].metadata.heading_hierarchy == ("## Shared: ## Cache strategy decision",)
         assert (
-            _build_shared_title(chunks[0].metadata.heading_hierarchy)
+            _build_shared_title(
+                chunks[0].metadata.heading_hierarchy,
+                chunk_type=chunks[0].metadata.chunk_type,
+            )
             == "Shared: Cache strategy decision"
         )
 
@@ -388,7 +438,10 @@ class TestBuildSharedTitle:
         )
         assert chunks[0].metadata.heading_hierarchy == ("## Shared: Top level > Sub heading",)
         assert (
-            _build_shared_title(chunks[0].metadata.heading_hierarchy)
+            _build_shared_title(
+                chunks[0].metadata.heading_hierarchy,
+                chunk_type=chunks[0].metadata.chunk_type,
+            )
             == "Shared: Top level > Sub heading"
         )
 
@@ -397,7 +450,13 @@ class TestBuildSharedTitle:
             Path("notes.md"), "Just some text without any headings.\n"
         )
         assert chunks[0].metadata.heading_hierarchy == ()
-        assert _build_shared_title(chunks[0].metadata.heading_hierarchy) == "Shared: memory"
+        assert (
+            _build_shared_title(
+                chunks[0].metadata.heading_hierarchy,
+                chunk_type=chunks[0].metadata.chunk_type,
+            )
+            == "Shared: memory"
+        )
 
     def test_real_chunk_preserves_non_leading_shared(self):
         chunks = MarkdownChunker().chunk_file(
@@ -405,7 +464,10 @@ class TestBuildSharedTitle:
         )
         assert chunks[0].metadata.heading_hierarchy == ("## Notes on Shared: behaviour",)
         assert (
-            _build_shared_title(chunks[0].metadata.heading_hierarchy)
+            _build_shared_title(
+                chunks[0].metadata.heading_hierarchy,
+                chunk_type=chunks[0].metadata.chunk_type,
+            )
             == "Shared: Notes on Shared: behaviour"
         )
 

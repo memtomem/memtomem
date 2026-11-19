@@ -8,13 +8,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ### Fixed
 
 - **Share titles strip Markdown heading markers so re-share prefixes collapse cleanly (#3470).**
-  Indexed hierarchy entries retain their heading markers (`## Cache decision`), which caused
-  `_build_shared_title` to produce titles carrying the markers (`Shared: ## Cache decision`) and
-  prevented the `Shared: ` prefix check from matching on subsequent shares. As a result, each
-  re-share accumulated another `Shared: ## ` layer instead of collapsing to a single prefix.
-  `mem_agent_share` and `mm agent share` now strip leading `#{1,6}` heading markers and collapse
-  repeated `Shared: ` prefixes across all hierarchy levels, while preserving multi-level ` > `
-  path joining.
+  Indexed Markdown entries retain their heading markers (`## Cache decision`), which caused
+  sharing to produce titles carrying the markers (`Shared: ## Cache decision`) and prevented
+  the `Shared: ` prefix check from matching on subsequent shares. As a result, each re-share
+  accumulated another `Shared: ## ` layer instead of collapsing to a single prefix.
+  `mem_agent_share` and `mm agent share` now strip leading `#{1,6}` heading markers on Markdown
+  chunks and collapse repeated `Shared: ` prefixes across all hierarchy levels, while
+  preserving multi-level ` > ` path joins and non-Markdown heading text.
 
 - **A second short `mem_agent_share` into the same namespace on the same day is indexed (#3324).**
   Every copy went to the namespace's day file, and a short copy merged into the chunk of the
