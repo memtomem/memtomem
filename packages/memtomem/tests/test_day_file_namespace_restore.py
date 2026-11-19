@@ -15,10 +15,12 @@ from pathlib import Path
 import pytest
 
 from memtomem.memory_scope import (
+    SHARE_COPY_DIR,
     day_file_declaration,
     day_file_name,
     decode_day_file_namespace,
     namespace_mix_refusal,
+    share_copy_file_name,
 )
 
 DATE = "2026-11-04"
@@ -111,6 +113,51 @@ class TestDeclarationReadsTheResolvedName:
         assert day_file_declaration(fp) == (None, True)
 
 
+class TestShareCopyNames:
+    """A share copy's file is a day file's name plus a token (#3324): it declares
+    what that day file would, and no other name changes what it declares."""
+
+    @pytest.mark.parametrize("namespace", ["shared", "agent-runtime:planner", "shared:repo-demo"])
+    def test_a_copy_declares_the_namespace_it_was_written_for(self, tmp_path, namespace) -> None:
+        rel = share_copy_file_name(namespace, "default", date_str=DATE)
+        directory, name = rel.split("/")
+        assert directory == SHARE_COPY_DIR
+        assert name.startswith(_name(namespace).removesuffix(".md") + "-")
+        assert day_file_declaration(tmp_path / name) == (namespace, True)
+
+    def test_each_call_names_a_new_file(self) -> None:
+        names = {share_copy_file_name("shared", "default", date_str=DATE) for _ in range(50)}
+        assert len(names) == 50
+
+    def test_a_copy_for_the_default_namespace_declares_nothing(self, tmp_path) -> None:
+        # As the default day file ``{date}.md`` declares nothing.
+        name = share_copy_file_name("default", "default", date_str=DATE).split("/")[1]
+        assert name.startswith(f"{DATE}-")
+        assert day_file_declaration(tmp_path / name) == (None, False)
+
+    def test_a_copy_of_an_undecodable_day_file_name_is_reported_as_such(self, tmp_path) -> None:
+        name = f"{DATE}--shared-repo-demo-0123456789abcdef-0123456789ab.md"
+        assert day_file_declaration(tmp_path / name) == (None, True)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # Ends in a 12-digit token, but what precedes it is not a day file.
+            "notes-0123456789ab.md",
+            f"{DATE}-run3-0123456789ab.md",  # a consolidation summary's name
+            f"{DATE}-repo-run3-0123456789ab.md",
+            # A token too short or too long.
+            _name("shared").removesuffix(".md") + "-0123456789a.md",
+            _name("shared").removesuffix(".md") + "-0123456789abc.md",
+        ],
+    )
+    def test_other_names_declare_what_they_did_before(self, tmp_path, name) -> None:
+        assert day_file_declaration(tmp_path / name) == (None, False)
+
+    def test_a_day_file_name_is_never_read_as_a_copy(self, tmp_path) -> None:
+        assert day_file_declaration(tmp_path / _name("shared")) == ("shared", True)
+
+
 def _write_day_file(memory_dir: Path, namespace: str, body: str = "entry") -> Path:
     fp = memory_dir / _name(namespace)
     fp.write_text(f"## Note\n\n> created: {DATE}T10:00:00+00:00\n\n{body}\n", encoding="utf-8")
@@ -129,6 +176,19 @@ class TestEngineRestoresFromTheName:
         assert await components.storage.namespaces_for_source(fp) == ["shared:repo-demo"]
         assert stats.namespaces_restored_from_name == 1
         assert stats.day_file_names_undecoded == 0
+
+    async def test_a_rebuild_puts_a_share_copy_back_in_its_namespace(
+        self, components, memory_dir
+    ) -> None:
+        """A copy's file is under ``shared-copies/`` and carries a token (#3324)."""
+        fp = memory_dir / share_copy_file_name("agent-runtime:planner", "default", date_str=DATE)
+        fp.parent.mkdir()
+        fp.write_text(f"## Note\n\n> created: {DATE}T10:00:00+00:00\n\nentry\n", encoding="utf-8")
+
+        stats = await components.index_engine.index_path(memory_dir, recursive=True)
+
+        assert await components.storage.namespaces_for_source(fp) == ["agent-runtime:planner"]
+        assert stats.namespaces_restored_from_name == 1
 
     async def test_the_name_outranks_a_session_binding(self, components, memory_dir) -> None:
         """``mem_index`` in a bound MCP session passes the binding as

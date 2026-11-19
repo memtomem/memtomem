@@ -890,6 +890,7 @@ async def _mem_add_core(
     event_type: str,
     confirmation_surface: str = "mem_add",
     file_name: str | None = None,
+    new_file_only: bool = False,
     on_appended: Callable[[str], None] | None = None,
 ) -> tuple[str, "IndexingStats | None"]:
     """Core logic for ``mem_add`` — also usable from internal callers that
@@ -938,6 +939,12 @@ async def _mem_add_core(
     ``consolidated_into`` edges (#2802). The file holds one namespace by
     construction, so it is never re-targeted the way a day file is (#2005).
     Ignored when ``file`` is given.
+
+    ``new_file_only`` refuses the write when the target file already exists,
+    before anything is written: for a ``file_name`` whose point is that the
+    entry is the file's only one (a share copy, #3324). The check reads the
+    preflight's view of the file under the lock; a file created after it is
+    refused by the writer's exclusive create.
 
     ``on_appended`` is called once with the text this call appended, under the
     file lock, right after the append and before the re-index.
@@ -1290,6 +1297,12 @@ async def _mem_add_core(
                     )
                     if refusal is not None:
                         return (refusal, None)
+                    if new_file_only and judged.existed:
+                        return (
+                            f"Error: {target} already exists; nothing was written. "
+                            "Retry to write to a new file.",
+                            None,
+                        )
                     # Idempotency claim under the lock (issue #1573). The claim is a
                     # global (tool, key) row, not a file lock, so it also blocks a
                     # concurrent same-key call that targets a *different* file: exactly

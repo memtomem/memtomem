@@ -76,7 +76,9 @@ own, `{date}--{slug}-{digest}.md`, and a rebuild reads the namespace back from t
 `2026-11-04--shared-my-project-<digest>.md` comes back in `shared:my-project`. Files already on
 disk count, whenever they were written. The name wins over an MCP session's namespace, so
 `mem_index` in a bound session rebuilds those files where they were. The index result counts them
-(`namespaces_restored_from_name`).
+(`namespaces_restored_from_name`). A copy written by `mem_agent_share` or `mm agent share` goes to
+a file of its own under `shared-copies/`, named after its namespace's day file with a random token
+before `.md`, and comes back the same way.
 
 The rest of what the database recorded is in no file, and a rebuild starts it over. That includes:
 
