@@ -1,6 +1,6 @@
 interface:
   display_name: "memtomem Handoff"
-  short_description: "Save or resume a project handoff"
+  short_description: "Save, resume, or list project handoffs"
   default_prompt: "Use $memtomem-handoff to save this work for the next coding agent."
 policy:
   allow_implicit_invocation: false

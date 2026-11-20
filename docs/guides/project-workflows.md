@@ -59,9 +59,9 @@ fall back to your user-scope memory for project records.
 
 ## handoff
 
-`handoff` takes exactly one operation, `save` or `resume`. As a shorthand, `s`
-and `r` count only when they are the whole first word after the invocation, as
-in `s to codex-cli` or `r <handoff-id>`. The target runtime is one of
+`handoff` takes exactly one operation, `save`, `resume`, or `list`. As a
+shorthand, `s`, `r`, and `l` count only when they are the whole first word after
+the invocation, as in `s to codex-cli` or `r <handoff-id>`. The target runtime is one of
 `claude-code`, `codex-cli`, `kimi-code`, `opencode`, `antigravity-cli`,
 `cursor`, or `any` (the default).
 
@@ -100,6 +100,17 @@ GitHub issue or pull request as `owner/repo#N` or a full URL, resume reports
 its state when the host can query GitHub. Resume never deletes, edits, or
 replaces a handoff. It runs no memory search; it ends by telling you that `brief`,
 run with the record's objective as its task, lists related project memories.
+A number is not a `handoff_id`: `resume 2` is rejected and points you to `list`.
+
+**List** shows which records resume can load here, read-only. It reads the
+newest 30 rows addressed to the current runtime or to `any`, says which record a
+plain `resume` would select, and groups the rows by their `handoff-id-<id>` tag.
+Each entry shows only tag and row data (id, sender, recipient, time, and how many
+of its rows the page holds), never the record's text. When the page is full it
+says that older records may exist and that any entry may be incomplete. In an
+interactive session it then numbers the entries and asks which one to resume;
+a number or id from that list hands the record to resume, which runs every
+check. `list` takes no argument.
 
 ## brief
 
