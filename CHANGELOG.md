@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`handoff list` shows which handoffs resume can load (#3477).** `handoff` accepted only
+  `save` and `resume`, and a plain `resume` silently took the newest record addressed to the
+  current runtime, so loading an older one meant already knowing its UUID. `list` (shorthand
+  `l`) is read-only: it reads the newest 30 rows with resume's own filter, says which record a
+  plain `resume` would select, and groups the rows by their `handoff-id-<id>` tag. Each entry
+  shows tag and row data only, never the record's body. In an interactive session it numbers
+  the entries and asks which one to resume. A pick is accepted only from that same list, and
+  resume then runs every check on the picked record. `resume <number>` is rejected and points
+  to `list`.
+
 ### Fixed
 
 - **`mem_consolidate_apply` refuses to write a summary into a file that already exists

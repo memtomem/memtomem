@@ -905,7 +905,7 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     assert handoff["effect"] == "write"
     assert handoff["implicit"] is False
     assert handoff["tools"] == ["mem_status", "mem_recall", "mem_add"]
-    assert handoff["argument_hint"] == "[save|resume|s|r] [target runtime or handoff id]"
+    assert handoff["argument_hint"] == "[save|resume|list|s|r|l] [target runtime or handoff id]"
     # Host-tool grants stay subcommand-scoped: a bare ``Bash(git:*)`` would
     # also permit ``git -c alias.x=!<shell> x`` style execution while the
     # workflow resumes untrusted handoff text.
@@ -998,10 +998,16 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "insufficient_input: work context",
         "insufficient_input: operation",
         # The one-letter aliases are only safe in the first-word position: a
-        # lone `s` or `r` later in the request is prose, not an operation.
-        "`s` means `save` and `r` means `resume`",
+        # lone `s`, `r` or `l` later in the request is prose, not an operation.
+        "Accept exactly one operation: `save`, `resume`, or `list`.",
+        "`s` means `save`, `r` means `resume`, and `l` means `list`",
         "only when it is the entire first word of the operation's arguments",
-        "A bare `s` or `r` anywhere else is not an operation",
+        "A bare `s`, `r`, or `l` anywhere else is not an operation",
+        # `list all`, `list then resume`: words after list are not a mode it has.
+        "`list` takes no argument: any words after it make the operation ambiguous",
+        # A number names a row of some listing, and only list's own pick can resolve it.
+        "A number is not an id either",
+        "point to `list`, which numbers the records and asks which one to resume",
         # #2930: a record that matched a stale local checkout passed resume. Each
         # outcome clause is pinned whole: an edit that keeps every command but
         # flips what an exit status means would pass an argv-only check.
@@ -1063,7 +1069,7 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     # prune and fetch.all config; ancestry lazily fetches in a partial clone;
     # ``--get`` returns the last of several merge values; ``--abbrev-ref`` can name
     # another branch.
-    resume = flat.split("## Resume", 1)[1]
+    resume = flat.split("## Resume", 1)[1].split("## List", 1)[0]
     for rejected in (
         "git fetch",
         "--prune",
@@ -1109,8 +1115,8 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     assert not (kimi_root / "agents").exists()
 
 
-def test_handoff_save_reports_a_refusal_in_every_delivery() -> None:
-    """Every host's `handoff` reports a refused `mem_add` as the refusal (#3443)."""
+def _handoff_deliveries() -> dict[str, str]:
+    """Every shipped `handoff` text, by delivery: five SKILL.md files and OpenCode's command."""
     rendered = _renderer().expected_files()  # type: ignore[attr-defined]
     by_path = {path.relative_to(_ROOT).as_posix(): text for path, text in rendered.items()}
     # By the skill directory's exact name: a checkout path can contain "handoff" too.
@@ -1125,11 +1131,76 @@ def test_handoff_save_reports_a_refusal_in_every_delivery() -> None:
     commands = _opencode_commands(by_path["packages/opencode-memtomem/src/generated.ts"])
     deliveries["opencode memtomem-handoff command"] = commands["memtomem-handoff"]["template"]
     assert len(deliveries) == 6, sorted(deliveries)
-    for label, text in deliveries.items():
+    return deliveries
+
+
+def test_handoff_save_reports_a_refusal_in_every_delivery() -> None:
+    """Every host's `handoff` reports a refused `mem_add` as the refusal (#3443)."""
+    for label, text in _handoff_deliveries().items():
         flat = _flat(text)
         for marker in _HANDOFF_SAVE_REPORT:
             assert marker in flat, (label, marker)
         assert _HANDOFF_SAVE_CONDITION.search(flat), label
+
+
+# The tool the query goes to: OpenCode names it `memtomem_mem_recall`, so it is matched.
+_HANDOFF_LIST_CALL = re.compile(
+    r"1\. Call `(?:memtomem_)?mem_recall` with "
+    r'`tag_filter="handoff-to-<current-runtime>,handoff-to-any"`'
+)
+_HANDOFF_LIST = (
+    # The query: resume step 2's filter, so list shows what resume can load, on a bounded page.
+    '`tag_filter="handoff-to-<current-runtime>,handoff-to-any"`, '
+    '`namespace="shared:<project-slug>"`, `scope="project_local"`, `limit=30`, and '
+    '`output_format="structured"` — the filter resume step 2 uses.',
+    "The 30 rows are a bounded sample, not a count of records",
+    "List is read-only: it shows which records resume can load here and writes nothing.",
+    "It runs no Git command beyond the common checks.",
+    # The default candidate comes from the raw newest row: skipping a malformed row first
+    # would name an older record that plain resume never selects.
+    "Before skipping any row, look at the first (newest) row, as resume step 2 does.",
+    "If it carries exactly one `handoff-id-<id>` tag and that id is a canonical UUID",
+    "Otherwise do not predict: say that plain `resume` would not get a single valid id from the "
+    "newest record, and report that row's `chunk_id`.",
+    "Being selected is not being verified",
+    # Tags only, like brief: a body line on a partial page is not evidence of the field.
+    "Group the rows by tag, never by body.",
+    "Count and leave out any row with no such tag, with more than one, or with an id that is "
+    "not a canonical UUID.",
+    "in the order each id first appears in the newest-first page",
+    "Never read, quote, or summarize body text",
+    # Truncation: any entry can be incomplete, not only the last one.
+    "If exactly 30 rows came back, say that older handoffs may exist and that any listed entry "
+    "may have rows beyond this page",
+    "Do not page further.",
+    # The pick: resolved only against this run's list, then handed to resume's own checks.
+    "If no entry is listed, end here.",
+    "use the host's choice prompt within its own option limit",
+    "Accept only a listed number or the `handoff_id` of a listed entry, matched against the "
+    "list shown in this same run",
+    "never a number from an earlier run, never a new query to resolve the answer, and never an "
+    "id the list does not show",
+    "Any other answer: say so and stop, with no tool call and no second prompt.",
+    "continue at Resume step 1 with that entry's `handoff_id`",
+    "the order of this list is not evidence, and resume runs every check",
+    "in a non-interactive run, where you never ask",
+)
+
+
+def test_handoff_list_is_read_only_and_resolves_a_pick_in_every_delivery() -> None:
+    """`handoff list` shows what resume can load and hands a pick to resume's checks."""
+    for label, text in _handoff_deliveries().items():
+        listing = _flat(text).split("## List", 1)
+        assert len(listing) == 2, label
+        section = listing[1]
+        for marker in _HANDOFF_LIST:
+            assert marker in section, (label, marker)
+        assert _HANDOFF_LIST_CALL.search(section), label
+        # Read-only: no write tool, no search, and no Git call of its own.
+        for forbidden in ("mem_add", "mem_search", "git rev-parse", "git status", "git ls-remote"):
+            assert forbidden not in section, (label, forbidden)
+        # No host's option count in the shared prose: each host has its own limit.
+        assert "at most 4" not in section and "4 options" not in section, label
 
 
 def test_brief_workflow_pins_read_only_project_local_contract() -> None:
@@ -1617,7 +1688,7 @@ def test_handoff_resume_points_to_brief_without_searching() -> None:
     assert "mem_search(" not in body
     assert "`mem_search`" not in body
     flat = " ".join(body.split())
-    resume = flat.split("## Resume", 1)[1]
+    resume = flat.split("## Resume", 1)[1].split("## List", 1)[0]
     assert "the brief workflow, run with this objective as its task" in resume
     assert "Do not run it and do not search from this workflow" in resume
 
@@ -1966,6 +2037,26 @@ def test_automation_failure_log_does_not_store_prompt(
 
 _PROJECT_WORKFLOWS_GUIDE = _ROOT / "docs/guides/project-workflows.md"
 _CROSS_RUNTIME_HANDOFF_GUIDE = _ROOT / "docs/guides/integrations/cross-runtime-handoff.md"
+
+
+def _named_operations(flat: str) -> set[str]:
+    """The backticked words of the one sentence that says which operations exist."""
+    sentences = re.findall(r"exactly one operation[:,] (.*?)\.", flat)
+    assert len(sentences) == 1, sentences
+    return set(re.findall(r"`([a-z]+)`", sentences[0]))
+
+
+def test_project_workflows_guide_names_every_handoff_operation() -> None:
+    """The guide's operation sentence names the same operations the workflow accepts.
+
+    Compared as sets, not by substring: a guide that still said "`save` or `resume`" next
+    to a new paragraph about `list` would pass a presence check.
+    """
+    workflow = _named_operations(_flat(_project_body("handoff")))
+    guide = _named_operations(_flat(_PROJECT_WORKFLOWS_GUIDE.read_text(encoding="utf-8")))
+    assert workflow == guide == {"save", "resume", "list"}
+
+
 _ROOT_README = _ROOT / "README.md"
 _PYPI_README = _ROOT / "packages/memtomem/README.md"
 _UPDATE_WORKFLOW = _ROOT / "packages/memtomem-plugin-assets/workflows/update.md"

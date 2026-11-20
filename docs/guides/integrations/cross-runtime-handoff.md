@@ -86,7 +86,9 @@ then resume it in Claude Code with `/memtomem:handoff resume`.
 
 `s` and `r` are accepted as shorthand for `save` and `resume` when they are the
 first word of the arguments: `/memtomem:handoff s to codex-cli`,
-`/memtomem:handoff r <ID>`.
+`/memtomem:handoff r <ID>`. To see which handoffs are waiting for this runtime,
+run `/memtomem:handoff list` (or `l`): it lists them by id, read-only, and in an
+interactive session asks which one to resume.
 
 Each save that `mem_add` confirms must report its `handoff_id`,
 `project_local` scope, `shared:<project-slug>` namespace, written file, and the
