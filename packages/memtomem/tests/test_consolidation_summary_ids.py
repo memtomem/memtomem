@@ -83,3 +83,55 @@ async def test_overlap_leaves_the_attribution_unverified_and_the_link_stands(
     assert set(stats.new_chunk_ids) == {c.id for c in rows}
     assert "Originals linked: 3/3" in out
     assert await _targets(components, originals) == {stats.new_chunk_ids[0]}
+
+
+_OTHER = b"## Someone else\n\nzqother body\n"
+
+
+async def test_an_existing_file_at_the_summary_path_is_refused(components, memory_dir, monkeypatch):
+    """A file already at the generated path is refused, not appended to (#3474).
+
+    ``new_chunk_ids`` are the summary's chunks only while the summary is its
+    file's one entry, so a collision must not put it next to another one.
+    """
+    from memtomem import memory_scope
+    from memtomem.server.tools.consolidation import mem_consolidate, mem_consolidate_apply
+
+    real_name = memory_scope.consolidation_file_name
+    taken: list[Path] = []
+
+    def colliding(*args, **kwargs):
+        name = real_name(*args, **kwargs)
+        if not taken:
+            path = memory_dir / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(_OTHER)
+            taken.append(path)
+        return name
+
+    monkeypatch.setattr(memory_scope, "consolidation_file_name", colliding)
+    originals = await _originals(components, memory_dir / "notes.md", 3)
+    ctx = _ctx(components)
+    await mem_consolidate(min_group_size=2, ctx=ctx)
+
+    out = await mem_consolidate_apply(group_id=0, summary="zqshort summary body", ctx=ctx)
+
+    (path,) = taken
+    assert out.startswith("Error:"), out
+    assert "already exists; nothing was written" in out
+    assert path.read_bytes() == _OTHER
+    assert await components.storage.list_chunks_by_source(path) == []
+    assert await _targets(components, originals) == set()
+    (run,) = await components.storage.maintenance_run_latest(kind="consolidate_apply")
+    assert run["status"] == "error"
+    assert run["error"] == out
+
+    # The preview is kept, so a retry writes to a fresh file and links the originals.
+    out = await mem_consolidate_apply(group_id=0, summary="zqshort summary body", ctx=ctx)
+
+    assert "Originals linked: 3/3" in out
+    written = [p for p in memory_dir.rglob("*.md") if p not in (path, memory_dir / "notes.md")]
+    (summary_file,) = written
+    rows = await components.storage.list_chunks_by_source(summary_file)
+    assert await _targets(components, originals) == {c.id for c in rows}
+    assert path.read_bytes() == _OTHER

@@ -7,6 +7,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_consolidate_apply` refuses to write a summary into a file that already exists
+  (#3474).** Each summary goes to a file named for that apply alone
+  (`consolidated/<date>-<source>-run<id>-<12 hex>.md`, #2802), and the summary's links to its
+  originals assume it is that file's only entry. The name was generated fresh but not checked,
+  so a file already at that path would have been appended to. The write now refuses an existing
+  file before anything is written, as `mem_agent_share` does for its copies (#3324): the run is
+  recorded as an error and the preview is kept, so applying it again writes to a new file. No
+  path is known to produce such a collision; this makes the assumption checked.
+
 - **Share titles strip Markdown heading markers so re-share prefixes collapse cleanly (#3470).**
   Indexed Markdown entries retain their heading markers (`## Cache decision`), which caused
   sharing to produce titles carrying the markers (`Shared: ## Cache decision`) and prevented

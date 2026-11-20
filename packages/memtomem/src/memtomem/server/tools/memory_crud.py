@@ -942,7 +942,8 @@ async def _mem_add_core(
 
     ``new_file_only`` refuses the write when the target file already exists,
     before anything is written: for a ``file_name`` whose point is that the
-    entry is the file's only one (a share copy, #3324). The check reads the
+    entry is the file's only one (a share copy #3324, a consolidation summary
+    #3474). The check reads the
     preflight's view of the file under the lock; a file created after it is
     refused by the writer's exclusive create.
 
