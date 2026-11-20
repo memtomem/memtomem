@@ -349,7 +349,7 @@ skips the surviving chunks as `unchanged` and writes no vectors. See
 
 ```bash
 uv tool update-shell
-uv tool install --python 3.12 'memtomem[all]' --refresh
+uv tool install 'memtomem[all]' --refresh
 ```
 
 Open a new shell after updating PATH. Project/source installs require

@@ -1664,7 +1664,7 @@ badges — *recorded* (exact), *inferred* (fallback), *provided* (manual), plus
 | `MEMTOMEM_SESSION_TRACE__PAYLOAD_MODE` | `metadata` | Payload logging mode: `metadata` (no payloads logged / None), `redacted` (replaces secret-looking fields like passwords/keys with `***` while leaving ordinary values intact), or `full` (log complete input/output). |
 | `MEMTOMEM_SESSION_TRACE__MAX_PAYLOAD_CHARS` | `10000` | Maximum character length for payload properties before truncation. |
 
-When `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED=true` is set, both public and secret keys must be supplied, and the `langfuse` Python package must be installed (e.g., via `pip install 'memtomem[langfuse]'` or `uv tool install --python 3.12 'memtomem[all]'` which includes it).
+When `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED=true` is set, both public and secret keys must be supplied, and the `langfuse` Python package must be installed (e.g., via `pip install 'memtomem[langfuse]'` or `uv tool install 'memtomem[all]'` which includes it).
 
 The keys may come either from the config surface above or from the Langfuse SDK's own standard variables — `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and optionally `LANGFUSE_HOST`. Like the other unprefixed variables listed at the top of this page, these configure another tool rather than memtomem, and they are credentials-only: the values are read by the Langfuse SDK itself, never copied into memtomem config, and `LANGFUSE_ENABLED` alone never turns tracing on — enabling always requires the explicit `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED=true` (or `config.json`) opt-in.
 
