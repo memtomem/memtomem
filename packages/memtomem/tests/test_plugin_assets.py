@@ -950,7 +950,10 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "check that it is a canonical UUID",
         "Reject anything else without calling a tool",
         '`scope="project_local"`, `limit=20`, and',
-        "read the id out of its `handoff-id-<id>` tag, and check that id is a canonical UUID",
+        "Require exactly one `handoff-id-<id>` tag on the newest row",
+        "With zero or several, report the row's `source` and `chunk_id` as unusable and stop",
+        "the same way the torn and mismatch failures are handled",
+        "Check that id is a canonical UUID exactly as in step 1",
         "`handoff_id` in the record's own content equals `selected_handoff_id`",
         "every required field is present, and `to_runtime` is the current runtime or `any`",
         "a matching tag is not evidence that the content is the record you asked for",
@@ -1201,6 +1204,22 @@ def test_handoff_list_is_read_only_and_resolves_a_pick_in_every_delivery() -> No
             assert forbidden not in section, (label, forbidden)
         # No host's option count in the shared prose: each host has its own limit.
         assert "at most 4" not in section and "4 options" not in section, label
+
+
+_HANDOFF_RESUME_CARDINALITY = (
+    "Require exactly one `handoff-id-<id>` tag on the newest row.",
+    "With zero or several, report the row's `source` and `chunk_id` as unusable and stop, the "
+    "same way the torn and mismatch failures are handled.",
+    "Do not fall back to another record.",
+)
+
+
+def test_handoff_resume_tag_cardinality_in_every_delivery() -> None:
+    """Every host's `handoff` requires exactly one id tag on the newest row (#3475)."""
+    for label, text in _handoff_deliveries().items():
+        flat = _flat(text)
+        for marker in _HANDOFF_RESUME_CARDINALITY:
+            assert marker in flat, (label, marker)
 
 
 def test_brief_workflow_pins_read_only_project_local_contract() -> None:

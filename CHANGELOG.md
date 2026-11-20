@@ -19,6 +19,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Handoff resume requires exactly one `handoff-id-<id>` tag on the newest row (#3475).**
+  Resume step 2 previously instructed agents to read the id out of the newest row's
+  `handoff-id-<id>` tag and check that it was a canonical UUID, leaving behavior undefined
+  when a row carried no such tag or more than one. Save always writes exactly one tag, but a
+  hand-edited or foreign record in the same namespace could carry zero or several. The workflow
+  now requires exactly one `handoff-id-<id>` tag on the newest row: with zero or several, or an
+  invalid id, the row's `source` and `chunk_id` are reported as unusable and execution stops
+  without falling back to another record, aligning with torn and mismatch failure handling.
+
 - **`mem_consolidate_apply` refuses to write a summary into a file that already exists
   (#3474).** Each summary goes to a file named for that apply alone
   (`consolidated/<date>-<source>-run<id>-<12 hex>.md`, #2802), and the summary's links to its
