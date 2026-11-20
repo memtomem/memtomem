@@ -316,7 +316,7 @@ only when those side effects are wanted:
 Install the exact CLI version expected by the automation bundle:
 
 ```bash
-uv tool install 'memtomem==0.7.12'
+uv tool install --python 3.12 'memtomem==0.7.12'
 ```
 
 That command installs no extras. If your store uses a local ONNX model (the

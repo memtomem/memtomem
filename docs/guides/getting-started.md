@@ -20,7 +20,7 @@ or connected AI editor for the first success.
 ## Quickstart
 
 ```bash
-uv tool install 'memtomem[all]'
+uv tool install --python 3.12 'memtomem[all]'
 mm init
 mm status
 mm add "Deployment checklist uses blue-green rollout" --tags ops
@@ -74,7 +74,7 @@ install, where commands are invoked as `mm ...`.
 ### Option A: From PyPI (recommended for most users)
 
 ```bash
-uv tool install 'memtomem[all]'       # or: pipx install 'memtomem[all]'
+uv tool install --python 3.12 'memtomem[all]'   # or: pipx install 'memtomem[all]'
 mm --version
 ```
 
@@ -82,7 +82,7 @@ mm --version
 (keyword search until you configure Ollama or OpenAI):
 
 ```bash
-uv tool install memtomem
+uv tool install --python 3.12 memtomem
 ```
 
 Add features later with a reinstall such as:
@@ -349,7 +349,7 @@ skips the surviving chunks as `unchanged` and writes no vectors. See
 
 ```bash
 uv tool update-shell
-uv tool install 'memtomem[all]' --refresh
+uv tool install --python 3.12 'memtomem[all]' --refresh
 ```
 
 Open a new shell after updating PATH. Project/source installs require
