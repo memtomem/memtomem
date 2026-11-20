@@ -35,6 +35,14 @@ mode: incremental · saved 2 items · commit-derived: 1 · session-derived: 1
 
 `handoff save` writes one Markdown record into the project's own `.memtomem/memories.local`; `brief` only reads; `update` saves decisions, bug fixes, and preferences as separate items. All three run only when you invoke them. The [Project workflows](https://github.com/memtomem/memtomem/blob/main/docs/guides/project-workflows.md) guide has each one's modes, checks, and names per host.
 
+## Private by design
+
+- **Local by default.** The server, its database, and your Markdown files stay on your machine. With the defaults (keyword search, no LLM, no reranker) no note text is sent anywhere; the local ONNX models download their weights once and then run in-process.
+- **Every remote service is opt-in.** OpenAI embeddings, an Ollama server on another host, a cloud LLM, the Cohere reranker, Langfuse tracing, and webhooks each stay off until you configure them. `mm status` lists the embedding, LLM, and reranker endpoints among them that are not on a loopback address; Langfuse and webhooks are not in that list.
+- **Your AI client is a separate step.** MCP tools return note text to the client that called them (Claude Code, Codex, …), which sends it to its own model provider under its own terms.
+
+The full table of what each setting sends, and when: [What leaves your machine](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#what-leaves-your-machine).
+
 ## Set it up from your coding agent
 
 Paste a prompt into Claude Code, Codex CLI, or another coding agent. The agent runs the [Quick Start](https://github.com/memtomem/memtomem#quick-start) commands for you, asks before the choices that are yours, and shows you the result.
