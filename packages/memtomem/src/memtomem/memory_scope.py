@@ -463,10 +463,10 @@ def consolidation_file_name(source_name: str, run_id: int, *, date_str: str) -> 
     chunk id drops the ``consolidated_into`` edges that mark its originals as
     covered. The source name is only a readable hint, slugged like a day
     file's namespace. The run id names the ``maintenance_runs`` row, and the
-    random token keeps the name fresh when a reset store reuses run ids, since
-    an append into an existing file would put two entries in it again. The
-    name never ends in ``.consolidated.md``, the policy's virtual summary
-    suffix.
+    random token keeps the name fresh when a reset store reuses run ids. The
+    writer refuses a file that already exists rather than append a second
+    entry to it (``_mem_add_core``'s ``new_file_only``, #3474). The name never
+    ends in ``.consolidated.md``, the policy's virtual summary suffix.
     """
     stem = Path(source_name).stem
     slug = _FS_UNSAFE_RE.sub("-", stem).strip("-")

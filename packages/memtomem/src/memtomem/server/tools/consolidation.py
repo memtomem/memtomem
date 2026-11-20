@@ -388,10 +388,11 @@ async def mem_consolidate_apply(
         # to a file named for this apply alone (``consolidation_file_name``: run
         # id plus a random token), so nothing else is in it to re-index, no
         # pending edit and no stored row whose id it could keep, and the new ids
-        # are the summary's chunks. The name is generated fresh, not checked: a
-        # file already at that path would be appended to like any other. The
-        # append attribution adds nothing here and is ``unverified`` whenever
-        # chunk overlap is on and the summary spans several chunks.
+        # are the summary's chunks. The write refuses a file already at that
+        # path (``new_file_only``, #3474), so a fresh name is checked, not only
+        # likely. The append attribution adds nothing here and is
+        # ``unverified`` whenever chunk overlap is on and the summary spans
+        # several chunks.
         if not stats.new_chunk_ids:
             logger.warning(
                 "mem_consolidate_apply: mem_add produced no new chunk ids — "
@@ -551,16 +552,19 @@ async def mem_consolidate_apply(
                 confirmation_surface="mem_consolidate_apply",
                 # A file of its own, not the day file: there the summary can be
                 # re-chunked with a neighbouring entry, and the new chunk id
-                # drops the edges ``link_published`` writes (#2802).
+                # drops the edges ``link_published`` writes (#2802). An existing
+                # file at that path is refused, not appended to (#3474).
                 file_name=consolidation_file_name(
                     source_name,
                     run_id,
                     date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                 ),
+                new_file_only=True,
             )
             if stats is None:
                 # The core refused before writing anything (an excluded target
-                # #2488, a namespace mix, the redaction guard): nothing was
+                # #2488, a namespace mix, the redaction guard, a summary file
+                # that already exists #3474): nothing was
                 # consolidated, so neither record the run as applied nor drop
                 # the preview a retry needs.
                 outcome = _ApplyOutcome(
