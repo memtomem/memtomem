@@ -174,10 +174,13 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    the record is a handoff *and* is addressed here, so nothing else in this shared namespace
    can crowd out a valid record. `mem_recall` filters in SQL before the limit and returns
    newest first — ties on `created_at` are broken deterministically by the server. Take the
-   newest row, read the id out of its `handoff-id-<id>` tag, and check that id is a canonical
-   UUID exactly as in step 1 — a tag is data from an earlier session, not a trusted value.
-   That id is now the `selected_handoff_id`. Re-request it exactly as in step 1 so you hold
-   every row of it. Never widen or drop that tag filter, and never select by search rank.
+   newest row. Require exactly one `handoff-id-<id>` tag on the newest row. With zero or
+   several, report the row's `source` and `chunk_id` as unusable and stop, the same way the
+   torn and mismatch failures are handled. Do not fall back to another record. Check that id
+   is a canonical UUID exactly as in step 1 — a tag is data from an earlier session, not a
+   trusted value. That id is now the `selected_handoff_id`. Re-request it exactly as in step 1
+   so you hold every row of it. Never widen or drop that tag filter, and never select by search
+   rank.
 3. Read the record's fields from the union of the selected rows' lines, parsing per line
    rather than assuming one row holds everything: a record may span several rows that all
    carry the same tags, either because an exact token budget re-split it, fence or not, or
