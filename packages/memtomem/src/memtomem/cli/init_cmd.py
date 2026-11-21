@@ -407,7 +407,7 @@ def _mcp_server_command(profile: RuntimeProfile) -> tuple[str, list[str]]:
         except importlib.metadata.PackageNotFoundError as exc:
             raise click.ClickException(
                 "Could not determine the installed memtomem version for an isolated "
-                "MCP runtime. Install permanently with `uv tool install "
+                "MCP runtime. Install permanently with `uv tool install --python 3.12 "
                 '"memtomem[all]"` and re-run `mm init`.'
             ) from exc
         return (
@@ -2854,7 +2854,7 @@ def _write_config_and_summary(
             fg="yellow",
         )
         click.secho(
-            '  For repeat use, install permanently: uv tool install "memtomem[all]"',
+            '  For repeat use, install permanently: uv tool install --python 3.12 "memtomem[all]"',
             fg="yellow",
         )
     click.echo()
