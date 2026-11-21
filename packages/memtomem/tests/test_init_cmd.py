@@ -2283,27 +2283,24 @@ class TestUvxBranching:
         result = init_cmd._install_extras("uvx", ["onnx"])
         assert result is False
         out = unstyle(capsys.readouterr().out)
+        # `[all]` although one extra is missing: a uvx re-invocation replaces the
+        # environment, so naming only `onnx` would drop an extra the run already had.
         assert out.splitlines() == [
             "  (uvx is ephemeral — re-invoke with "
-            '`uvx --python 3.12 --from "memtomem[onnx]" memtomem ...` instead)'
+            '`uvx --python 3.12 --from "memtomem[all]" memtomem ...` instead)'
         ]
 
     @staticmethod
     def _uvx_state() -> dict:
         return {"_profile": _make_test_profile(kind="pypi", mm_binary_origin="uvx")}
 
-    @pytest.mark.parametrize(
-        ("extras", "name"),
-        [(["onnx"], "onnx"), (["korean"], "korean"), (["onnx", "web"], "all")],
-    )
-    def test_extra_install_hint_on_uvx_is_a_uvx_reinvocation(
-        self, extras: list[str], name: str
-    ) -> None:
-        """The hint is the uvx command with the extra, not a tool-environment install."""
+    @pytest.mark.parametrize("extras", [["onnx"], ["korean"], ["onnx", "web"]])
+    def test_extra_install_hint_on_uvx_is_a_uvx_reinvocation(self, extras: list[str]) -> None:
+        """The hint is the uvx command with every extra, not a tool-environment install."""
         from memtomem.cli import init_cmd
 
         assert init_cmd._extra_install_hint(extras, self._uvx_state()) == (
-            f'uvx --python 3.12 --from "memtomem[{name}]" memtomem ...'
+            'uvx --python 3.12 --from "memtomem[all]" memtomem ...'
         )
 
     @pytest.mark.parametrize("kind", ["source", "project"])
@@ -2331,9 +2328,9 @@ class TestUvxBranching:
 
         from memtomem.cli import init_cmd
 
-        init_cmd._install_extras("uvx", ["onnx", "web"])
+        init_cmd._install_extras("uvx", ["korean"])
         out = unstyle(capsys.readouterr().out)
-        hint = init_cmd._extra_install_hint(["onnx", "web"], self._uvx_state())
+        hint = init_cmd._extra_install_hint(["korean"], self._uvx_state())
         assert out.splitlines() == [f"  (uvx is ephemeral — re-invoke with `{hint}` instead)"]
 
     def test_summary_missing_extra_on_uvx_prints_the_uvx_command_twice(
@@ -2363,8 +2360,8 @@ class TestUvxBranching:
         init_cmd._write_config_and_summary(state, tmp_path)
 
         lines = unstyle(capsys.readouterr().out).splitlines()
-        command = 'uvx --python 3.12 --from "memtomem[onnx]" memtomem ...'
-        assert [line for line in lines if "memtomem[onnx]" in line] == [
+        command = 'uvx --python 3.12 --from "memtomem[all]" memtomem ...'
+        assert [line for line in lines if '--from "memtomem[' in line] == [
             f"  (uvx is ephemeral — re-invoke with `{command}` instead)",
             f"      → {command}",
         ]
@@ -2392,7 +2389,7 @@ class TestUvxBranching:
         lines = click.unstyle(result.output).splitlines()
         assert "  fastembed not installed." in lines
         assert [line for line in lines if line.startswith("  Install with:")] == [
-            '  Install with: uvx --python 3.12 --from "memtomem[onnx]" memtomem ...'
+            '  Install with: uvx --python 3.12 --from "memtomem[all]" memtomem ...'
         ]
 
 
@@ -6826,19 +6823,22 @@ class TestNonInteractiveExtrasValidation:
         return [
             line
             for line in output.splitlines()
-            if line.startswith(("  Install first:", "  Re-run with the extra:"))
+            if line.startswith(("  Install first:", "  Re-run with the extra"))
         ]
 
+    _ONNX_AND_KOREAN = ["--provider", "onnx", "--model", "bge-m3", "--tokenizer", "kiwipiepy"]
+
     @pytest.mark.parametrize(
-        ("absent", "argv", "name"),
+        ("absent", "argv"),
         [
-            (("fastembed",), ["--provider", "onnx", "--model", "bge-small-en-v1.5"], "onnx"),
-            (
-                ("fastembed", "kiwipiepy"),
-                ["--provider", "onnx", "--model", "bge-m3", "--tokenizer", "kiwipiepy"],
-                "all",
-            ),
+            (("fastembed",), ["--provider", "onnx", "--model", "bge-small-en-v1.5"]),
+            (("fastembed", "kiwipiepy"), _ONNX_AND_KOREAN),
+            # One of the two is already there. A re-run that named only the missing one
+            # would bring up an environment without the other and be refused for it.
+            (("kiwipiepy",), _ONNX_AND_KOREAN),
+            (("fastembed",), _ONNX_AND_KOREAN),
         ],
+        ids=["onnx-only", "both-missing", "has-onnx-lacks-korean", "has-korean-lacks-onnx"],
     )
     def test_scripted_refusal_on_uvx_says_how_to_rerun_with_the_extra(
         self,
@@ -6846,9 +6846,8 @@ class TestNonInteractiveExtrasValidation:
         monkeypatch: pytest.MonkeyPatch,
         absent: tuple[str, ...],
         argv: list[str],
-        name: str,
     ) -> None:
-        """On a uvx run the recovery is a re-run with the extra, not an install step (#3489)."""
+        """On a uvx run the recovery is a re-run with every extra, not an install step (#3489)."""
         from click.testing import CliRunner
 
         from memtomem.cli import cli, init_cmd
@@ -6869,8 +6868,8 @@ class TestNonInteractiveExtrasValidation:
 
         assert result.exit_code != 0, result.output
         assert self._recovery_lines(result.output) == [
-            "  Re-run with the extra: "
-            f'uvx --python 3.12 --from "memtomem[{name}]" memtomem init <same options>'
+            "  Re-run with the extras: "
+            'uvx --python 3.12 --from "memtomem[all]" memtomem init <same options>'
         ]
         assert not (tmp_path / ".memtomem" / "config.json").exists()
 

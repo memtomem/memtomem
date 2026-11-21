@@ -1759,15 +1759,20 @@ def _extra_hint_target(state: dict | None) -> Literal["workspace", "uvx", "tool"
     return "tool"
 
 
-def _uvx_extra_prefix(extras: list[str]) -> str:
-    """The ``uvx`` invocation prefix that brings the missing extras along.
+def _uvx_extra_prefix() -> str:
+    """The ``uvx`` invocation prefix that brings every extra along.
+
+    ``[all]`` whichever extra is missing: a re-invocation that names only
+    the missing extra can come up without one the run already had. With
+    ``--provider onnx --tokenizer kiwipiepy`` (uv 0.12.13, memtomem 0.7.12)
+    a run from ``memtomem[onnx]`` was refused for ``korean`` and one from
+    ``memtomem[korean]`` for ``onnx``.
 
     ``--python 3.12`` because without it uv 0.12.13 on macOS resolved
     ``memtomem[onnx]`` against a Python 3.9 that came first on ``PATH`` and
     stopped (#3485). The requirement is double-quoted so Windows Command
     Prompt passes it intact."""
-    name = extras[0] if len(extras) == 1 else "all"
-    return f'uvx --python 3.12 --from "memtomem[{name}]"'
+    return 'uvx --python 3.12 --from "memtomem[all]"'
 
 
 def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
@@ -1777,9 +1782,10 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
     - source / project install → ``uv sync --extra <name>`` (single) or
       ``uv sync --extra all`` (two+). The workspace ``.venv`` is what
       ``uv run mm`` will use, so ``uv sync`` is the right install path.
-    - ``uvx`` run → ``uvx --python 3.12 --from "memtomem[<name>]" memtomem
-      ...``, the re-invocation :func:`_install_extras` prints. A tool
-      install is a separate environment, not this command with the extra.
+    - ``uvx`` run → ``uvx --python 3.12 --from "memtomem[all]" memtomem
+      ...``, the re-invocation :func:`_install_extras` prints, always with
+      ``[all]`` (see :func:`_uvx_extra_prefix`). A tool install is a
+      separate environment, not this command with the extras.
     - PyPI / ``uv tool install`` (default) → ``uv tool install --reinstall
       "memtomem[<name>]"`` or ``[all]``. Matches how the global ``mm``
       binary is installed.
@@ -1794,7 +1800,7 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
     ``_profile`` as PyPI install (matches the ``state=None`` default)."""
     target = _extra_hint_target(state)
     if target == "uvx":
-        return f"{_uvx_extra_prefix(extras)} memtomem ..."
+        return f"{_uvx_extra_prefix()} memtomem ..."
     name = extras[0] if len(extras) == 1 else "all"
     if target == "workspace":
         return f"{_UV_SYNC_HINT_PREFIX}{name}"
@@ -1850,8 +1856,7 @@ def _install_extras(
 
     if install_type == "uvx":  # ephemeral env; a non-ephemeral install is meaningless
         click.echo(
-            "  (uvx is ephemeral — re-invoke with "
-            f"`{_uvx_extra_prefix(extras)} memtomem ...` instead)"
+            f"  (uvx is ephemeral — re-invoke with `{_uvx_extra_prefix()} memtomem ...` instead)"
         )
         return False
 
@@ -3544,11 +3549,10 @@ def init(
         required = [x for x in missing if x in _REQUIRED_EXTRAS_FOR_NON_INTERACTIVE]
         if required:
             if _extra_hint_target(state) == "uvx":
-                # A uvx run is re-run with the extra rather than installed into.
+                # A uvx run is re-run with the extras rather than installed into.
                 # The run's own arguments are not echoed; they can hold a key.
                 recovery = (
-                    f"Re-run with the extra: {_uvx_extra_prefix(required)} "
-                    "memtomem init <same options>"
+                    f"Re-run with the extras: {_uvx_extra_prefix()} memtomem init <same options>"
                 )
             else:
                 recovery = f"Install first: {_extra_install_hint(required, state)}"
