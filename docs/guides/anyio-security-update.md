@@ -67,11 +67,12 @@ when uvx reuses an installed tool. Do not use `--force` with active tools.
 
 Restart the original client while online. No refresh flag belongs in the
 persistent MCP configuration. Custom dependency pins or private indexes must
-provide AnyIO >=4.14.2. For the default plugin's package specification, inspect
-the same resolved environment with:
+provide AnyIO >=4.14.2. To see what the default plugin's package specification
+and interpreter request resolve to, run them with this terminal's uv
+configuration and cache:
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.12' python -c "from importlib.metadata import version; print(version('anyio'))"
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' python -c "from importlib.metadata import version; print(version('anyio'))"
 ```
 
 For a different launcher, substitute its exact `--from` value and preserve any

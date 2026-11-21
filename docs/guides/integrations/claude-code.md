@@ -96,8 +96,8 @@ optional.
 >   the manual entry wins, including its environment.
 > - **Different command** — and the manual registrations this guide and
 >   [mcp-clients.md](../mcp-clients.md) teach (`memtomem-server` from your
->   environment, or `uvx --isolated --from "memtomem[all]==0.7.12"
->   memtomem-server`) *are* different — **duplicate registrations are possible**,
+>   environment, or `uvx --python 3.12 --isolated --from
+>   "memtomem[all]==0.7.12" memtomem-server`) *are* different — **duplicate registrations are possible**,
 >   exposing tools under
 >   `mcp__memtomem__mem_*` plus `mcp__plugin_memtomem_memtomem__mem_*`.
 >
@@ -188,7 +188,7 @@ Both `-s local` and `-s user` write to `~/.claude.json` — no need to edit
 that file by hand.
 
 The direct command preserves the extras in the persistent environment used by
-`mm`. For a no-install setup, use `uvx --isolated --from
+`mm`. For a no-install setup, use `uvx --python 3.12 --isolated --from
 "memtomem[all]==0.7.12" memtomem-server`. If an older user-scope registration
 already exists, replace it explicitly:
 

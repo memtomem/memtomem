@@ -151,7 +151,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 
 **No install** (uvx on demand):
 ```bash
-claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- uvx --isolated --from "memtomem[all]==0.7.12" memtomem-server
+claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- uvx --python 3.12 --isolated --from "memtomem[all]==0.7.12" memtomem-server
 ```
 
 </details>
