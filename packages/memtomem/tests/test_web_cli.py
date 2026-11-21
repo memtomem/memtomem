@@ -1181,6 +1181,33 @@ def test_sidecar_pid_with_a_live_sentinel_is_signalled(
     assert signals == [24680]
 
 
+@pytest.mark.parametrize("reads_sidecar", [True, False], ids=["windows-arm", "posix-arm"])
+def test_web_pid_that_changed_mid_probe_is_not_signalled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reads_sidecar: bool
+) -> None:
+    """A probe that saw ``web.pid`` change withholds its pid (#3423). ``web.json``
+    is rewritten after ``web.pid``, so it may still name the predecessor, and a
+    registry that confirms it is not enough: the stop refuses before either."""
+    from memtomem.cli import _liveness
+
+    holder, signals = _sidecar_only_web_ui(monkeypatch, tmp_path)
+    monkeypatch.setattr(web_cmd, "_stop_reads_pid_from_sidecar", lambda: reads_sidecar)
+    _registry_snapshot(monkeypatch, live=[(24680, "0123abcd")])
+    changed = _liveness.ServerState(
+        alive=True, pid=None, pid_file=Path(holder.name), payload_changed=True
+    )
+    monkeypatch.setattr(_liveness, "check_web_liveness", lambda: changed)
+    try:
+        result = CliRunner().invoke(web, ["stop"])
+    finally:
+        _release(holder)
+
+    assert result.exit_code == 1, result.output
+    assert signals == []
+    assert "changed while it was being checked" in result.output
+    assert "No signal was sent" in result.output
+
+
 def test_sidecar_pid_with_an_incomplete_registry_is_not_signalled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

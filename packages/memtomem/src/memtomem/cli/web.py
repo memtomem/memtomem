@@ -160,8 +160,16 @@ def verified_web_identity(state: ServerState) -> tuple[int, str] | None:
     registry sentinel carries the same ``(pid, procid)``. A stale sidecar from
     an exited Web UI names a random procid that no live sentinel has, so
     matching keeps every unproven case attributed to nobody (#2574).
+
+    A probe that saw the payload change (``payload_changed``) withholds its
+    pid, so the sidecar cannot be checked against it and is not used (#3423).
     """
-    if not state.alive or state.probe_error is not None or state.pid_file is None:
+    if (
+        not state.alive
+        or state.probe_error is not None
+        or state.pid_file is None
+        or state.payload_changed
+    ):
         return None
     metadata = _read_web_metadata(state.pid_file)
     # ``type() is int``: JSON ``true`` parses as a ``bool``, an ``int`` equal to 1.
@@ -697,6 +705,14 @@ def _web_stop() -> None:
             _stop_remove_stale_pid_file(state.pid_file)
         click.echo("not running")
         raise SystemExit(0)
+    if state.payload_changed:
+        # The lock may have changed hands while it was probed (#3423), and
+        # ``web.json`` is rewritten after ``web.pid``, so it may still name the
+        # predecessor. Neither file vouches for a pid; a fresh probe can.
+        raise click.ClickException(
+            "The Web UI pid file changed while it was being checked (a Web UI may have "
+            "just started). No signal was sent; retry in a moment."
+        )
     if pid is None:
         raise click.ClickException(
             f"Web UI appears to be running, but the pid is unreadable. Inspect {_web_pid_file()}."

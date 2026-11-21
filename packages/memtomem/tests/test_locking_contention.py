@@ -156,6 +156,27 @@ def _hold_pid_lock_via_portalocker(pid_file_str: str, hold_seconds: float, q) ->
     q.put("released")
 
 
+def _take_over_pid_file(pid_file_str: str, payload: str, go, published, release) -> None:
+    """Stand in for a replacement owner (#3423): once *go* is set, take the lock
+    through the real writer helper, then truncate and write as the writers do."""
+    from memtomem._pid_lock import lock_pid_file
+
+    if not go.wait(30):
+        return
+    fp = lock_pid_file(Path(pid_file_str), label="test pid", timeout_s=5)
+    if fp is None:
+        return
+    try:
+        fp.seek(0)
+        fp.truncate()
+        fp.write(payload)
+        fp.flush()
+        published.set()
+        release.wait(30)
+    finally:
+        fp.close()
+
+
 # --------------------------------------------------------- _file_lock
 
 
@@ -465,6 +486,161 @@ class TestLivenessProbeContention:
         assert state.alive is True
         assert state.pid is None
         assert state.probe_error is not None
+
+
+# ---------------------- probe_pid_file: payload re-read after contention (#3423)
+
+_STALE_PAYLOAD = "111\n18080\n2026-11-01T00:00:00+00:00\n"
+_NEW_PAYLOAD = "222\n18081\n2026-11-21T00:00:00+00:00\n"
+
+
+class TestContendedProbeRereadsPayload:
+    """The payload is read before the lock attempt, so a contended probe reads
+    it again and withholds the metadata when the two reads differ: a holder
+    that locked and rewrote the file in between is not reported as its
+    predecessor."""
+
+    @staticmethod
+    def _contend_after(monkeypatch: pytest.MonkeyPatch, action) -> None:
+        """Run *action* where the probe's lock attempt is, then report contention."""
+        import portalocker
+
+        from memtomem.cli import _liveness
+
+        def _lock(*_args, **_kwargs):
+            action()
+            raise portalocker.AlreadyLocked("held")
+
+        monkeypatch.setattr(_liveness.portalocker, "lock", _lock)
+
+    @staticmethod
+    def _assert_withheld(state, pid_file: Path) -> None:
+        assert state.alive is True
+        assert state.pid is None
+        assert state.port is None
+        assert state.started is None
+        assert state.payload_changed is True
+        assert state.probe_error is None, "observed contention is evidence, not a failed probe"
+        assert state.pid_file == pid_file
+
+    def test_rewritten_payload_withholds_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_text(_STALE_PAYLOAD, encoding="utf-8")
+
+        def _rewrite() -> None:
+            with open(pid_file, "r+", encoding="utf-8") as other:
+                other.truncate()
+                other.write(_NEW_PAYLOAD)
+
+        self._contend_after(monkeypatch, _rewrite)
+        self._assert_withheld(_liveness.probe_pid_file(pid_file), pid_file)
+
+    def test_truncated_payload_withholds_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The replacement has locked and truncated, but not written yet."""
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_text(_STALE_PAYLOAD, encoding="utf-8")
+
+        def _truncate() -> None:
+            with open(pid_file, "r+b") as other:
+                other.truncate()
+
+        self._contend_after(monkeypatch, _truncate)
+        self._assert_withheld(_liveness.probe_pid_file(pid_file), pid_file)
+
+    def test_failed_reread_withholds_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A second read that fails (Windows: the replacement's mandatory range
+        lock) cannot confirm the first one."""
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_text(_STALE_PAYLOAD, encoding="utf-8")
+        real_read = _liveness._read_bounded_fd
+        calls = 0
+
+        def _read(fd, *args):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise PermissionError(13, "simulated locked range")
+            return real_read(fd, *args)
+
+        monkeypatch.setattr(_liveness, "_read_bounded_fd", _read)
+        self._contend_after(monkeypatch, lambda: None)
+        state = _liveness.probe_pid_file(pid_file)
+
+        assert calls == 2
+        self._assert_withheld(state, pid_file)
+
+    def test_unchanged_payload_keeps_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_text(_STALE_PAYLOAD, encoding="utf-8")
+
+        self._contend_after(monkeypatch, lambda: None)
+        state = _liveness.probe_pid_file(pid_file)
+
+        assert state.alive is True
+        assert (state.pid, state.port, state.started) == (
+            111,
+            18080,
+            "2026-11-01T00:00:00+00:00",
+        )
+        assert state.payload_changed is False
+        assert state.probe_error is None
+
+    def test_cross_process_takeover_between_read_and_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Production ordering with a real holder: the probe reads the stale
+        payload, a replacement takes the lock through ``lock_pid_file`` and
+        publishes, then the probe's real lock attempt meets it. POSIX: the
+        second read sees the new bytes. Windows: the mandatory range lock fails
+        it. Either way the predecessor's pid is not reported."""
+        from memtomem.cli import _liveness
+
+        pid_file = tmp_path / "server.pid"
+        pid_file.write_text(_STALE_PAYLOAD, encoding="utf-8")
+        go, published, release = _CTX.Event(), _CTX.Event(), _CTX.Event()
+        p = _CTX.Process(
+            target=_take_over_pid_file,
+            args=(str(pid_file), _NEW_PAYLOAD, go, published, release),
+        )
+        p.start()
+        real_lock = _liveness.portalocker.lock
+        attempts = 0
+
+        def _lock_after_takeover(fp, flags):
+            nonlocal attempts
+            attempts += 1
+            go.set()
+            assert published.wait(30), "the replacement never published"
+            return real_lock(fp, flags)
+
+        monkeypatch.setattr(_liveness.portalocker, "lock", _lock_after_takeover)
+        try:
+            state = _liveness.probe_pid_file(pid_file)
+        finally:
+            monkeypatch.undo()
+            go.set()
+            release.set()
+            p.join(timeout=30)
+
+        assert p.exitcode == 0
+        assert attempts == 1
+        self._assert_withheld(state, pid_file)
 
 
 # ------------------------------------------- check_server_liveness (#1990)

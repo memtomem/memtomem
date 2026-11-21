@@ -19,6 +19,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A contended pid-file probe withholds the pid when its two reads differ (#3423).**
+  `probe_pid_file` reads the pid file before its lock attempt, and on contention it returned
+  the pid it had read. If the old holder had exited and a new one had locked and rewritten the
+  same file in between, `mm upgrade`, `mm web stop` and `mm daemon stop` were given the old
+  holder's pid to signal, a dead process or one that had reused its pid. A contended probe now
+  reads the file again. If the two reads differ, that probe reports the holder as running
+  without a pid, so no signal is sent on its answer: `mm web stop` and `mm daemon stop` stop
+  and ask you to retry. `mm web stop` also refuses in this case on Windows, where it would
+  otherwise take the pid from `web.json`, which the new Web UI rewrites only after `web.pid`.
+  Two reads that agree still do not prove the bytes are the new holder's: one that has locked
+  but not yet rewritten the file leaves its predecessor's pid in place for both.
+
 - **The automation plugin's missing-`mm` hint asks uv for Python 3.12 (#3481).** When the
   SessionStart hook finds no `mm` on `PATH`, it suggested `uv tool install memtomem==<version>`.
   uv can pick an installed interpreter older than 3.12 for that command and stop with
