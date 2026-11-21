@@ -55,11 +55,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   closing "For repeat use" hint, and the error `mm init` raises when it cannot determine the
   installed version for the isolated MCP launch, now read
   `uv tool install --python 3.12 "memtomem[all]"`, the README Quick Start command. The uvx
-  re-invocation hint for a missing extra now reads
-  `uvx --python 3.12 --from "memtomem[<extra>]" memtomem ...`. Without the flag, uv 0.12.13 on
+  re-invocation hint for a missing extra gained the same flag (its requirement is
+  `memtomem[all]` since #3489, the next entry). Without the flag, uv 0.12.13 on
   macOS resolved `memtomem[all]` (installing) and `memtomem[onnx]` (re-invoking) against
   `/usr/bin/python3` 3.9.6 first on `PATH` and stopped. The `--reinstall` hints for an existing
   tool environment are unchanged.
+
+- **Outside a workspace, `mm init` run from `uvx` writes an MCP launch that asks uv for Python
+  3.12, and its missing-extra hints are a `uvx` command (#3489).** The MCP server command it
+  registers with Claude Code, or writes to `./.mcp.json` or Kimi Code's `mcp.json`, was
+  `uvx --isolated --from memtomem[all]==<version> memtomem-server`. It is now
+  `uvx --python 3.12 --isolated --from memtomem[all]==<version> memtomem-server`. With uv 0.12.13
+  on macOS and `/usr/bin/python3` 3.9.6 first on `PATH`, the old launch run with `--help`
+  exited 1 with `No solution found`, and the new one printed the server's help. One setup goes
+  the other way: with uv's Python downloads turned off and only a Python newer than 3.12 visible
+  to uv (3.14 in the run), the old launch printed the help and the new one stops with
+  `No interpreter found for Python 3.12`. The hint for a missing extra, in the wizard's ONNX
+  step and in the closing summary, was `uv tool install --reinstall "memtomem[<extra>]"`: an
+  install into a separate tool environment, not the `uvx` command run with the extra. It is
+  now `uvx --python 3.12 --from "memtomem[all]" memtomem ...`, and when
+  `mm init --non-interactive` refuses for a missing extra the error reads `Re-run with the
+  extras: uvx --python 3.12 --from "memtomem[all]" memtomem init <same options>`. The
+  requirement is `[all]` whichever extra is missing, in the summary's existing re-invocation
+  line too, which named the missing extra: a re-run that names only that one can come up
+  without another the run already had. With uv 0.12.13, memtomem 0.7.12 and
+  `--provider onnx --tokenizer kiwipiepy`, a run from `"memtomem[onnx]==0.7.12"` was refused
+  for `korean`, one from `"memtomem[korean]==0.7.12"` was refused for `onnx`, and one from
+  `"memtomem[all]==0.7.12"` wrote the config. From a source or project workspace, and for a
+  `uv tool` install, the MCP launch and the hints are unchanged.
 
 - **The automation plugin's missing-`mm` hint is the install command its README shows
   (#3481).** When the SessionStart hook finds no `mm` on `PATH`, its hint now reads

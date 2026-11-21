@@ -389,7 +389,10 @@ def _mcp_server_command(profile: RuntimeProfile) -> tuple[str, list[str]]:
     installs reuse the exact interpreter that is running ``mm init`` so the
     generated MCP server sees the same optional extras. Only an ephemeral
     ``uvx`` invocation creates a new environment; that environment is isolated
-    and exact-pinned to the current distribution with ``[all]`` enabled.
+    and exact-pinned to the current distribution with ``[all]`` enabled. It
+    asks uv for Python 3.12: without the request, uv 0.12.13 on macOS resolved
+    this requirement against a Python 3.9 that came first on ``PATH`` and
+    stopped with "No solution found" (#3489).
     """
     if profile.cwd_install_type in ("source", "project"):
         if profile.cwd_install_dir is None:
@@ -413,6 +416,8 @@ def _mcp_server_command(profile: RuntimeProfile) -> tuple[str, list[str]]:
         return (
             "uvx",
             [
+                "--python",
+                "3.12",
                 "--isolated",
                 "--from",
                 f"memtomem[all]=={version}",
@@ -1611,9 +1616,11 @@ async def _check_embedding_mismatch(state: dict, *, interactive: bool) -> None:
         await storage.close()
 
 
-# Canonical hint prefixes. Branching lives in ``_extra_install_hint``:
-# source/project installs use the workspace ``uv sync`` path so the extras
-# land in the same ``.venv`` that ``uv run mm`` will use; everything else
+# Canonical hint prefixes. ``_extra_hint_target`` picks the environment and
+# ``_extra_install_hint`` maps it to a command: source/project installs use the
+# workspace ``uv sync`` path so the extras land in the same ``.venv`` that
+# ``uv run mm`` will use; a ``uvx`` run's environment is ephemeral, so its hint
+# is a ``uvx`` re-invocation (``_uvx_extra_prefix``); everything else
 # (``uv tool install`` / PyPI) stays on the tool-env reinstall path that the
 # global ``mm`` binary relies on.
 _EXTRA_INSTALL_HINT_PREFIX: str = 'uv tool install --reinstall "memtomem'
@@ -1736,13 +1743,49 @@ def _workspace_needs_sync(state: dict) -> bool:
     return _workspace_python(state) is None
 
 
+def _extra_hint_target(state: dict | None) -> Literal["workspace", "uvx", "tool"]:
+    """Which environment a missing-extra hint has to reach.
+
+    The workspace comes first: ``uvx … mm init`` from a source or project
+    checkout still prints ``uv run mm`` next steps, which use the workspace
+    ``.venv``. A missing ``_profile`` is a tool install, as ``state=None`` is."""
+    profile = (state or {}).get("_profile")
+    if profile is None:
+        return "tool"
+    if profile.cwd_install_type in ("source", "project"):
+        return "workspace"
+    if profile.mm_binary_origin == "uvx":
+        return "uvx"
+    return "tool"
+
+
+def _uvx_extra_prefix() -> str:
+    """The ``uvx`` invocation prefix that brings every extra along.
+
+    ``[all]`` whichever extra is missing: a re-invocation that names only
+    the missing extra can come up without one the run already had. With
+    ``--provider onnx --tokenizer kiwipiepy`` (uv 0.12.13, memtomem 0.7.12)
+    a run from ``memtomem[onnx]`` was refused for ``korean`` and one from
+    ``memtomem[korean]`` for ``onnx``.
+
+    ``--python 3.12`` because without it uv 0.12.13 on macOS resolved
+    ``memtomem[onnx]`` against a Python 3.9 that came first on ``PATH`` and
+    stopped (#3485). The requirement is double-quoted so Windows Command
+    Prompt passes it intact."""
+    return 'uvx --python 3.12 --from "memtomem[all]"'
+
+
 def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
     """Return the install command for one or more missing extras, branched
-    by install type.
+    by :func:`_extra_hint_target`.
 
     - source / project install → ``uv sync --extra <name>`` (single) or
       ``uv sync --extra all`` (two+). The workspace ``.venv`` is what
       ``uv run mm`` will use, so ``uv sync`` is the right install path.
+    - ``uvx`` run → ``uvx --python 3.12 --from "memtomem[all]" memtomem
+      ...``, the re-invocation :func:`_install_extras` prints, always with
+      ``[all]`` (see :func:`_uvx_extra_prefix`). A tool install is a
+      separate environment, not this command with the extras.
     - PyPI / ``uv tool install`` (default) → ``uv tool install --reinstall
       "memtomem[<name>]"`` or ``[all]``. Matches how the global ``mm``
       binary is installed.
@@ -1755,10 +1798,11 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
     Phase 3 (#363): reads ``cwd_install_type`` from :class:`RuntimeProfile`
     so the workspace-vs-tool branch lives in one place. Treats missing
     ``_profile`` as PyPI install (matches the ``state=None`` default)."""
-    profile = (state or {}).get("_profile")
-    is_workspace = profile is not None and profile.cwd_install_type in ("source", "project")
+    target = _extra_hint_target(state)
+    if target == "uvx":
+        return f"{_uvx_extra_prefix()} memtomem ..."
     name = extras[0] if len(extras) == 1 else "all"
-    if is_workspace:
+    if target == "workspace":
         return f"{_UV_SYNC_HINT_PREFIX}{name}"
     return f'{_EXTRA_INSTALL_HINT_PREFIX}[{name}]"'
 
@@ -1812,8 +1856,7 @@ def _install_extras(
 
     if install_type == "uvx":  # ephemeral env; a non-ephemeral install is meaningless
         click.echo(
-            "  (uvx is ephemeral — re-invoke with "
-            f'`uvx --python 3.12 --from "memtomem[{name}]" memtomem ...` instead)'
+            f"  (uvx is ephemeral — re-invoke with `{_uvx_extra_prefix()} memtomem ...` instead)"
         )
         return False
 
@@ -2291,10 +2334,12 @@ def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
     Silent when ``missing`` is empty so the common "already installed" path
     adds no output noise. When non-empty, names the missing extras, lists
     which ``Next steps`` commands will fail without them, and prints a single
-    install command (narrow per-extra hint when one missing, ``[all]`` when
-    two+ — matches ``pyproject.toml``'s public extras). The hint is branched
-    by install type: workspace installs get ``uv sync --extra …``, tool
-    installs get ``uv tool install --reinstall …``."""
+    install command. The hint is branched by install type: workspace installs
+    get ``uv sync --extra …`` and tool installs get
+    ``uv tool install --reinstall …``, each a narrow per-extra hint when one
+    is missing and ``[all]`` when two+ (matches ``pyproject.toml``'s public
+    extras); ``uvx`` runs get a ``uvx`` re-invocation that always names
+    ``[all]``."""
     if not missing:
         return
     click.echo()
@@ -3504,11 +3549,18 @@ def init(
         missing = _collect_missing_extras(state)
         required = [x for x in missing if x in _REQUIRED_EXTRAS_FOR_NON_INTERACTIVE]
         if required:
-            hint = _extra_install_hint(required, state)
+            if _extra_hint_target(state) == "uvx":
+                # A uvx run is re-run with the extras rather than installed into.
+                # The run's own arguments are not echoed; they can hold a key.
+                recovery = (
+                    f"Re-run with the extras: {_uvx_extra_prefix()} memtomem init <same options>"
+                )
+            else:
+                recovery = f"Install first: {_extra_install_hint(required, state)}"
             raise click.ClickException(
                 f"Missing required extras for `mm init --non-interactive`: "
                 f"{', '.join(required)}.\n"
-                f"  Install first: {hint}\n"
+                f"  {recovery}\n"
                 f"  Or drop the flag(s) that require them "
                 f"(e.g. --provider none, --tokenizer unicode61)."
             )
