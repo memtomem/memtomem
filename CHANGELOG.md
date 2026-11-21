@@ -61,6 +61,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `/usr/bin/python3` 3.9.6 first on `PATH` and stopped. The `--reinstall` hints for an existing
   tool environment are unchanged.
 
+- **Outside a workspace, `mm init` run from `uvx` writes an MCP launch that asks uv for Python
+  3.12, and its missing-extra hints are a `uvx` command (#3489).** The MCP server command it
+  registers with Claude Code, or writes to `./.mcp.json` or Kimi Code's `mcp.json`, was
+  `uvx --isolated --from memtomem[all]==<version> memtomem-server`. It is now
+  `uvx --python 3.12 --isolated --from memtomem[all]==<version> memtomem-server`. With uv 0.12.13
+  on macOS and `/usr/bin/python3` 3.9.6 first on `PATH`, the old launch run with `--help`
+  exited 1 with `No solution found`, and the new one printed the server's help. One setup goes
+  the other way: with uv's Python downloads turned off and only a Python newer than 3.12 visible
+  to uv (3.14 in the run), the old launch printed the help and the new one stops with
+  `No interpreter found for Python 3.12`. The hint for a missing extra, in the wizard's ONNX
+  step and in the closing summary, was `uv tool install --reinstall "memtomem[<extra>]"`: an
+  install into a separate tool environment, not the `uvx` command run with the extra. It is
+  now `uvx --python 3.12 --from "memtomem[<extra>]" memtomem ...`, the line the summary already
+  printed beside it. When `mm init --non-interactive` refuses for a missing extra, the error
+  reads `Re-run with the extra: uvx --python 3.12 --from "memtomem[<extra>]" memtomem init
+  <same options>`. In one run of that prefix with the requirement pinned to the release,
+  `"memtomem[onnx]==0.7.12"`, `--provider onnx` got past the refusal and the config was
+  written. From a source or project workspace, and for a `uv tool` install, the MCP launch and
+  the hints are unchanged.
+
 - **The automation plugin's missing-`mm` hint is the install command its README shows
   (#3481).** When the SessionStart hook finds no `mm` on `PATH`, its hint now reads
   `uv tool install --python 3.12 memtomem==<version>`, the line in the plugin README and the
