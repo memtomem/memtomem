@@ -19,7 +19,14 @@ extras let the server open a store configured for a local ONNX model, and
 server starts when uv picks a Python older than 3.12. An existing entry whose
 `command` is `uvx`, whose `args` name `memtomem[<extra>]` and ask for no
 Python, hand-written or written by `mm init`, can stop that way: add
-`"--python", "3.12"` at the front of its `args`. The `env` block exposes
+`"--python", "3.12"` at the front of its `args`. The flag in turn needs a
+Python 3.12 that uv can find or download, for this entry and for the one
+`mm init --mcp kimi` writes when run from `uvx`: where uv may not download
+Python on its own (`python-downloads = "never"` or `"manual"` in its
+configuration) and only a newer Python is installed, the server stops with `No interpreter found for
+Python 3.12`. Then install a Python 3.12 first, or install memtomem with the
+Python you have (`uv tool install --python 3.13 'memtomem[all]'`) and set
+`"command": "memtomem-server"` with no `args`. The `env` block exposes
 `mem_update_coverage`, which the `memtomem-update` skill needs for its
 default incremental mode and for `full`; without that setting the skill
 stops before writing whenever a coverage call is due, while `topic` still

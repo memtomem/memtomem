@@ -2191,6 +2191,125 @@ class TestUvxExtraLaunchesAskForPython312:
         assert self._EXPECTED_FILES <= seen, sorted(self._EXPECTED_FILES - seen)
 
 
+def _heading_section(text: str, heading: str) -> str:
+    """Body under the one heading line equal to *heading*, up to the next heading of the
+    same or a higher level. Headings come from markdown-it-py's parse, so a shell comment
+    (``# User scope``) inside any fence is not one."""
+    from markdown_it import MarkdownIt
+
+    lines = text.splitlines()
+    headings = [
+        (token.map[0], int(token.tag[1:]))
+        for token in MarkdownIt("commonmark").parse(text)
+        if token.type == "heading_open" and token.map
+    ]
+    starts = [(i, level) for i, level in headings if lines[i].rstrip() == heading]
+    assert len(starts) == 1, f"{len(starts)} headings equal to {heading!r}; expected exactly one"
+    start, level = starts[0]
+    end = next((i for i, other in headings if i > start and other <= level), len(lines))
+    return "\n".join(lines[start + 1 : end])
+
+
+_PY312_NEEDS = "a Python 3.12 that uv can find or download"
+_PY312_NEEDS_KO = "uv가 찾거나 내려받을 수 있는 Python 3.12"
+_PY312_INSTALL = "install a Python 3.12"
+_PY312_INSTALL_KO = "Python 3.12를 설치"
+_PY313_TOOL_INSTALL = "uv tool install --python 3.13"
+
+
+class TestPython312CommandsSayWhatTheyNeed:
+    """Each guide that teaches a ``--python 3.12`` command says, in the section where the
+    reader first copies one, that uv has to find or download Python 3.12, and what to do when
+    it cannot (#3498): where uv may not download Python on its own, a machine with only a
+    newer Python stops with ``No interpreter found for Python 3.12``.
+
+    The table is the placement claim, read against the docs in review; the guard checks each
+    row's section exists, holds a ``uvx`` or ``uv tool install`` command passing
+    ``--python 3.12`` (the caveat's own mention of the flag does not count, so a row cannot
+    pass on a section whose commands are gone), and carries both the requirement and every
+    part of the remedy, links included."""
+
+    _ROWS = (
+        ("README.md", "### 1. Install", (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL)),
+        (
+            "docs/guides/getting-started.md",
+            "## Quickstart",
+            (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL),
+        ),
+        (
+            "docs/guides/getting-started.md",
+            "## Connect to your AI editor (manual)",
+            (_PY312_NEEDS, "(#prerequisites)"),
+        ),
+        (
+            "docs/guides/mcp-clients.md",
+            "### Add via command (`local` / `user`)",
+            (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL),
+        ),
+        (
+            "docs/guides/integrations/claude-code.md",
+            "### Option A: Install the safe base plugin",
+            (_PY312_NEEDS, _PY312_INSTALL, "(#option-b-register-the-mcp-server-manually)"),
+        ),
+        (
+            "docs/guides/integrations/claude-code.md",
+            "#### Add via command (`local` / `user`)",
+            (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL),
+        ),
+        (
+            "docs/guides/integrations/kimi-code.md",
+            "## Register the MCP server",
+            (
+                _PY312_NEEDS,
+                _PY312_INSTALL,
+                _PY313_TOOL_INSTALL,
+                '`"command": "memtomem-server"` with no `args`',
+            ),
+        ),
+        (
+            "docs/guides/integrations/opencode.md",
+            "### Manual MCP alternative",
+            (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL, '"command": ["memtomem-server"]'),
+        ),
+        (
+            "docs/guides/plugin-quickstart.md",
+            "## 2. Shared setup: initialize your user memory store once",
+            (_PY312_NEEDS, _PY312_INSTALL, "(mcp-clients.md)"),
+        ),
+        (
+            "docs/guides/vibe-coding-getting-started-ko.md",
+            "## 2. 공통 준비: 사용자 기억 저장소를 한 번 초기화",
+            (_PY312_NEEDS_KO, _PY312_INSTALL_KO, "(mcp-clients.md)"),
+        ),
+    )
+
+    @pytest.mark.parametrize(
+        ("path", "heading", "phrases"),
+        _ROWS,
+        ids=[f"{path}::{heading}" for path, heading, _ in _ROWS],
+    )
+    def test_section_states_requirement_and_remedy(
+        self, path: str, heading: str, phrases: tuple[str, ...]
+    ) -> None:
+        section = _heading_section(_read(_REPO_ROOT / path), heading)
+        assert any(
+            _PYTHON_312.search(unit) and (_UVX.search(unit) or "uv tool install" in unit)
+            for _, unit in _markdown_code_units(section)
+        ), f"{path} {heading!r} teaches no `--python 3.12` command; move the row"
+        prose = _unwrapped(section).casefold()  # a phrase may open a sentence
+        missing = [phrase for phrase in phrases if phrase.casefold() not in prose]
+        assert not missing, f"{path} {heading!r} lacks {missing}"
+
+    def test_getting_started_prerequisite_names_python_312(self) -> None:
+        section = _heading_section(_read(_GUIDES / "getting-started.md"), "## Prerequisites")
+        assert [_plain(cell) for cell in _table_row(section, "Python 3.12")] == [
+            "Python 3.12",
+            "[python.org](https://python.org), or let uv download it",
+            "uv python find 3.12",
+        ]
+        assert _PY312_NEEDS in _unwrapped(section)
+
+
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 _LINT_DOCS = (_REPO_ROOT / "CLAUDE.md", _REPO_ROOT / "CONTRIBUTING.md")
 

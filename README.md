@@ -90,7 +90,7 @@ uv tool install --python 3.12 'memtomem[all]'   # or: pipx install 'memtomem[all
 mm --version                                    # verify install
 ```
 
-`--python 3.12` has uv download Python 3.12 when none is installed; without it, uv can pick an older system Python and stop with `No solution found`. `[all]` bundles ONNX dense embeddings, the Korean tokenizer, the code chunker, and the Web UI (about 340 MB installed, before any model download). The Ollama and OpenAI embedding providers need no extra. A smaller install is under [Other install options](#minimal-install) below.
+`--python 3.12` has uv download Python 3.12 when none is installed (by default); without it, uv can pick an older system Python and stop with `No solution found`. The flag needs a Python 3.12 that uv can find or download: where uv may not download Python on its own (`python-downloads = "never"` or `"manual"` in its configuration), a machine with only a newer Python stops with `No interpreter found for Python 3.12`. Then install a Python 3.12 first (`uv python install 3.12` downloads one under `"manual"`, not under `"never"`), or install with the Python you have, such as `uv tool install --python 3.13 'memtomem[all]'`. `[all]` bundles ONNX dense embeddings, the Korean tokenizer, the code chunker, and the Web UI (about 340 MB installed, before any model download). The Ollama and OpenAI embedding providers need no extra. A smaller install is under [Other install options](#minimal-install) below.
 
 ### 2. Setup
 
