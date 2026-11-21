@@ -3,6 +3,13 @@
 CORE_VERSION = "0.7.12"
 MCP_REQUIREMENT = "memtomem[onnx]==0.7.12"
 TOOL_MODE = "core"
+LAUNCH_ARGS = [
+    "--python",
+    "3.12",
+    "--from",
+    "memtomem[onnx]==0.7.12",
+    "memtomem-server",
+]
 LAUNCH_ENV = {
     "MEMTOMEM_TOOL_MODE": "core",
     "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage",

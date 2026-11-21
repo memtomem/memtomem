@@ -55,7 +55,7 @@ Before `/plugin install`, review existing registrations in `/mcp`, then run
 the diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin registers an MCP server; it does
@@ -67,6 +67,8 @@ plus current/prospective risk and whether an existing registration can be reused
 Exit codes are `0` (no detected conflict), `1` (duplicate risk), and `2`
 (incomplete inspection). The prospective check uses this CLI release's generated
 plugin contract; an installed plugin is checked against its actual manifest.
+The marketplace can serve a plugin newer than that release, with a different
+launch command, so repeat the diagnostic after installing.
 It does not intercept Claude's installation command.
 
 ```
@@ -78,14 +80,14 @@ For project-scoped onboarding, run `claude plugin install memtomem@memtomem --sc
 from that project directory instead. The [plugin quickstart](../plugin-quickstart.md#3-path-a-install-the-claude-code-plugin)
 explains effective enablement and disabling a manual server only in that project.
 
-The plugin launches the server via an exact reviewed `uvx --from
-memtomem[onnx]==<version>` pin, so [uv](https://docs.astral.sh/uv/) must be on your
-PATH. BM25 works with the default `embedding.provider=none`; embeddings are
+The plugin launches the server via an exact reviewed
+`uvx --python 3.12 --from memtomem[onnx]==<version>` pin, so
+[uv](https://docs.astral.sh/uv/) must be on your PATH. BM25 works with the default `embedding.provider=none`; embeddings are
 optional.
 
 > **Already registered via `claude mcp add`?** What happens depends on
 > whether your manual entry launches the server with the **same command and
-> arguments** as the plugin — `uvx --from 'memtomem[onnx]==0.7.12' memtomem-server`
+> arguments** as the plugin — `uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' memtomem-server`
 > (environment variables are not compared; measured on Claude Code 2.1.218):
 >
 > - **Same command** — Claude Code suppresses the plugin-managed copy, your
@@ -94,8 +96,8 @@ optional.
 >   the manual entry wins, including its environment.
 > - **Different command** — and the manual registrations this guide and
 >   [mcp-clients.md](../mcp-clients.md) teach (`memtomem-server` from your
->   environment, or `uvx --isolated --from "memtomem[all]==0.7.12"
->   memtomem-server`) *are* different — **duplicate registrations are possible**,
+>   environment, or `uvx --python 3.12 --isolated --from
+>   "memtomem[all]==0.7.12" memtomem-server`) *are* different — **duplicate registrations are possible**,
 >   exposing tools under
 >   `mcp__memtomem__mem_*` plus `mcp__plugin_memtomem_memtomem__mem_*`.
 >
@@ -186,7 +188,7 @@ Both `-s local` and `-s user` write to `~/.claude.json` — no need to edit
 that file by hand.
 
 The direct command preserves the extras in the persistent environment used by
-`mm`. For a no-install setup, use `uvx --isolated --from
+`mm`. For a no-install setup, use `uvx --python 3.12 --isolated --from
 "memtomem[all]==0.7.12" memtomem-server`. If an older user-scope registration
 already exists, replace it explicitly:
 
@@ -316,7 +318,7 @@ only when those side effects are wanted:
 Install the exact CLI version expected by the automation bundle:
 
 ```bash
-uv tool install 'memtomem==0.7.12'
+uv tool install --python 3.12 memtomem==0.7.12
 ```
 
 That command installs no extras. If your store uses a local ONNX model (the

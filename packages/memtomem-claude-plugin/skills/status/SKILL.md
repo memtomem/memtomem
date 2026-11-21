@@ -23,7 +23,7 @@ registers an MCP server, not the CLI. So offer the pinned form, which works
 either way:
 
 ```bash
-uvx --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
 ```
 
 This diagnostic runs in its own environment. It does not install dependencies

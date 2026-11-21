@@ -28,6 +28,114 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   invalid id, the row's `source` and `chunk_id` are reported as unusable and execution stops
   without falling back to another record, aligning with torn and mismatch failure handling.
 
+- **`mm init` on a `uv tool` install names `memtomem[all]` for a missing extra, so following
+  it keeps the extras the tool environment already has (#3495).** With one extra missing, the
+  hint and the install the wizard offers at the end were `uv tool install --reinstall
+  "memtomem[<extra>]"`. `--reinstall` keeps only the extras it names: with uv 0.12.13, running
+  it for `korean` on an install made from `memtomem[onnx]` removed `fastembed` and
+  `onnxruntime`. Both now name `[all]`, as the uvx re-run from #3489 does. The lines around the hints
+  no longer assume an install: the ONNX choice says it needs the `onnx` extra instead of
+  `pip install memtomem[onnx]`, the `kiwipiepy` warning drops `Run: pip install kiwipiepy`, the
+  summary says what fails "while it is missing" rather than "until installed", and the uvx
+  re-run ends in `memtomem init` (with `--non-interactive <same options>` on a scripted run)
+  instead of a literal `...`. A uvx summary prints that command once instead of twice. The
+  hint for a source or project checkout (`uv sync --extra …`) is unchanged.
+
+- **The Claude Code, Codex and OpenCode plugins ask uv for Python 3.12 when they start the
+  server (#3488).** Their launch command was `uvx --from memtomem[onnx]==<version>
+  memtomem-server`. uv resolves a requirement that names an extra against the first Python it
+  finds, so on a machine where that is older than 3.12 and uv manages no interpreter of its own
+  (a Mac with only the Command Line Tools' Python 3.9, for one) the command stopped with
+  `No solution found` and the plugin's server did not start. The launch is now
+  `uvx --python 3.12 --from …`, the interpreter request the Cursor, Antigravity, Hermes and
+  OpenClaw bundles already made: uv downloads Python 3.12 when it finds none, unless its
+  configuration disables Python downloads. The plugin quickstart (English and Korean), the
+  Claude Code guide, both plugin READMEs and the Claude plugin's `setup` and `status` skills
+  pass the same flag in their `uvx … mm …` commands, and the error for a missing optional
+  module names the same launch. Two things change for an existing setup. A manual Claude Code
+  registration copied from the old launch line no longer has the plugin's arguments, so Claude
+  Code no longer suppresses the plugin's copy of the server; `mm doctor --claude-mcp` reports
+  the difference and `/mcp` shows which connections started. And where uv is configured never
+  to download Python, the server now needs a Python 3.12 on the machine: a newer one alone was
+  enough before and is not now.
+
+- **The manual `uvx` registrations the docs, the Web UI setup guide and the server's printed
+  example give ask uv for Python 3.12 (#3493).** They showed
+  `uvx --isolated --from memtomem[all]==<version> memtomem-server`, which has the same failure
+  as the plugins' old launch: with uv 0.12.13 on macOS, an empty `HOME` and
+  `/usr/bin/python3` 3.9.6 first on `PATH`, `uv tool run --isolated --from
+  'memtomem[all]==0.7.12' memtomem-server --help` exited 1 with "the current Python version
+  (3.9.6) does not satisfy Python>=3.12", and with `--python 3.12` it printed the help. They
+  now read `uvx --python 3.12 --isolated --from …` (`"--python", "3.12"` first in a JSON or
+  TOML `args` array, right after `"uvx"` in OpenCode's `command` array) in the README, the
+  getting-started, MCP clients, Claude Code, Kimi Code and OpenCode guides, the OpenCode
+  plugin README, the Web UI's Claude Code, Antigravity and Codex snippets, and the help
+  `memtomem-server` prints when run in a terminal. The AnyIO guide's
+  terminal command, which resolves the default plugin's package specification with this
+  terminal's uv configuration, asks for 3.12 too, as that plugin's launch does; without the
+  flag it exited 1 on the same setup. The Kimi Code guide no longer says its entry matches what
+  `mm init` writes, and says to put `"--python", "3.12"` at the front of a `uvx` entry's `args`
+  that name an extra and ask for no Python. Commands that name no extra are unchanged: on the
+  same setup `uv tool run --from 'memtomem==0.7.12' mm --version` and
+  `uv tool run --from memtomem mm --version` each exited 0 and printed the version. As with
+  #3488, where uv is configured never to download Python, a copied registration needs a
+  Python 3.12 on the machine.
+
+- **A contended pid-file probe withholds the pid when its two reads differ (#3423).**
+  `probe_pid_file` reads the pid file before its lock attempt, and on contention it returned
+  the pid it had read. If the old holder had exited and a new one had locked and rewritten the
+  same file in between, `mm upgrade`, `mm web stop` and `mm daemon stop` were given the old
+  holder's pid to signal, a dead process or one that had reused its pid. A contended probe now
+  reads the file again. If the two reads differ, that probe reports the holder as running
+  without a pid, so no signal is sent on its answer: `mm web stop` and `mm daemon stop` stop
+  and ask you to retry. `mm web stop` also refuses in this case on Windows, where it would
+  otherwise take the pid from `web.json`, which the new Web UI rewrites only after `web.pid`.
+  For the same reason `mm web status` shows the pid, port and start time as unknown in this
+  case instead of filling them in from `web.json`. Two reads that agree still do not prove the
+  bytes are the new holder's: one that has locked but not yet rewritten the file leaves its
+  predecessor's pid in place for both.
+
+- **`mm init` run from `uvx` asks uv for Python 3.12 in the commands it suggests (#3485).** Its
+  closing "For repeat use" hint, and the error `mm init` raises when it cannot determine the
+  installed version for the isolated MCP launch, now read
+  `uv tool install --python 3.12 "memtomem[all]"`, the README Quick Start command. The uvx
+  re-invocation hint for a missing extra gained the same flag (its requirement is
+  `memtomem[all]` since #3489, the next entry). Without the flag, uv 0.12.13 on
+  macOS resolved `memtomem[all]` (installing) and `memtomem[onnx]` (re-invoking) against
+  `/usr/bin/python3` 3.9.6 first on `PATH` and stopped. This change leaves the `--reinstall`
+  hints for an existing tool environment as they were; #3495 changes their requirement.
+
+- **Outside a workspace, `mm init` run from `uvx` writes an MCP launch that asks uv for Python
+  3.12, and its missing-extra hints are a `uvx` command (#3489).** The MCP server command it
+  registers with Claude Code, or writes to `./.mcp.json` or Kimi Code's `mcp.json`, was
+  `uvx --isolated --from memtomem[all]==<version> memtomem-server`. It is now
+  `uvx --python 3.12 --isolated --from memtomem[all]==<version> memtomem-server`. With uv 0.12.13
+  on macOS and `/usr/bin/python3` 3.9.6 first on `PATH`, the old launch run with `--help`
+  exited 1 with `No solution found`, and the new one printed the server's help. One setup goes
+  the other way: with uv's Python downloads turned off and only a Python newer than 3.12 visible
+  to uv (3.14 in the run), the old launch printed the help and the new one stops with
+  `No interpreter found for Python 3.12`. The hint for a missing extra, in the wizard's ONNX
+  step and in the closing summary, was `uv tool install --reinstall "memtomem[<extra>]"`: an
+  install into a separate tool environment, not the `uvx` command run with the extra. It is
+  now `uvx --python 3.12 --from "memtomem[all]" memtomem init`, and when
+  `mm init --non-interactive` refuses for a missing extra the error reads `Re-run with the
+  extras: uvx --python 3.12 --from "memtomem[all]" memtomem init --non-interactive <same
+  options>` (the command's final wording is from #3495). The requirement is `[all]` whichever
+  extra is missing, and the summary prints that one command, where it used to add a second
+  re-invocation line naming the missing extra: a re-run that names only that one can come up
+  without another the run already had. With uv 0.12.13, memtomem 0.7.12 and
+  `--provider onnx --tokenizer kiwipiepy`, a run from `"memtomem[onnx]==0.7.12"` was refused
+  for `korean`, one from `"memtomem[korean]==0.7.12"` was refused for `onnx`, and one from
+  `"memtomem[all]==0.7.12"` wrote the config. From a source or project workspace, and for a
+  `uv tool` install, the MCP launch is unchanged; the `uv tool` hint changes in #3495.
+
+- **The automation plugin's missing-`mm` hint is the install command its README shows
+  (#3481).** When the SessionStart hook finds no `mm` on `PATH`, its hint now reads
+  `uv tool install --python 3.12 memtomem==<version>`, the line in the plugin README and the
+  Claude Code guide. The hint's previous command had no `--python 3.12`. The README and the guide
+  now write that command without single quotes, which Windows Command Prompt would pass through
+  as part of the requirement. The hint for an `mm` of the wrong version is unchanged.
+
 - **`mem_consolidate_apply` refuses to write a summary into a file that already exists
   (#3474).** Each summary goes to a file named for that apply alone
   (`consolidated/<date>-<source>-run<id>-<12 hex>.md`, #2802), and the summary's links to its

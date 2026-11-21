@@ -3,6 +3,8 @@
     "memtomem": {
       "command": "uvx",
       "args": [
+        "--python",
+        "3.12",
         "--from",
         "memtomem[onnx]==0.7.12",
         "memtomem-server"

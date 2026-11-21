@@ -47,16 +47,50 @@ saved 2 items · commit-derived: 1 · session-derived: 1
 - **Explicit by default.** Memory operations run on your CLI or MCP calls (`mm add`, `mem_add`, `mem_index`). Optional client hooks are separate, removable integrations, not a hidden runtime default.
 - **One store, many tools.** Claude Code, Codex CLI, OpenCode, Kimi Code, and Antigravity share one local store, and any MCP client can search it. Hermes Agent joins the same store through its [plugin and memory provider](#agent-frameworks), and LangGraph apps get the same search pipeline over a store of their own with [`langchain-memtomem`](packages/langchain-memtomem/). [memtomem-stm](https://github.com/memtomem/memtomem-stm) is a separate, optional proxy that surfaces memories proactively.
 
+## Private by design
+
+The memtomem server runs on your machine, and its database and Markdown files stay there. With the defaults (BM25-only search, no LLM, no reranker) the server sends none of your note text anywhere. Some optional providers send text to an outside service, and each one is off until you configure it; a request to a loopback address can still leave your machine if your environment routes HTTP through a proxy or the local server forwards the request to a hosted model. Separately, the MCP tools return note text to the AI client that called them, and memtomem does not control what that client sends to its own model provider. [What leaves your machine](docs/guides/configuration.md#what-leaves-your-machine) lists what each setting sends, when, and where.
+
+## Set it up from your coding agent
+
+Paste a prompt into Claude Code, Codex CLI, or another coding agent. The agent runs the [Quick Start](#quick-start) commands for you, asks before the choices that are yours, and shows you the result.
+
+**Install and verify:**
+
+```text
+Install memtomem on this computer by following
+https://github.com/memtomem/memtomem#quick-start.
+If a ~/.memtomem folder already exists, memtomem is already set up here: stop and
+tell me, and change nothing.
+Otherwise ask me which preset to use (minimal, english, or korean) and which folder
+should hold my memories, then run `uv tool install --python 3.12 'memtomem[all]'` and
+`mm init --non-interactive --preset <preset> --memory-dir <folder> --mcp skip`.
+Verify with `mm add "memtomem setup check" --file setup-check.md` (pick another file
+name if that one exists) and a `mm search` that finds it, and show me both outputs.
+If a command fails, stop and show me the error instead of working around it.
+Do not edit, move, or delete my existing notes, and do not install any hooks.
+Finish by telling me which plugin under "Works with" connects this agent.
+```
+
+**Something looks wrong:**
+
+```text
+Check my memtomem setup with read-only commands: run `mm doctor` and `mm memory doctor`,
+then list each finding with the command that would fix it. Ask me before you run any fix.
+```
+
+Prefer to run the commands yourself? The Quick Start below is the same path, step by step.
+
 ## Quick Start
 
 ### 1. Install
 
 ```bash
-uv tool install 'memtomem[all]'       # or: pipx install 'memtomem[all]'
-mm --version                          # verify install
+uv tool install --python 3.12 'memtomem[all]'   # or: pipx install 'memtomem[all]'
+mm --version                                    # verify install
 ```
 
-`[all]` bundles ONNX dense embeddings, the Korean tokenizer, the code chunker, and the Web UI (about 340 MB installed, before any model download). The Ollama and OpenAI embedding providers need no extra. A smaller install is under [Other install options](#minimal-install) below.
+`--python 3.12` has uv download Python 3.12 when none is installed; without it, uv can pick an older system Python and stop with `No solution found`. `[all]` bundles ONNX dense embeddings, the Korean tokenizer, the code chunker, and the Web UI (about 340 MB installed, before any model download). The Ollama and OpenAI embedding providers need no extra. A smaller install is under [Other install options](#minimal-install) below.
 
 ### 2. Setup
 
@@ -106,7 +140,7 @@ mm web stop           # stop the tracked Web UI process
 <a id="minimal-install"></a>
 **Minimal** (no bundled model, about 50 MB):
 ```bash
-uv tool install memtomem             # no extras — no local ONNX model, Web UI or Korean tokenizer until you add them; Ollama/OpenAI embeddings still work
+uv tool install --python 3.12 memtomem   # no extras — no local ONNX model, Web UI or Korean tokenizer until you add them; Ollama/OpenAI embeddings still work
 ```
 Opt in later per feature: `uv tool install --reinstall 'memtomem[onnx,web]'` (see the [extras table](docs/guides/getting-started.md#optional-extras)). List every extra you want to keep, because `--reinstall` replaces the whole set. A plain `mm upgrade` keeps the extras it detects from the current install, but an explicit `mm upgrade --extras` list must name the complete set too.
 
@@ -117,7 +151,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 
 **No install** (uvx on demand):
 ```bash
-claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- uvx --isolated --from "memtomem[all]==0.7.12" memtomem-server
+claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- uvx --python 3.12 --isolated --from "memtomem[all]==0.7.12" memtomem-server
 ```
 
 </details>
@@ -135,6 +169,14 @@ claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- u
 ## Works with
 
 Everything here runs on the [**memtomem**](https://pypi.org/project/memtomem/) core package: the MCP server, CLI, Web UI, hybrid search, and storage. [**memtomem-stm**](https://github.com/memtomem/memtomem-stm) is a separate, optional STM proxy that surfaces memories proactively by intercepting tool calls.
+
+| Use it from | For | Start here |
+|---|---|---|
+| **A coding agent** | Saving and resuming project memory across sessions and tools | [Coding agents](#coding-agents) |
+| **Any MCP client** | Searching and writing the store with nine core tools | [MCP Client Setup](docs/guides/mcp-clients.md) |
+| **The terminal** | Indexing, health checks, scripts (`--json` output) | [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) |
+| **A browser** | Browsing sources, tags, the timeline, and duplicates (`mm web`) | [Web UI](docs/guides/reference/operations.md) |
+| **Agent frameworks** | LangGraph stores and Hermes Agent memory | [Agent frameworks](#agent-frameworks) |
 
 ### Coding agents
 

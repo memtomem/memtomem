@@ -497,12 +497,16 @@ def _print_direct_stdio_help() -> None:
                 "",
                 "Configure your MCP client with:",
                 "  command: uvx",
-                f'  args: ["--isolated", "--from", "memtomem[all]=={_memtomem_version}", "memtomem-server"]',
+                # --python 3.12: without it the launch can stop before the server starts
+                # when uv picks a Python older than 3.12.
+                '  args: ["--python", "3.12", "--isolated", "--from", '
+                f'"memtomem[all]=={_memtomem_version}", "memtomem-server"]',
                 f'  env: {{"MEMTOMEM_EXTRA_TOOLS": "{extra_tools}"}}',
                 "",
                 "Example:",
                 f"  claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS={extra_tools} "
-                f"-- uvx --isolated --from 'memtomem[all]=={_memtomem_version}' memtomem-server",
+                "-- uvx --python 3.12 --isolated "
+                f"--from 'memtomem[all]=={_memtomem_version}' memtomem-server",
                 "",
                 "For a manually started network server, use:",
                 "  memtomem-server --transport sse --host 127.0.0.1 --port 8000 --url http://127.0.0.1:8000/sse",

@@ -35,11 +35,43 @@ mode: incremental · saved 2 items · commit-derived: 1 · session-derived: 1
 
 `handoff save` writes one Markdown record into the project's own `.memtomem/memories.local`; `brief` only reads; `update` saves decisions, bug fixes, and preferences as separate items. All three run only when you invoke them. The [Project workflows](https://github.com/memtomem/memtomem/blob/main/docs/guides/project-workflows.md) guide has each one's modes, checks, and names per host.
 
+## Private by design
+
+The memtomem server runs on your machine, and its database and Markdown files stay there. With the defaults (BM25-only search, no LLM, no reranker) the server sends none of your note text anywhere. Some optional providers send text to an outside service, and each one is off until you configure it; a request to a loopback address can still leave your machine if your environment routes HTTP through a proxy or the local server forwards the request to a hosted model. Separately, the MCP tools return note text to the AI client that called them, and memtomem does not control what that client sends to its own model provider. [What leaves your machine](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#what-leaves-your-machine) lists what each setting sends, when, and where.
+
+## Set it up from your coding agent
+
+Paste a prompt into Claude Code, Codex CLI, or another coding agent. The agent runs the [Quick Start](https://github.com/memtomem/memtomem#quick-start) commands for you, asks before the choices that are yours, and shows you the result.
+
+**Install and verify:**
+
+```text
+Install memtomem on this computer by following
+https://github.com/memtomem/memtomem#quick-start.
+If a ~/.memtomem folder already exists, memtomem is already set up here: stop and
+tell me, and change nothing.
+Otherwise ask me which preset to use (minimal, english, or korean) and which folder
+should hold my memories, then run `uv tool install --python 3.12 'memtomem[all]'` and
+`mm init --non-interactive --preset <preset> --memory-dir <folder> --mcp skip`.
+Verify with `mm add "memtomem setup check" --file setup-check.md` (pick another file
+name if that one exists) and a `mm search` that finds it, and show me both outputs.
+If a command fails, stop and show me the error instead of working around it.
+Do not edit, move, or delete my existing notes, and do not install any hooks.
+Finish by telling me which plugin under "Works with" connects this agent.
+```
+
+**Something looks wrong:**
+
+```text
+Check my memtomem setup with read-only commands: run `mm doctor` and `mm memory doctor`,
+then list each finding with the command that would fix it. Ask me before you run any fix.
+```
+
 ## Quick Start
 
 ```bash
 # 1. Install memtomem with all features (Python 3.12+)
-uv tool install 'memtomem[all]'  # or: pipx install 'memtomem[all]'
+uv tool install --python 3.12 'memtomem[all]'  # or: pipx install 'memtomem[all]'
 mm --version
 
 # 2. Configure storage, search, and optional MCP registration

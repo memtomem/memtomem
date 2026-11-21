@@ -21,7 +21,7 @@ from typing import Any
 
 import click
 
-from memtomem._claude_plugin_contract import LAUNCH_ENV, MCP_REQUIREMENT
+from memtomem._claude_plugin_contract import LAUNCH_ARGS, LAUNCH_ENV
 
 
 @dataclass
@@ -475,7 +475,7 @@ def _inspect_claude_mcp() -> Report:
         if plugins
         else {
             "command": "uvx",
-            "args": ["--from", MCP_REQUIREMENT, "memtomem-server"],
+            "args": list(LAUNCH_ARGS),
             "env": dict(LAUNCH_ENV),
         }
     )

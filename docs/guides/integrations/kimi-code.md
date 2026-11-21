@@ -13,9 +13,13 @@ environment variable is set. memtomem `0.4.0` and later write that path, so
 Releases up to and including `0.3.14` wrote the legacy `~/.kimi/mcp.json`
 layout, which current Kimi Code does not read — move the entry if you
 registered with one of those. To write the file by hand instead, it needs
-exactly one `memtomem` entry. Its launch matches what `mm init` writes when
-run through `uvx` — the `[all]` extras let the server open a store
-configured for a local ONNX model. The `env` block exposes
+exactly one `memtomem` entry. Its launch is the no-install one: the `[all]`
+extras let the server open a store configured for a local ONNX model, and
+`--python 3.12` is there because without it the launch can stop before the
+server starts when uv picks a Python older than 3.12. An existing entry whose
+`command` is `uvx`, whose `args` name `memtomem[<extra>]` and ask for no
+Python, hand-written or written by `mm init`, can stop that way: add
+`"--python", "3.12"` at the front of its `args`. The `env` block exposes
 `mem_update_coverage`, which the `memtomem-update` skill needs for its
 default incremental mode and for `full`; without that setting the skill
 stops before writing whenever a coverage call is due, while `topic` still
@@ -29,7 +33,7 @@ block, so add the `MEMTOMEM_EXTRA_TOOLS` line by hand to an entry it wrote:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--isolated", "--from", "memtomem[all]==0.7.12", "memtomem-server"],
+      "args": ["--python", "3.12", "--isolated", "--from", "memtomem[all]==0.7.12", "memtomem-server"],
       "env": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }

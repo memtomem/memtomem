@@ -727,7 +727,7 @@ and Web keeps HTTP 200 so per-case diagnostics remain accessible.
 Ordinary non-exhaustive search is not equivalent evaluation evidence. This
 reporting change does not alter experiment command output or exit policy.
 
-Install the CLI: `uv tool install 'memtomem[all]'` (PyPI) or `uv run mm ...` (source).
+Install the CLI: `uv tool install --python 3.12 'memtomem[all]'` (PyPI) or `uv run mm ...` (source).
 All commands support `-h` and `--help`.
 
 ---
