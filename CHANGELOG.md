@@ -19,6 +19,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The Claude Code, Codex and OpenCode plugins ask uv for Python 3.12 when they start the
+  server (#3488).** Their launch command was `uvx --from memtomem[onnx]==<version>
+  memtomem-server`. uv resolves a requirement that names an extra against the first Python it
+  finds, so on a machine where that is older than 3.12 and uv manages no interpreter of its own
+  (a Mac with only the Command Line Tools' Python 3.9, for one) the command stopped with
+  `No solution found` and the plugin's server did not start. The launch is now
+  `uvx --python 3.12 --from …`, the interpreter request the Cursor, Antigravity, Hermes and
+  OpenClaw bundles already made: uv downloads Python 3.12 when it finds none, unless its
+  configuration disables Python downloads. The plugin quickstart (English and Korean), the
+  Claude Code guide, both plugin READMEs and the Claude plugin's `setup` and `status` skills
+  pass the same flag in their `uvx … mm …` commands, and the error for a missing optional
+  module names the same launch. Two things change for an existing setup. A manual Claude Code
+  registration copied from the old launch line no longer has the plugin's arguments, so Claude
+  Code no longer suppresses the plugin's copy of the server; `mm doctor --claude-mcp` reports
+  the difference and `/mcp` shows which connections started. And where uv is configured never
+  to download Python, the server now needs a Python 3.12 on the machine: a newer one alone was
+  enough before and is not now.
+
 - **A contended pid-file probe withholds the pid when its two reads differ (#3423).**
   `probe_pid_file` reads the pid file before its lock attempt, and on contention it returned
   the pid it had read. If the old holder had exited and a new one had locked and rewritten the

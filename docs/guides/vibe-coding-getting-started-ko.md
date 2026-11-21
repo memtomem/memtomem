@@ -50,7 +50,9 @@ uvx --version
 명령을 찾지 못하면 [uv 공식 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를
 따른 뒤 터미널을 새로 여세요. memtomem은 Python 3.12 이상 환경에서
 실행되며, 첫 실행에는 정확히 고정된 패키지를 내려받을 네트워크 연결이
-필요합니다. 임베딩 모델이나 API key는 필요하지 않습니다.
+필요합니다. 아래 명령은 `--python 3.12`를 넘기므로, Python 3.12를 찾지 못하면
+uv가 내려받습니다. 단, uv 설정에서 Python 다운로드를 꺼 둔 경우는 예외입니다.
+임베딩 모델이나 API key는 필요하지 않습니다.
 
 그다음 평소 쓰는 도구 **하나만** 확인합니다.
 
@@ -76,8 +78,8 @@ Claude Code와 Codex CLI 중 어느 쪽을 쓰더라도 완전히 새 환경에�
 기존 ONNX/E5 설정이 보이는 것은 정상입니다. 이 체험을 위해 기존 모델이나 DB를 바꾸지 않습니다.
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.12' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.7.12' mm status
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' mm init --preset minimal --non-interactive --mcp skip
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' mm status
 ```
 
 `--mcp skip`은 다음 단계의 플러그인이 MCP 연결을 제공하므로 다른
@@ -100,7 +102,7 @@ database path는 나중에 두 도구가 같은 저장소를 보는지 확인할
 터미널을 **온보딩 프로젝트 루트**에서 엽니다. 다음 진단도 같은 폴더에서 실행합니다.
 
 ```bash
-uvx --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
 ```
 
 플러그인은 `mm`을 PATH에 설치하지 않으므로 위의 고정 버전 명령을 사용합니다.
@@ -109,6 +111,11 @@ CLI를 별도로 설치했다면 `mm doctor --claude-mcp`도 같은 진단입니
 이 명령은 MCP **등록 충돌**을 확인합니다. 종료 코드 `0`은 감지된 충돌 없음,
 `1`은 중복 위험, `2`는 확인 불완전입니다. `0`이 실제 MCP 연결 성공을 뜻하지는 않습니다.
 별도 `[all]` 환경에서 진단해도 플러그인 서버의 패키지를 설치하거나 고치지는 않습니다.
+
+플러그인 설치 전에는 이 진단이 실행한 릴리스가 알고 있는 플러그인 기동 명령과 기존 등록을
+비교합니다. 마켓플레이스의 플러그인이 그 릴리스보다 새것이면 기동 명령이 다를 수 있으므로,
+여기서 나온 `0`은 예측입니다. 설치 후에 진단을 한 번 더 실행하세요. 그때는 설치된
+플러그인의 실제 명령과 비교합니다.
 
 기존 수동 등록이 있으면 Claude Code의 `/mcp`에서 이름·범위와 플러그인 서버를 구분합니다.
 플러그인을 사용할 프로젝트에서는 **수동 서버만 이 프로젝트에서 비활성화**합니다.
@@ -267,7 +274,7 @@ $memtomem-setup 스킬로 /path/to/project/docs를 인덱싱하고 검색까지 
 해당하는 기억은 실제 Git 저장소 루트에서 별도 초기화합니다.
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.12' mm mem init --scope project_local
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' mm mem init --scope project_local
 ```
 
 이 명령은 Git에 올라가지 않는 로컬 기억 계층을 만들고 등록합니다. 실행

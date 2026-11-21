@@ -728,7 +728,10 @@ class TestPluginManualCoexistenceCallout:
             # ``test_plugin_readme_fresh_env_blocks_have_no_bare_mm`` holds.
             # Compared whole rather than by substring, because the pinned line
             # itself ends in "mm doctor --claude-mcp".
-            assert f'uvx --from "memtomem[all]=={version}" mm doctor --claude-mcp' in fenced
+            assert (
+                f'uvx --python 3.12 --from "memtomem[all]=={version}" mm doctor --claude-mcp'
+                in fenced
+            )
             assert "mm doctor --claude-mcp" not in fenced
             # The shorthand still has to be mentioned, in prose, for readers
             # who do have the CLI.
@@ -755,8 +758,36 @@ class TestPluginManualCoexistenceCallout:
         # Collapse prose wrapping so the phrase pins don't depend on line breaks.
         flat = " ".join(mcp_clients.split())
         assert "differ from the plugin's pinned launch command" in flat
-        assert "runs **two** servers against the same store" in flat
+        assert "can run **two** servers against the same store" in flat
+        assert "`/mcp` shows which are connected" in flat
         assert "integrations/claude-code.md" in flat
+
+    def test_displayed_plugin_launch_is_the_one_the_plugin_ships(self) -> None:
+        # Both guides show the plugin's launch so a reader can compare a manual entry
+        # with it; a command the plugin no longer runs makes that comparison wrong.
+        manifest = json.loads(_read(_REPO_ROOT / "packages/memtomem-claude-plugin/.mcp.json"))
+        server = manifest["mcpServers"]["memtomem"]
+        words = [f"'{arg}'" if "[" in arg else arg for arg in server["args"]]
+        launch = f"`{server['command']} {' '.join(words)}`"
+        for path in (_GUIDES / "mcp-clients.md", _INTEGRATIONS / "claude-code.md"):
+            flat = " ".join(_read(path).split())
+            assert launch in flat, f"{path.name} does not show the shipped launch {launch}"
+
+    def test_preinstall_diagnostic_is_a_prediction_to_repeat_after_installing(self) -> None:
+        # Before installation the check knows only the launch its own release bundles;
+        # the marketplace plugin can be newer (#3488), so every surface that offers the
+        # check says to run it again once the plugin is installed.
+        workflows = _REPO_ROOT / "packages" / "memtomem-plugin-assets" / "workflows"
+        for path, phrase in (
+            (_PLUGIN_QUICKSTART, "Run the diagnostic again after installing"),
+            (_VIBE_GUIDE, "설치 후에 진단을 한 번 더 실행하세요"),
+            (_PLUGIN_README, "repeat the check after installing"),
+            (_INTEGRATIONS / "claude-code.md", "repeat the diagnostic after installing"),
+            (workflows / "setup.claude.md", "repeat the diagnostic after installation"),
+            (workflows / "status.claude.md", "repeat the diagnostic after installation"),
+        ):
+            flat = " ".join(_read(path).split())
+            assert phrase in flat, f"{path.relative_to(_REPO_ROOT)} lost the post-install repeat"
 
 
 class TestNoJsoncFenceInPublicGuides:
@@ -1451,10 +1482,11 @@ class TestPluginQuickstarts:
     def test_fresh_store_bootstrap_is_shared_and_precedes_client_branches(self) -> None:
         version = _plugin_contract()["core"]["version"]
         bootstrap = (
-            f"uvx --from 'memtomem[onnx]=={version}' mm init "
+            f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm init "
             "--preset minimal --non-interactive --mcp skip"
         )
-        status = f"uvx --from 'memtomem[onnx]=={version}' mm status"
+        status = f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm status"
+        project_store = f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm mem init --scope project_local"
 
         guides = tuple(locale.path for locale in _QUICKSTARTS)
         for path in (*guides, _PLUGIN_README, _CODEX_PLUGIN_README):
@@ -1462,6 +1494,11 @@ class TestPluginQuickstarts:
             name = path.relative_to(_REPO_ROOT)
             assert text.count(bootstrap) == 1, f"{name} must keep exactly one shared bootstrap"
             assert status in text, f"{name} lost the bootstrap status check"
+            assert project_store in text, f"{name} lost the project store command"
+            # uv resolves a requirement that names an extra against the first Python it
+            # finds and stops when that one is older than 3.12 (#3488), so no command
+            # in these four files runs uvx without the interpreter request.
+            assert "uvx --from" not in text, f"{name} runs uvx without `--python 3.12`"
             # Every documented `mm init` (as opposed to `mm mem init`) must carry
             # `--mcp skip` — the plugin supplies the MCP server, so a bootstrap
             # variant without it would register a second server.

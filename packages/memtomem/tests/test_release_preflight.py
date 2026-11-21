@@ -1564,16 +1564,34 @@ def _pypi_metadata(version="0.3.6", description=None):
     }
 
 
+_OPENCODE_LAUNCH_LINE = (
+    'export const MCP_LAUNCH_ARGS = ["--python", "3.12", "--from", "memtomem[onnx]==0.3.6", '
+    '"memtomem-server"] as const;\n'
+)
+
+
+_OPENCODE_LAUNCH_MULTILINE = (
+    "export const MCP_LAUNCH_ARGS = [\n"
+    '  "--python", "3.12",\n'
+    '  "--from", "memtomem[onnx]==0.3.6",\n'
+    '  "memtomem-server",\n'
+    "] as const;\n"
+)
+
+
 def _opencode_repo(tmp_path):
     repo = _repo(tmp_path)
     contract = repo / "packages/memtomem-plugin-assets/contract.toml"
     contract.parent.mkdir(parents=True)
-    contract.write_text('[core]\nversion = "0.3.6"\nmcp_extras = ["onnx"]\n', encoding="utf-8")
+    contract.write_text(
+        '[core]\nversion = "0.3.6"\nmcp_extras = ["onnx"]\n[hermes]\npython = "3.12"\n',
+        encoding="utf-8",
+    )
     generated = repo / "packages/opencode-memtomem/src/generated.ts"
     generated.parent.mkdir(parents=True)
     generated.write_text(
         'export const CORE_VERSION = "0.3.6";\n'
-        'export const MCP_REQUIREMENT = "memtomem[onnx]==0.3.6";\n',
+        'export const MCP_REQUIREMENT = "memtomem[onnx]==0.3.6";\n' + _OPENCODE_LAUNCH_LINE,
         encoding="utf-8",
     )
     return repo
@@ -1787,7 +1805,7 @@ def test_opencode_refuses_pin_drift_before_network(tmp_path, change):
     if change == "version":
         text = text.replace('CORE_VERSION = "0.3.6"', 'CORE_VERSION = "0.3.7"')
     elif change == "requirement":
-        text = text.replace("memtomem[onnx]", "memtomem[all]")
+        text = text.replace('MCP_REQUIREMENT = "memtomem[onnx]', 'MCP_REQUIREMENT = "memtomem[all]')
     elif change == "duplicate":
         text += 'export const CORE_VERSION = "0.3.6";\n'
     elif change == "missing":
@@ -1796,6 +1814,37 @@ def test_opencode_refuses_pin_drift_before_network(tmp_path, change):
         (repo / "packages/memtomem-plugin-assets/contract.toml").write_text("[core]\n")
     generated.write_text(text)
     with pytest.raises(rp.ReleaseCheckError):
+        rp.validate_opencode_pypi(repo, fetch_json=lambda *_: pytest.fail("network called"))
+
+
+@pytest.mark.parametrize(
+    "launch_line",
+    [
+        # Only the array the server launches from drifts; the two scalar constants agree.
+        _OPENCODE_LAUNCH_LINE.replace("==0.3.6", "==0.3.7"),
+        _OPENCODE_LAUNCH_LINE.replace("[onnx]", "[all]"),
+        _OPENCODE_LAUNCH_LINE.replace('"--python", "3.12", ', ""),
+        _OPENCODE_LAUNCH_LINE.replace('"3.12"', '"3.13"'),
+        _OPENCODE_LAUNCH_LINE.replace('"memtomem-server"', '"memtomem"'),
+        _OPENCODE_LAUNCH_LINE.replace('"memtomem-server"]', '"memtomem-server"'),
+        _OPENCODE_LAUNCH_LINE * 2,
+        "",
+        # The expected line survives only in a comment; the live export differs.
+        "/*\n"
+        + _OPENCODE_LAUNCH_LINE
+        + "*/\n"
+        + _OPENCODE_LAUNCH_MULTILINE.replace("3.12", "3.13"),
+        # Not the renderer's shape, even with the right values.
+        _OPENCODE_LAUNCH_MULTILINE,
+    ],
+)
+def test_opencode_refuses_launch_argument_drift_before_network(tmp_path, launch_line):
+    repo = _opencode_repo(tmp_path)
+    generated = repo / "packages/opencode-memtomem/src/generated.ts"
+    text = generated.read_text()
+    assert text.count(_OPENCODE_LAUNCH_LINE) == 1
+    generated.write_text(text.replace(_OPENCODE_LAUNCH_LINE, launch_line))
+    with pytest.raises(rp.ReleaseCheckError, match="MCP_LAUNCH_ARGS"):
         rp.validate_opencode_pypi(repo, fetch_json=lambda *_: pytest.fail("network called"))
 
 
@@ -2098,7 +2147,8 @@ def test_readiness_workflow_guard_rejects_dependency_and_order_bypasses(bypass):
 
 
 _CLAUDE = "packages/memtomem-claude-plugin"
-_CLAUDE_LAUNCH = ("--from", "memtomem[onnx]==0.6.7", "memtomem-server")
+_CLAUDE_PYTHON = ("--python", "3.12")
+_CLAUDE_LAUNCH = (*_CLAUDE_PYTHON, "--from", "memtomem[onnx]==0.6.7", "memtomem-server")
 _CLAUDE_CONTRACT = "packages/memtomem-plugin-assets/contract.toml"
 
 
@@ -2109,6 +2159,7 @@ def _claude_repo(
     args: tuple[object, ...] = _CLAUDE_LAUNCH,
     core: str = "0.6.7",
     extras: tuple[str, ...] = ("onnx",),
+    hermes: str = '[hermes]\npython = "3.12"\n',
 ) -> Path:
     repo = tmp_path / "claude"
     (repo / _CLAUDE / ".claude-plugin").mkdir(parents=True)
@@ -2122,7 +2173,8 @@ def _claude_repo(
     contract = repo / _CLAUDE_CONTRACT
     contract.parent.mkdir(parents=True)
     contract.write_text(
-        f'[core]\nversion = "{core}"\nmcp_extras = {json.dumps(list(extras))}\n', encoding="utf-8"
+        f'[core]\nversion = "{core}"\nmcp_extras = {json.dumps(list(extras))}\n{hermes}',
+        encoding="utf-8",
     )
     return repo
 
@@ -2170,18 +2222,23 @@ def test_claude_plugin_refuses_a_manifest_version_no_tag_can_name(tmp_path, vers
 @pytest.mark.parametrize(
     "args",
     [
-        ("--from", "memtomem-server"),
-        ("--with", "memtomem[onnx]==0.6.7", "memtomem-server"),
-        ("--from", "memtomem[onnx]==0.6.7", "memtomem==0.6.7"),
-        ("--from", "memtomem[onnx]==0.6.7", "memtomem-server", "MemToMem>=999.0.0"),
-        ("--from", 7, "memtomem-server"),
-        ("--from", "memtomem[onnx]>=0.6.7", "memtomem-server"),
-        ("--from", "memtomem[onnx]==0.6.8", "memtomem-server"),
-        ("--from", "memtomem[all]==0.6.7", "memtomem-server"),
-        ("--from", "memtomem==0.6.7", "memtomem-server"),
-        ("--from", "memtomem[]==0.6.7", "memtomem-server"),
-        ("--from", " memtomem[onnx]==0.6.7", "memtomem-server"),
-        ("--from", "MemToMem[onnx]==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--with", "memtomem[onnx]==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem[onnx]==0.6.7", "memtomem==0.6.7"),
+        (*_CLAUDE_LAUNCH, "MemToMem>=999.0.0"),
+        (*_CLAUDE_PYTHON, "--from", 7, "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem[onnx]>=0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem[onnx]==0.6.8", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem[all]==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem[]==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", " memtomem[onnx]==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "MemToMem[onnx]==0.6.7", "memtomem-server"),
+        # The interpreter request: dropped, another minor, an open range, or out of place.
+        _CLAUDE_LAUNCH[2:],
+        ("--python", "3.13", *_CLAUDE_LAUNCH[2:]),
+        ("--python", ">=3.12", *_CLAUDE_LAUNCH[2:]),
+        (*_CLAUDE_LAUNCH[2:4], *_CLAUDE_PYTHON, "memtomem-server"),
     ],
 )
 def test_claude_plugin_refuses_a_launch_that_is_not_the_contract_one_before_any_network(
@@ -2205,9 +2262,29 @@ def test_claude_plugin_refuses_a_launch_left_behind_by_a_contract_bump(tmp_path)
     "extras,pin", [((), "memtomem[]==0.6.7"), (("onnx", "web_ui"), "memtomem[onnx,web_ui]==0.6.7")]
 )
 def test_claude_plugin_accepts_whatever_extras_the_contract_renders(tmp_path, extras, pin):
-    repo = _claude_repo(tmp_path, args=("--from", pin, "memtomem-server"), extras=extras)
+    args = (*_CLAUDE_PYTHON, "--from", pin, "memtomem-server")
+    repo = _claude_repo(tmp_path, args=args, extras=extras)
     reply = (200, _pypi_metadata(version="0.6.7"))
     assert rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=lambda *_: reply)
+
+
+@pytest.mark.parametrize(
+    "hermes",
+    [
+        "",
+        "[hermes]\n",
+        "[hermes]\npython = 3.12\n",
+        '[hermes]\npython = ""\n',
+        '[hermes]\npython = " "\n',
+        '[hermes]\npython = ">=3.12"\n',
+        '[hermes]\npython = "3.12.1"\n',
+        '[hermes]\npython = "3"\n',
+    ],
+)
+def test_claude_plugin_refuses_a_contract_with_no_interpreter_to_ask_uv_for(tmp_path, hermes):
+    repo = _claude_repo(tmp_path, hermes=hermes)
+    with pytest.raises(rp.ReleaseCheckError, match=r"hermes\.python"):
+        rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=_no_network)
 
 
 @pytest.mark.parametrize("contract", ["", "[core]\n", '[core]\nversion = "0.6.7"\n', None])
@@ -2221,9 +2298,7 @@ def test_claude_plugin_refuses_an_unusable_contract_before_any_network(tmp_path,
         rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=_no_network)
 
 
-_CLAUDE_SERVER = (
-    '{"command": "uvx", "args": ["--from", "memtomem[onnx]==0.6.7", "memtomem-server"]}'
-)
+_CLAUDE_SERVER = json.dumps({"command": "uvx", "args": list(_CLAUDE_LAUNCH)})
 
 
 @pytest.mark.parametrize(

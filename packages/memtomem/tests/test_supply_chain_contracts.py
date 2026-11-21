@@ -60,7 +60,15 @@ def _contract() -> dict:
 def _assert_mcp_pin(document: dict, version: str, tool_mode: str) -> None:
     server = document.get("mcpServers", {}).get("memtomem", {})
     assert server.get("command") == "uvx"
-    assert server.get("args") == ["--from", f"memtomem[onnx]=={version}", "memtomem-server"]
+    # `--python`: a requirement that names an extra is otherwise resolved against the first
+    # Python uv finds, and with only an older one the server does not start (#3488).
+    assert server.get("args") == [
+        "--python",
+        "3.12",
+        "--from",
+        f"memtomem[onnx]=={version}",
+        "memtomem-server",
+    ]
     assert server.get("env") == {
         "MEMTOMEM_TOOL_MODE": tool_mode,
         "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage",
@@ -674,6 +682,12 @@ def test_opencode_plugin_launches_the_contract_requirement() -> None:
     generated = (package / "src/generated.ts").read_text(encoding="utf-8")
     rendered = re.findall(r'^export const MCP_REQUIREMENT = "([^"]*)";$', generated, re.MULTILINE)
     assert rendered == [expected]
+    launch_args = re.findall(
+        r"^export const MCP_LAUNCH_ARGS = (\[.*\]) as const;$", generated, re.MULTILINE
+    )
+    assert [json.loads(args) for args in launch_args] == [
+        ["--python", "3.12", "--from", expected, "memtomem-server"]
+    ]
 
     server = (package / "src/server.ts").read_text(encoding="utf-8")
     # Tokens, not layout: test/server.test.mjs pins the built command itself.
@@ -681,7 +695,7 @@ def test_opencode_plugin_launches_the_contract_requirement() -> None:
         [token.strip() for token in body.split(",") if token.strip()]
         for body in re.findall(r"command:\s*\[([^\]]*)\]", server)
     ]
-    assert launches == [['"uvx"', '"--from"', "MCP_REQUIREMENT", '"memtomem-server"']]
+    assert launches == [['"uvx"', "...MCP_LAUNCH_ARGS"]]
 
     readme = " ".join((package / "README.md").read_text(encoding="utf-8").split())
     assert re.findall(r"the plugin starts the exact-pinned `([^`]*)` runtime", readme) == [expected]
