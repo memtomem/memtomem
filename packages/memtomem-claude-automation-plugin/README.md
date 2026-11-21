@@ -11,7 +11,7 @@ retrieval and write-time indexing. Install the safe base plugin first.
 The hooks use the memtomem CLI, pinned to the same reviewed core release:
 
 ```sh
-uv tool install --python 3.12 'memtomem==0.7.12'
+uv tool install --python 3.12 memtomem==0.7.12
 ```
 
 That command installs no extras. If your store uses a local ONNX model (the
