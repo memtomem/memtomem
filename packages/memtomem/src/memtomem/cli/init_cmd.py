@@ -2334,11 +2334,12 @@ def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
     Silent when ``missing`` is empty so the common "already installed" path
     adds no output noise. When non-empty, names the missing extras, lists
     which ``Next steps`` commands will fail without them, and prints a single
-    install command (narrow per-extra hint when one missing, ``[all]`` when
-    two+ — matches ``pyproject.toml``'s public extras). The hint is branched
-    by install type: workspace installs get ``uv sync --extra …``, ``uvx``
-    runs get a ``uvx`` re-invocation, tool installs get
-    ``uv tool install --reinstall …``."""
+    install command. The hint is branched by install type: workspace installs
+    get ``uv sync --extra …`` and tool installs get
+    ``uv tool install --reinstall …``, each a narrow per-extra hint when one
+    is missing and ``[all]`` when two+ (matches ``pyproject.toml``'s public
+    extras); ``uvx`` runs get a ``uvx`` re-invocation that always names
+    ``[all]``."""
     if not missing:
         return
     click.echo()

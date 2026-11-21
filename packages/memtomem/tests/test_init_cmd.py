@@ -2349,7 +2349,7 @@ class TestUvxBranching:
             "importlib.util.find_spec",
             lambda name: None if name == "fastembed" else object(),
         )
-        # Otherwise `web` joins the list and both lines read `[all]`.
+        # Keeps `onnx` the only missing extra in this case.
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
 
         state = _make_init_state(tmp_path)
