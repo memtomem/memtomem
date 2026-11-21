@@ -516,6 +516,43 @@ def test_web_status_reports_unverified_state_without_error_exit(
     assert "running (unverified: simulated lock failure)" in result.output
 
 
+@pytest.mark.parametrize("payload_changed", [True, False], ids=["changed", "control"])
+def test_web_status_does_not_fill_a_changed_probe_from_the_sidecar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, payload_changed: bool
+) -> None:
+    """A probe that saw ``web.pid`` change withholds its metadata (#3423), and
+    ``web.json`` may still be the predecessor's: status shows unknowns, not the
+    predecessor. The control (no change, pid unreadable as on Windows) shows the
+    sidecar's values, so the fixture's sidecar is really there to be read."""
+    runtime_dir = _isolate_runtime(monkeypatch, tmp_path)
+    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.chmod(0o700)
+    (runtime_dir / "web.json").write_text(
+        '{"pid": 24680, "port": 18080, "started": "2026-11-01T00:00:00+00:00"}\n',
+        encoding="utf-8",
+    )
+
+    def fake_probe(_pid_file: Path) -> ServerState:
+        return ServerState(
+            alive=True,
+            pid=None,
+            pid_file=runtime_dir / "web.pid",
+            payload_changed=payload_changed,
+        )
+
+    monkeypatch.setattr("memtomem.cli._liveness.probe_pid_file", fake_probe)
+
+    result = CliRunner().invoke(web, ["status"])
+
+    assert result.exit_code == 0, result.output
+    if payload_changed:
+        assert "pid=?  port=?  started=?" in result.output
+        assert "pid file changed while it was being checked" in result.output
+        assert "24680" not in result.output
+    else:
+        assert "pid=24680  port=18080  started=2026-11-01T00:00:00+00:00" in result.output
+
+
 def test_web_stop_removes_stale_pid_file_and_keeps_sidecar(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

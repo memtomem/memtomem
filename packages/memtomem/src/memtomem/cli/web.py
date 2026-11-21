@@ -662,7 +662,9 @@ def _web_status() -> None:
     from memtomem.cli._liveness import check_web_liveness
 
     state = check_web_liveness()
-    metadata = _read_web_metadata(state.pid_file)
+    # A probe that saw web.pid change withholds its metadata (#3423), and
+    # web.json may still be the predecessor's: do not fill the gaps from it.
+    metadata = _WebMetadata() if state.payload_changed else _read_web_metadata(state.pid_file)
     pid = state.pid if state.pid is not None else metadata.pid
     port = state.port if state.port is not None else metadata.port
     started = state.started if state.started is not None else metadata.started
@@ -670,6 +672,8 @@ def _web_status() -> None:
         status = "running"
         if state.probe_error is not None:
             status += f" (unverified: {state.probe_error})"
+        elif state.payload_changed:
+            status += " (pid file changed while it was being checked; retry for details)"
         click.echo(
             f"{status}  pid={pid if pid is not None else '?'}  "
             f"port={port if port is not None else '?'}  "
