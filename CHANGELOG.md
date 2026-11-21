@@ -44,19 +44,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `/usr/bin/python3` 3.9.6 first on `PATH`, `uv tool run --isolated --from
   'memtomem[all]==0.7.12' memtomem-server --help` exited 1 with "the current Python version
   (3.9.6) does not satisfy Python>=3.12", and with `--python 3.12` it printed the help. They
-  now read `uvx --python 3.12 --isolated --from …` (JSON and TOML: `"--python", "3.12"` first
-  in the array) in the README, the getting-started, MCP clients, Claude Code, Kimi Code and
-  OpenCode guides, the OpenCode plugin README, the Web UI's Claude Code, Antigravity and Codex
-  snippets, and the help `memtomem-server` prints when run in a terminal. The AnyIO guide's
+  now read `uvx --python 3.12 --isolated --from …` (`"--python", "3.12"` first in a JSON or
+  TOML `args` array, right after `"uvx"` in OpenCode's `command` array) in the README, the
+  getting-started, MCP clients, Claude Code, Kimi Code and OpenCode guides, the OpenCode
+  plugin README, the Web UI's Claude Code, Antigravity and Codex snippets, and the help
+  `memtomem-server` prints when run in a terminal. The AnyIO guide's
   terminal command, which resolves the default plugin's package specification with this
   terminal's uv configuration, asks for 3.12 too, as that plugin's launch does; without the
   flag it exited 1 on the same setup. The Kimi Code guide no longer says its entry matches what
   `mm init` writes, and says to put `"--python", "3.12"` at the front of a `uvx` entry's `args`
   that name an extra and ask for no Python. Commands that name no extra are unchanged: on the
   same setup `uv tool run --from 'memtomem==0.7.12' mm --version` and
-  `uv tool run --from memtomem mm --version` each printed `memtomem 0.7.12`. As with #3488,
-  where uv is configured never to download Python, a copied registration needs a Python 3.12 on
-  the machine.
+  `uv tool run --from memtomem mm --version` each exited 0 and printed the version. As with
+  #3488, where uv is configured never to download Python, a copied registration needs a
+  Python 3.12 on the machine.
 
 - **A contended pid-file probe withholds the pid when its two reads differ (#3423).**
   `probe_pid_file` reads the pid file before its lock attempt, and on contention it returned

@@ -2049,8 +2049,11 @@ class TestRegistryAndInstallDocs:
 # markdown-it-py finds, and the Web UI guide's ``<code>`` bodies -- rather than parsing argv,
 # so a respelt ``--from`` or a reordered option cannot slip past it. A unit has to carry one
 # ``--python 3.12`` per extra-naming requirement: a second launch pasted into a block that
-# already has one flag fails. A shell fence is split into its commands (continuations joined,
-# comments dropped), so one command's flag, or a comment, cannot cover the next.
+# already has one flag fails. A shell fence is read one line at a time (``\`` continuations
+# joined, comments dropped by ``shlex``), so a flag on one line, or in a comment, cannot cover
+# another line; commands chained on one line with ``&&``, ``;`` or ``|`` stay one unit.
+# Markdown's raw-HTML ``<code>`` and comments in non-shell fences are not handled: no tracked
+# doc has either around these launches.
 #
 # Not scanned here: the generated plugin launches, which ``tools/render_plugin_assets.py``
 # writes from ``contract.toml`` and its ``--check`` pins; ``mm init``'s own command
