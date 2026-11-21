@@ -670,7 +670,7 @@ class TestPluginManualCoexistenceCallout:
     (measured on 2.1.218: env vars are not compared; suppression logs
     ``Suppressing plugin MCP server ... duplicates manually-configured``).
     The manual registrations our own guides teach (bare ``memtomem-server``,
-    ``uvx --isolated --from "memtomem[all]==<ver>"``) use a *different*
+    ``uvx --python 3.12 --isolated --from "memtomem[all]==<ver>"``) use a *different*
     command, so plugin-on-top-of-manual runs two servers against one store.
     An unconditional "nothing runs twice" promise was wrong for exactly the
     users who followed our docs — keep both cases and the migration
@@ -2041,6 +2041,154 @@ class TestRegistryAndInstallDocs:
         assert "<code>claude mcp add memtomem -- memtomem-server</code>" not in portal
         assert '"command": "memtomem-server"' not in portal
         assert 'command = "memtomem-server"' not in portal
+
+
+# A ``uvx`` example that names ``memtomem[<extra>]`` can stop before the server starts when uv
+# picks a Python older than 3.12, so each one asks for 3.12 the way the plugins' own launch
+# does. The scan reads code units -- every fence, indented block and inline code span
+# markdown-it-py finds, and the Web UI guide's ``<code>`` bodies -- rather than parsing argv,
+# so a respelt ``--from`` or a reordered option cannot slip past it. A unit has to carry one
+# ``--python 3.12`` per extra-naming requirement: a second launch pasted into a block that
+# already has one flag fails. A shell fence is read one line at a time (``\`` continuations
+# joined, comments dropped by ``shlex``), so a flag on one line, or in a comment, cannot cover
+# another line; commands chained on one line with ``&&``, ``;`` or ``|`` stay one unit.
+# Markdown's raw-HTML ``<code>`` and comments in non-shell fences are not handled: no tracked
+# doc has either around these launches. The count does not check where the flag sits either:
+# ``--python 3.12`` passed to the launched program (``memtomem-server --python 3.12``, or
+# inside a ``python -c`` string) counts as well. Telling uv's options from the program's would
+# mean parsing ``uvx`` argv, which this scan deliberately does not do.
+#
+# Not scanned here: the generated plugin launches, which ``tools/render_plugin_assets.py``
+# writes from ``contract.toml`` and its ``--check`` pins; ``mm init``'s own command
+# (``test_init_cmd.py``); and the server's printed example, compared whole in
+# ``test_server_cli.py``. ``CHANGELOG.md`` quotes earlier commands on purpose.
+_UVX = re.compile(r"(?<![\w-])uvx(?![\w-])")
+_EXTRA_REQUIREMENT = re.compile(r"memtomem\[[A-Za-z0-9_,\s-]+\]")
+# ``--python 3.12``, ``--python=3.12``, and a JSON/TOML array's ``"--python", "3.12"``. The
+# value has to end there: ``3.12-dev`` or ``3.12x`` is a different request.
+_PYTHON_312 = re.compile(r"--python(?:=|\s+|[\"']\s*,\s*[\"'])3\.12(?=[\"'\s,\]]|$)")
+_SHELL_FENCES = frozenset({"bash", "sh", "shell", "zsh", "console"})
+
+
+def _shell_words(command: str) -> str:
+    """*command* as shell words joined by spaces, comments dropped by ``shlex``.
+
+    ``shlex`` knows quoting, so a ``#`` inside a quoted argument stays; a command it cannot
+    split (an unbalanced quote) is kept as written."""
+    try:
+        return " ".join(shlex.split(command, comments=True))
+    except ValueError:
+        return command
+
+
+def _shell_commands(block: str, first_line: int) -> list[tuple[int, str]]:
+    """``(line, command)`` for each command in a shell block, continuations joined."""
+    commands: list[tuple[int, str]] = []
+    parts: list[str] = []
+    start = first_line
+    for offset, raw in enumerate(block.splitlines()):
+        if not parts:
+            start = first_line + offset
+        line = raw.rstrip()
+        if line.endswith("\\"):
+            parts.append(line[:-1])
+            continue
+        parts.append(line)
+        commands.append((start, _shell_words(" ".join(parts))))
+        parts = []
+    if parts:
+        commands.append((start, _shell_words(" ".join(parts))))
+    return commands
+
+
+def _markdown_code_units(text: str) -> list[tuple[int, str]]:
+    """``(line, text)`` of each code unit markdown-it-py finds in *text*, lines 1-based.
+
+    A block's line is its first content line; an inline span's is the first line of the
+    paragraph that holds it, since the parser keeps no line map for spans."""
+    from markdown_it import MarkdownIt
+
+    units: list[tuple[int, str]] = []
+    for token in MarkdownIt("commonmark").parse(text):
+        line = token.map[0] + 1 if token.map else 0
+        if token.type == "fence":
+            info = token.info.split()
+            if info and info[0].lower() in _SHELL_FENCES:
+                units.extend(_shell_commands(token.content, line + 1))
+            else:
+                units.append((line + 1, token.content))
+        elif token.type == "code_block":
+            units.append((line, token.content))
+        elif token.type == "inline":
+            units.extend(
+                (line, child.content)
+                for child in token.children or []
+                if child.type == "code_inline"
+            )
+    return units
+
+
+def _uvx_extra_launch_units() -> list[tuple[str, int, str]]:
+    """``(path, line, unit)`` for each code unit running ``uvx`` on ``memtomem[<extra>]``."""
+    # Named as well as enumerated: without Git metadata ``_tracked_markdown()`` falls back to
+    # the contractual docs, which leave the OpenCode package README out.
+    markdown = {*_tracked_markdown(), _REPO_ROOT / "packages" / "opencode-memtomem" / "README.md"}
+    sources: list[tuple[Path, list[tuple[int, str]]]] = [
+        (path, _markdown_code_units(_read(path)))
+        for path in sorted(markdown)
+        if path != _REPO_ROOT / "CHANGELOG.md"
+    ]
+    portal = _read(_PORTAL_JS)
+    sources.append(
+        (
+            _PORTAL_JS,
+            [
+                (portal.count("\n", 0, match.start()) + 1, match.group(1))
+                for match in _PORTAL_CODE.finditer(portal)
+            ],
+        )
+    )
+    return [
+        (path.relative_to(_REPO_ROOT).as_posix(), line, unit)
+        for path, units in sources
+        for line, unit in units
+        if _UVX.search(unit) and _EXTRA_REQUIREMENT.search(unit)
+    ]
+
+
+class TestUvxExtraLaunchesAskForPython312:
+    # The files whose examples #3493 changed. Each has to stay visible to the scan, or a
+    # broken unit extractor would pass by finding nothing.
+    _EXPECTED_FILES = frozenset(
+        {
+            "README.md",
+            "docs/guides/anyio-security-update.md",
+            "docs/guides/getting-started.md",
+            "docs/guides/integrations/claude-code.md",
+            "docs/guides/integrations/kimi-code.md",
+            "docs/guides/integrations/opencode.md",
+            "docs/guides/mcp-clients.md",
+            "packages/memtomem/src/memtomem/web/static/context-portal.js",
+            "packages/opencode-memtomem/README.md",
+        }
+    )
+
+    def test_every_extra_naming_uvx_example_asks_for_python_312(self) -> None:
+        offenders = [
+            f"{path}:{line}: {' '.join(unit.split())[:120]}"
+            for path, line, unit in _uvx_extra_launch_units()
+            if len(_PYTHON_312.findall(unit)) < len(_EXTRA_REQUIREMENT.findall(unit))
+        ]
+        assert not offenders, (
+            "uvx examples naming a memtomem extra without `--python 3.12` (#3493): such a "
+            "launch can stop before the server starts when uv picks a Python older than 3.12. "
+            'Put `--python 3.12` (array form `"--python", "3.12"`) right after `uvx`:\n  '
+            + "\n  ".join(offenders)
+        )
+
+    def test_the_scan_sees_every_file_it_guards(self) -> None:
+        seen = {path for path, _, _ in _uvx_extra_launch_units()}
+        assert self._EXPECTED_FILES <= seen, sorted(self._EXPECTED_FILES - seen)
 
 
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
