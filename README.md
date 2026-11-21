@@ -47,6 +47,10 @@ saved 2 items · commit-derived: 1 · session-derived: 1
 - **Explicit by default.** Memory operations run on your CLI or MCP calls (`mm add`, `mem_add`, `mem_index`). Optional client hooks are separate, removable integrations, not a hidden runtime default.
 - **One store, many tools.** Claude Code, Codex CLI, OpenCode, Kimi Code, and Antigravity share one local store, and any MCP client can search it. Hermes Agent joins the same store through its [plugin and memory provider](#agent-frameworks), and LangGraph apps get the same search pipeline over a store of their own with [`langchain-memtomem`](packages/langchain-memtomem/). [memtomem-stm](https://github.com/memtomem/memtomem-stm) is a separate, optional proxy that surfaces memories proactively.
 
+## Private by design
+
+The memtomem server runs on your machine, and its database and Markdown files stay there. With the defaults (BM25-only search, no LLM, no reranker) the server sends none of your note text anywhere. Some optional providers send text to an outside service, and each one is off until you configure it; a request to a loopback address can still leave your machine if your environment routes HTTP through a proxy or the local server forwards the request to a hosted model. Separately, the MCP tools return note text to the AI client that called them, and memtomem does not control what that client sends to its own model provider. [What leaves your machine](docs/guides/configuration.md#what-leaves-your-machine) lists what each setting sends, when, and where.
+
 ## Set it up from your coding agent
 
 Paste a prompt into Claude Code, Codex CLI, or another coding agent. The agent runs the [Quick Start](#quick-start) commands for you, asks before the choices that are yours, and shows you the result.
@@ -165,6 +169,14 @@ claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- u
 ## Works with
 
 Everything here runs on the [**memtomem**](https://pypi.org/project/memtomem/) core package: the MCP server, CLI, Web UI, hybrid search, and storage. [**memtomem-stm**](https://github.com/memtomem/memtomem-stm) is a separate, optional STM proxy that surfaces memories proactively by intercepting tool calls.
+
+| Use it from | For | Start here |
+|---|---|---|
+| **A coding agent** | Saving and resuming project memory across sessions and tools | [Coding agents](#coding-agents) |
+| **Any MCP client** | Searching and writing the store with nine core tools | [MCP Client Setup](docs/guides/mcp-clients.md) |
+| **The terminal** | Indexing, health checks, scripts (`--json` output) | [CLI reference](docs/guides/reference/data-config-cli.md#cli-reference) |
+| **A browser** | Browsing sources, tags, the timeline, and duplicates (`mm web`) | [Web UI](docs/guides/reference/operations.md) |
+| **Agent frameworks** | LangGraph stores and Hermes Agent memory | [Agent frameworks](#agent-frameworks) |
 
 ### Coding agents
 

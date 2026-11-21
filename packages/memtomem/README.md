@@ -35,6 +35,10 @@ mode: incremental · saved 2 items · commit-derived: 1 · session-derived: 1
 
 `handoff save` writes one Markdown record into the project's own `.memtomem/memories.local`; `brief` only reads; `update` saves decisions, bug fixes, and preferences as separate items. All three run only when you invoke them. The [Project workflows](https://github.com/memtomem/memtomem/blob/main/docs/guides/project-workflows.md) guide has each one's modes, checks, and names per host.
 
+## Private by design
+
+The memtomem server runs on your machine, and its database and Markdown files stay there. With the defaults (BM25-only search, no LLM, no reranker) the server sends none of your note text anywhere. Some optional providers send text to an outside service, and each one is off until you configure it; a request to a loopback address can still leave your machine if your environment routes HTTP through a proxy or the local server forwards the request to a hosted model. Separately, the MCP tools return note text to the AI client that called them, and memtomem does not control what that client sends to its own model provider. [What leaves your machine](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#what-leaves-your-machine) lists what each setting sends, when, and where.
+
 ## Set it up from your coding agent
 
 Paste a prompt into Claude Code, Codex CLI, or another coding agent. The agent runs the [Quick Start](https://github.com/memtomem/memtomem#quick-start) commands for you, asks before the choices that are yours, and shows you the result.
