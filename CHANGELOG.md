@@ -26,14 +26,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (a Mac with only the Command Line Tools' Python 3.9, for one) the command stopped with
   `No solution found` and the plugin's server did not start. The launch is now
   `uvx --python 3.12 --from …`, the interpreter request the Cursor, Antigravity, Hermes and
-  OpenClaw bundles already made, and uv downloads Python 3.12 when it finds none. The plugin
-  quickstart (English and Korean), the Claude Code guide, both plugin READMEs and the Claude
-  plugin's `setup` and `status` skills pass the same flag in their `uvx … mm …` commands. Two
-  things change for an existing setup. A manual Claude Code registration copied from the old
-  launch line no longer has the plugin's arguments, so Claude Code starts both servers until
-  the entry is updated or removed; `mm doctor --claude-mcp` reports it. And where uv is
-  configured never to download Python, the server now needs a Python 3.12 on the machine: a
-  newer one alone was enough before and is not now.
+  OpenClaw bundles already made: uv downloads Python 3.12 when it finds none, unless its
+  configuration disables Python downloads. The plugin quickstart (English and Korean), the
+  Claude Code guide, both plugin READMEs and the Claude plugin's `setup` and `status` skills
+  pass the same flag in their `uvx … mm …` commands, and the error for a missing optional
+  module names the same launch. Two things change for an existing setup. A manual Claude Code
+  registration copied from the old launch line no longer has the plugin's arguments, so Claude
+  Code no longer suppresses the plugin's copy of the server; `mm doctor --claude-mcp` reports
+  the difference and `/mcp` shows which connections started. And where uv is configured never
+  to download Python, the server now needs a Python 3.12 on the machine: a newer one alone was
+  enough before and is not now.
 
 - **The automation plugin's missing-`mm` hint is the install command its README shows
   (#3481).** When the SessionStart hook finds no `mm` on `PATH`, its hint now reads

@@ -9,7 +9,7 @@ def missing_onnx_dependency(module: str) -> ConfigError:
         f"Missing optional module '{module}' required by the configured tokenizer. "
         "Install memtomem[onnx] in the environment that runs this server, then restart it. "
         "For uvx, change the server launch command to: "
-        f"uvx --from 'memtomem[onnx]=={__version__}' memtomem-server. "
+        f"uvx --python 3.12 --from 'memtomem[onnx]=={__version__}' memtomem-server. "
         "Installing packages or running doctor in a different environment does not repair "
         "this server's environment."
     )

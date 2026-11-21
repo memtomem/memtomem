@@ -52,8 +52,9 @@ If either command is not found, follow the [official uv installation
 guide](https://docs.astral.sh/uv/getting-started/installation/) and open a new
 terminal. memtomem runs on Python 3.12 or newer, and the first run needs a
 network connection to download the exactly pinned packages. The commands
-below pass `--python 3.12`, so uv downloads Python 3.12 when it finds none.
-You do not need an embedding model or an API key.
+below pass `--python 3.12`, so uv downloads Python 3.12 when it finds none,
+unless your uv configuration disables Python downloads. You do not need an
+embedding model or an API key.
 
 Then check **only** the tool you use:
 

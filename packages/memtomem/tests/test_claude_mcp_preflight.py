@@ -153,22 +153,38 @@ def test_different_command_refused_and_names_are_reported(sandbox, name):
     assert name in json.dumps(report.payload())
 
 
+def _pinned_args(**changes: str) -> list[str]:
+    """The plugin's launch arguments with exactly the named positions replaced."""
+    args = pinned()["args"]
+    positions = {"python": 1, "requirement": 3}
+    for name, value in changes.items():
+        args[positions[name]] = value
+    return args
+
+
 @pytest.mark.parametrize(
     "entry",
     [
-        {"command": "uvx", "args": ["--from", "memtomem==0.1.0", "memtomem-server"]},
+        # One axis each: the rest of the launch is the plugin's own.
+        {"command": "uvx", "args": _pinned_args(requirement="memtomem[onnx]==0.1.0")},
         {
             "command": "uvx",
-            "args": ["--isolated", "--from", "memtomem[all]==0.5.0", "memtomem-server"],
+            "args": _pinned_args(requirement=MCP_REQUIREMENT.replace("onnx", "all")),
         },
+        {"command": "uvx", "args": _pinned_args(python="3.13")},
+        {"command": "uvx", "args": ["--isolated", *_pinned_args()]},
         {"command": "/opt/uv", "args": ["run", "--directory", "/src", "memtomem-server"]},
         {"command": "C:\\venv\\python.exe", "args": ["-m", "memtomem.server"]},
     ],
+    ids=["version", "extras", "interpreter", "isolated", "source", "python-module"],
 )
 def test_versions_extras_source_and_python_are_different_launches(sandbox, entry):
     plugin(sandbox)
     manual(sandbox, name="alias", entry=entry)
-    assert checks.inspect_claude_mcp().current_risk
+    report = checks.inspect_claude_mcp()
+    assert report.current_risk
+    assert "duplicate_risk" in codes(report)
+    assert "native_dedup" not in codes(report)
 
 
 def test_exact_launch_dedup_ignores_env_but_warns_without_secrets(sandbox):
@@ -206,7 +222,7 @@ def test_preinstall_prediction_is_the_launch_the_plugin_ships(sandbox):
 @pytest.mark.parametrize("installed", [False, True])
 def test_a_launch_without_the_interpreter_request_is_not_the_plugin_launch(sandbox, installed):
     # The plugin's launch before it asked uv for a Python (#3488): the arguments differ
-    # from the plugin's now, so Claude Code starts both.
+    # from the plugin's now, so Claude Code no longer suppresses the plugin's copy.
     if installed:
         plugin(sandbox)
     entry = pinned()

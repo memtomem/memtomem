@@ -1564,16 +1564,25 @@ def _pypi_metadata(version="0.3.6", description=None):
     }
 
 
+_OPENCODE_LAUNCH_LINE = (
+    'export const MCP_LAUNCH_ARGS = ["--python", "3.12", "--from", "memtomem[onnx]==0.3.6", '
+    '"memtomem-server"] as const;\n'
+)
+
+
 def _opencode_repo(tmp_path):
     repo = _repo(tmp_path)
     contract = repo / "packages/memtomem-plugin-assets/contract.toml"
     contract.parent.mkdir(parents=True)
-    contract.write_text('[core]\nversion = "0.3.6"\nmcp_extras = ["onnx"]\n', encoding="utf-8")
+    contract.write_text(
+        '[core]\nversion = "0.3.6"\nmcp_extras = ["onnx"]\n[hermes]\npython = "3.12"\n',
+        encoding="utf-8",
+    )
     generated = repo / "packages/opencode-memtomem/src/generated.ts"
     generated.parent.mkdir(parents=True)
     generated.write_text(
         'export const CORE_VERSION = "0.3.6";\n'
-        'export const MCP_REQUIREMENT = "memtomem[onnx]==0.3.6";\n',
+        'export const MCP_REQUIREMENT = "memtomem[onnx]==0.3.6";\n' + _OPENCODE_LAUNCH_LINE,
         encoding="utf-8",
     )
     return repo
@@ -1787,7 +1796,7 @@ def test_opencode_refuses_pin_drift_before_network(tmp_path, change):
     if change == "version":
         text = text.replace('CORE_VERSION = "0.3.6"', 'CORE_VERSION = "0.3.7"')
     elif change == "requirement":
-        text = text.replace("memtomem[onnx]", "memtomem[all]")
+        text = text.replace('MCP_REQUIREMENT = "memtomem[onnx]', 'MCP_REQUIREMENT = "memtomem[all]')
     elif change == "duplicate":
         text += 'export const CORE_VERSION = "0.3.6";\n'
     elif change == "missing":
@@ -1796,6 +1805,30 @@ def test_opencode_refuses_pin_drift_before_network(tmp_path, change):
         (repo / "packages/memtomem-plugin-assets/contract.toml").write_text("[core]\n")
     generated.write_text(text)
     with pytest.raises(rp.ReleaseCheckError):
+        rp.validate_opencode_pypi(repo, fetch_json=lambda *_: pytest.fail("network called"))
+
+
+@pytest.mark.parametrize(
+    "launch_line",
+    [
+        # Only the array the server launches from drifts; the two scalar constants agree.
+        _OPENCODE_LAUNCH_LINE.replace("==0.3.6", "==0.3.7"),
+        _OPENCODE_LAUNCH_LINE.replace("[onnx]", "[all]"),
+        _OPENCODE_LAUNCH_LINE.replace('"--python", "3.12", ', ""),
+        _OPENCODE_LAUNCH_LINE.replace('"3.12"', '"3.13"'),
+        _OPENCODE_LAUNCH_LINE.replace('"memtomem-server"', '"memtomem"'),
+        _OPENCODE_LAUNCH_LINE.replace('"memtomem-server"]', '"memtomem-server"'),
+        _OPENCODE_LAUNCH_LINE * 2,
+        "",
+    ],
+)
+def test_opencode_refuses_launch_argument_drift_before_network(tmp_path, launch_line):
+    repo = _opencode_repo(tmp_path)
+    generated = repo / "packages/opencode-memtomem/src/generated.ts"
+    text = generated.read_text()
+    assert text.count(_OPENCODE_LAUNCH_LINE) == 1
+    generated.write_text(text.replace(_OPENCODE_LAUNCH_LINE, launch_line))
+    with pytest.raises(rp.ReleaseCheckError, match="MCP_LAUNCH_ARGS"):
         rp.validate_opencode_pypi(repo, fetch_json=lambda *_: pytest.fail("network called"))
 
 
@@ -2219,7 +2252,19 @@ def test_claude_plugin_accepts_whatever_extras_the_contract_renders(tmp_path, ex
     assert rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=lambda *_: reply)
 
 
-@pytest.mark.parametrize("hermes", ["", "[hermes]\n", "[hermes]\npython = 3.12\n"])
+@pytest.mark.parametrize(
+    "hermes",
+    [
+        "",
+        "[hermes]\n",
+        "[hermes]\npython = 3.12\n",
+        '[hermes]\npython = ""\n',
+        '[hermes]\npython = " "\n',
+        '[hermes]\npython = ">=3.12"\n',
+        '[hermes]\npython = "3.12.1"\n',
+        '[hermes]\npython = "3"\n',
+    ],
+)
 def test_claude_plugin_refuses_a_contract_with_no_interpreter_to_ask_uv_for(tmp_path, hermes):
     repo = _claude_repo(tmp_path, hermes=hermes)
     with pytest.raises(rp.ReleaseCheckError, match=r"hermes\.python"):
