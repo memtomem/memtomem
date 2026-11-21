@@ -91,8 +91,11 @@ it registers an MCP server, not the CLI. If you already have the CLI installed,
 scope-specific removal guidance below covers the same ground by hand.
 
 It reports current registrations and predicts conflicts with this release's
-plugin command. Exit codes: `0` no detected conflict, `1` duplicate risk,
-`2` incomplete inspection. `--json` provides structured findings. Keep your
+plugin command. The marketplace can serve a plugin newer than that release,
+with a different launch command, so repeat the check after installing: it then
+reads the installed plugin's own command. Exit codes: `0` no detected conflict,
+`1` duplicate risk, `2` incomplete inspection. `--json` provides structured
+findings. Keep your
 existing uv installation; resolve any manual MCP registration shown by the
 check before installing. The check does not intercept `/plugin install`.
 

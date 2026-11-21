@@ -116,6 +116,12 @@ incomplete. `0` does not prove that the MCP connection works. Running the
 diagnostic from a separate `[all]` environment does not install or repair
 packages for the plugin's server.
 
+Before the plugin is installed, the diagnostic compares your registrations
+with the plugin launch command known to the release it runs. The marketplace
+can serve a plugin newer than that release, with a different launch command,
+so a `0` here is a prediction. Run the diagnostic again after installing: it
+then reads the installed plugin's own command.
+
 If you already registered memtomem by hand, use Claude Code's `/mcp` to tell
 that server's name and scope apart from the plugin's server. In the project
 where you use the plugin, **disable only the manual server, only in this

@@ -67,6 +67,8 @@ plus current/prospective risk and whether an existing registration can be reused
 Exit codes are `0` (no detected conflict), `1` (duplicate risk), and `2`
 (incomplete inspection). The prospective check uses this CLI release's generated
 plugin contract; an installed plugin is checked against its actual manifest.
+The marketplace can serve a plugin newer than that release, with a different
+launch command, so repeat the diagnostic after installing.
 It does not intercept Claude's installation command.
 
 ```
