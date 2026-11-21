@@ -758,7 +758,8 @@ class TestPluginManualCoexistenceCallout:
         # Collapse prose wrapping so the phrase pins don't depend on line breaks.
         flat = " ".join(mcp_clients.split())
         assert "differ from the plugin's pinned launch command" in flat
-        assert "runs **two** servers against the same store" in flat
+        assert "can run **two** servers against the same store" in flat
+        assert "`/mcp` shows which are connected" in flat
         assert "integrations/claude-code.md" in flat
 
 
@@ -1458,6 +1459,7 @@ class TestPluginQuickstarts:
             "--preset minimal --non-interactive --mcp skip"
         )
         status = f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm status"
+        project_store = f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm mem init --scope project_local"
 
         guides = tuple(locale.path for locale in _QUICKSTARTS)
         for path in (*guides, _PLUGIN_README, _CODEX_PLUGIN_README):
@@ -1465,6 +1467,11 @@ class TestPluginQuickstarts:
             name = path.relative_to(_REPO_ROOT)
             assert text.count(bootstrap) == 1, f"{name} must keep exactly one shared bootstrap"
             assert status in text, f"{name} lost the bootstrap status check"
+            assert project_store in text, f"{name} lost the project store command"
+            # uv resolves a requirement that names an extra against the first Python it
+            # finds and stops when that one is older than 3.12 (#3488), so no command
+            # in these four files runs uvx without the interpreter request.
+            assert "uvx --from" not in text, f"{name} runs uvx without `--python 3.12`"
             # Every documented `mm init` (as opposed to `mm mem init`) must carry
             # `--mcp skip` — the plugin supplies the MCP server, so a bootstrap
             # variant without it would register a second server.
@@ -3480,136 +3487,3 @@ class TestSharedDaemonGuideMatchesSource:
             ("main", None, None),
             (None, "main", 0.0),
         ]
-
-
-_UVX_VALUE_OPTIONS = frozenset({"--from", "--python", "-p", "--with", "--with-requirements"})
-_SHELL_BREAK = re.compile(r"`|&&|\|\||[;|]")
-
-
-def _uvx_invocations(text: str) -> list[tuple[int, list[str]]]:
-    """Every ``uvx`` invocation in *text*: its first line number and the words after ``uvx``.
-
-    A trailing backslash joins the next line, a shell operator, a backtick or another
-    ``uvx`` ends the invocation, and quotes are removed the way a shell removes them.
-    """
-    found: list[tuple[int, list[str]]] = []
-    lines = text.splitlines()
-    index = 0
-    while index < len(lines):
-        number = index + 1
-        logical = lines[index]
-        while logical.rstrip().endswith("\\") and index + 1 < len(lines):
-            index += 1
-            logical = logical.rstrip()[:-1] + " " + lines[index]
-        index += 1
-        for segment in _SHELL_BREAK.split(logical):
-            match = re.search(r"(?<![\w./-])uvx\s+(.*)", segment)
-            if match is None:
-                continue
-            try:
-                words = shlex.split(match.group(1))
-            except ValueError:
-                words = match.group(1).replace('"', "").replace("'", "").split()
-            invocation: list[str] = []
-            for word in words:
-                if word == "uvx":
-                    found.append((number, invocation))
-                    invocation = []
-                else:
-                    invocation.append(word)
-            found.append((number, invocation))
-    return found
-
-
-def _uvx_cli_python(words: list[str]) -> tuple[bool, str | None]:
-    """Whether *words* run ``mm`` from a requirement naming an extra, and the Python asked for."""
-    requirement = python = command = None
-    position = 0
-    while position < len(words):
-        name, attached, value = words[position].partition("=")
-        if name in _UVX_VALUE_OPTIONS:
-            if not attached:
-                position += 1
-                value = words[position] if position < len(words) else ""
-            if name == "--from":
-                requirement = value
-            elif name in ("--python", "-p"):
-                python = value
-        elif not name.startswith("-"):
-            command = words[position].rstrip(".,:)")
-            break
-        position += 1
-    names_extra = requirement is not None and re.match(r"memtomem\[[^\]]+\]", requirement)
-    return bool(command in {"mm", "memtomem"} and names_extra), python
-
-
-@pytest.mark.parametrize(
-    "text,expected",
-    [
-        ("uvx --from 'memtomem[onnx]==1.0' mm", [(True, None)]),
-        ("uvx --python 3.12 --from 'memtomem[onnx]==1.0' mm status", [(True, "3.12")]),
-        ('uvx --python   3.12 --from "memtomem[all]" memtomem init', [(True, "3.12")]),
-        ("uvx --python=3.12 --from 'memtomem[onnx]' mm status", [(True, "3.12")]),
-        ("uvx --python 3.13 --from 'memtomem[onnx]' mm status", [(True, "3.13")]),
-        ("uvx --from 'memtomem[onnx]==1.0' \\\n    mm status", [(True, None)]),
-        ("uvx --isolated --from 'memtomem[all]' --with extra mm status", [(True, None)]),
-        ("Run `uvx --from 'memtomem[all]' mm doctor`.", [(True, None)]),
-        # An earlier command's flag is not this command's.
-        (
-            "uvx --python 3.12 ruff check; uvx --from 'memtomem[onnx]' mm status",
-            [(False, "3.12"), (True, None)],
-        ),
-        ("uvx --python 3.12 ruff uvx --from 'memtomem[onnx]' mm", [(False, "3.12"), (True, None)]),
-        # Not read: the server launch, and a requirement without an extra.
-        ("uvx --from 'memtomem[onnx]==1.0' memtomem-server", [(False, None)]),
-        ("uvx --from memtomem==1.0 mm status", [(False, None)]),
-        ('"command": "uvx", "args": ["--from", "memtomem[all]", "mm"]', []),
-    ],
-)
-def test_uvx_command_reader_finds_each_command_and_its_own_python(text, expected) -> None:
-    assert [_uvx_cli_python(words) for _, words in _uvx_invocations(text)] == expected
-
-
-def _uvx_cli_commands(text: str) -> list[tuple[int, str, bool]]:
-    """Each ``uvx … mm …`` naming an extra: its line, its text, and whether it asks for 3.12."""
-    commands = []
-    for number, words in _uvx_invocations(text):
-        is_cli, python = _uvx_cli_python(words)
-        if is_cli:
-            commands.append((number, "uvx " + " ".join(words), python == "3.12"))
-    return commands
-
-
-@pytest.mark.parametrize(
-    "command,asks",
-    [
-        ("uvx --python 3.12 --from 'memtomem[onnx]' mm status", [True]),
-        ("uvx --from 'memtomem[onnx]' mm status", [False]),
-        ("uvx --python 3.13 --from 'memtomem[onnx]' mm status", [False]),
-        ("uvx --python '>=3.12' --from 'memtomem[onnx]' mm status", [False]),
-        ("uvx --from 'memtomem[onnx]' memtomem-server", []),
-    ],
-)
-def test_uvx_cli_commands_ask_for_python_312_and_nothing_else(command, asks) -> None:
-    assert [ok for _, _, ok in _uvx_cli_commands(command)] == asks
-
-
-def test_a_cli_command_run_through_uvx_with_an_extra_asks_for_python_312() -> None:
-    """A copied ``uvx --from 'memtomem[extra]…' mm …`` must not depend on the first Python.
-
-    uv resolves a requirement that names an extra against the first Python it finds. With
-    only an older one visible and no uv-managed interpreter it stops with "No solution
-    found" rather than downloading 3.12 (#3488), so each such command carries
-    ``--python 3.12``. Commands that start the server (``… memtomem-server``) are not read
-    here, and the changelog keeps the commands its older entries quoted.
-    """
-    seen, missing = 0, []
-    for path in _tracked_markdown():
-        if path == _REPO_ROOT / "CHANGELOG.md":
-            continue
-        for number, command, asks_for_312 in _uvx_cli_commands(_read(path)):
-            seen += 1
-            if not asks_for_312:
-                missing.append(f"{path.relative_to(_REPO_ROOT)}:{number}: {command}")
-    assert seen, "no uvx CLI command was found; the guard would pass on anything"
-    assert not missing, "uvx CLI commands without --python 3.12:\n" + "\n".join(missing)

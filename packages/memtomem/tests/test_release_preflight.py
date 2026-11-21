@@ -1570,6 +1570,15 @@ _OPENCODE_LAUNCH_LINE = (
 )
 
 
+_OPENCODE_LAUNCH_MULTILINE = (
+    "export const MCP_LAUNCH_ARGS = [\n"
+    '  "--python", "3.12",\n'
+    '  "--from", "memtomem[onnx]==0.3.6",\n'
+    '  "memtomem-server",\n'
+    "] as const;\n"
+)
+
+
 def _opencode_repo(tmp_path):
     repo = _repo(tmp_path)
     contract = repo / "packages/memtomem-plugin-assets/contract.toml"
@@ -1820,6 +1829,13 @@ def test_opencode_refuses_pin_drift_before_network(tmp_path, change):
         _OPENCODE_LAUNCH_LINE.replace('"memtomem-server"]', '"memtomem-server"'),
         _OPENCODE_LAUNCH_LINE * 2,
         "",
+        # The expected line survives only in a comment; the live export differs.
+        "/*\n"
+        + _OPENCODE_LAUNCH_LINE
+        + "*/\n"
+        + _OPENCODE_LAUNCH_MULTILINE.replace("3.12", "3.13"),
+        # Not the renderer's shape, even with the right values.
+        _OPENCODE_LAUNCH_MULTILINE,
     ],
 )
 def test_opencode_refuses_launch_argument_drift_before_network(tmp_path, launch_line):

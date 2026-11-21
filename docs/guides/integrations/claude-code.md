@@ -78,9 +78,9 @@ For project-scoped onboarding, run `claude plugin install memtomem@memtomem --sc
 from that project directory instead. The [plugin quickstart](../plugin-quickstart.md#3-path-a-install-the-claude-code-plugin)
 explains effective enablement and disabling a manual server only in that project.
 
-The plugin launches the server via an exact reviewed `uvx --from
-memtomem[onnx]==<version>` pin, so [uv](https://docs.astral.sh/uv/) must be on your
-PATH. BM25 works with the default `embedding.provider=none`; embeddings are
+The plugin launches the server via an exact reviewed
+`uvx --python 3.12 --from memtomem[onnx]==<version>` pin, so
+[uv](https://docs.astral.sh/uv/) must be on your PATH. BM25 works with the default `embedding.provider=none`; embeddings are
 optional.
 
 > **Already registered via `claude mcp add`?** What happens depends on
