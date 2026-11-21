@@ -351,9 +351,18 @@ class TestMcpServerCommand:
         profile = _make_test_profile(kind="pypi", mm_binary_origin="uvx")
         monkeypatch.setattr("memtomem.cli.init_cmd.importlib.metadata.version", lambda _: "0.5.0")
 
+        # Without `--python`, uv 0.12.13 resolved `memtomem[all]` against a 3.9 first on
+        # PATH and the launch exited 1 with "No solution found" (#3489).
         assert _mcp_server_command(profile) == (
             "uvx",
-            ["--isolated", "--from", "memtomem[all]==0.5.0", "memtomem-server"],
+            [
+                "--python",
+                "3.12",
+                "--isolated",
+                "--from",
+                "memtomem[all]==0.5.0",
+                "memtomem-server",
+            ],
         )
 
     def test_uvx_without_version_hints_install_with_python_flag(
@@ -2274,9 +2283,113 @@ class TestUvxBranching:
         result = init_cmd._install_extras("uvx", ["onnx"])
         assert result is False
         out = unstyle(capsys.readouterr().out)
+        # `[all]` although one extra is missing: a uvx re-invocation replaces the
+        # environment, so naming only `onnx` would drop an extra the run already had.
         assert out.splitlines() == [
             "  (uvx is ephemeral — re-invoke with "
-            '`uvx --python 3.12 --from "memtomem[onnx]" memtomem ...` instead)'
+            '`uvx --python 3.12 --from "memtomem[all]" memtomem ...` instead)'
+        ]
+
+    @staticmethod
+    def _uvx_state() -> dict:
+        return {"_profile": _make_test_profile(kind="pypi", mm_binary_origin="uvx")}
+
+    @pytest.mark.parametrize("extras", [["onnx"], ["korean"], ["onnx", "web"]])
+    def test_extra_install_hint_on_uvx_is_a_uvx_reinvocation(self, extras: list[str]) -> None:
+        """The hint is the uvx command with every extra, not a tool-environment install."""
+        from memtomem.cli import init_cmd
+
+        assert init_cmd._extra_install_hint(extras, self._uvx_state()) == (
+            'uvx --python 3.12 --from "memtomem[all]" memtomem ...'
+        )
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_extra_install_hint_workspace_wins_over_uvx_origin(
+        self, tmp_path: Path, kind: Literal["source", "project"]
+    ) -> None:
+        """`uvx … mm init` inside a workspace: `uv run mm` uses the workspace `.venv`."""
+        from memtomem.cli import init_cmd
+
+        state = {"_profile": _make_test_profile(tmp_path, kind=kind, mm_binary_origin="uvx")}
+        assert init_cmd._extra_install_hint(["onnx"], state) == "uv sync --extra onnx"
+
+    def test_extra_install_hint_uv_tool_origin_keeps_tool_reinstall(self) -> None:
+        from memtomem.cli import init_cmd
+
+        state = {"_profile": _make_test_profile(kind="pypi", mm_binary_origin="uv-tool")}
+        assert init_cmd._extra_install_hint(["onnx"], state) == (
+            'uv tool install --reinstall "memtomem[onnx]"'
+        )
+
+    def test_install_extras_and_extra_install_hint_print_one_command(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        init_cmd._install_extras("uvx", ["korean"])
+        out = unstyle(capsys.readouterr().out)
+        hint = init_cmd._extra_install_hint(["korean"], self._uvx_state())
+        assert out.splitlines() == [f"  (uvx is ephemeral — re-invoke with `{hint}` instead)"]
+
+    def test_summary_missing_extra_on_uvx_prints_the_uvx_command_twice(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The parenthetical and the warning used to name two different commands."""
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name: None if name == "fastembed" else object(),
+        )
+        # Keeps `onnx` the only missing extra in this case.
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        state = _make_init_state(tmp_path)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        state["_profile"] = _make_test_profile(kind="pypi", mm_binary_origin="uvx")
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        lines = unstyle(capsys.readouterr().out).splitlines()
+        command = 'uvx --python 3.12 --from "memtomem[all]" memtomem ...'
+        assert [line for line in lines if '--from "memtomem[' in line] == [
+            f"  (uvx is ephemeral — re-invoke with `{command}` instead)",
+            f"      → {command}",
+        ]
+
+    def test_interactive_onnx_step_on_uvx_prints_the_uvx_command(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import click
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import run_steps
+
+        # `_step_embedding` imports fastembed directly; a None entry makes that raise.
+        monkeypatch.setitem(sys.modules, "fastembed", None)
+        seeded = self._uvx_state()
+
+        @click.command()
+        def cmd() -> None:
+            run_steps([init_cmd._step_embedding], seeded)
+
+        # choice=2 (Local ONNX) → model 4 (default)
+        result = CliRunner().invoke(cmd, [], input="2\n4\n")
+        assert result.exit_code == 0, result.output
+        lines = click.unstyle(result.output).splitlines()
+        assert "  fastembed not installed." in lines
+        assert [line for line in lines if line.startswith("  Install with:")] == [
+            '  Install with: uvx --python 3.12 --from "memtomem[all]" memtomem ...'
         ]
 
 
@@ -6699,9 +6812,109 @@ class TestNonInteractiveExtrasValidation:
         assert "Missing required extras" in result.output
         assert "onnx" in result.output
         # Hint should be install-type-aware — pypi → uv tool install --reinstall.
-        assert "uv tool install --reinstall" in result.output
+        assert self._recovery_lines(result.output) == [
+            '  Install first: uv tool install --reinstall "memtomem[onnx]"'
+        ]
         # Config must not be written.
         assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    @staticmethod
+    def _recovery_lines(output: str) -> list[str]:
+        return [
+            line
+            for line in output.splitlines()
+            if line.startswith(("  Install first:", "  Re-run with the extra"))
+        ]
+
+    _ONNX_AND_KOREAN = ["--provider", "onnx", "--model", "bge-m3", "--tokenizer", "kiwipiepy"]
+
+    @pytest.mark.parametrize(
+        ("absent", "argv"),
+        [
+            (("fastembed",), ["--provider", "onnx", "--model", "bge-small-en-v1.5"]),
+            (("fastembed", "kiwipiepy"), _ONNX_AND_KOREAN),
+            # One of the two is already there. A re-run that named only the missing one
+            # would bring up an environment without the other and be refused for it.
+            (("kiwipiepy",), _ONNX_AND_KOREAN),
+            (("fastembed",), _ONNX_AND_KOREAN),
+        ],
+        ids=["onnx-only", "both-missing", "has-onnx-lacks-korean", "has-korean-lacks-onnx"],
+    )
+    def test_scripted_refusal_on_uvx_says_how_to_rerun_with_the_extra(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        absent: tuple[str, ...],
+        argv: list[str],
+    ) -> None:
+        """On a uvx run the recovery is a re-run with every extra, not an install step (#3489)."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            init_cmd,
+            "_runtime_profile",
+            lambda: _make_test_profile(kind="pypi", mm_binary_origin="uvx"),
+        )
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda module: None if module in absent else object(),
+        )
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+        result = CliRunner().invoke(cli, ["init", "--non-interactive", *argv, "--mcp", "skip"])
+
+        assert result.exit_code != 0, result.output
+        assert self._recovery_lines(result.output) == [
+            "  Re-run with the extras: "
+            'uvx --python 3.12 --from "memtomem[all]" memtomem init <same options>'
+        ]
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_scripted_refusal_in_a_workspace_run_through_uvx_keeps_uv_sync(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`uvx … mm init` from a source checkout: the workspace hint, not a uvx one."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        home = tmp_path / "home"
+        home.mkdir()
+        workspace = tmp_path / "ws"
+        venv_bin = workspace / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python").touch()
+        set_home(monkeypatch, home)
+        monkeypatch.setattr(
+            init_cmd,
+            "_runtime_profile",
+            lambda: _make_test_profile(workspace, kind="source", mm_binary_origin="uvx"),
+        )
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: {"fastapi", "uvicorn"})
+        # The in-process probe would find everything, so only the workspace probe can
+        # report fastembed missing, whatever this interpreter has installed.
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "--non-interactive",
+                "--provider",
+                "onnx",
+                "--model",
+                "bge-small-en-v1.5",
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code != 0, result.output
+        assert self._recovery_lines(result.output) == ["  Install first: uv sync --extra onnx"]
+        assert not (home / ".memtomem" / "config.json").exists()
 
     def test_scripted_tokenizer_kiwipiepy_missing_exits_non_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
