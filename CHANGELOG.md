@@ -33,13 +33,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   bytes are the new holder's: one that has locked but not yet rewritten the file leaves its
   predecessor's pid in place for both.
 
-- **The automation plugin's missing-`mm` hint asks uv for Python 3.12 (#3481).** When the
-  SessionStart hook finds no `mm` on `PATH`, it suggested `uv tool install memtomem==<version>`.
-  uv can pick an installed interpreter older than 3.12 for that command and stop with
-  `No solution found`. The hint now reads `uv tool install --python 3.12 memtomem==<version>`,
-  the command the plugin's README shows. That command is written without quotes there and in
-  the Claude Code guide, since Windows Command Prompt passes single quotes through as part of
-  the argument. The hint for an `mm` of the wrong version is unchanged.
+- **The automation plugin's missing-`mm` hint is the install command its README shows
+  (#3481).** When the SessionStart hook finds no `mm` on `PATH`, its hint now reads
+  `uv tool install --python 3.12 memtomem==<version>`, the line in the plugin README and the
+  Claude Code guide. The hint's previous command had no `--python 3.12`. The README and the guide
+  now write that command without single quotes, which Windows Command Prompt would pass through
+  as part of the requirement. The hint for an `mm` of the wrong version is unchanged.
 
 - **`mem_consolidate_apply` refuses to write a summary into a file that already exists
   (#3474).** Each summary goes to a file named for that apply alone
