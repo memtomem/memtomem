@@ -19,6 +19,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm init` on a `uv tool` install names `memtomem[all]` for a missing extra, so following
+  it keeps the extras the tool environment already has (#3495).** With one extra missing, the
+  hint and the install the wizard offers at the end were `uv tool install --reinstall
+  "memtomem[<extra>]"`. `--reinstall` keeps only the extras it names: with uv 0.12.13, running
+  it for `korean` on an install made from `memtomem[onnx]` removed `fastembed` and
+  `onnxruntime`. Both now name `[all]`, as the uvx re-run from #3489 does. The lines around the hints
+  no longer assume an install: the ONNX choice says it needs the `onnx` extra instead of
+  `pip install memtomem[onnx]`, the `kiwipiepy` warning drops `Run: pip install kiwipiepy`, the
+  summary says what fails "while it is missing" rather than "until installed", and the uvx
+  re-run ends in `memtomem init` (with `--non-interactive <same options>` on a scripted run)
+  instead of a literal `...`. A uvx summary prints that command once instead of twice. The
+  hint for a source or project checkout (`uv sync --extra …`) is unchanged.
+
 - **The Claude Code, Codex and OpenCode plugins ask uv for Python 3.12 when they start the
   server (#3488).** Their launch command was `uvx --from memtomem[onnx]==<version>
   memtomem-server`. uv resolves a requirement that names an extra against the first Python it
@@ -80,8 +93,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   re-invocation hint for a missing extra gained the same flag (its requirement is
   `memtomem[all]` since #3489, the next entry). Without the flag, uv 0.12.13 on
   macOS resolved `memtomem[all]` (installing) and `memtomem[onnx]` (re-invoking) against
-  `/usr/bin/python3` 3.9.6 first on `PATH` and stopped. The `--reinstall` hints for an existing
-  tool environment are unchanged.
+  `/usr/bin/python3` 3.9.6 first on `PATH` and stopped. This change leaves the `--reinstall`
+  hints for an existing tool environment as they were; #3495 changes their requirement.
 
 - **Outside a workspace, `mm init` run from `uvx` writes an MCP launch that asks uv for Python
   3.12, and its missing-extra hints are a `uvx` command (#3489).** The MCP server command it
@@ -95,16 +108,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `No interpreter found for Python 3.12`. The hint for a missing extra, in the wizard's ONNX
   step and in the closing summary, was `uv tool install --reinstall "memtomem[<extra>]"`: an
   install into a separate tool environment, not the `uvx` command run with the extra. It is
-  now `uvx --python 3.12 --from "memtomem[all]" memtomem ...`, and when
+  now `uvx --python 3.12 --from "memtomem[all]" memtomem init`, and when
   `mm init --non-interactive` refuses for a missing extra the error reads `Re-run with the
-  extras: uvx --python 3.12 --from "memtomem[all]" memtomem init <same options>`. The
-  requirement is `[all]` whichever extra is missing, in the summary's existing re-invocation
-  line too, which named the missing extra: a re-run that names only that one can come up
+  extras: uvx --python 3.12 --from "memtomem[all]" memtomem init --non-interactive <same
+  options>` (the command's final wording is from #3495). The requirement is `[all]` whichever
+  extra is missing, and the summary prints that one command, where it used to add a second
+  re-invocation line naming the missing extra: a re-run that names only that one can come up
   without another the run already had. With uv 0.12.13, memtomem 0.7.12 and
   `--provider onnx --tokenizer kiwipiepy`, a run from `"memtomem[onnx]==0.7.12"` was refused
   for `korean`, one from `"memtomem[korean]==0.7.12"` was refused for `onnx`, and one from
   `"memtomem[all]==0.7.12"` wrote the config. From a source or project workspace, and for a
-  `uv tool` install, the MCP launch and the hints are unchanged.
+  `uv tool` install, the MCP launch is unchanged; the `uv tool` hint changes in #3495.
 
 - **The automation plugin's missing-`mm` hint is the install command its README shows
   (#3481).** When the SessionStart hook finds no `mm` on `PATH`, its hint now reads
