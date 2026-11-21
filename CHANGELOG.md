@@ -19,6 +19,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The automation plugin's missing-`mm` hint asks uv for Python 3.12 (#3481).** When the
+  SessionStart hook finds no `mm` on `PATH`, it suggested `uv tool install memtomem==<version>`.
+  uv can pick an installed interpreter older than 3.12 for that command and stop with
+  `No solution found`. The hint now reads
+  `uv tool install --python 3.12 'memtomem==<version>'`, the command the plugin's README has
+  shown since #3480. The hint for an `mm` of the wrong version is unchanged.
+
 - **`mem_consolidate_apply` refuses to write a summary into a file that already exists
   (#3474).** Each summary goes to a file named for that apply alone
   (`consolidated/<date>-<source>-run<id>-<12 hex>.md`, #2802), and the summary's links to its

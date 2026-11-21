@@ -2017,6 +2017,30 @@ def test_automation_reports_incompatible_dependency(fake_mm: tuple[dict[str, str
     assert _calls(log) == [["--version"]]
 
 
+def test_automation_missing_dependency_hint_is_the_readme_install_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no ``mm`` to find, SessionStart prints the README's fresh-install command."""
+    # PATH is replaced, where ``fake_mm`` prefixes it: a developer's global ``mm`` must not
+    # be found. Windows also searches the working directory ahead of PATH.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    env = os.environ.copy()
+    env.update({"PATH": str(empty), "CLAUDE_PLUGIN_DATA": str(tmp_path / "data")})
+
+    result = _dispatch("SessionStart", {"hook_event_name": "SessionStart"}, env)
+
+    assert result.returncode == 0
+    command = f"uv tool install --python 3.12 'memtomem=={_contract()['core']['version']}'"
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert context == f"Install the optional automation dependency with `{command}`."
+    readme = (_ROOT / "packages/memtomem-claude-automation-plugin/README.md").read_text(
+        encoding="utf-8"
+    )
+    assert command in readme.splitlines()
+
+
 def test_automation_failure_log_does_not_store_prompt(
     fake_mm: tuple[dict[str, str], Path],
 ) -> None:
