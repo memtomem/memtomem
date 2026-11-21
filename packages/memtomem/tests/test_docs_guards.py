@@ -2053,7 +2053,10 @@ class TestRegistryAndInstallDocs:
 # joined, comments dropped by ``shlex``), so a flag on one line, or in a comment, cannot cover
 # another line; commands chained on one line with ``&&``, ``;`` or ``|`` stay one unit.
 # Markdown's raw-HTML ``<code>`` and comments in non-shell fences are not handled: no tracked
-# doc has either around these launches.
+# doc has either around these launches. The count does not check where the flag sits either:
+# ``--python 3.12`` passed to the launched program (``memtomem-server --python 3.12``, or
+# inside a ``python -c`` string) counts as well. Telling uv's options from the program's would
+# mean parsing ``uvx`` argv, which this scan deliberately does not do.
 #
 # Not scanned here: the generated plugin launches, which ``tools/render_plugin_assets.py``
 # writes from ``contract.toml`` and its ``--check`` pins; ``mm init``'s own command
