@@ -2253,8 +2253,8 @@ class TestUvxBranching:
         out = unstyle(capsys.readouterr().out)
         assert "Install:    uvx (ephemeral)" in out
         assert "uvx is ephemeral" in out
-        # Without the flag, uv 0.12.13 resolved `memtomem[all]` against a 3.9 earlier
-        # on PATH and failed, while bare `uvx memtomem` on that PATH ran on a later 3.12.
+        # Without the flag, uv 0.12.13 resolved `memtomem[all]` against a 3.9 first on
+        # PATH and failed with "No solution found".
         hint = [line for line in out.splitlines() if "install permanently" in line]
         assert hint == [
             '  For repeat use, install permanently: uv tool install --python 3.12 "memtomem[all]"'
@@ -2274,8 +2274,10 @@ class TestUvxBranching:
         result = init_cmd._install_extras("uvx", ["onnx"])
         assert result is False
         out = unstyle(capsys.readouterr().out)
-        assert "uvx is ephemeral" in out
-        assert "memtomem[onnx]" in out
+        assert out.splitlines() == [
+            "  (uvx is ephemeral — re-invoke with "
+            '`uvx --python 3.12 --from "memtomem[onnx]" memtomem ...` instead)'
+        ]
 
 
 class TestFindSpecUnification:

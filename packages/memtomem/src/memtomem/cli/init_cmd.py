@@ -1813,7 +1813,7 @@ def _install_extras(
     if install_type == "uvx":  # ephemeral env; a non-ephemeral install is meaningless
         click.echo(
             "  (uvx is ephemeral — re-invoke with "
-            f'`uvx --from "memtomem[{name}]" memtomem ...` instead)'
+            f'`uvx --python 3.12 --from "memtomem[{name}]" memtomem ...` instead)'
         )
         return False
 

@@ -19,13 +19,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
-- **`mm init` run from `uvx` prints the install command the README shows (#3485).** Its
-  closing "For repeat use" hint, and the error raised when the isolated MCP runtime cannot read
-  the installed version, now read `uv tool install --python 3.12 "memtomem[all]"`. Without the
-  flag, uv 0.12.13 on macOS resolved `memtomem[all]` against `/usr/bin/python3` 3.9.6 when it
-  came first on `PATH` and stopped with "No solution found", although `uvx memtomem` on the same
-  `PATH` had just run on a Homebrew Python 3.12. A macOS login shell can put `/usr/bin` first.
-  The `--reinstall` hints for an existing tool environment are unchanged.
+- **`mm init` run from `uvx` asks uv for Python 3.12 in the commands it suggests (#3485).** Its
+  closing "For repeat use" hint, and the error `mm init` raises when it cannot determine the
+  installed version for the isolated MCP launch, now read
+  `uv tool install --python 3.12 "memtomem[all]"`, the README Quick Start command. The hint for
+  a missing extra now reads `uvx --python 3.12 --from "memtomem[<extra>]" memtomem ...`. Without
+  the flag, uv 0.12.13 on macOS resolved these extras requirements against `/usr/bin/python3`
+  3.9.6 first on `PATH` and stopped with "No solution found". The `--reinstall` hints for an
+  existing tool environment are unchanged.
 
 - **The automation plugin's missing-`mm` hint is the install command its README shows
   (#3481).** When the SessionStart hook finds no `mm` on `PATH`, its hint now reads
