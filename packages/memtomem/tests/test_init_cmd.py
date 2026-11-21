@@ -2253,8 +2253,8 @@ class TestUvxBranching:
         out = unstyle(capsys.readouterr().out)
         assert "Install:    uvx (ephemeral)" in out
         assert "uvx is ephemeral" in out
-        # uv resolves an extras requirement against the first Python on PATH,
-        # so without the flag the printed command fails where `uvx` just worked.
+        # Without the flag, uv 0.12.13 resolved `memtomem[all]` against a 3.9 earlier
+        # on PATH and failed, while bare `uvx memtomem` on that PATH ran on a later 3.12.
         hint = [line for line in out.splitlines() if "install permanently" in line]
         assert hint == [
             '  For repeat use, install permanently: uv tool install --python 3.12 "memtomem[all]"'
