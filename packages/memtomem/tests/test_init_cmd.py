@@ -8,6 +8,7 @@ pydantic-settings parses list-typed env vars as JSON arrays.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import subprocess
 import sys
@@ -353,6 +354,24 @@ class TestMcpServerCommand:
         assert _mcp_server_command(profile) == (
             "uvx",
             ["--isolated", "--from", "memtomem[all]==0.5.0", "memtomem-server"],
+        )
+
+    def test_uvx_without_version_hints_install_with_python_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        profile = _make_test_profile(kind="pypi", mm_binary_origin="uvx")
+
+        def _missing(_: str) -> str:
+            raise importlib.metadata.PackageNotFoundError("memtomem")
+
+        monkeypatch.setattr("memtomem.cli.init_cmd.importlib.metadata.version", _missing)
+
+        with pytest.raises(click.ClickException) as exc_info:
+            _mcp_server_command(profile)
+        assert exc_info.value.message == (
+            "Could not determine the installed memtomem version for an isolated "
+            'MCP runtime. Install permanently with `uv tool install --python 3.12 "memtomem[all]"` '
+            "and re-run `mm init`."
         )
 
     def test_persistent_command_launches_server_module(self) -> None:
@@ -2234,6 +2253,12 @@ class TestUvxBranching:
         out = unstyle(capsys.readouterr().out)
         assert "Install:    uvx (ephemeral)" in out
         assert "uvx is ephemeral" in out
+        # Without the flag, uv 0.12.13 resolved `memtomem[all]` against a 3.9 first on
+        # PATH and failed with "No solution found".
+        hint = [line for line in out.splitlines() if "install permanently" in line]
+        assert hint == [
+            '  For repeat use, install permanently: uv tool install --python 3.12 "memtomem[all]"'
+        ]
 
     def test_install_extras_uvx_hint_branch(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -2249,8 +2274,10 @@ class TestUvxBranching:
         result = init_cmd._install_extras("uvx", ["onnx"])
         assert result is False
         out = unstyle(capsys.readouterr().out)
-        assert "uvx is ephemeral" in out
-        assert "memtomem[onnx]" in out
+        assert out.splitlines() == [
+            "  (uvx is ephemeral — re-invoke with "
+            '`uvx --python 3.12 --from "memtomem[onnx]" memtomem ...` instead)'
+        ]
 
 
 class TestFindSpecUnification:
