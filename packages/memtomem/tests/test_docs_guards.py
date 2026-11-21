@@ -3076,11 +3076,20 @@ def _stdio_help_registrations(expected: str) -> list[_Registration]:
     return _number("stdio-help", items)
 
 
+# Markdown outside the contractual docs that holds a manual registration. Named as well as
+# enumerated: without Git metadata ``_tracked_markdown()`` falls back to the contractual docs
+# and would skip these. A checkout test keeps the list complete.
+_REGISTRATION_README_FALLBACK = (
+    _REPO_ROOT / "packages" / "memtomem-antigravity-plugin" / "README.md",
+    _REPO_ROOT / "packages" / "opencode-memtomem" / "README.md",
+)
+
+
 def _all_registrations() -> list[_Registration]:
     expected = _expected_extra_tools()
     docs = [
         p
-        for p in _tracked_markdown()
+        for p in sorted({*_tracked_markdown(), *_REGISTRATION_README_FALLBACK})
         if p.name != "CHANGELOG.md" and "docs/adr/" not in p.as_posix()
     ]
     found: list[_Registration] = []
@@ -3183,6 +3192,40 @@ class TestManualRegistrationsExposeTheUpdateTool:
         assert [(r.kind, r.valid) for r in registrations if r.source == "stdio-help"] == [
             ("cli", True)
         ]
+
+    def test_the_export_fallback_finds_every_tracked_registration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tree without Git metadata scans every registration a checkout scans (#3499).
+
+        Without a repository ``_tracked_markdown()`` falls back to the contractual docs, so a
+        registration outside them and outside ``_REGISTRATION_README_FALLBACK`` goes unchecked in
+        a source export, where it can also bring a count in the test above below its floor. The
+        fallback may find more (a local untracked guide), never less.
+        """
+        if _tracked_files("*.md") is None:
+            pytest.skip("no Git metadata: there is no tracked list to compare the fallback with")
+
+        def key(r: _Registration) -> tuple[str, str, str, int, bool | None]:
+            return (r.source, r.section, r.kind, r.ordinal, r.valid)
+
+        tracked = {key(r) for r in _all_registrations()}
+        calls: list[tuple[str, ...]] = []
+
+        def no_repository(*pathspecs: str, root: Path = _REPO_ROOT) -> None:
+            calls.append(pathspecs)
+            return None
+
+        monkeypatch.setitem(globals(), "_tracked_files", no_repository)
+        fallback = {key(r) for r in _all_registrations()}
+        assert any("*.md" in pathspecs for pathspecs in calls), (
+            "the scan did not enumerate Markdown through _tracked_files; this check is vacuous"
+        )
+        missing = sorted(tracked - fallback)
+        assert not missing, (
+            "Registrations a checkout scans but a tree without Git metadata does not; add their "
+            "file to _REGISTRATION_README_FALLBACK:\n  " + "\n  ".join(map(str, missing))
+        )
 
     @pytest.mark.parametrize(
         ("command", "expected"),
