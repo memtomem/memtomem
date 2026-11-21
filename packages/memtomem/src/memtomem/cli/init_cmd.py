@@ -460,8 +460,8 @@ def _y_refuse_hint(flag: str, extra: str) -> str:
     text teaches ``--non-interactive`` since the #1631 flag split.)
     """
     return (
-        f"  Note: `mm init --non-interactive {flag}` refuses without "
-        f"`memtomem[{extra}]`; install first for scripted setups."
+        f"  Note: a scripted `mm init --non-interactive {flag}` refuses without "
+        f"`memtomem[{extra}]`."
     )
 
 
@@ -483,7 +483,7 @@ def _step_embedding(state: dict) -> None:
     step_header(state, "Embedding Provider")
     click.echo("  Choose how to generate embeddings:")
     click.echo("    [1] Quick start — keyword search only, no setup needed (recommended)")
-    click.echo("    [2] Local ONNX — dense search, no server needed (pip install memtomem[onnx])")
+    click.echo("    [2] Local ONNX — dense search, no server needed (needs the onnx extra)")
     click.echo("    [3] Ollama — local dense embeddings, needs GPU")
     click.echo("    [4] OpenAI — cloud dense embeddings, needs API key")
     choice = nav_prompt("  Select", type=click.IntRange(1, 4), default=1)
@@ -511,8 +511,7 @@ def _step_embedding(state: dict) -> None:
             # Use the install-type-aware hint so the inline message matches
             # what the summary would otherwise print, then mark the warning
             # as already surfaced so ``_collect_missing_extras`` skips it.
-            click.echo(f"  Install with: {_extra_install_hint(['onnx'], state)}")
-            click.echo("  Saving ONNX config now so you're ready after install.")
+            click.echo(f"  Get it with: {_extra_install_hint(['onnx'], state)}")
             click.echo(_y_refuse_hint("--provider onnx", "onnx"))
             click.echo()
             state.setdefault("_extras_warned_inline", set()).add("onnx")
@@ -1115,7 +1114,7 @@ def _step_language(state: dict) -> None:
 
             click.secho("  kiwipiepy is installed.", fg="green")
         except ImportError:
-            click.secho("  kiwipiepy not installed. Run: pip install kiwipiepy", fg="yellow")
+            click.secho("  kiwipiepy not installed.", fg="yellow")
             click.echo(_y_refuse_hint("--tokenizer kiwipiepy", "korean"))
     state["tokenizer"] = tokenizer
     click.echo()
@@ -1783,28 +1782,29 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
       ``uv sync --extra all`` (two+). The workspace ``.venv`` is what
       ``uv run mm`` will use, so ``uv sync`` is the right install path.
     - ``uvx`` run → ``uvx --python 3.12 --from "memtomem[all]" memtomem
-      ...``, the re-invocation :func:`_install_extras` prints, always with
-      ``[all]`` (see :func:`_uvx_extra_prefix`). A tool install is a
-      separate environment, not this command with the extras.
+      init`` (see :func:`_uvx_extra_prefix`), with ``--non-interactive
+      <same options>`` when ``state["non_interactive"]`` is set so a scripted
+      caller is not sent into the wizard. The run's own arguments are not
+      echoed; they can hold a key. A tool install is a separate environment,
+      not this command with the extras.
     - PyPI / ``uv tool install`` (default) → ``uv tool install --reinstall
-      "memtomem[<name>]"`` or ``[all]``. Matches how the global ``mm``
-      binary is installed.
-
-    Multi-extra case collapses to ``[all]`` instead of bracketed multiples
-    (``memtomem[onnx,web]``) because ``[all]`` is the public, documented
-    extra in ``pyproject.toml``; the user doesn't need to know the
-    sub-bundle.
+      "memtomem[all]"`` whichever extras are missing. ``--reinstall`` replaces
+      the tool environment with exactly the extras it names: with uv 0.12.13,
+      reinstalling ``memtomem[korean]`` over a ``memtomem[onnx]`` install
+      removed ``fastembed`` (#3495). :func:`_install_extras` runs the same
+      requirement.
 
     Phase 3 (#363): reads ``cwd_install_type`` from :class:`RuntimeProfile`
     so the workspace-vs-tool branch lives in one place. Treats missing
     ``_profile`` as PyPI install (matches the ``state=None`` default)."""
     target = _extra_hint_target(state)
     if target == "uvx":
-        return f"{_uvx_extra_prefix()} memtomem ..."
-    name = extras[0] if len(extras) == 1 else "all"
+        rerun = " --non-interactive <same options>" if (state or {}).get("non_interactive") else ""
+        return f"{_uvx_extra_prefix()} memtomem init{rerun}"
     if target == "workspace":
+        name = extras[0] if len(extras) == 1 else "all"
         return f"{_UV_SYNC_HINT_PREFIX}{name}"
-    return f'{_EXTRA_INSTALL_HINT_PREFIX}[{name}]"'
+    return f'{_EXTRA_INSTALL_HINT_PREFIX}[all]"'
 
 
 def _install_extras(
@@ -1852,12 +1852,10 @@ def _install_extras(
     Phase 1 :func:`_emit_missing_extras_warning` hint path."""
     if not extras:
         return False
-    name = extras[0] if len(extras) == 1 else "all"
 
     if install_type == "uvx":  # ephemeral env; a non-ephemeral install is meaningless
-        click.echo(
-            f"  (uvx is ephemeral — re-invoke with `{_uvx_extra_prefix()} memtomem ...` instead)"
-        )
+        # No command here: the caller's summary prints the re-run right after.
+        click.echo("  (uvx is ephemeral — nothing to install into; re-run with the command below.)")
         return False
 
     # Non-TTY: skip prompt and defer to Phase 1 hint. Without this,
@@ -1870,9 +1868,13 @@ def _install_extras(
     if install_type in ("source", "project"):
         if workspace_dir is None:
             return False
+        name = extras[0] if len(extras) == 1 else "all"
         cmd = ["uv", "sync", "--extra", name]
         cwd = str(workspace_dir)
     else:  # install_type == "tool"
+        # `[all]` for the reason in `_extra_install_hint`: `--reinstall` drops
+        # every extra the requirement does not name.
+        name = "all"
         cmd = ["uv", "tool", "install", "--reinstall", f"memtomem[{name}]"]
         cwd = None
 
@@ -2335,11 +2337,12 @@ def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
     adds no output noise. When non-empty, names the missing extras, lists
     which ``Next steps`` commands will fail without them, and prints a single
     install command. The hint is branched by install type: workspace installs
-    get ``uv sync --extra …`` and tool installs get
-    ``uv tool install --reinstall …``, each a narrow per-extra hint when one
-    is missing and ``[all]`` when two+ (matches ``pyproject.toml``'s public
-    extras); ``uvx`` runs get a ``uvx`` re-invocation that always names
-    ``[all]``."""
+    get ``uv sync --extra …`` (per-extra when one is missing, ``[all]`` when
+    two+); tool installs get ``uv tool install --reinstall "memtomem[all]"``
+    and ``uvx`` runs a ``uvx`` re-invocation from ``memtomem[all]``, both
+    whichever extras are missing (see :func:`_extra_install_hint`). On a
+    ``uvx`` run this line is the only one that prints the command;
+    :func:`_install_extras` says only that there is nothing to install into."""
     if not missing:
         return
     click.echo()
@@ -2353,20 +2356,20 @@ def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
         if embeds_with_onnx:
             click.echo(
                 "      'mm add', 'mm search', 'mm index' (embeddings) and 'mm web' (UI) "
-                "will fail until installed."
+                "will fail while they are missing."
             )
         else:
             click.echo(
                 "      Reranking keeps the original order and 'mm web' (UI) will fail "
-                "until installed."
+                "while they are missing."
             )
     elif "onnx" in missing:
         if embeds_with_onnx:
-            click.echo("      'mm add', 'mm search' and 'mm index' will fail until installed.")
+            click.echo("      'mm add', 'mm search' and 'mm index' will fail while it is missing.")
         else:
-            click.echo("      Reranking keeps the original order until installed.")
+            click.echo("      Reranking keeps the original order while it is missing.")
     elif "web" in missing:
-        click.echo("      'mm web' will fail to start until installed.")
+        click.echo("      'mm web' will fail to start while it is missing.")
     click.echo(f"      → {_extra_install_hint(missing, state)}")
 
 
@@ -3420,7 +3423,10 @@ def init(
     # the _get_or_build_profile back-compat shim, so there is exactly one
     # place to land a new install-context judgment.
     profile = _runtime_profile()
-    state: dict = {"_profile": profile}
+    # `non_interactive` is seeded here, not only at the assignment further down: the
+    # scripted refusal and the embedding step read it through `_extra_install_hint`
+    # before that line runs.
+    state: dict = {"_profile": profile, "non_interactive": non_interactive}
 
     if profile.cwd_install_type == "source":
         click.secho("  Detected: source install", fg="blue")
@@ -3552,9 +3558,7 @@ def init(
             if _extra_hint_target(state) == "uvx":
                 # A uvx run is re-run with the extras rather than installed into.
                 # The run's own arguments are not echoed; they can hold a key.
-                recovery = (
-                    f"Re-run with the extras: {_uvx_extra_prefix()} memtomem init <same options>"
-                )
+                recovery = f"Re-run with the extras: {_extra_install_hint(required, state)}"
             else:
                 recovery = f"Install first: {_extra_install_hint(required, state)}"
             raise click.ClickException(
