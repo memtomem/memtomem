@@ -37,11 +37,7 @@ mode: incremental · saved 2 items · commit-derived: 1 · session-derived: 1
 
 ## Private by design
 
-- **Local by default.** The server, its database, and your Markdown files stay on your machine. With the defaults (keyword search, no LLM, no reranker) no note text is sent anywhere; the local ONNX models download their weights once and then run in-process.
-- **Every remote service is opt-in.** OpenAI embeddings, an Ollama server on another host, a cloud LLM, the Cohere reranker, Langfuse tracing, and webhooks each stay off until you configure them. `mm status` lists the embedding, LLM, and reranker endpoints among them that are not on a loopback address; Langfuse and webhooks are not in that list.
-- **Your AI client is a separate step.** MCP tools return note text to the client that called them (Claude Code, Codex, …), which sends it to its own model provider under its own terms.
-
-The full table of what each setting sends, and when: [What leaves your machine](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#what-leaves-your-machine).
+The memtomem server runs on your machine, and its database and Markdown files stay there. With the defaults (BM25-only search, no LLM, no reranker) the server sends none of your note text anywhere. Some optional providers send text to an outside service, and each one is off until you configure it; a request to a loopback address can still leave your machine if your environment routes HTTP through a proxy or the local server forwards the request to a hosted model. Separately, the MCP tools return note text to the AI client that called them, and memtomem does not control what that client sends to its own model provider. [What leaves your machine](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#what-leaves-your-machine) lists what each setting sends, when, and where.
 
 ## Set it up from your coding agent
 
