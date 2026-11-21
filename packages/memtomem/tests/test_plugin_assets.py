@@ -2032,7 +2032,8 @@ def test_automation_missing_dependency_hint_is_the_readme_install_command(
     result = _dispatch("SessionStart", {"hook_event_name": "SessionStart"}, env)
 
     assert result.returncode == 0
-    command = f"uv tool install --python 3.12 'memtomem=={_contract()['core']['version']}'"
+    # Unquoted on purpose: cmd.exe passes single quotes through as part of the argument.
+    command = f"uv tool install --python 3.12 memtomem=={_contract()['core']['version']}"
     context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
     assert context == f"Install the optional automation dependency with `{command}`."
     readme = (_ROOT / "packages/memtomem-claude-automation-plugin/README.md").read_text(
