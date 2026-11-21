@@ -728,7 +728,10 @@ class TestPluginManualCoexistenceCallout:
             # ``test_plugin_readme_fresh_env_blocks_have_no_bare_mm`` holds.
             # Compared whole rather than by substring, because the pinned line
             # itself ends in "mm doctor --claude-mcp".
-            assert f'uvx --from "memtomem[all]=={version}" mm doctor --claude-mcp' in fenced
+            assert (
+                f'uvx --python 3.12 --from "memtomem[all]=={version}" mm doctor --claude-mcp'
+                in fenced
+            )
             assert "mm doctor --claude-mcp" not in fenced
             # The shorthand still has to be mentioned, in prose, for readers
             # who do have the CLI.
@@ -1451,10 +1454,10 @@ class TestPluginQuickstarts:
     def test_fresh_store_bootstrap_is_shared_and_precedes_client_branches(self) -> None:
         version = _plugin_contract()["core"]["version"]
         bootstrap = (
-            f"uvx --from 'memtomem[onnx]=={version}' mm init "
+            f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm init "
             "--preset minimal --non-interactive --mcp skip"
         )
-        status = f"uvx --from 'memtomem[onnx]=={version}' mm status"
+        status = f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm status"
 
         guides = tuple(locale.path for locale in _QUICKSTARTS)
         for path in (*guides, _PLUGIN_README, _CODEX_PLUGIN_README):
@@ -3477,3 +3480,28 @@ class TestSharedDaemonGuideMatchesSource:
             ("main", None, None),
             (None, "main", 0.0),
         ]
+
+
+def test_a_cli_command_run_through_uvx_with_an_extra_asks_for_python_312() -> None:
+    """A copied ``uvx --from 'memtomem[extra]…' mm …`` must not depend on the first Python.
+
+    uv resolves a requirement that names an extra against the first Python it finds. With
+    only an older one visible and no uv-managed interpreter it stops with "No solution
+    found" rather than downloading 3.12 (#3488), so each such command carries
+    ``--python 3.12``. Lines that start the server (``… memtomem-server``) are not read
+    here, and the changelog keeps the commands its older entries quoted.
+    """
+    command = re.compile(
+        r"uvx\s[^\n`]*?--from\s+[\"']?memtomem\[[^\]\n]*\][^\s\"']*[\"']?\s+(?:mm|memtomem)\s"
+    )
+    seen, missing = 0, []
+    for path in _tracked_markdown():
+        if path == _REPO_ROOT / "CHANGELOG.md":
+            continue
+        for number, line in enumerate(_read(path).splitlines(), 1):
+            for match in command.finditer(line):
+                seen += 1
+                if " --python 3.12 " not in match.group(0):
+                    missing.append(f"{path.relative_to(_REPO_ROOT)}:{number}: {line.strip()}")
+    assert seen, "the pattern matched no command; the guard would pass on anything"
+    assert not missing, "uvx CLI commands without --python 3.12:\n" + "\n".join(missing)

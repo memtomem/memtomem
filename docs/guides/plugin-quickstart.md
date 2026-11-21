@@ -51,8 +51,9 @@ uvx --version
 If either command is not found, follow the [official uv installation
 guide](https://docs.astral.sh/uv/getting-started/installation/) and open a new
 terminal. memtomem runs on Python 3.12 or newer, and the first run needs a
-network connection to download the exactly pinned packages. You do not need
-an embedding model or an API key.
+network connection to download the exactly pinned packages. The commands
+below pass `--python 3.12`, so uv downloads Python 3.12 when it finds none.
+You do not need an embedding model or an API key.
 
 Then check **only** the tool you use:
 
@@ -77,8 +78,8 @@ machine.
 Seeing an existing ONNX/E5 configuration is normal; this walkthrough does not change your model or database.
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.12' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.7.12' mm status
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' mm init --preset minimal --non-interactive --mcp skip
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' mm status
 ```
 
 `--mcp skip` leaves other clients' settings alone, because the plugin in the
@@ -102,7 +103,7 @@ Open the terminal in **the root of the project you are onboarding**, and run
 this diagnostic from the same folder:
 
 ```bash
-uvx --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
 ```
 
 The plugin does not put `mm` on your PATH, so use the pinned command above.
@@ -283,7 +284,7 @@ specific test before every PR", needs its own store. Initialize it at the root
 of the actual Git repository:
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.12' mm mem init --scope project_local
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' mm mem init --scope project_local
 ```
 
 This creates and registers a local memory tier that is not committed to Git.

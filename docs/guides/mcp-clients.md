@@ -129,7 +129,7 @@ For the safe plugin experience (bundled MCP server plus nine focused skills),
 install `/plugin install memtomem@memtomem`. Prompt retrieval and write-time
 indexing are a separate opt-in `/plugin install memtomem-automation@memtomem`.
 Note that both manual commands above differ from the plugin's pinned launch
-command (`uvx --from 'memtomem[onnx]==0.7.12' memtomem-server`), so installing the
+command (`uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' memtomem-server`), so installing the
 plugin on top of a manual entry runs **two** servers against the same store.
 The [Claude Code integration guide](integrations/claude-code.md) shows how to
 check for the duplicate and which registration to keep.

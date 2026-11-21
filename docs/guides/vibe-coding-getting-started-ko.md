@@ -50,7 +50,8 @@ uvx --version
 명령을 찾지 못하면 [uv 공식 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를
 따른 뒤 터미널을 새로 여세요. memtomem은 Python 3.12 이상 환경에서
 실행되며, 첫 실행에는 정확히 고정된 패키지를 내려받을 네트워크 연결이
-필요합니다. 임베딩 모델이나 API key는 필요하지 않습니다.
+필요합니다. 아래 명령은 `--python 3.12`를 넘기므로, Python 3.12를 찾지 못하면
+uv가 내려받습니다. 임베딩 모델이나 API key는 필요하지 않습니다.
 
 그다음 평소 쓰는 도구 **하나만** 확인합니다.
 
@@ -76,8 +77,8 @@ Claude Code와 Codex CLI 중 어느 쪽을 쓰더라도 완전히 새 환경에�
 기존 ONNX/E5 설정이 보이는 것은 정상입니다. 이 체험을 위해 기존 모델이나 DB를 바꾸지 않습니다.
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.12' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.7.12' mm status
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' mm init --preset minimal --non-interactive --mcp skip
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' mm status
 ```
 
 `--mcp skip`은 다음 단계의 플러그인이 MCP 연결을 제공하므로 다른
@@ -100,7 +101,7 @@ database path는 나중에 두 도구가 같은 저장소를 보는지 확인할
 터미널을 **온보딩 프로젝트 루트**에서 엽니다. 다음 진단도 같은 폴더에서 실행합니다.
 
 ```bash
-uvx --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
 ```
 
 플러그인은 `mm`을 PATH에 설치하지 않으므로 위의 고정 버전 명령을 사용합니다.
@@ -267,7 +268,7 @@ $memtomem-setup 스킬로 /path/to/project/docs를 인덱싱하고 검색까지 
 해당하는 기억은 실제 Git 저장소 루트에서 별도 초기화합니다.
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.12' mm mem init --scope project_local
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' mm mem init --scope project_local
 ```
 
 이 명령은 Git에 올라가지 않는 로컬 기억 계층을 만들고 등록합니다. 실행

@@ -143,6 +143,15 @@ def _contract_core_requirement(repo_root: Path) -> tuple[str, str]:
     return version, f"memtomem[{','.join(extras)}]=={version}"
 
 
+def _contract_launch_python(repo_root: Path) -> str:
+    """The interpreter every bundle's launch line asks uv for."""
+    hermes = _load_toml(repo_root / "packages/memtomem-plugin-assets/contract.toml").get("hermes")
+    python = hermes.get("python") if isinstance(hermes, dict) else None
+    if not isinstance(python, str) or not python:
+        raise ReleaseCheckError("plugin contract has no hermes.python")
+    return python
+
+
 def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = None) -> str:
     """Require the core version actually pinned by OpenCode to exist on PyPI."""
     version, requirement = _contract_core_requirement(repo_root)
@@ -186,7 +195,11 @@ def _claude_launch_pin(repo_root: Path) -> str:
     with that leaves no requirement syntax to recognise here.
     """
     version, requirement = _contract_core_requirement(repo_root)
-    expected = {"command": "uvx", "args": ["--from", requirement, "memtomem-server"]}
+    python = _contract_launch_python(repo_root)
+    expected = {
+        "command": "uvx",
+        "args": ["--python", python, "--from", requirement, "memtomem-server"],
+    }
     label = f"{_CLAUDE_PLUGIN}/.mcp.json"
     servers = _load_json_object(repo_root / label, label).get("mcpServers")
     if not isinstance(servers, dict) or list(servers) != ["memtomem"]:

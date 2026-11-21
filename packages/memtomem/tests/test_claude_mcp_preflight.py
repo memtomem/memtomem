@@ -26,7 +26,7 @@ def write(path: Path, value: object) -> None:
 def pinned() -> dict:
     return {
         "command": "uvx",
-        "args": ["--from", MCP_REQUIREMENT, "memtomem-server"],
+        "args": ["--python", "3.12", "--from", MCP_REQUIREMENT, "memtomem-server"],
         "env": {
             "MEMTOMEM_TOOL_MODE": TOOL_MODE,
             "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage",
@@ -191,6 +191,34 @@ def test_preinstall_prediction_carries_the_plugin_launch_env(sandbox):
     assert "environment_difference" not in found
 
 
+def test_preinstall_prediction_is_the_launch_the_plugin_ships(sandbox):
+    # The prediction is built into the package and the plugin is a file in the repository;
+    # a manual entry copied from that file must be the one the prediction calls a match.
+    shipped = Path(__file__).resolve().parents[3] / "packages/memtomem-claude-plugin/.mcp.json"
+    entry = json.loads(shipped.read_text(encoding="utf-8"))["mcpServers"]["memtomem"]
+    assert entry == pinned()
+    manual(sandbox, entry=entry)
+    found = codes(checks.inspect_claude_mcp())
+    assert "native_dedup" in found
+    assert not ({"environment_difference", "plugin_install_risk"} & found)
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_a_launch_without_the_interpreter_request_is_not_the_plugin_launch(sandbox, installed):
+    # The plugin's launch before it asked uv for a Python (#3488): the arguments differ
+    # from the plugin's now, so Claude Code starts both.
+    if installed:
+        plugin(sandbox)
+    entry = pinned()
+    entry["args"] = entry["args"][2:]
+    manual(sandbox, entry=entry)
+    report = checks.inspect_claude_mcp()
+    assert report.install_risk
+    assert report.current_risk is installed
+    assert ("duplicate_risk" if installed else "plugin_install_risk") in codes(report)
+    assert "native_dedup" not in codes(report)
+
+
 def test_preinstall_prediction_flags_an_entry_without_the_telemetry_switch(sandbox):
     entry = pinned()
     del entry["env"]["ORT_DISABLE_TELEMETRY"]
@@ -212,7 +240,7 @@ def test_old_base_only_launch_is_not_the_new_onnx_plugin(sandbox, installed):
     if installed:
         plugin(sandbox)
     entry = pinned()
-    entry["args"][1] = MCP_REQUIREMENT.replace("[onnx]", "")
+    entry["args"][3] = MCP_REQUIREMENT.replace("[onnx]", "")
     manual(sandbox, entry=entry)
     report = checks.inspect_claude_mcp()
     assert report.install_risk
@@ -347,7 +375,7 @@ def test_unclassifiable_launches_never_run_or_leak(sandbox, entry):
 
 def test_installed_plugin_pin_used_instead_of_package_version(sandbox):
     entry = pinned()
-    entry["args"][1] = "memtomem==0.2.0"
+    entry["args"][3] = "memtomem==0.2.0"
     plugin(sandbox, entry=entry)
     manual(sandbox, entry=entry)
     assert checks.inspect_claude_mcp().exit_code == 0

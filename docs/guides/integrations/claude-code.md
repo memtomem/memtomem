@@ -55,7 +55,7 @@ Before `/plugin install`, review existing registrations in `/mcp`, then run
 the diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin registers an MCP server; it does
@@ -85,7 +85,7 @@ optional.
 
 > **Already registered via `claude mcp add`?** What happens depends on
 > whether your manual entry launches the server with the **same command and
-> arguments** as the plugin — `uvx --from 'memtomem[onnx]==0.7.12' memtomem-server`
+> arguments** as the plugin — `uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' memtomem-server`
 > (environment variables are not compared; measured on Claude Code 2.1.218):
 >
 > - **Same command** — Claude Code suppresses the plugin-managed copy, your
