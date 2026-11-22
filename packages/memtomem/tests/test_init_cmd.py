@@ -8456,6 +8456,128 @@ class TestPresetMcpFlagPreAnswer:
         assert out == ""
 
 
+class TestInteractiveMcpFlagPreAnswer:
+    """(#3515) ``--mcp`` decides the connect step in the interactive paths that take no
+    ``--preset``: the default picker, the picker's Advanced choice and ``--advanced``.
+
+    The picker branch applied ``--mcp`` only after its steps had run, so the connect
+    step asked and its answer was then overwritten; the two Advanced paths never applied
+    it. No test here answers the connect step: if it asks, stdin runs out at its prompt,
+    ``run_steps`` reports a cancellation and no config is written."""
+
+    @staticmethod
+    def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+        """Isolate HOME, cwd and the Kimi config directory, and record every command
+        ``init_cmd._run`` is given."""
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        # Pinned, not inherited: the Kimi writer prefers it over `~/.kimi-code`, and the
+        # tests assert that nothing was written there.
+        monkeypatch.setenv("KIMI_CODE_HOME", str(tmp_path / ".kimi-code"))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr("memtomem.cli.init_cmd._claude_cli_found", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+        calls: list[list[str]] = []
+        real_run = init_cmd._run
+
+        def recording_run(cmd: list[str], *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            calls.append(list(cmd))
+            if cmd[:3] == ["claude", "mcp", "add"]:
+                raise AssertionError(f"--mcp skip must not register: {cmd}")
+            return real_run(cmd, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("memtomem.cli.init_cmd._run", recording_run)
+        return calls
+
+    def test_picker_with_mcp_skip_does_not_ask(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        calls = self._setup(tmp_path, monkeypatch)
+        memory_dir = tmp_path / "memories"
+        # Picker 1 (Minimal), memory dir, create it — and nothing for the connect step.
+        result = CliRunner().invoke(init, ["--mcp", "skip"], input=f"1\n{memory_dir}\ny\n")
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        assert "Connect to AI Editor" not in out
+        assert "Wizard cancelled" not in out
+        assert "Setup complete" in out
+        assert "MCP config:" not in out
+        assert "Claude Code:" not in out
+        assert not [c for c in calls if c[:2] == ["claude", "mcp"]]
+        assert not (tmp_path / ".mcp.json").exists()
+        assert not (tmp_path / ".kimi-code" / "mcp.json").exists()
+
+    def test_picker_with_mcp_json_writes_it_without_asking(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        self._setup(tmp_path, monkeypatch)
+        memory_dir = tmp_path / "memories"
+        result = CliRunner().invoke(init, ["--mcp", "json"], input=f"1\n{memory_dir}\ny\n")
+        assert result.exit_code == 0, result.output
+
+        assert "Connect to AI Editor" not in result.output
+        assert "MCP config: wrote ./.mcp.json" in result.output
+        written = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+        assert "memtomem" in written["mcpServers"]
+
+    @pytest.mark.parametrize(
+        ("args", "picker"),
+        [
+            pytest.param(["--advanced", "--mcp", "skip"], [], id="advanced-flag"),
+            # The picker's last entry is Advanced: three presets, then [4].
+            pytest.param(["--mcp", "skip"], ["4"], id="picker-advanced"),
+        ],
+    )
+    def test_advanced_with_mcp_skip_does_not_ask(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        args: list[str],
+        picker: list[str],
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        calls = self._setup(tmp_path, monkeypatch)
+        (tmp_path / ".claude").mkdir()
+        memory_dir = tmp_path / "memories"
+        # The answers of `test_advanced_flow_shows_numbers_1_through_10` without the
+        # connect step's "3": embedding 1, no reranker, memory dir + create, storage
+        # default, no auto-ns + default namespace, top_k default + no decay, english,
+        # no hooks.
+        answers = ["1", "n", str(memory_dir), "y", "", "n", "", "", "n", "1", "n", ""]
+        result = CliRunner().invoke(init, args, input="\n".join(picker + answers))
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        if picker:
+            assert "    [4] Advanced — full 10-step wizard (all options)" in out
+        assert "1. Embedding Provider" in out
+        assert "Connect to AI Editor" not in out
+        assert "Wizard cancelled" not in out
+        assert "Setup complete" in out
+        # Skip writes no editor config at all: no Claude registration, no project
+        # `.mcp.json`, no Kimi file.
+        assert not [c for c in calls if c[:2] == ["claude", "mcp"]]
+        assert not (tmp_path / ".mcp.json").exists()
+        assert not (tmp_path / ".kimi-code" / "mcp.json").exists()
+
+
 class TestOllamaWindowsHangFix:
     """Tests for the Windows pipe-inheritance hang fix.
 

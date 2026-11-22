@@ -7,6 +7,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm init --mcp <mode>` no longer asks the Connect to AI Editor step in the interactive
+  wizard and then discards the answer (#3515).** Without `--preset`, the picker path applied
+  `--mcp` only after its steps had run, so the step asked and the flag then overwrote what was
+  picked; after picking Advanced, and with `--advanced`, `--mcp` was not applied at all and the
+  answer to the step was used instead. `--mcp` now decides that step in every interactive path,
+  as it already did with `--preset`: the step is not shown. The flags that override a preset's
+  fields (`--provider`, `--model`, `--tokenizer`, …) are still not applied in the Advanced paths.
+
 - **`mm init` no longer treats every monorepo with a `pyproject.toml` and a `packages/`
   directory as a memtomem source checkout (#3510).** Inside one, it wrote
   `uv run --directory <root> memtomem-server` as the MCP command, printed `uv run` next
