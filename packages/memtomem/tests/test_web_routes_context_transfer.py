@@ -1090,9 +1090,12 @@ async def test_mcp_collision_409(client, cwd_root: Path, tmp_path: Path) -> None
 
     resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
     assert resp.status_code == 409, resp.text
+    # The mcp-servers adapter raises the same collision with its own path (#3302).
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "conflict"
     assert detail["reason_code"] == "destination_exists"
+    assert detail["message"] == _collision_message("mcp-servers", "pg", "project_shared")
     assert existing.read_bytes() == before
 
 
