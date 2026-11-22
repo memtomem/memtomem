@@ -1918,7 +1918,7 @@ def _write_memtomem_workspace(
     member.mkdir(parents=True, exist_ok=True)
     (root / "pyproject.toml").write_text(root_toml, encoding="utf-8")
     (member / "pyproject.toml").write_text(
-        "[project]\nname = 'memtomem'\nversion = '0'\n", encoding="utf-8"
+        "[project]\nname = 'memtomem'\nversion = '0.7.13'\n", encoding="utf-8"
     )
     return member
 
