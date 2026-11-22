@@ -2290,8 +2290,9 @@ class TestPython312CommandsSayWhatTheyNeed:
             "### Manual MCP alternative",
             (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY, '"command": ["memtomem-server"]'),
         ),
-        # The plugin path's fallback points at the tested remedy and the manual registration
-        # instead of restating their steps here.
+        # The plugin path's fallback points at the Getting Started Quickstart (install, store
+        # setup, and the other-version remedy) and the manual registration instead of
+        # restating their steps here.
         (
             "docs/guides/plugin-quickstart.md",
             "## 2. Shared setup: initialize your user memory store once",
@@ -2299,7 +2300,7 @@ class TestPython312CommandsSayWhatTheyNeed:
                 _PY312_NEEDS,
                 _PY312_OFFLINE,
                 _PY312_INSTALL,
-                "(getting-started.md#prerequisites)",
+                "(getting-started.md#quickstart)",
                 "register `memtomem-server`",
                 "(mcp-clients.md)",
             ),
@@ -2311,7 +2312,7 @@ class TestPython312CommandsSayWhatTheyNeed:
                 _PY312_NEEDS_KO,
                 _PY312_OFFLINE_KO,
                 _PY312_INSTALL_KO,
-                "(getting-started.md#prerequisites)",
+                "(getting-started.md#quickstart)",
                 "`memtomem-server`를 등록",
                 "(mcp-clients.md)",
             ),
@@ -2349,6 +2350,7 @@ class TestPython312CommandsSayWhatTheyNeed:
         assert "change `3.12` in the install command to the Python you have" in (
             _unwrapped(section)
         )
+        assert _PY313_TOOL_INSTALL in _unwrapped(section)
 
 
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"

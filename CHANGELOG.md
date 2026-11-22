@@ -17,7 +17,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (`python-downloads = "never"` or `"manual"`): install a Python 3.12 first, or install
   memtomem with the Python you have, putting its version in place of the `3.13` the
   example command names, and register `memtomem-server` (the plugin quickstart points to
-  the getting-started prerequisite for that install, then to the manual registration). The
+  the getting-started Quickstart for that install and the store setup, then to the manual
+  registration). The
   README, the getting-started prerequisite and the plugin quickstart add that an offline uv
   cannot download Python either, so a Python 3.12 has to be installed beforehand. The
   getting-started prerequisite read "Python 3.12+"; it is now "Python 3.12", checked with
@@ -36,7 +37,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   same launch with `--python 3.13`, and `uv tool install --python 3.13
   'memtomem[all]==0.7.12'` followed by the installed `memtomem-server --help`, each exited 0
   under `"never"`. Offline (`UV_OFFLINE=1`) with the packages cached, the launch exited 2
-  with the same error without a Python 3.12 and printed the help with one.
+  with the same error without a Python 3.12 and printed the help with one. Re-measured for
+  the getting-started example after 0.7.13: with Python 3.13 available and
+  `UV_PYTHON_DOWNLOADS=never`, `uv tool install --python 3.13 'memtomem[all]==0.7.13'` and
+  the installed `memtomem-server --help` each exited 0.
 
 ## [0.7.13] — 2026-11-22
 
