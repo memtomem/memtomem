@@ -89,9 +89,11 @@ Python 3.12를 찾지 못하면 uv가 내려받지만, uv가 Python을 스스로
 수 없으므로, 패키지가 이미 캐시돼 있어도 Python 3.12를 미리 설치해 두지
 않았다면 플러그인 서버가 시작되지 않습니다. 먼저 Python 3.12를 설치하세요
 (`uv python install 3.12`는 `"manual"`에서는 내려받고 `"never"`에서는
-거부됩니다). 또는 플러그인 대신, 지금 있는 Python으로 memtomem을 설치한 뒤
-([시작 가이드](getting-started.md#install)) [MCP 클라이언트 수동
-설정](mcp-clients.md)에 나온 대로 쓰는 도구에 `memtomem-server`를 등록하세요.
+거부됩니다). 또는 플러그인 대신, 지금 있는 Python으로 memtomem을 설치하고
+(`uv tool install --python 3.13 'memtomem[all]'`), 위 두 명령을 그냥 `mm`으로
+실행한 뒤(`mm init --preset minimal --non-interactive --mcp skip`, 이어서
+`mm status`), [MCP 클라이언트 수동 설정](mcp-clients.md)에 나온 대로 쓰는
+도구에 `memtomem-server`를 등록하세요.
 
 `--mcp skip`은 다음 단계의 플러그인이 MCP 연결을 제공하므로 다른
 클라이언트 설정을 건드리지 않겠다는 뜻입니다.

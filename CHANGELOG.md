@@ -81,12 +81,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   find or download, and what to do where uv may not download Python on its own
   (`python-downloads = "never"` or `"manual"`): install a Python 3.12 first, or install
   memtomem with the Python you have and register `memtomem-server` (the plugin quickstart
-  links to the install and to the manual registration for that). The README, the
-  getting-started prerequisite and the plugin quickstart add that an offline uv cannot
-  download Python either, so a Python 3.12 has to be installed beforehand. The
+  gives that install command and its `mm init` step before the manual registration). The
+  README, the getting-started prerequisite and the plugin quickstart add that an offline uv
+  cannot download Python either, so a Python 3.12 has to be installed beforehand. The
   getting-started prerequisite read "Python 3.12+"; it is now "Python 3.12", checked with
-  `uv python find 3.12` rather than `python3 --version`. Measured with uv 0.12.13 on macOS, with only Python 3.13.7 and
-  3.14.4 visible to uv and `python-downloads = "never"`:
+  `uv python find --system 3.12` rather than `python3 --version`. Without `--system` the
+  check also reports a project `.venv`'s Python: with a 3.12 visible only through `.venv`,
+  `uv python find 3.12` exited 0 while `uv python find --system 3.12` and the `uvx` launch
+  each exited 2, and with a Homebrew 3.12 on `PATH` the `--system` check exited 0. Measured
+  with uv 0.12.13 on macOS, with only Python 3.13.7 and 3.14.4 visible to uv and
+  `python-downloads = "never"`:
   `uvx --python 3.12 --isolated --from 'memtomem[all]==0.7.12' memtomem-server --help` and
   `uv tool install --python 3.12 'memtomem[all]==0.7.12'` each exited 2 with
   `No interpreter found for Python 3.12 in managed installations or search path`, and

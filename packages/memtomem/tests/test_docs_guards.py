@@ -2285,7 +2285,13 @@ class TestPython312CommandsSayWhatTheyNeed:
         (
             "docs/guides/plugin-quickstart.md",
             "## 2. Shared setup: initialize your user memory store once",
-            (_PY312_NEEDS, _PY312_INSTALL, "(getting-started.md#install)", "(mcp-clients.md)"),
+            (
+                _PY312_NEEDS,
+                _PY312_INSTALL,
+                _PY313_TOOL_INSTALL,
+                "`mm init --preset minimal --non-interactive --mcp skip`",
+                "(mcp-clients.md)",
+            ),
         ),
         (
             "docs/guides/vibe-coding-getting-started-ko.md",
@@ -2293,7 +2299,8 @@ class TestPython312CommandsSayWhatTheyNeed:
             (
                 _PY312_NEEDS_KO,
                 _PY312_INSTALL_KO,
-                "(getting-started.md#install)",
+                _PY313_TOOL_INSTALL,
+                "`mm init --preset minimal --non-interactive --mcp skip`",
                 "(mcp-clients.md)",
             ),
         ),
@@ -2321,7 +2328,9 @@ class TestPython312CommandsSayWhatTheyNeed:
         assert [_plain(cell) for cell in _table_row(section, "Python 3.12")] == [
             "Python 3.12",
             "[python.org](https://python.org), or let uv download it",
-            "uv python find 3.12",
+            # ``--system``: without it uv also reports a project ``.venv``'s 3.12, which the
+            # ``uvx`` launch does not search.
+            "uv python find --system 3.12",
         ]
         assert _PY312_NEEDS in _unwrapped(section)
 

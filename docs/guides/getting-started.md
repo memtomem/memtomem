@@ -62,7 +62,7 @@ installed or removed separately.
 
 | Requirement | Install | Verify |
 |---|---|---|
-| Python 3.12 | [python.org](https://python.org), or let uv download it | `uv python find 3.12` |
+| Python 3.12 | [python.org](https://python.org), or let uv download it | `uv python find --system 3.12` |
 | Python 3.12+ (pipx only) | [python.org](https://python.org) | `python3 --version` |
 | `uv` or `pipx` | [uv installation](https://docs.astral.sh/uv/getting-started/installation/) | `uv --version` |
 | An AI editor | Optional for the terminal first success | — |
