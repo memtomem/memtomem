@@ -125,4 +125,15 @@ describe('FTS rebuild toast', () => {
     );
     expect(warningToast).toBeDefined();
   });
+
+  it('does not show a warning toast when saving a tokenizer change succeeds', async () => {
+    const toasts = await saveTokenizer({
+      tokenizer: 'kiwipiepy',
+      rebuilt_rows: 2,
+      warning: null,
+    });
+    expect(
+      Array.from(toasts).some((toast) => toast.classList.contains('toast-warning')),
+    ).toBe(false);
+  });
 });
