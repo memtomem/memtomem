@@ -2148,8 +2148,8 @@ class TestSourceWorkspaceMarker:
     ) -> None:
         """A ``pyproject.toml`` symlink into a directory the user cannot
         enter makes ``Path.exists()`` raise ``PermissionError`` on Python
-        3.13; the walks skip it and reach the dependent ancestor, and the
-        workspace-venv lookup above it does not raise either."""
+        3.13; the source and project walks skip it (below and above the
+        dependent ancestor) and reach that ancestor."""
         from memtomem.cli import init_cmd
 
         outer = tmp_path / "outer"
@@ -2175,6 +2175,41 @@ class TestSourceWorkspaceMarker:
         assert profile.cwd_install_dir == outer
         assert profile.workspace_venv_path is None
 
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo (POSIX)")
+    def test_fifo_pyproject_below_the_checkout_root_does_not_block(self, tmp_path: Path) -> None:
+        """A FIFO named ``pyproject.toml`` between cwd and the workspace root
+        is not opened (opening one for reading blocks until a writer
+        appears). Run in a child process with a timeout so a regression
+        fails instead of hanging the suite."""
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "ws"
+        deep = _write_memtomem_workspace(root) / "src"
+        deep.mkdir()
+        os.mkfifo(deep / "pyproject.toml")
+        src_dir = Path(init_cmd.__file__).resolve().parents[2]
+        code = (
+            "from memtomem.cli.init_cmd import _runtime_profile\n"
+            "p = _runtime_profile()\n"
+            "print(p.cwd_install_type)\n"
+            "print(p.cwd_install_dir)\n"
+        )
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=deep,
+                env={**os.environ, "PYTHONPATH": str(src_dir)},
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("_runtime_profile() blocked on the FIFO pyproject.toml")
+        assert proc.returncode == 0, proc.stderr
+        kind, found = proc.stdout.splitlines()
+        assert kind == "source"
+        assert Path(found).resolve() == root.resolve()
+
     def test_invalid_utf8_nested_pyproject_walks_on_to_dependent_ancestor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2196,8 +2231,10 @@ class TestSourceWorkspaceMarker:
 
 
 class TestWorkspaceMemberProjectVenv:
-    """#3510 — a project found at a uv workspace member reads the workspace
-    root's ``.venv``, where uv keeps it, when the member has none."""
+    """#3510 — a project found at a uv workspace member probes only its own
+    ``.venv``. The workspace root's ``.venv`` is not borrowed: without a
+    membership check that matches uv, a project the workspace excludes would
+    have ``mm init`` run an unrelated interpreter for its extras probe."""
 
     @staticmethod
     def _member_layout(root: Path, members_dir: str = "libs") -> Path:
@@ -2222,26 +2259,23 @@ class TestWorkspaceMemberProjectVenv:
         return py
 
     @pytest.mark.parametrize("members_dir", ["libs", "packages"])
-    def test_member_without_venv_uses_workspace_root_venv(
+    def test_member_without_own_venv_does_not_borrow_workspace_venv(
         self, members_dir: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from memtomem.cli import init_cmd
 
         root = tmp_path / "mono"
         member = self._member_layout(root, members_dir)
-        py = self._venv_python(root / ".venv")
+        self._venv_python(root / ".venv")
         monkeypatch.chdir(member)
-        monkeypatch.setattr(init_cmd.sys, "executable", str(py))
-        monkeypatch.setattr(init_cmd.sys, "prefix", str(root / ".venv"))
+        _neutral_interpreter(monkeypatch, tmp_path)
 
         profile = init_cmd._runtime_profile()
         assert profile.cwd_install_type == "project"
         assert profile.cwd_install_dir == member
-        assert profile.workspace_venv_path == root / ".venv"
-        assert profile.runtime_matches_workspace is True
-        assert profile.mm_binary_origin == "venv-relative"
+        assert profile.workspace_venv_path is None
 
-    def test_member_own_venv_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_member_own_venv_is_used(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from memtomem.cli import init_cmd
 
         root = tmp_path / "mono"
@@ -2252,74 +2286,6 @@ class TestWorkspaceMemberProjectVenv:
         _neutral_interpreter(monkeypatch, tmp_path)
 
         assert init_cmd._runtime_profile().workspace_venv_path == member / ".venv"
-
-    def test_project_outside_any_workspace_keeps_no_venv(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from memtomem.cli import init_cmd
-
-        proj = tmp_path / "outer" / "proj"
-        proj.mkdir(parents=True)
-        (proj / "pyproject.toml").write_text(
-            "[project]\nname = 'proj'\ndependencies = ['memtomem']\n", encoding="utf-8"
-        )
-        # A parent with a .venv but no uv workspace is not the project's env.
-        self._venv_python(tmp_path / "outer" / ".venv")
-        (tmp_path / "outer" / "pyproject.toml").write_text(
-            "[project]\nname = 'outer'\n", encoding="utf-8"
-        )
-        monkeypatch.chdir(proj)
-        _neutral_interpreter(monkeypatch, tmp_path)
-
-        profile = init_cmd._runtime_profile()
-        assert profile.cwd_install_type == "project"
-        assert profile.workspace_venv_path is None
-
-    @pytest.mark.skipif(
-        sys.platform == "win32" or os.geteuid() == 0,
-        reason="needs POSIX permission bits that the current user cannot bypass",
-    )
-    @pytest.mark.requires_symlinks
-    def test_denied_workspace_venv_symlink_leaves_no_venv(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A workspace ``.venv`` symlink whose target the user cannot access
-        makes ``Path.exists()`` raise ``PermissionError`` on Python 3.13; the
-        member stays a project with no detected venv."""
-        from memtomem.cli import init_cmd
-
-        root = tmp_path / "mono"
-        member = self._member_layout(root)
-        locked = tmp_path / "locked"
-        (locked / "venv").mkdir(parents=True)
-        (root / ".venv").symlink_to(locked / "venv", target_is_directory=True)
-        monkeypatch.chdir(member)
-        _neutral_interpreter(monkeypatch, tmp_path)
-
-        locked.chmod(0)
-        try:
-            profile = init_cmd._runtime_profile()
-        finally:
-            locked.chmod(0o755)
-        assert profile.cwd_install_type == "project"
-        assert profile.cwd_install_dir == member
-        assert profile.workspace_venv_path is None
-
-    def test_uninstall_hint_names_workspace_root_venv(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from memtomem.cli import init_cmd, uninstall_cmd
-
-        root = tmp_path / "mono"
-        member = self._member_layout(root)
-        py = self._venv_python(root / ".venv")
-        monkeypatch.chdir(member)
-        monkeypatch.setattr(init_cmd.sys, "executable", str(py))
-        monkeypatch.setattr(init_cmd.sys, "prefix", str(root / ".venv"))
-
-        label, lines = uninstall_cmd._binary_uninstall_hint(init_cmd._runtime_profile())
-        assert label == f"workspace venv ({root / '.venv'})"
-        assert lines[0] == "uv pip uninstall memtomem"
 
 
 class TestMmBinaryOriginDetection:

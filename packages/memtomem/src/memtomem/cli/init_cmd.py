@@ -138,13 +138,17 @@ def _detect_source_install() -> Path | None:
 
 
 def _load_pyproject(pyproject: Path) -> dict | None:
-    """Parse *pyproject*, or ``None`` when it is missing or unreadable
-    (including a ``PermissionError`` on a symlink into a directory the user
-    cannot enter, which ``Path.exists()`` raises on Python 3.13), is not
-    valid UTF-8 (``tomllib`` raises ``UnicodeDecodeError`` for that, not
-    ``TOMLDecodeError``) or is not valid TOML. Callers pass the path without
-    an ``exists()`` check of their own."""
+    """Parse *pyproject*, or ``None`` when it is missing, not a regular file
+    (opening a FIFO would block), unreadable (including a ``PermissionError``
+    on a symlink whose target the user cannot access, which ``Path.exists()``
+    and ``Path.is_file()`` raise on Python 3.13), not valid UTF-8
+    (``tomllib`` raises ``UnicodeDecodeError`` for that, not
+    ``TOMLDecodeError``) or not valid TOML. Callers pass the path without an
+    ``exists()`` check of their own. A file swapped for a FIFO between the
+    check and the open still blocks."""
     try:
+        if not pyproject.is_file():
+            return None
         with pyproject.open("rb") as fh:
             return tomllib.load(fh)
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
@@ -285,27 +289,6 @@ def _detect_project_install() -> Path | None:
     return None
 
 
-def _workspace_root_venv(project_dir: Path) -> Path | None:
-    """``.venv`` of the nearest of *project_dir*'s parents (at most 5) whose
-    ``pyproject.toml`` has a ``[tool.uv.workspace]`` table, when that
-    ``.venv`` exists: uv's default location for a workspace member's
-    environment (``UV_PROJECT_ENVIRONMENT`` is not consulted). Membership
-    globs are not checked."""
-    check = project_dir.parent
-    for _ in range(5):
-        data = _load_pyproject(check / "pyproject.toml")
-        if data is not None and isinstance(_uv_table(data).get("workspace"), dict):
-            venv = check / ".venv"
-            try:
-                return venv if venv.exists() else None
-            except OSError:  # e.g. a symlink whose target the user cannot access
-                return None
-        if check.parent == check:
-            break
-        check = check.parent
-    return None
-
-
 def _detect_mm_binary_origin(
     interpreter: Path, *, runtime_matches_workspace: bool
 ) -> MmBinaryOrigin:
@@ -372,10 +355,9 @@ class RuntimeProfile:
       ``None`` for ``pypi``.
     - ``runtime_interpreter`` — ``sys.executable`` as a ``Path`` (raw, no
       ``.resolve()`` — see ``feedback_venv_raw_path_check.md``).
-    - ``workspace_venv_path`` — ``<cwd_install_dir>/.venv`` if it exists;
-      for a project without one, the enclosing uv workspace's ``.venv``
-      (:func:`_workspace_root_venv`); ``None`` otherwise. Used to probe
-      extras via the workspace's interpreter rather than the wizard's own.
+    - ``workspace_venv_path`` — ``<cwd_install_dir>/.venv`` if it exists,
+      ``None`` otherwise. Used to probe extras via the workspace's
+      interpreter rather than the wizard's own.
     - ``mm_binary_origin`` — how the running ``mm`` was installed/invoked
       (``uv-tool`` / ``uvx`` / ``venv-relative`` / ``system`` / ``unknown``).
     - ``runtime_matches_workspace`` — does ``runtime_interpreter`` actually
@@ -417,8 +399,6 @@ def _runtime_profile() -> RuntimeProfile:
     if cwd_install_dir is not None:
         candidate = cwd_install_dir / ".venv"
         workspace_venv_path = candidate if candidate.exists() else None
-        if workspace_venv_path is None and cwd_install_type == "project":
-            workspace_venv_path = _workspace_root_venv(cwd_install_dir)
     else:
         workspace_venv_path = None
 

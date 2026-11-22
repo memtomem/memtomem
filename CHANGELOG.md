@@ -16,15 +16,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `[project] dependencies`, the `dev` dependency group or `[tool.uv] dev-dependencies`.
   Any other monorepo is a project when `mm init` finds a `pyproject.toml` that depends on
   memtomem in the current directory or up to four levels above it (before, a directory with
-  `packages/` never counted), and otherwise a PyPI install. For a project with no `.venv` of
-  its own, `mm init` and `mm uninstall` now read the `.venv` of the nearest of its five
-  parent directories whose `pyproject.toml` has a `[tool.uv.workspace]` table, when that
-  `.venv` exists, instead of reporting none; that is uv's default location for a workspace
-  member's environment. Membership in that workspace is not checked. A `pyproject.toml`
+  `packages/` never counted), and otherwise a PyPI install. A project found at a workspace
+  member still probes only its own `.venv`, not the workspace root's. A `pyproject.toml`
   that is not valid UTF-8, or that is a symlink whose target the user cannot access, no
   longer stops `mm init` and `mm uninstall` with a `UnicodeDecodeError` or
-  `PermissionError`; both are skipped like malformed TOML. The same holds for that
-  workspace's `.venv`.
+  `PermissionError`, and one that is not a regular file (a FIFO would block) is not opened;
+  all three are skipped like malformed TOML.
 
 - **`mm init` in a source checkout or a project that depends on memtomem no longer hints or
   runs `uv sync --extra <name>` for a missing extra (#3500).** That flag selects an extra of
