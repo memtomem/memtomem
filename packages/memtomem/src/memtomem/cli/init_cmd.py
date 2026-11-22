@@ -1881,11 +1881,15 @@ def _probe_workspace_extras(py: Path) -> set[str] | None:
     try:
         # Bytes: with ``text=True`` an undecodable byte raises on POSIX and,
         # on Windows, leaves ``stdout`` as ``None`` (decoded in a reader thread).
-        # ``-I``: without it ``-c`` puts the current directory first on
-        # ``sys.path`` and ``PYTHONPATH`` adds more, so a ``fastembed.py`` in
-        # either would pass for the installed extra.
+        # ``-P``: without it ``-c`` puts the current directory first on
+        # ``sys.path``, which the ``memtomem-server`` console script does not,
+        # so a ``fastembed.py`` there would pass for the extra. Not ``-I``:
+        # the server inherits ``PYTHONPATH`` and user site-packages from the
+        # environment it is launched in, and a package it can import from
+        # there is one the config can use. memtomem needs 3.12+, which has
+        # ``-P``; an older Python rejects it and the extras read as not checked.
         result = subprocess.run(
-            [str(py), "-I", "-c", _PROBE_EXTRAS_CODE], capture_output=True, timeout=5
+            [str(py), "-P", "-c", _PROBE_EXTRAS_CODE], capture_output=True, timeout=5
         )
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None

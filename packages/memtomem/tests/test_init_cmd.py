@@ -2984,12 +2984,15 @@ class TestProbeWorkspaceExtrasOutput:
         assert [{k: v for k, v in kw.items() if k in ("text", "encoding")} for kw in seen] == [{}]
 
     @pytest.mark.parametrize("where", ["cwd", "PYTHONPATH"])
-    def test_a_module_outside_the_environment_does_not_pass_for_an_extra(
+    def test_the_probe_sees_what_the_server_imports(
         self, where: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A real probe of this interpreter with a same-named module in the
-        current directory, or in a directory on ``PYTHONPATH``: ``-c`` alone
-        would put either on ``sys.path`` and report the module as installed."""
+        current directory, or in a directory on ``PYTHONPATH``. ``-c`` alone
+        puts the current directory on ``sys.path``, which the
+        ``memtomem-server`` console script does not, so that module must not
+        count. ``PYTHONPATH`` reaches the server launched in the same
+        environment, so a package there must count (``-I`` hid it)."""
         import importlib.util
 
         from memtomem.cli import init_cmd
@@ -3005,7 +3008,7 @@ class TestProbeWorkspaceExtrasOutput:
             monkeypatch.setenv("PYTHONPATH", str(tmp_path))
         importable = init_cmd._probe_workspace_extras(Path(sys.executable))
         assert importable is not None
-        assert absent[0] not in importable
+        assert (absent[0] in importable) is (where == "PYTHONPATH")
 
 
 class TestMmBinaryOriginDetection:

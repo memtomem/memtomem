@@ -17,12 +17,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `uv workspace dir --offline --directory <dir>` for the root (uv decides membership,
   `exclude` included, and needs no lockfile) and uses `UV_PROJECT_ENVIRONMENT` or
   `<root>/.venv`, as seen from the shell `mm init` runs in. When that cannot be told — uv not
-  on `PATH`, the command failing, or `UV_NO_PROJECT` / `UV_ISOLATED` set — or the
-  environment's interpreter cannot be probed, the summary says `Extras not checked` with the
-  reason instead of checking `mm init`'s own interpreter, and `mm init --non-interactive`
-  refuses a configuration that needs `onnx` or `korean` before writing anything. The probe
-  no longer counts a same-named module in the current directory or on `PYTHONPATH` as an
-  installed extra. A
+  on `PATH`, the command failing, or `UV_NO_PROJECT` / `UV_ISOLATED` set to a value uv reads
+  as true or refuses — or the environment's interpreter cannot be probed, the summary says
+  `Extras not checked` with the reason instead of checking `mm init`'s own interpreter, and
+  `mm init --non-interactive` refuses a configuration that needs `onnx` or `korean` before
+  writing anything. The probe no longer counts a same-named module in the current directory
+  as an installed extra; the server does not import from there. A
   `.venv` symlink whose target the user cannot access no longer stops `mm init` or
   `mm uninstall` with a `PermissionError` (Python 3.12 and 3.13), and `mm init` reports it
   the same way rather than as an environment to sync (on 3.14 the check answered "absent").
