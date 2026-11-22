@@ -126,36 +126,108 @@ def _test_openai_key(api_key: str) -> bool:
 
 
 def _detect_source_install() -> Path | None:
-    """Walk up at most 5 ancestors looking for a workspace root marker
-    (``pyproject.toml`` + ``packages/`` dir). Returns the workspace root
-    ``Path`` or ``None`` if no source checkout is detected.
-
-    Replaces the legacy ``_is_source_install`` / ``_detect_source_dir`` pair
-    (#363 Phase 3) — a single helper returning the path-or-None lets callers
-    truthy-check for the legacy bool case (``if _detect_source_install():``)
-    without needing two near-identical 5-ancestor walks."""
+    """Walk up at most 5 ancestors (cwd included) looking for a memtomem
+    source workspace (:func:`_is_memtomem_workspace`). Returns its root, or
+    ``None`` if there is none. Other workspaces on the way are walked past."""
     check = Path.cwd()
     for _ in range(5):
-        if (check / "pyproject.toml").exists() and (check / "packages").exists():
+        if _is_memtomem_workspace(check):
             return check
         check = check.parent
     return None
 
 
+def _load_pyproject(pyproject: Path) -> dict | None:
+    """Parse *pyproject*, or ``None`` when it is missing, not a regular file
+    (opening a FIFO would block), unreadable (including a ``PermissionError``
+    on a symlink whose target the user cannot access, which ``Path.exists()``
+    and ``Path.is_file()`` raise on Python 3.13), not valid UTF-8
+    (``tomllib`` raises ``UnicodeDecodeError`` for that, not
+    ``TOMLDecodeError``) or not valid TOML. Callers pass the path without an
+    ``exists()`` check of their own. A file swapped for a FIFO between the
+    check and the open still blocks."""
+    try:
+        if not pyproject.is_file():
+            return None
+        with pyproject.open("rb") as fh:
+            return tomllib.load(fh)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+
+
+def _uv_table(data: dict) -> dict:
+    tool = data.get("tool")
+    uv_section = tool.get("uv") if isinstance(tool, dict) else None
+    return uv_section if isinstance(uv_section, dict) else {}
+
+
+def _is_memtomem_workspace(root: Path) -> bool:
+    """True iff ``root/pyproject.toml`` is a uv workspace whose root installs
+    memtomem from a workspace member — where the source-checkout commands
+    (``uv run --directory <root> memtomem-server``, ``uv sync --dev``) work.
+
+    All three must hold:
+
+    - a ``[tool.uv.workspace]`` table;
+    - a ``[tool.uv.sources]`` entry for ``memtomem`` with ``workspace = true``;
+    - memtomem in ``[project] dependencies``, the ``dev`` dependency group or
+      ``[tool.uv] dev-dependencies`` — the ones a default or ``--dev`` sync
+      installs. An optional extra or another group does not count.
+
+    Member globs are not expanded: uv itself rejects a ``workspace = true``
+    source that names no member, and a member the root depends on without
+    that source."""
+    data = _load_pyproject(root / "pyproject.toml")
+    if data is None:
+        return False
+    uv_section = _uv_table(data)
+    if not isinstance(uv_section.get("workspace"), dict):
+        return False
+    sources = uv_section.get("sources")
+    if not isinstance(sources, dict) or not any(
+        _canonical_pkg_name(name) == "memtomem"
+        and isinstance(spec, dict)
+        and spec.get("workspace") is True
+        for name, spec in sources.items()
+    ):
+        return False
+    project = data.get("project")
+    groups = data.get("dependency-groups")
+    return (
+        (isinstance(project, dict) and _list_has_memtomem(project.get("dependencies")))
+        or (isinstance(groups, dict) and _list_has_memtomem(groups.get("dev")))
+        or _list_has_memtomem(uv_section.get("dev-dependencies"))
+    )
+
+
 # PEP 508 dependency-spec leading name (``re.match`` against the trimmed
 # string). Group 1 captures the bare name before any extras / specifiers /
-# markers. Used by :func:`_pyproject_depends_on_memtomem`.
+# markers. Used by :func:`_list_has_memtomem`.
 _PEP508_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
 def _canonical_pkg_name(name: str) -> str:
     """PEP 503 normalized name: lowercase + collapse ``-_.`` runs to ``-``.
 
-    Used for dependency-name comparison so ``memtomem``, ``Memtomem``,
-    ``mem_tomem``, and ``mem.tomem`` all match the canonical form. Inlined
-    instead of pulling in ``packaging.utils.canonicalize_name`` because the
-    rule is one regex and ``packaging`` isn't a runtime dep of the wizard."""
+    Used for dependency-name comparison so ``Memtomem`` and ``MEMTOMEM``
+    match ``memtomem`` (``mem_tomem`` becomes ``mem-tomem``, another name).
+    Inlined instead of pulling in ``packaging.utils.canonicalize_name``
+    because the rule is one regex and ``packaging`` isn't a runtime dep of
+    the wizard."""
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _list_has_memtomem(deps: object) -> bool:
+    """True iff *deps* is a list of PEP 508 strings, one of which names memtomem."""
+    if not isinstance(deps, list):
+        return False
+    for entry in deps:
+        if not isinstance(entry, str):
+            continue
+        match = _PEP508_NAME_RE.match(entry.strip())
+        if match and _canonical_pkg_name(match.group(1)) == "memtomem":
+            return True
+    return False
 
 
 def _pyproject_depends_on_memtomem(pyproject: Path) -> bool:
@@ -168,35 +240,17 @@ def _pyproject_depends_on_memtomem(pyproject: Path) -> bool:
     before comparison so ``memtomem[all]>=0.1``, ``Memtomem``, and
     ``memtomem @ git+…`` all match.
 
-    Returns ``False`` when the file is unreadable or has malformed TOML —
+    Returns ``False`` when :func:`_load_pyproject` cannot parse the file —
     classification falls through to ``pypi`` in that case, which is the
     safe default (the PyPI / uv-tool install hint always works; the
     workspace ``uv sync`` hint requires a parseable workspace).
 
-    The point of the check: ``_detect_project_install`` previously treated
-    *any* ancestor with a ``pyproject.toml`` (and no ``packages/`` dir) as
-    a project that depends on memtomem. Foreign sibling projects
-    (e.g. running ``mm init`` from inside another Python repo entirely)
-    were misclassified, which routed the extras probe at the foreign
-    project's ``.venv`` — almost always missing memtomem entirely — and
-    printed an install hint (``uv sync --extra all``) that fails because
-    the foreign project's ``pyproject.toml`` doesn't define memtomem's
-    extras."""
-    try:
-        with pyproject.open("rb") as fh:
-            data = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError):
-        return False
-
-    def _list_has_memtomem(deps: object) -> bool:
-        if not isinstance(deps, list):
-            return False
-        for entry in deps:
-            if not isinstance(entry, str):
-                continue
-            match = _PEP508_NAME_RE.match(entry.strip())
-            if match and _canonical_pkg_name(match.group(1)) == "memtomem":
-                return True
+    Without the check, any ancestor ``pyproject.toml`` would count as a
+    project that depends on memtomem: running ``mm init`` inside another
+    Python repo would probe that repo's ``.venv`` for memtomem's extras and
+    tell it to edit a requirement it does not have."""
+    data = _load_pyproject(pyproject)
+    if data is None:
         return False
 
     project = data.get("project")
@@ -213,36 +267,23 @@ def _pyproject_depends_on_memtomem(pyproject: Path) -> bool:
         for deps in groups.values():
             if _list_has_memtomem(deps):
                 return True
-    tool = data.get("tool")
-    if isinstance(tool, dict):
-        uv_section = tool.get("uv")
-        if isinstance(uv_section, dict) and _list_has_memtomem(uv_section.get("dev-dependencies")):
-            return True
-    return False
+    return _list_has_memtomem(_uv_table(data).get("dev-dependencies"))
 
 
 def _detect_project_install() -> Path | None:
-    """Walk up at most 5 ancestors looking for a project that depends on
-    memtomem (``pyproject.toml`` declaring memtomem as a dep, no ``packages/``
-    dir). Returns the project root ``Path`` or ``None``.
+    """Walk up at most 5 ancestors (cwd included) looking for a
+    ``pyproject.toml`` that depends on memtomem
+    (:func:`_pyproject_depends_on_memtomem`). Returns its directory or
+    ``None``. Ancestors that do not depend on memtomem are walked past, so a
+    nested foreign pyproject does not shadow an outer dependent one.
 
-    Pair with :func:`_detect_source_install`. Caller convention: check source
-    first; only check project when source returned ``None`` so a monorepo
-    checkout never falsely classifies as a project install.
-
-    The dependency check (added after foreign sibling projects like
-    ``memtomem-stm`` were misclassified) walks past pyproject ancestors
-    that don't depend on memtomem. This means a nested non-memtomem
-    pyproject doesn't shadow an outer memtomem-using parent — the loop
-    keeps searching upward instead of returning the first hit."""
+    Pair with :func:`_detect_source_install` and check it first: memtomem's
+    own workspace root (its ``dev`` group) and its LangChain member both
+    depend on memtomem, so this walk alone would call the checkout a
+    project."""
     check = Path.cwd()
     for _ in range(5):
-        pyproj = check / "pyproject.toml"
-        if (
-            pyproj.exists()
-            and not (check / "packages").exists()
-            and _pyproject_depends_on_memtomem(pyproj)
-        ):
+        if _pyproject_depends_on_memtomem(check / "pyproject.toml"):
             return check
         check = check.parent
     return None
