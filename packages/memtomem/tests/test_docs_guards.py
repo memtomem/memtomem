@@ -3887,7 +3887,8 @@ class TestExistingStoreIsNotReinitialized:
             "row_no_init": "do not initialize",
             "row_fresh": "On a new store,",
             "confirm": "the plugin's status check",
-            "confirm_what": "database path and memory directories",
+            "confirm_what": "confirm that its database path is the one your settings name",
+            "unverifiable": "memory directories",
             "checklist": "or an existing store's database path was confirmed",
         },
         _VIBE_GUIDE: {
@@ -3899,7 +3900,8 @@ class TestExistingStoreIsNotReinitialized:
             "row_no_init": "초기화하지 마세요",
             "row_fresh": "새 저장소라면",
             "confirm": "플러그인 status 확인",
-            "confirm_what": "database path와 기억 디렉터리",
+            "confirm_what": "database path가 설정에 적은 값인지 확인하세요",
+            "unverifiable": "기억 디렉터리가",
             "checklist": "초기화했거나, 기존 저장소의 database path를 확인했다",
         },
     }
@@ -3914,11 +3916,16 @@ class TestExistingStoreIsNotReinitialized:
         words = self._LOCALES[path]
         section = _heading_section(_read(path), words["step"])
         flat = " ".join(section.split())
-        # The authoritative check is the connected server's status, and it has to cover
-        # where memories are written as well as the database: a terminal-only
-        # MEMTOMEM_INDEXING__MEMORY_DIRS leaves the database path equal on both sides.
+        # The final check is the connected server's status. It may ask only for what that
+        # check shows: the status workflow reports the database path, and `mem_status`
+        # lists memory directories only up to a row limit, so a sentence asking the reader
+        # to confirm the memory directories there cannot be followed.
         for phrase in (words["confirm"], words["confirm_what"]):
             assert phrase in flat, f"{path.name} step 2 lost {phrase!r}"
+        preview_onward = flat[flat.index("mm config show") :]
+        assert words["unverifiable"] not in preview_onward, (
+            f"{path.name} asks the status check to confirm memory directories it does not show"
+        )
         assert self._preview() in _fenced_commands(section), f"{path.name} lost the preview"
         # The refusal has to sit in the fragment/variable branch, not anywhere in the step:
         # moved to the config.json branch, it would leave fragment stores told nothing.

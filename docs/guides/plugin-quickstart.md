@@ -135,7 +135,7 @@ plugin's server can see other environment variables, so it is not the final
 check: before saving a memory, use the plugin's status check in
 [step 3](#confirm-the-real-connection) or
 [step 4](#4-path-b-install-the-codex-cli-plugin) and confirm that its database
-path and memory directories are the ones your settings name.
+path is the one your settings name.
 
 ## 3. Path A: install the Claude Code plugin
 
@@ -420,7 +420,7 @@ guide](integrations/codex.md).
 | `uvx` is not found | Follow the official uv installation guide, then check `uvx --version` in a new terminal. |
 | The plugin is not found | Check the marketplace list and rerun the install command. |
 | Workflows or skills do not appear | In Claude Code, reload or start a new session; in Codex, start a new thread. |
-| The store is reported as not initialized | If `config.d/` fragments or `MEMTOMEM_*` variables configure your store, do not initialize: `mm status` stops when `config.json` does not exist. Run the [shared setup](#2-shared-setup-initialize-your-user-memory-store-once)'s `mm config show` preview and confirm the database path and memory directories with the plugin's status check. On a new store, rerun `mm init ... --mcp skip` and `mm status` from the shared setup. |
+| The store is reported as not initialized | If `config.d/` fragments or `MEMTOMEM_*` variables configure your store, do not initialize: `mm status` stops when `config.json` does not exist. Run the [shared setup](#2-shared-setup-initialize-your-user-memory-store-once)'s `mm config show` preview and confirm the database path with the plugin's status check. On a new store, rerun `mm init ... --mcp skip` and `mm status` from the shared setup. |
 | You cannot save a project memory | Run `mm mem init --scope project_local` at the real Git root and reopen the tool. |
 | Search returns 0 results | Check the chunk count in status and search again with words that appear in the saved sentence. |
 | Claude Code and Codex return different results | Compare the database paths; for project memories, also compare the project root and scope. |

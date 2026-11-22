@@ -14,8 +14,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   said to rerun init. The `config.json` init writes replaces the database path, memory
   directories and embedding model a fragment sets, so the existing store could look empty.
   The English and Korean quickstarts now treat fragments and variables as an existing setup,
-  preview it with `mm config show` and confirm the database path and memory directories with
-  the plugin's status check. In `docs/guides/mcp-clients.md`, the Antigravity and Codex checks
+  preview it with `mm config show` and confirm the database path with the plugin's status
+  check. In `docs/guides/mcp-clients.md`, the Antigravity and Codex checks
   are to be run after installing the plugin: before then there is no bundled server to compare
   with, so a complete check with one usable manual entry under another name passes, and both
   can start once the plugin is installed and enabled. The Claude check runs from the project
