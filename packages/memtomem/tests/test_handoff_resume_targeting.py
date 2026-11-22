@@ -1068,3 +1068,39 @@ async def test_a_malformed_newest_row_stays_first_on_the_list_page(components) -
     page = await components.storage.recall_chunks(limit=_LIST_LIMIT, tag_filter=_LIST_FILTER)
 
     assert [c.id for c in page] == [malformed.id, valid.id]
+
+
+async def test_a_newest_row_with_zero_or_multiple_id_tags_stays_first_on_resume_recall(
+    components,
+) -> None:
+    """Storage retains rows with zero or several id tags; resume's cardinality rule governs it (#3475).
+
+    If the newest row carries no `handoff-id-<id>` tag or carries several, storage still returns
+    it first. Resume step 2 requires exactly one id tag on the newest row, reporting the row
+    unusable rather than guessing or falling back.
+    """
+    valid = _handoff_chunk(_TARGET_ID, "claude-code", _TARGET_AT)
+    zero_tags = make_chunk(
+        content="handoff_id: 11111111-0000-4000-8000-000000000001\n",
+        tags=("handoff", "handoff-to-claude-code"),
+        namespace=_NAMESPACE,
+        source="handoff-zero-tags.md",
+    )
+    zero_tags.created_at = zero_tags.updated_at = _TARGET_AT + timedelta(hours=1)
+    multiple_tags = make_chunk(
+        content="handoff_id: 22222222-0000-4000-8000-000000000002\n",
+        tags=(
+            "handoff",
+            "handoff-to-claude-code",
+            "handoff-id-22222222-0000-4000-8000-000000000002",
+            "handoff-id-33333333-0000-4000-8000-000000000003",
+        ),
+        namespace=_NAMESPACE,
+        source="handoff-multiple-tags.md",
+    )
+    multiple_tags.created_at = multiple_tags.updated_at = _TARGET_AT + timedelta(hours=2)
+    await components.storage.upsert_chunks([valid, zero_tags, multiple_tags])
+
+    page = await components.storage.recall_chunks(limit=_RESUME_LIMIT, tag_filter=_LIST_FILTER)
+
+    assert [c.id for c in page] == [multiple_tags.id, zero_tags.id, valid.id]

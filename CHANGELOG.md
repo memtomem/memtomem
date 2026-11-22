@@ -19,6 +19,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Handoff resume requires exactly one `handoff-id-<id>` tag on the newest row (#3475).**
+  Resume step 2 previously instructed agents to read the id out of the newest row's
+  `handoff-id-<id>` tag and check that it was a canonical UUID, leaving behavior undefined
+  when a row carried no such tag or more than one. Save always writes exactly one tag, but a
+  hand-edited or foreign record in the same namespace could carry zero or several. The workflow
+  now requires exactly one `handoff-id-<id>` tag on the newest row: with zero or several, or an
+  invalid id, the row's `source` and `chunk_id` are reported as unusable and execution stops
+  without falling back to another record, aligning with torn and mismatch failure handling.
+
 - **`mm init` on a `uv tool` install names `memtomem[all]` for a missing extra, so following
   it keeps the extras the tool environment already has (#3495).** With one extra missing, the
   hint and the install the wizard offers at the end were `uv tool install --reinstall
