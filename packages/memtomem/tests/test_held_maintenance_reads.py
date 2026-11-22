@@ -144,11 +144,15 @@ class TestDiscovery:
 
         async def record(text, *args, **kwargs):
             seen.append(text)
-            return []
+            return entity_extraction.EntityExtraction([], llm_failed=False)
 
         monkeypatch.setattr(entity_extraction, "extract_entities_with_llm", record)
 
-        await mem_entity_scan(ctx=StubCtx(AppContext.from_components(comp)))
+        out = await mem_entity_scan(ctx=StubCtx(AppContext.from_components(comp)))
+
+        # ``tool_handler`` turns an exception into an error string, so without
+        # this a stub the scan cannot read would still pass on ``seen`` alone.
+        assert out.startswith("Entity scan complete"), out
 
         assert any("visibleentityword" in text for text in seen)
         assert not any("heldentityword" in text for text in seen)

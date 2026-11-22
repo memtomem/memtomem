@@ -17,7 +17,9 @@ from memtomem.server.tools.entity import mem_entity_scan
 
 async def _no_entities(*_args, **_kwargs):
     """Stand in for an extractor pass that now finds nothing."""
-    return []
+    from memtomem.tools.entity_extraction import EntityExtraction
+
+    return EntityExtraction([], llm_failed=False)
 
 
 async def _seed(comp, content="sqlite migration owned by @alice"):
@@ -99,10 +101,10 @@ class TestScanCoversWholeSource:
         scanned: set[str] = set()
 
         async def _one_entity(text, entity_types, provider):
-            from memtomem.tools.entity_extraction import ExtractedEntity
+            from memtomem.tools.entity_extraction import EntityExtraction, ExtractedEntity
 
             scanned.add(text)
-            return [ExtractedEntity("technology", "sqlite", 0.9, 0)]
+            return EntityExtraction([ExtractedEntity("technology", "sqlite", 0.9, 0)], False)
 
         ctx = StubCtx(AppContext.from_components(comp))
         with patch("memtomem.tools.entity_extraction.extract_entities_with_llm", _one_entity):
@@ -148,12 +150,12 @@ class TestScanInvalidatesSearchCache:
         calls = {"n": 0}
 
         async def _boom(text, entity_types, provider):
-            from memtomem.tools.entity_extraction import ExtractedEntity
+            from memtomem.tools.entity_extraction import EntityExtraction, ExtractedEntity
 
             calls["n"] += 1
             if calls["n"] > 1:
                 raise RuntimeError("extractor died")
-            return [ExtractedEntity("technology", "sqlite", 0.9, 0)]
+            return EntityExtraction([ExtractedEntity("technology", "sqlite", 0.9, 0)], False)
 
         ctx = StubCtx(AppContext.from_components(comp))
         before = comp.search_pipeline._cache_version
@@ -218,3 +220,172 @@ class TestEntityTypeValidation:
         out = await mem_entity_scan(entity_types=["technology"], ctx=ctx)  # type: ignore[arg-type]
         assert "unknown entity type" not in out.lower()
         assert "complete" in out.lower()
+
+
+class _RaisingLLM:
+    """A provider whose every call fails, the way an unreachable Ollama does."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, prompt: str, *, system: str = "", max_tokens: int = 1024) -> str:
+        from memtomem.errors import LLMError
+
+        self.calls += 1
+        raise LLMError("Cannot connect to Ollama")
+
+    async def close(self) -> None:
+        pass
+
+
+class _AnsweringLLM:
+    """A provider that answers every call with a fixed reply."""
+
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+
+    async def generate(self, prompt: str, *, system: str = "", max_tokens: int = 1024) -> str:
+        return self._reply
+
+    async def close(self) -> None:
+        pass
+
+
+async def _seed_person(comp, content: str):
+    """One chunk holding a row only the LLM would find (``person|Alice``)."""
+    chunk = make_chunk(content, source="note.md")
+    await comp.storage.upsert_chunks([chunk])
+    await comp.storage.upsert_entities(
+        str(chunk.id),
+        [{"entity_type": "person", "entity_value": "Alice", "confidence": 0.95}],
+    )
+    return chunk
+
+
+def _rows(entities: list[dict]) -> set[tuple[str, str]]:
+    return {(e["entity_type"], e["entity_value"]) for e in entities}
+
+
+async def _scan(comp, **kwargs) -> str:
+    return await mem_entity_scan(ctx=StubCtx(AppContext.from_components(comp)), **kwargs)  # type: ignore[arg-type]
+
+
+class TestLlmFailureLeavesChunksUnchanged:
+    """A failed LLM call is not an extraction (#3383).
+
+    The wrapper falls back to the regex extractor when the LLM call fails. The
+    scan used to take that result as the chunk's new entities, so an
+    ``overwrite`` scan during an outage replaced LLM rows with regex rows, or
+    cleared them when the regex found nothing. These drive the real wrapper with
+    a failing provider; nothing here patches the extractor.
+    """
+
+    @pytest.mark.asyncio
+    async def test_overwrite_does_not_clear_when_regex_finds_nothing(self, bm25_only_components):
+        from memtomem.tools.entity_extraction import extract_entities
+
+        comp, _ = bm25_only_components
+        chunk = await _seed_person(comp, "Alice joined")
+        assert extract_entities("Alice joined") == []  # the case that used to clear
+        comp.llm = _RaisingLLM()
+
+        out = await _scan(comp, overwrite=True)
+
+        assert comp.llm.calls == 1
+        assert _rows(await comp.storage.get_entities_for_chunk(str(chunk.id))) == {
+            ("person", "Alice")
+        }
+        assert "Chunks cleared" not in out
+        assert "- Chunks left unchanged (LLM extraction failed): 1" in out.splitlines()
+        assert "- Chunks with entities: 0" in out.splitlines()
+
+    @pytest.mark.asyncio
+    async def test_overwrite_does_not_replace_with_regex_rows(self, bm25_only_components):
+        from memtomem.tools.entity_extraction import extract_entities
+
+        comp, _ = bm25_only_components
+        content = "Alice chose SQLite for the cache"
+        chunk = await _seed_person(comp, content)
+        assert extract_entities(content)  # the case that used to replace
+        comp.llm = _RaisingLLM()
+
+        out = await _scan(comp, overwrite=True)
+
+        assert _rows(await comp.storage.get_entities_for_chunk(str(chunk.id))) == {
+            ("person", "Alice")
+        }
+        assert "- Chunks left unchanged (LLM extraction failed): 1" in out.splitlines()
+        assert "- Total entities found: 0" in out.splitlines()
+
+    @pytest.mark.asyncio
+    async def test_a_chunk_without_rows_gets_no_regex_rows(self, bm25_only_components):
+        # Plain scan, regex-positive content, no rows yet (for example an
+        # earlier overwrite scan's NONE cleared them): the failed call writes
+        # nothing, and the chunk is reported.
+        from memtomem.tools.entity_extraction import extract_entities
+
+        comp, _ = bm25_only_components
+        content = "Alice chose SQLite for the cache"
+        chunk = make_chunk(content, source="note.md")
+        await comp.storage.upsert_chunks([chunk])
+        assert extract_entities(content)
+        comp.llm = _RaisingLLM()
+
+        out = await _scan(comp)
+
+        assert await comp.storage.get_entities_for_chunk(str(chunk.id)) == []
+        assert "- Chunks left unchanged (LLM extraction failed): 1" in out.splitlines()
+
+    @pytest.mark.asyncio
+    async def test_none_answer_still_clears(self, bm25_only_components):
+        # NONE is the model saying the content has no entities, not a failure.
+        comp, _ = bm25_only_components
+        chunk = await _seed_person(comp, "Alice joined")
+        comp.llm = _AnsweringLLM("NONE")
+
+        out = await _scan(comp, overwrite=True)
+
+        assert await comp.storage.get_entities_for_chunk(str(chunk.id)) == []
+        assert "- Chunks cleared (no entities on re-scan): 1" in out.splitlines()
+        assert "LLM extraction failed" not in out
+
+    @pytest.mark.asyncio
+    async def test_an_unparseable_reply_is_a_failure(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        chunk = await _seed_person(comp, "Alice joined")
+        comp.llm = _AnsweringLLM("I cannot extract entities from this text")
+
+        out = await _scan(comp, overwrite=True)
+
+        assert _rows(await comp.storage.get_entities_for_chunk(str(chunk.id))) == {
+            ("person", "Alice")
+        }
+        assert "Chunks cleared" not in out
+        assert "- Chunks left unchanged (LLM extraction failed): 1" in out.splitlines()
+
+    @pytest.mark.asyncio
+    async def test_dry_run_counts_the_failure(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        chunk = await _seed_person(comp, "Alice joined")
+        comp.llm = _RaisingLLM()
+
+        out = await _scan(comp, overwrite=True, dry_run=True)
+
+        assert _rows(await comp.storage.get_entities_for_chunk(str(chunk.id))) == {
+            ("person", "Alice")
+        }
+        lines = out.splitlines()
+        assert "- Chunks left unchanged (LLM extraction failed): 1 (dry run)" in lines
+        # The preview must not promise the clear the live scan would not do.
+        assert "Chunks cleared" not in out
+
+    @pytest.mark.asyncio
+    async def test_a_scan_that_only_failed_does_not_invalidate(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        await _seed_person(comp, "Alice chose SQLite for the cache")
+        comp.llm = _RaisingLLM()
+        before = comp.search_pipeline._cache_version
+
+        await _scan(comp, overwrite=True)
+
+        assert comp.search_pipeline._cache_version == before

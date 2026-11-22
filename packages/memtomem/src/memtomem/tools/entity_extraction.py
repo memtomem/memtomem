@@ -2,7 +2,7 @@
 
 When an LLM provider is available, ``extract_entities_with_llm`` tries the
 LLM first for higher-quality extraction (especially person names and
-decisions) and falls back to the regex heuristic.
+decisions), falls back to the regex heuristic, and reports whether it did.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from memtomem.errors import LLMError
 
@@ -374,9 +374,13 @@ async def extract_entities_llm(
         when the model answers ``NONE``, the prompt's answer for "no entities".
 
     Raises:
-        LLMError: The answer was empty. The prompt asks for ``NONE`` when there
-            is nothing to extract, so an empty answer is the model failing to
-            answer.
+        LLMError: The answer was empty, or it was neither exactly ``NONE`` nor
+            held at least one valid ``TYPE|VALUE`` line. The prompt asks for ``NONE`` when
+            there is nothing to extract, so either is the model failing to
+            answer, and reading it as "no entities" would clear a chunk's rows
+            under ``mem_entity_scan(overwrite=True)``. Usability is judged
+            before the *entity_types* filter: a valid answer that the filter
+            reduces to nothing is still an answer.
     """
     from memtomem.llm.utils import strip_llm_response
 
@@ -387,29 +391,54 @@ async def extract_entities_llm(
     prompt = f"Extract entities from the following text.{type_hint}\n---\n{text[:3000]}\n---"
 
     raw = await llm_provider.generate(prompt, system=_ENTITY_SYSTEM_PROMPT, max_tokens=256)
-    if not strip_llm_response(raw):
+    answer = strip_llm_response(raw)
+    if not answer:
         raise LLMError("LLM returned an empty answer to the entity extraction prompt")
+    # ``NONE`` counts only as the whole answer, the way ``_parse_entity_response``
+    # reads it: a ``NONE`` line beside malformed ones is not the model saying
+    # there is nothing here.
+    if answer.strip().upper() != "NONE" and not _parse_entity_response(raw):
+        raise LLMError(
+            "LLM gave no usable answer to the entity extraction prompt "
+            "(neither NONE nor a TYPE|VALUE line)"
+        )
     types_set = set(entity_types) if entity_types else None
     return _parse_entity_response(raw, types_set)
+
+
+class EntityExtraction(NamedTuple):
+    """What ``extract_entities_with_llm`` produced, and whether the LLM failed.
+
+    ``llm_failed`` is true only when a provider was given and its call failed
+    (``extract_entities_llm`` raised). ``entities`` is then the regex fallback's
+    result, which is not a replacement for an LLM extraction: a caller that
+    overwrites stored entities must not write it over them (#3383). With no
+    provider, the regex extractor is the configured one and ``llm_failed`` is
+    false.
+    """
+
+    entities: list[ExtractedEntity]
+    llm_failed: bool
 
 
 async def extract_entities_with_llm(
     text: str,
     entity_types: list[str] | None = None,
     llm_provider: LLMProvider | None = None,
-) -> list[ExtractedEntity]:
+) -> EntityExtraction:
     """Extract entities, preferring LLM when available.
 
     Falls back to the regex heuristic when *llm_provider* is ``None`` or
-    when the LLM call fails. An empty LLM answer is a failure
-    (``extract_entities_llm`` raises on it); ``NONE`` is not.
+    when the LLM call fails, and says which happened (``EntityExtraction``).
+    An empty or unusable LLM answer is a failure (``extract_entities_llm``
+    raises on it); ``NONE`` is not.
     """
     if llm_provider is not None:
         try:
-            return await extract_entities_llm(text, llm_provider, entity_types)
-        except Exception:
-            logger.warning(
-                "LLM entity extraction failed, using heuristic fallback",
-                exc_info=True,
+            return EntityExtraction(
+                await extract_entities_llm(text, llm_provider, entity_types), False
             )
-    return extract_entities(text, entity_types)
+        except Exception:
+            logger.warning("LLM entity extraction failed", exc_info=True)
+            return EntityExtraction(extract_entities(text, entity_types), True)
+    return EntityExtraction(extract_entities(text, entity_types), False)

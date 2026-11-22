@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mem_entity_scan` no longer replaces or clears a chunk's entities when the LLM call for it
+  fails (#3383).** The scan took the regex fallback's result as the chunk's new extraction, so
+  one `overwrite=True` scan while the provider was unreachable, timing out or refusing the key
+  replaced LLM-found rows such as `person|Alice` with regex rows, or deleted them and reported
+  `Chunks cleared` when the regex found nothing. A chunk whose LLM call fails is now left as it
+  is and counted as `Chunks left unchanged (LLM extraction failed)`. A reply that is neither
+  exactly `NONE` nor contains at least one valid `TYPE|VALUE` line (for example `I cannot
+  extract entities…`) now counts as a failed call too; `NONE` still clears. A chunk without
+  rows no longer gets the regex fallback's rows on a failed call; it stays without rows. The
+  `entity_boost_no_entities` advisory in `mem_status` says the provider must be reachable, and
+  that a scan with `llm.enabled=false` uses the regex extractor.
+
 - **`mm init` no longer treats every monorepo with a `pyproject.toml` and a `packages/`
   directory as a memtomem source checkout (#3510).** Inside one, it wrote
   `uv run --directory <root> memtomem-server` as the MCP command, printed `uv run` next
