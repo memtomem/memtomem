@@ -1342,14 +1342,16 @@ class TestPublicReadmeAndExamples:
         assert len(store_steps) == 1, store_steps
         anchors = re.findall(r"plugin-quickstart\.md#([\w-]+)\)", section)
         assert _slug(store_steps[0]) in anchors, (store_steps, anchors)
-        # The coexistence check named before the plugin commands is one `mm doctor` runs.
-        doctor = _CLI.get_command(click.Context(_CLI), "doctor")
-        assert doctor is not None
-        option = next(p for p in doctor.params if "--mcp-client" in getattr(p, "opts", ()))
-        named = re.findall(r"`mm doctor --mcp-client (\w+)`", section)
-        assert sorted(named) == ["claude", "codex"], named
-        assert set(named) <= set(option.type.choices), (named, option.type.choices)
-        assert section.index("mm doctor --mcp-client") < section.index("claude plugin install")
+        # When to run each host's coexistence check differs (Codex reports a duplicate only
+        # once the plugin is installed), so the section links the guide's section for it,
+        # ahead of both hosts' plugin commands, instead of naming the checks itself.
+        assert "mm doctor" not in section
+        coexistence = "## Keep manual MCP and plugin skills"
+        assert coexistence in _read(_GUIDES / "mcp-clients.md").splitlines()
+        link = f"mcp-clients.md#{_slug(coexistence.removeprefix('## '))})"
+        assert section.count(link) == 1, link
+        for host_command in ("claude plugin marketplace add", "codex plugin marketplace add"):
+            assert section.index(link) < section.index(host_command), host_command
         # The brief stops until the project tier exists, so the fenced tier command comes
         # before each host's brief.
         bash = self._bash_lines(section, r".")

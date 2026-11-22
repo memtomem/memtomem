@@ -18,7 +18,7 @@ uv tool install --python 3.12 'memtomem[all]'
 
 This and the plugin's server need a Python 3.12 that uv can find or download. If `mm` is not found afterwards, run `uv tool update-shell` and open a new shell. Then create your memory store once, as [step 2 of the plugin quickstart](docs/guides/plugin-quickstart.md#2-shared-setup-initialize-your-user-memory-store-once) shows; that step also says to skip it if you already have saved memories or memtomem settings, and what to do when uv cannot get Python 3.12.
 
-If you registered memtomem as an MCP server by hand before, run `mm doctor --mcp-client claude` or `mm doctor --mcp-client codex` first, and [Keep manual MCP and plugin skills](docs/guides/mcp-clients.md#keep-manual-mcp-and-plugin-skills) explains the result; a manual entry and the plugin's server can otherwise both run, or the manual one can serve in its place.
+If you registered memtomem as an MCP server by hand before, read [Keep manual MCP and plugin skills](docs/guides/mcp-clients.md#keep-manual-mcp-and-plugin-skills) before you start a session with the plugin: a manual entry and the plugin's server can both run, or the manual one can serve in its place; that section gives the read-only check for each host.
 
 Then add the plugin for the agent you use. Claude Code (user scope; for one project only, see the [plugin quickstart](docs/guides/plugin-quickstart.md#install-with-an-explicit-project-scope)):
 

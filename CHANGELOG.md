@@ -69,8 +69,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   install, `mm mem init --scope project_local` and the first `brief`) and adds the Claude
   Code and Codex CLI plugin commands, which neither page gave before. It names the agent to
   have installed and signed in, says that its `uv tool install --python 3.12` command and
-  the plugin's server need a Python 3.12, names the read-only `mm doctor --mcp-client`
-  check to run first when memtomem was registered by hand, and says to start the session
+  the plugin's server need a Python 3.12, links the MCP clients guide's coexistence
+  section, with each host's read-only check, for a reader who registered memtomem by hand, and says to start the session
   from the Git root where the project tier was registered. For creating the memory store it links step 2 of the plugin quickstart, which says
   when to skip that step and what to do when uv cannot get Python 3.12, instead of running
   `mm init` on the first screen: on a machine that already has memtomem settings, a re-run
