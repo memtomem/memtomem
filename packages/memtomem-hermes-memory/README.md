@@ -68,6 +68,11 @@ active once `memory.provider` names it. The exception is a provider listed under
 `plugins.disabled`, where `hermes plugins disable` puts it: Hermes does not load it until
 `hermes plugins enable memtomem-memory` takes it off that list.
 
+memtomem-memory is also listed in the Hermes plugin catalog, so
+`hermes plugins install memtomem-memory` installs without a commit lookup. It installs the commit
+the catalog pins, which moves only when the catalog entry is updated and can trail the newest
+memtomem release; to install a later release, use the commit lookup above.
+
 Then select the provider and grant it access to the `memtomem` MCP entry in
 `~/.hermes/config.yaml` (or your profile's `config.yaml`):
 

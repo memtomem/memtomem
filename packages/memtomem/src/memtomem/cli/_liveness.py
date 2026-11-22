@@ -303,6 +303,12 @@ class ServerState:
     # omitted an unsafe speculative runtime candidate. Destructive callers
     # surface this before proceeding on the narrowed inventory (#2039).
     probe_warning: str | None = None
+    # Set only by a contended probe whose two reads of the payload, one on
+    # each side of the failed lock attempt, differed: the lock may have
+    # changed hands mid-probe (#3423). ``pid``/``port``/``started`` are
+    # withheld, and no other source (``web.json``) may supply a pid to signal
+    # or attribute for this state; a fresh probe can.
+    payload_changed: bool = False
 
 
 def _merge_probe_warnings(*warnings: str | None) -> str | None:
@@ -369,8 +375,10 @@ def probe_pid_file(pid_file: Path) -> ServerState:
     ``server/__init__.py:main`` opens this file and holds an exclusive
     lock for the entire server lifetime. If we can acquire
     ``LOCK_EX | LOCK_NB`` on it, no live writer is holding it. If we
-    cannot, a writer is alive — regardless of whether the recorded PID
-    is still valid (kernel may have recycled it; see #387).
+    cannot, the verdict is ``alive=True``: that establishes only that the
+    lock was held, by a writer or by another short-lived locker (see
+    below), regardless of whether the recorded PID is still valid (kernel
+    may have recycled it; see #387).
 
     Real probe on every OS; portalocker dispatches to ``fcntl.flock`` on
     POSIX and ``msvcrt.locking`` on Windows (portalocker's default
@@ -378,6 +386,26 @@ def probe_pid_file(pid_file: Path) -> ServerState:
     ``LockFileEx``). Replaces the prior
     conservative "pid file exists → assume alive" Windows fallback (see
     #448, #625).
+
+    The payload is read before the lock attempt, so on contention it is read
+    a second time and the two bounded results are compared. Each result is the
+    bytes read or "unavailable" (the read failed or was oversized). Two equal
+    byte strings, or two unavailable results (Windows, when the lock is held
+    throughout), count as unchanged; an unavailable result never equals a
+    byte result. If they differ, the metadata is withheld: the state is
+    alive with ``payload_changed=True`` and no pid, port or start time. That
+    catches a holder that exited and a replacement that locked and rewrote
+    the same file between the first read and the lock attempt (#3423), which
+    would otherwise report the previous holder's pid. It can also be the
+    same holder finishing its own first write; callers then refuse as for a
+    holder that has not written its pid yet.
+
+    Matching reads do not prove the bytes are the holder's. A holder that has
+    locked but not yet truncated the file (every writer truncates right after
+    :func:`memtomem._pid_lock.lock_pid_file` returns) leaves its
+    predecessor's bytes for both reads. And the contention may be another
+    short-lived locker, a concurrent probe or :func:`unlink_stale_pid_file`,
+    on a stale file nobody owns.
     """
     try:
         opened = _open_verified_regular(pid_file, writable=True)
@@ -447,6 +475,15 @@ def probe_pid_file(pid_file: Path) -> ServerState:
                 probe_error=_exception_detail(exc),
             )
 
+        payload_changed = False
+        if contended:
+            # No lock is held here, so moving the offset cannot disturb an
+            # unlock (portalocker's Windows backend works from the offset).
+            try:
+                payload_changed = _read_bounded_fd(fp.fileno()) != payload
+            except OSError:
+                payload_changed = payload is not None
+
         try:
             # The PID is signalable only if the path still names the exact
             # regular inode whose bytes and lock state were inspected.
@@ -459,6 +496,13 @@ def probe_pid_file(pid_file: Path) -> ServerState:
                 probe_error=_exception_detail(exc),
             )
 
+        if payload_changed:
+            return ServerState(
+                alive=True,
+                pid=None,
+                pid_file=pid_file,
+                payload_changed=True,
+            )
         if contended:
             return ServerState(
                 alive=True,
@@ -527,6 +571,16 @@ def unlink_stale_pid_file(pid_file: Path) -> StalePidUnlink:
         return _unlink_locked_pid_file(pid_file)
     finally:
         barrier.release()
+
+
+def unlink_stale_pid_file_holding_barrier(pid_file: Path) -> StalePidUnlink:
+    """:func:`unlink_stale_pid_file` for a caller that holds the barrier exclusive.
+
+    ``mm uninstall`` deletes while it holds the lifecycle barrier exclusive;
+    the shared hold :func:`unlink_stale_pid_file` takes would contend with it,
+    in this process as in any other. The lock-then-delete rule is the same.
+    """
+    return _unlink_locked_pid_file(pid_file)
 
 
 def _unlink_locked_pid_file(pid_file: Path) -> StalePidUnlink:
@@ -870,6 +924,103 @@ def enumerate_server_liveness_inventory() -> tuple[list[ServerState], str | None
     if legacy_state.alive:
         states.append(_with_probe_warning(legacy_state, warning))
     return states, warning
+
+
+@dataclass(frozen=True)
+class DaemonState:
+    """One shared daemon's lifetime lock (#3381): its probe and its socket path."""
+
+    name: str
+    state: ServerState
+    socket_path: Path
+
+
+@dataclass(frozen=True)
+class DaemonInventory:
+    """What :func:`enumerate_daemons` found.
+
+    ``error`` is set when the runtime roots could not be enumerated: the list
+    is then incomplete, and a caller that would act on "no daemon" must refuse
+    instead. ``warnings`` are diagnostics of a pass that did complete: a
+    runtime candidate skipped as unsafe, or a ``server-daemon-*.pid`` file
+    whose name this version cannot parse, which is reported and not guessed at.
+    """
+
+    daemons: list[DaemonState]
+    error: str | None = None
+    warnings: tuple[str, ...] = ()
+
+
+def enumerate_daemons() -> DaemonInventory:
+    """Every daemon lifetime lock in the runtime roots, live or stale, sorted."""
+    from memtomem._daemon_paths import (
+        LIFETIME_LOCK_PREFIX,
+        name_from_lifetime_lock,
+        socket_path,
+    )
+
+    globbed, detail = _glob_server_pid_files()
+    if globbed is None:
+        return DaemonInventory([], error=f"could not enumerate server-*.pid ({detail})")
+    warnings: list[str] = [detail] if detail else []
+    daemons: list[DaemonState] = []
+    for pid_file in globbed:
+        if not pid_file.name.startswith(LIFETIME_LOCK_PREFIX):
+            continue
+        name = name_from_lifetime_lock(pid_file.name)
+        if name is None:
+            warnings.append(f"{scrub_text(str(pid_file))}: not a daemon name this version knows")
+            continue
+        daemons.append(
+            DaemonState(
+                name=name,
+                state=probe_pid_file(pid_file),
+                socket_path=socket_path(pid_file.parent, name),
+            )
+        )
+    return DaemonInventory(daemons, warnings=tuple(warnings))
+
+
+def live_daemon_for_pid(pid: int | None) -> str | None:
+    """The name of the live daemon whose lifetime lock records *pid*, or ``None``.
+
+    Only for naming a daemon in a message: it adds a name and a stop command to
+    a refusal that is already decided, and never decides one.
+    """
+    if pid is None:
+        return None
+    try:
+        daemons = enumerate_daemons().daemons
+    except (OSError, _UnsafeProbePathError):
+        return None
+    for daemon in daemons:
+        state = daemon.state
+        if state.alive and state.probe_error is None and state.pid == pid:
+            return daemon.name
+    return None
+
+
+def running_daemons_hint() -> str | None:
+    """A sentence naming the running shared daemons and their stop command, or ``None``.
+
+    For refusal messages only: it never decides a refusal, so a listing that
+    fails adds nothing rather than raising.
+    """
+    try:
+        inventory = enumerate_daemons()
+    except (OSError, _UnsafeProbePathError):
+        return None
+    if inventory.error is not None:
+        return None
+    live = [d for d in inventory.daemons if d.state.alive and d.state.probe_error is None]
+    if not live:
+        return None
+    names = ", ".join(
+        f"'{d.name}' (pid {d.state.pid if d.state.pid is not None else '?'})" for d in live
+    )
+    if len(live) == 1:
+        return f"Shared daemon {names} is running; stop it with `mm daemon stop {live[0].name}`."
+    return f"Shared daemons {names} are running; stop them with `mm daemon stop`."
 
 
 def check_server_liveness(db_path: Path | None = None) -> ServerState:

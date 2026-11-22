@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from memtomem.scheduler.jobs import JOB_KINDS, run_outcome
+from memtomem.scheduler.jobs import JOB_KINDS, run_job, run_outcome, stored_params
 from memtomem.server.background import loop_task_error_cb, stop_loop_task
 from memtomem.server.health_checks import (
     DEEP_CHECKS,
@@ -181,7 +181,7 @@ class HealthWatchdog:
             )
             return
         try:
-            params = spec.params_model.model_validate(sched.get("params") or {})
+            params = stored_params(spec, sched)
         except Exception as exc:
             logger.warning(
                 "schedule %s params invalid for %s: %s",
@@ -195,12 +195,17 @@ class HealthWatchdog:
             return
 
         try:
-            result = await asyncio.wait_for(
-                spec.runner(self._app, **params.model_dump()),
+            # The state read with the due row is still the stored one: only
+            # ``schedule_mark_run`` writes it, with a new ``last_run_at``,
+            # and the claim above matched the ``last_run_at`` of that read.
+            result, state_update = await asyncio.wait_for(
+                run_job(spec, self._app, params, sched.get("state")),
                 timeout=timeout,
             )
             status, recorded = run_outcome(result)
-            await self._app.storage.schedule_mark_run(sched["id"], status, result=recorded)
+            await self._app.storage.schedule_mark_run(
+                sched["id"], status, result=recorded, state=state_update
+            )
         except asyncio.TimeoutError:
             logger.warning(
                 "schedule %s (%s) exceeded %.1fs timeout",

@@ -57,4 +57,4 @@ Choose the destination from the user's context:
 - Use `scope="user"` only for cross-project preferences or when the user explicitly requests personal/global memory.
 - Use `project_shared` only after explicit confirmation and set `confirm_project_shared=true`.
 
-Always leave `force_unsafe=false`. Report the effective scope, written file, and indexed chunk count. If the tool reports a similar memory, surface the warning rather than silently creating another variant.
+Always leave `force_unsafe=false`. When `mem_add` confirms the write, report the effective scope, written file, and how many chunks the memory's lines fall in: the value of the result's `- Entry chunks:` line, unchanged. If the result has no such line, say that the server did not report it; do not substitute `- Chunks indexed:`, which counts the whole file. When the result is a refusal or an error instead, report it unchanged and add no file or chunk count of your own. If the tool reports a similar memory, surface the warning rather than silently creating another variant.

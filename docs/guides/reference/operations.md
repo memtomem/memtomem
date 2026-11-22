@@ -258,6 +258,16 @@ Running both `memtomem-server` (MCP) and `memtomem-web` simultaneously is suppor
   cases, stop them yourself first.
 - **Recommendation**: for typical usage, run only the MCP server. Launch the Web UI on-demand when you need visual browsing.
 
+### Shared daemon
+
+With `memtomem-server --shared NAME`, several client sessions are served by one
+background process instead of one server each (macOS and Linux, opt-in). The
+lifecycle commands treat that daemon as a server: `mm reset` and `mm uninstall`
+refuse while it runs and name the `mm daemon stop` command, and `mm upgrade`
+stops it, which ends the sessions connected to it. See
+[Share one server between sessions](../shared-daemon.md) for turning it on,
+checking that a session joined, and what ends a daemon.
+
 ### "swap_recovery_pending" when writing a skill
 
 A skill in the Store is a directory, so replacing it is a two-step rename with

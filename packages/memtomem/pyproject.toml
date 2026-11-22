@@ -1,7 +1,7 @@
 [project]
 name = "memtomem"
-version = "0.7.10"
-description = "Long-term memory for AI coding agents, kept as Markdown you own. Hybrid BM25 + vector search via MCP."
+version = "0.7.13"
+description = "Local-first long-term memory for AI coding agents, kept as Markdown you own. Hybrid keyword + semantic search via MCP."
 authors = [
     {name = "DAPADA Inc.", email = "contact@dapada.co.kr"},
     {name = "memtomem contributors"},
@@ -152,7 +152,7 @@ all = ["memtomem[onnx,ollama,openai,korean,code,web,langfuse,langgraph]"]
 [project.scripts]
 memtomem = "memtomem.cli:cli"
 mm = "memtomem.cli:cli"
-memtomem-server = "memtomem.server:main"
+memtomem-server = "memtomem._server_entry:main"
 memtomem-web = "memtomem.web.app:main"
 
 [project.urls]

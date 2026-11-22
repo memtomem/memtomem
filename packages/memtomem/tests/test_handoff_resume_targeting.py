@@ -30,7 +30,6 @@ selection is decidable from one bounded page.
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -568,62 +567,6 @@ _FIELDS = (
 )
 # A record saved before ``artifacts`` existed has every other field (#2930).
 _LEGACY_FIELDS = tuple(key for key in _FIELDS if key != "artifacts")
-_FASTEMBED_CACHE_ENV = ("MEMTOMEM_FASTEMBED_CACHE", "FASTEMBED_CACHE_PATH")
-
-
-def _verified_cached_e5_tokenizer() -> str | None:
-    """A copy of the pinned tokenizer already in a fastembed cache, read only.
-
-    Looks where the product would (the non-empty overrides, then the default
-    ``~/.memtomem/cache/fastembed``) without creating or writing anything, and
-    returns a file only when its checksum is the pinned one.
-    """
-    import hashlib
-    from pathlib import Path
-
-    from memtomem.embedding.profiles import E5_MODEL, E5_REVISION, E5_TOKENIZER_SHA256
-
-    roots = [os.environ[name] for name in _FASTEMBED_CACHE_ENV if os.environ.get(name)]
-    roots.append(str(Path.home() / ".memtomem" / "cache" / "fastembed"))
-    snapshot = Path("models--" + E5_MODEL.replace("/", "--"), "snapshots", E5_REVISION)
-    for root in roots:
-        candidate = Path(root).expanduser() / snapshot / "tokenizer.json"
-        if not candidate.is_file():
-            continue
-        with candidate.open("rb") as stream:
-            if hashlib.file_digest(stream, "sha256").hexdigest() == E5_TOKENIZER_SHA256:
-                return str(candidate)
-    return None
-
-
-@pytest.fixture(scope="session")
-def _e5_tokenizer_file(tmp_path_factory) -> str:
-    """The pinned E5 ``tokenizer.json``, checksum-verified, as a plain path.
-
-    Reuses a verified copy from an existing cache without writing to it;
-    otherwise downloads into a temporary cache, never the developer's. Skips
-    only when the file cannot be fetched. A checksum mismatch on the download
-    (``ValueError``) is a real failure and propagates.
-    """
-    pytest.importorskip("tokenizers")
-    pytest.importorskip("huggingface_hub")
-    httpx = pytest.importorskip("httpx")
-    from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
-
-    from memtomem.embedding.profiles import E5_TOKENIZER, resolve_tokenizer
-
-    cached = _verified_cached_e5_tokenizer()
-    if cached is not None:
-        return cached
-    with pytest.MonkeyPatch.context() as mp:
-        # ``MEMTOMEM_FASTEMBED_CACHE`` outranks ``FASTEMBED_CACHE_PATH``, so
-        # this alone keeps the download out of any cache the developer uses.
-        mp.setenv("MEMTOMEM_FASTEMBED_CACHE", str(tmp_path_factory.mktemp("fastembed")))
-        try:
-            path = resolve_tokenizer(E5_TOKENIZER)
-        except (HfHubHTTPError, LocalEntryNotFoundError, OSError, httpx.TransportError) as exc:
-            pytest.skip(f"pinned E5 tokenizer unavailable: {type(exc).__name__}: {exc}")
-    return str(path)
 
 
 @pytest.fixture
@@ -1014,3 +957,150 @@ async def test_a_failure_report_needs_the_chunk_id_to_locate_the_file(monkeypatc
 
     assert f"- Source: {path}" in read
     assert "- Lines: 12-27" in read
+
+
+# ``handoff list`` reads one page with resume step 2's filter. What the workflow relies on
+# from storage: the page holds only addressed rows, newest first; its first row is the row
+# resume step 2 takes, whatever the two limits; and a malformed newest row stays on the page,
+# so list must judge the raw first row before it skips anything.
+_LIST_FILTER = "handoff-to-claude-code,handoff-to-any"
+_LIST_LIMIT = 30
+_RESUME_LIMIT = 10
+
+
+def _record_rows(handoff_id: str, to_runtime: str, created_at: datetime, rows: int):
+    """One record stored as several rows that carry the same tags, as a token re-split does."""
+    chunks = []
+    for part in range(rows):
+        chunk = _handoff_chunk(handoff_id, to_runtime, created_at)
+        chunk.content = f"part {part} of {handoff_id}\n"
+        chunks.append(chunk)
+    return chunks
+
+
+def _id_tag(chunk) -> str:
+    (tag,) = [t for t in chunk.metadata.tags if t.startswith("handoff-id-")]
+    return tag.removeprefix("handoff-id-")
+
+
+async def test_list_page_holds_only_addressed_rows_newest_first(components) -> None:
+    """Grouping the list page by first appearance gives the records newest first."""
+    older = "33333333-0000-4000-8000-000000000001"
+    newer = "33333333-0000-4000-8000-000000000002"
+    to_any = "33333333-0000-4000-8000-000000000003"
+    addressed = [
+        *_record_rows(older, "claude-code", _TARGET_AT, 3),
+        *_record_rows(newer, "claude-code", _TARGET_AT + timedelta(hours=1), 3),
+        *_record_rows(to_any, "any", _TARGET_AT + timedelta(hours=2), 2),
+    ]
+    # Newer than every addressed row, so an unfiltered or bare-tag page would lead with them.
+    elsewhere = _record_rows("33333333-0000-4000-8000-000000000004", "codex-cli", _DECOY_BASE, 3)
+    notes = [
+        _recipient_tagged_non_handoff(f"l{i}", "claude-code", _DECOY_BASE + timedelta(hours=i))
+        for i in range(3)
+    ]
+    await components.storage.upsert_chunks([*addressed, *elsewhere, *notes])
+
+    page = await components.storage.recall_chunks(limit=_LIST_LIMIT, tag_filter=_LIST_FILTER)
+
+    assert {c.id for c in page} == {c.id for c in addressed}
+    assert [c.created_at for c in page] == sorted((c.created_at for c in page), reverse=True)
+    grouped = list(dict.fromkeys(_id_tag(c) for c in page))
+    assert grouped == [to_any, newer, older]
+    # The structured rows list reads carry what an entry shows: id tag, time, and chunk id.
+    from memtomem.server.formatters import _format_recall_structured
+
+    row = json.loads(_format_recall_structured(page))["results"][0]
+    assert f"handoff-id-{to_any}" in row["tags"]
+    assert row["created_at"] == page[0].created_at.isoformat()
+    assert row["chunk_id"] == str(page[0].id)
+
+
+async def test_list_first_row_is_the_row_resume_selects(components) -> None:
+    """The record list names as plain resume's pick is decided by the same first row.
+
+    Checked against an independently expected row, not only list-versus-resume equality,
+    which would also hold if both pages shared a wrong order: the newest record is a tie
+    of three rows at one instant, so the server's ``id DESC`` tie-break decides it.
+    """
+    newest = "44444444-0000-4000-8000-000000000001"
+    tied = _record_rows(newest, "claude-code", _TARGET_AT + timedelta(days=1), 3)
+    older = [
+        row
+        for i in range(12)
+        for row in _record_rows(
+            f"44444444-0000-4000-8000-0000000001{i:02d}",
+            "any",
+            _TARGET_AT + timedelta(minutes=i),
+            2,
+        )
+    ]
+    elsewhere = _record_rows("44444444-0000-4000-8000-000000000999", "codex-cli", _DECOY_BASE, 2)
+    await components.storage.upsert_chunks([*older, *tied, *elsewhere])
+    expected = max(tied, key=lambda c: str(c.id)).id
+
+    listed = await components.storage.recall_chunks(limit=_LIST_LIMIT, tag_filter=_LIST_FILTER)
+    resumed = await components.storage.recall_chunks(limit=_RESUME_LIMIT, tag_filter=_LIST_FILTER)
+
+    assert listed[0].id == resumed[0].id == expected
+    assert _id_tag(listed[0]) == newest
+    # 27 addressed rows: the page is not full, so list makes no truncation claim here.
+    assert len(listed) == 27 < _LIST_LIMIT
+
+
+async def test_a_malformed_newest_row_stays_first_on_the_list_page(components) -> None:
+    """Storage does not drop a row whose id tag is malformed; list has to judge it first.
+
+    If list skipped malformed rows before naming plain resume's pick, it would name the
+    valid record below, which resume step 2 never selects: resume takes this row and
+    rejects its id.
+    """
+    valid = _handoff_chunk(_TARGET_ID, "claude-code", _TARGET_AT)
+    malformed = make_chunk(
+        content="handoff_id: not-a-uuid\n",
+        tags=("handoff", "handoff-to-claude-code", "handoff-id-not-a-uuid"),
+        namespace=_NAMESPACE,
+        source="handoff-malformed.md",
+    )
+    malformed.created_at = malformed.updated_at = _TARGET_AT + timedelta(hours=1)
+    await components.storage.upsert_chunks([valid, malformed])
+
+    page = await components.storage.recall_chunks(limit=_LIST_LIMIT, tag_filter=_LIST_FILTER)
+
+    assert [c.id for c in page] == [malformed.id, valid.id]
+
+
+async def test_a_newest_row_with_zero_or_multiple_id_tags_stays_first_on_resume_recall(
+    components,
+) -> None:
+    """Storage retains rows with zero or several id tags; resume's cardinality rule governs it (#3475).
+
+    If the newest row carries no `handoff-id-<id>` tag or carries several, storage still returns
+    it first. Resume step 2 requires exactly one id tag on the newest row, reporting the row
+    unusable rather than guessing or falling back.
+    """
+    valid = _handoff_chunk(_TARGET_ID, "claude-code", _TARGET_AT)
+    zero_tags = make_chunk(
+        content="handoff_id: 11111111-0000-4000-8000-000000000001\n",
+        tags=("handoff", "handoff-to-claude-code"),
+        namespace=_NAMESPACE,
+        source="handoff-zero-tags.md",
+    )
+    zero_tags.created_at = zero_tags.updated_at = _TARGET_AT + timedelta(hours=1)
+    multiple_tags = make_chunk(
+        content="handoff_id: 22222222-0000-4000-8000-000000000002\n",
+        tags=(
+            "handoff",
+            "handoff-to-claude-code",
+            "handoff-id-22222222-0000-4000-8000-000000000002",
+            "handoff-id-33333333-0000-4000-8000-000000000003",
+        ),
+        namespace=_NAMESPACE,
+        source="handoff-multiple-tags.md",
+    )
+    multiple_tags.created_at = multiple_tags.updated_at = _TARGET_AT + timedelta(hours=2)
+    await components.storage.upsert_chunks([valid, zero_tags, multiple_tags])
+
+    page = await components.storage.recall_chunks(limit=_RESUME_LIMIT, tag_filter=_LIST_FILTER)
+
+    assert [c.id for c in page] == [multiple_tags.id, zero_tags.id, valid.id]

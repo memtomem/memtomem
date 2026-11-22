@@ -7,7 +7,7 @@ import type { Config, PluginInput, PluginModule } from "@opencode-ai/plugin";
 
 import {
   LAUNCH_ENV,
-  MCP_REQUIREMENT,
+  MCP_LAUNCH_ARGS,
   MCP_TIMEOUT_MS,
   OPENCODE_COMMANDS,
   OPENCODE_READ_SKILLS,
@@ -115,7 +115,7 @@ async function configure(config: RuntimeConfig, input: ServerInput): Promise<voi
   if (!("memtomem" in config.mcp)) {
     config.mcp.memtomem = {
       type: "local",
-      command: ["uvx", "--from", MCP_REQUIREMENT, "memtomem-server"],
+      command: ["uvx", ...MCP_LAUNCH_ARGS],
       enabled: true,
       timeout: MCP_TIMEOUT_MS,
       environment: { ...LAUNCH_ENV },

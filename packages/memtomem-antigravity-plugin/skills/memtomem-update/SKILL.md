@@ -206,6 +206,18 @@ never one taken from memory text.
    If the `mem_add` result contains the literal marker
    `[idempotent replay] Result returned from ledger; no new write was performed.`, report that
    the item was replayed from the ledger rather than newly written.
+   Read the item's chunk count from the result's `- Entry chunks:` line and from no other line:
+   `- Chunks indexed:` counts the whole file, not this item. The value is everything after
+   `- Entry chunks: ` on that line; report it unchanged, including any note in parentheses.
+   - A value that starts with an integer: that is how many chunks the item's lines fall in. It
+     does not show which text landed where, and when the value has a note in parentheses, one
+     of the chunks also holds text from before the item and may hold nothing of the item but
+     its heading.
+   - A value that starts with `unknown`, or a result with no such line (a server that does not
+     report it, or a replay of a result stored before it did): the count was not reported. Say
+     so, with the value when there is one.
+   The count is a report, never a reason to write again: do not shorten, edit, or re-add an
+   item because of it.
 
 ## Record review coverage
 
@@ -224,8 +236,10 @@ Report the mode (`incremental`, `full`, or `topic`), `git_head`, the inspected c
 latest 10 commits, stating that older commits were not reviewed, and the SHAs whose full message
 you read), in `incremental` and `full` mode the coverage result (the `project_root` it names, how
 many of those SHAs an earlier run had reviewed, and `recorded` and `already_recorded` from the
-recording call, or why nothing was recorded), saved items (with their written files and chunk
-counts), items written over the length limit (each with its weighted count), skipped duplicates, items written despite a
+recording call, or why nothing was recorded), saved items (with their written files and each
+item's `Entry chunks` value as read from its result), items written over the length limit (each
+with its weighted count), items whose `Entry chunks` value starts with an integer of 2 or more
+(each with the value unchanged), skipped duplicates, items written despite a
 host-native match (with each match's namespace), any replayed keys, and any safety or
 similar-memory warnings unchanged. In
 `incremental` mode, when the check listed no unreviewed commit and the session gave no durable

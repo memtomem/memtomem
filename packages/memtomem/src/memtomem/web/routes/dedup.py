@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from memtomem.search.dedup import parse_scan_cursor
 from memtomem.web.deps import get_dedup_scanner, get_search_pipeline
 from memtomem.web.schemas import (
     DedupCandidateOut,
@@ -26,12 +27,23 @@ async def scan_duplicates(
     threshold: float = 0.92,
     limit: int = 100,
     max_scan: int = Query(500, ge=1),
+    after: str | None = None,
     dedup_scanner=Depends(get_dedup_scanner),
 ) -> DedupScanResponse:
-    """Scan for duplicate chunk candidates (dry-run, no mutations)."""
+    """Scan for duplicate chunk candidates (dry-run, no mutations).
+
+    ``after`` is a chunk id: the scan takes the chunks after it in chunk-id
+    order. A response's ``next_after`` is the value that continues from it.
+    """
+    try:
+        cursor = parse_scan_cursor(after)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         candidates, coverage = await asyncio.wait_for(
-            dedup_scanner.scan_with_coverage(threshold=threshold, limit=limit, max_scan=max_scan),
+            dedup_scanner.scan_with_coverage(
+                threshold=threshold, limit=limit, max_scan=max_scan, after=cursor
+            ),
             timeout=_DEDUP_SCAN_TIMEOUT,
         )
     except asyncio.TimeoutError:
@@ -57,6 +69,11 @@ async def scan_duplicates(
         near_search_enabled=coverage.near_search_enabled,
         probed_chunks=coverage.probed,
         chunks_without_vector=coverage.without_vector,
+        same_source_read_only_pairs=coverage.same_source_read_only,
+        pairs_found=coverage.pairs_found,
+        after=None if coverage.after is None else str(coverage.after),
+        remaining_chunks=coverage.remaining,
+        next_after=None if coverage.next_after is None else str(coverage.next_after),
     )
 
 

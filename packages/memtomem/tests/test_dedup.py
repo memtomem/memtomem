@@ -18,7 +18,8 @@ from memtomem.models import (
     ChunkMetadata,
     SearchResult,
 )
-from memtomem.search.dedup import DedupScanner
+from memtomem.search.dedup import DedupScanner, parse_scan_cursor
+from memtomem.storage.base import VisiblePool
 
 
 _next_id = count(1)
@@ -71,15 +72,19 @@ class _FakeStorage:
         self.deletes: list[list[UUID]] = []
         self.lookups: list[list[str]] = []
         self.probes: list[dict] = []
+        self.cursors: list[str | None] = []
 
-    async def list_visible_chunks_by_id(self, limit: int) -> tuple[list[Chunk], int]:
-        # The real read screens holds and orders by id in one statement; mirror
-        # both. There is no per-source listing here for a scanner to fall back on.
+    async def list_visible_chunks_by_id(self, limit: int, after: str | None = None) -> VisiblePool:
+        # The real read screens holds, orders by id and applies the cursor in
+        # one statement; mirror all three. There is no per-source listing here
+        # for a scanner to fall back on.
+        self.cursors.append(after)
         visible = sorted(
             (c for c in self._chunks if c.metadata.source_file not in self.held_sources),
             key=lambda c: str(c.id),
         )
-        return visible[:limit], len(visible)
+        above = [c for c in visible if after is None or str(c.id) > after]
+        return VisiblePool(chunks=above[:limit], visible=len(visible), above_cursor=len(above))
 
     async def is_source_hidden(self, source: Path) -> bool:
         return source in self.held_sources
@@ -462,6 +467,142 @@ class TestStoredVectorsAndCoverage:
 
         assert await scanner.scan() == (await scanner.scan_with_coverage())[0]
 
+    @pytest.mark.asyncio
+    async def test_scan_takes_the_cursor_too(self, scanner_factory):
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        first, same, also_same = (
+            _mk(body, created_at=t0 + timedelta(seconds=i))
+            for i, body in enumerate(("other", "same", "same"))
+        )
+        scanner, _ = scanner_factory([first, same, also_same], dense_enabled=False)
+
+        assert await scanner.scan(max_scan=2) == []
+        after_the_first = await scanner.scan(max_scan=2, after=first.id)
+
+        assert [(c.chunk_a.id, c.chunk_b.id) for c in after_the_first] == [(same.id, also_same.id)]
+
+
+def _ro(content: str, source: str = "/data.json", **kwargs) -> Chunk:
+    """A chunk stored read-only, as ``chunk_json`` stamps every slice."""
+    chunk = _mk(content, **kwargs)
+    chunk.metadata = replace(chunk.metadata, source_file=Path(source), source_read_only=True)
+    return chunk
+
+
+def _rw(content: str, source: str = "/data.json", **kwargs) -> Chunk:
+    chunk = _mk(content, **kwargs)
+    chunk.metadata = replace(chunk.metadata, source_file=Path(source))
+    return chunk
+
+
+def _both_ways(a: str, b: str, score: float) -> dict[tuple[str, str], float]:
+    return {(a, b): score, (b, a): score}
+
+
+class TestSameSourceReadOnlyPairs:
+    """#3418: two read-only chunks of one source are not a candidate."""
+
+    @pytest.mark.asyncio
+    async def test_exact_pair_is_left_out_and_counted(self, scanner_factory):
+        scanner, _ = scanner_factory([_ro("{slice}"), _ro("{slice}")])
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert candidates == []
+        assert coverage.same_source_read_only == 1
+
+    @pytest.mark.asyncio
+    async def test_near_pair_is_left_out_and_counted(self, scanner_factory):
+        scanner, _ = scanner_factory(
+            [_ro('{"a": 1'), _ro('{"a": 2')], _both_ways('{"a": 1', '{"a": 2', 0.97)
+        )
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert candidates == []
+        assert coverage.same_source_read_only == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("make_a", "make_b"),
+        [
+            # Both orders: the older chunk is chunk_a in either phase.
+            pytest.param(lambda c: _ro(c), lambda c: _rw(c), id="same-file-older-read-only"),
+            pytest.param(lambda c: _rw(c), lambda c: _ro(c), id="same-file-older-writable"),
+            pytest.param(lambda c: _ro(c), lambda c: _ro(c, source="/other.json"), id="two-files"),
+            pytest.param(lambda c: _rw(c), lambda c: _rw(c), id="same-file-writable"),
+        ],
+    )
+    @pytest.mark.parametrize("exact", [True, False], ids=["exact", "near"])
+    async def test_other_pairs_are_kept(self, scanner_factory, make_a, make_b, exact):
+        a = make_a("one text")
+        b = make_b("one text" if exact else "one txt")
+        sims = {} if exact else _both_ways("one text", "one txt", 0.97)
+        scanner, _ = scanner_factory([a, b], sims)
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert [(c.chunk_a.id, c.chunk_b.id, c.exact) for c in candidates] == [(a.id, b.id, exact)]
+        assert coverage.same_source_read_only == 0
+
+    @pytest.mark.asyncio
+    async def test_a_pair_both_phases_and_both_probes_reach_is_counted_once(self, scanner_factory):
+        # Exact (one hash) and near (each probes the other at 0.99): the exact
+        # phase, then each member's near probe, all reach the one pair.
+        scanner, storage = scanner_factory(
+            [_ro("{slice}"), _ro("{slice}")], {("{slice}", "{slice}"): 0.99}
+        )
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert candidates == []
+        assert len(storage.probes) == 2
+        assert coverage.same_source_read_only == 1
+
+    @pytest.mark.asyncio
+    async def test_bm25_only_store_counts_exact_pairs(self, scanner_factory):
+        scanner, _ = scanner_factory([_ro("{slice}"), _ro("{slice}")], dense_enabled=False)
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert candidates == []
+        assert coverage.near_search_enabled is False
+        assert coverage.same_source_read_only == 1
+
+    @pytest.mark.asyncio
+    async def test_left_out_pairs_take_no_limit_slot_and_are_all_counted(self, scanner_factory):
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        kept_a = _rw("note", source="/a.md", created_at=t0)
+        kept_b = _rw("note", source="/b.md", created_at=t0 + timedelta(hours=1))
+        # All three pairs are exact (score 1.0), so they keep pool order, and
+        # these lower ids would take the one slot first.
+        left = [_ro("{x}"), _ro("{x}"), _ro("{y}"), _ro("{y}")]
+        scanner, _ = scanner_factory([*left, kept_a, kept_b])
+
+        candidates, coverage = await scanner.scan_with_coverage(limit=1)
+
+        assert [(c.chunk_a.id, c.chunk_b.id) for c in candidates] == [(kept_a.id, kept_b.id)]
+        assert coverage.same_source_read_only == 2
+
+    @pytest.mark.asyncio
+    async def test_siblings_still_fill_a_probes_neighbour_slots(self, scanner_factory):
+        # Stated limit: the filter runs after each probe's top 6, so a probe
+        # whose slots are all left-out siblings does not reach a writable
+        # neighbour past them. Not widened: on a real store copy (2026-11-17,
+        # max_scan=5000) 2,502 probes had a left-out sibling in a full top 6, and
+        # widening those probes found no additional pair at the threshold.
+        siblings = [_ro(f"s{i}") for i in range(7)]
+        writable = _rw("w", source="/w.md")  # highest id: outside a 7-chunk pool
+        sims = {(a.content, b.content): 0.99 for a in siblings for b in siblings if a is not b}
+        sims.update(_both_ways("s0", "w", 0.95))
+        scanner, _ = scanner_factory([*siblings, writable], sims)
+
+        candidates, coverage = await scanner.scan_with_coverage(max_scan=7)
+
+        assert coverage.pool == 7
+        assert candidates == []
+        assert coverage.same_source_read_only > 0
+
 
 class TestMcpScanCoverage:
     """``mem_dedup_scan`` says what it covered on both branches."""
@@ -558,27 +699,171 @@ class TestMcpScanCoverage:
         ("coverage", "line"),
         [
             pytest.param(
-                {"pool": 500, "eligible": 39458, "probed": 500, "without_vector": 0},
-                "Scanned 500 of 39458 scannable chunks (the first 500 in chunk-id order: "
-                "the same chunks on every run while the scannable chunks and max_scan stay "
-                "the same; raise max_scan to cover more); near-duplicate search probed 500.",
+                {
+                    "pool": 500,
+                    "eligible": 39458,
+                    "probed": 500,
+                    "without_vector": 0,
+                    "remaining": 38958,
+                    "next_after": UUID(int=500),
+                },
+                "Scanned 500 of 39458 scannable chunks (the first 500 in chunk-id order); "
+                "near-duplicate search probed 500; 38958 remain: "
+                'continue with after="00000000-0000-0000-0000-0000000001f4".',
                 id="bounded",
             ),
             pytest.param(
-                {"pool": 2, "eligible": 3, "probed": 1, "without_vector": 1},
-                "Scanned 2 of 3 scannable chunks (the first 2 in chunk-id order: "
-                "the same chunks on every run while the scannable chunks and max_scan stay "
-                "the same; raise max_scan to cover more); near-duplicate search probed 1, "
-                "1 had no usable stored vector and were not probed.",
-                id="bounded-without-vector",
+                {
+                    "pool": 2,
+                    "eligible": 3,
+                    "probed": 1,
+                    "without_vector": 1,
+                    "remaining": 1,
+                    "next_after": UUID(int=2),
+                },
+                "Scanned 2 of 3 scannable chunks (the first 2 in chunk-id order); "
+                "near-duplicate search probed 1, "
+                "1 had no usable stored vector and were not probed; 1 remains: "
+                'continue with after="00000000-0000-0000-0000-000000000002".',
+                id="bounded-without-vector-one-remains",
             ),
             pytest.param(
-                {"pool": 2, "eligible": 3, "probed": 0, "without_vector": 0, "near": False},
-                "Scanned 2 of 3 scannable chunks (the first 2 in chunk-id order: "
-                "the same chunks on every run while the scannable chunks and max_scan stay "
-                "the same; raise max_scan to cover more); "
-                "near-duplicate search is off (BM25-only store).",
+                {
+                    "pool": 2,
+                    "eligible": 3,
+                    "probed": 0,
+                    "without_vector": 0,
+                    "near": False,
+                    "remaining": 1,
+                    "next_after": UUID(int=2),
+                },
+                "Scanned 2 of 3 scannable chunks (the first 2 in chunk-id order); "
+                "near-duplicate search is off (BM25-only store); 1 remains: "
+                'continue with after="00000000-0000-0000-0000-000000000002".',
                 id="bounded-bm25-only",
+            ),
+            pytest.param(
+                {
+                    "pool": 500,
+                    "eligible": 39458,
+                    "probed": 500,
+                    "without_vector": 0,
+                    "after": UUID(int=500),
+                    "remaining": 38458,
+                    "next_after": UUID(int=1000),
+                },
+                "Scanned 500 of 39458 scannable chunks (the 500 after "
+                "00000000-0000-0000-0000-0000000001f4 in chunk-id order); "
+                "near-duplicate search probed 500; 38458 remain: "
+                'continue with after="00000000-0000-0000-0000-0000000003e8".',
+                id="cursor-mid-store",
+            ),
+            pytest.param(
+                {
+                    "pool": 458,
+                    "eligible": 39458,
+                    "probed": 458,
+                    "without_vector": 0,
+                    "after": UUID(int=39000),
+                },
+                "Scanned 458 of 39458 scannable chunks (the 458 after "
+                "00000000-0000-0000-0000-000000009858 in chunk-id order); "
+                "near-duplicate search probed 458; reached the end of the store.",
+                id="cursor-last-slice",
+            ),
+            pytest.param(
+                {
+                    "pool": 0,
+                    "eligible": 3,
+                    "probed": 0,
+                    "without_vector": 0,
+                    "after": UUID(int=3),
+                },
+                "Scanned 0 of 3 scannable chunks (none after "
+                "00000000-0000-0000-0000-000000000003 in chunk-id order); "
+                "near-duplicate search probed 0; reached the end of the store.",
+                id="cursor-past-the-end",
+            ),
+            pytest.param(
+                {
+                    "pool": 3,
+                    "eligible": 3,
+                    "probed": 3,
+                    "without_vector": 0,
+                    "after": UUID(int=0),
+                },
+                "Scanned 3 of 3 scannable chunks (the 3 after "
+                "00000000-0000-0000-0000-000000000000 in chunk-id order); "
+                "near-duplicate search probed 3; reached the end of the store.",
+                id="cursor-below-every-id",
+            ),
+            pytest.param(
+                {
+                    "pool": 500,
+                    "eligible": 39458,
+                    "probed": 500,
+                    "without_vector": 0,
+                    "same_source_read_only": 2,
+                    "pairs_found": 57,
+                    "remaining": 38958,
+                    "next_after": UUID(int=500),
+                },
+                "Scanned 500 of 39458 scannable chunks (the first 500 in chunk-id order); "
+                "near-duplicate search probed 500; left out 2 pairs of read-only chunks "
+                "from the same file (neither member can be removed); "
+                "limit=50 kept 50 of 57 pairs: to see the rest, scan again from the same "
+                "position with a higher limit; 38958 remain: "
+                'continue with after="00000000-0000-0000-0000-0000000001f4".',
+                id="limit-cut-then-continue",
+            ),
+            pytest.param(
+                {
+                    "pool": 3,
+                    "eligible": 3,
+                    "probed": 3,
+                    "without_vector": 0,
+                    "pairs_found": 51,
+                },
+                "Scanned all 3 scannable chunks; near-duplicate search probed 3; "
+                "limit=50 kept 50 of 51 pairs: to see the rest, scan again from the same "
+                "position with a higher limit.",
+                id="limit-cut-whole-store",
+            ),
+            pytest.param(
+                {
+                    "pool": 3,
+                    "eligible": 3,
+                    "probed": 3,
+                    "without_vector": 0,
+                    "pairs_found": 500,
+                },
+                "Scanned all 3 scannable chunks; near-duplicate search probed 3; "
+                "limit=50 kept 50 of 500 pairs: to see the rest, scan again from the same "
+                "position with a higher limit.",
+                id="limit-cut-the-largest-limit-lists-them-all",
+            ),
+            pytest.param(
+                {
+                    "pool": 3,
+                    "eligible": 3,
+                    "probed": 3,
+                    "without_vector": 0,
+                    "pairs_found": 501,
+                },
+                "Scanned all 3 scannable chunks; near-duplicate search probed 3; "
+                "limit=50 kept 50 of 501 pairs: one call lists at most 500.",
+                id="limit-cut-more-pairs-than-any-limit",
+            ),
+            pytest.param(
+                {
+                    "pool": 3,
+                    "eligible": 3,
+                    "probed": 3,
+                    "without_vector": 0,
+                    "pairs_found": 50,
+                },
+                "Scanned all 3 scannable chunks; near-duplicate search probed 3.",
+                id="pairs-found-equals-the-limit",
             ),
             pytest.param(
                 {"pool": 3, "eligible": 3, "probed": 3, "without_vector": 0},
@@ -594,6 +879,33 @@ class TestMcpScanCoverage:
                 {"pool": 0, "eligible": 0, "probed": 0, "without_vector": 0},
                 "Scanned all 0 scannable chunks; near-duplicate search probed 0.",
                 id="nothing-scannable",
+            ),
+            pytest.param(
+                {
+                    "pool": 4,
+                    "eligible": 4,
+                    "probed": 3,
+                    "without_vector": 1,
+                    "same_source_read_only": 2,
+                },
+                "Scanned all 4 scannable chunks; near-duplicate search probed 3, "
+                "1 had no usable stored vector and were not probed; left out 2 pairs of "
+                "read-only chunks from the same file (neither member can be removed).",
+                id="left-out-pairs",
+            ),
+            pytest.param(
+                {
+                    "pool": 2,
+                    "eligible": 2,
+                    "probed": 0,
+                    "without_vector": 0,
+                    "near": False,
+                    "same_source_read_only": 1,
+                },
+                "Scanned all 2 scannable chunks; near-duplicate search is off (BM25-only "
+                "store); left out 1 pair of read-only chunks from the same file "
+                "(neither member can be removed).",
+                id="left-out-pair-bm25-only",
             ),
         ],
     )
@@ -626,6 +938,219 @@ class TestMcpScanCoverage:
 
         assert out == "Error: max_scan must be at least 1, got 0."
         app.dedup_scanner.scan_with_coverage.assert_not_awaited()
+
+    _WHOLE = {
+        "pool": 3,
+        "eligible": 3,
+        "near_search_enabled": True,
+        "probed": 3,
+        "without_vector": 0,
+    }
+
+    @pytest.mark.asyncio
+    async def test_at_the_largest_limit_the_cut_names_no_remedy(self, monkeypatch):
+        # 501 pairs cannot be asked for: the tool refuses a limit above 500.
+        # The line says so and stops; a smaller pool would report other pairs.
+        tool, _ = self._run(monkeypatch, [], {**self._WHOLE, "pairs_found": 501})
+
+        out = await tool.mem_dedup_scan(limit=500, ctx=None)
+
+        assert out.splitlines()[-1] == (
+            "Scanned all 3 scannable chunks; near-duplicate search probed 3; "
+            "limit=500 kept 500 of 501 pairs: one call lists at most 500."
+        )
+        assert await tool.mem_dedup_scan(limit=501, ctx=None) == (
+            "Error: limit must be between 1 and 500, got 501."
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "typed",
+        [
+            "00000000-0000-0000-0000-0000000001f4",
+            "00000000-0000-0000-0000-0000000001F4",
+            "{00000000-0000-0000-0000-0000000001f4}",
+            "000000000000000000000000000001f4",
+            "urn:uuid:00000000-0000-0000-0000-0000000001f4",
+        ],
+        ids=["as-printed", "uppercase", "braces", "no-hyphens", "urn"],
+    )
+    async def test_after_reaches_the_scanner_as_the_id_it_names(self, monkeypatch, typed):
+        tool, app = self._run(monkeypatch, [], self._WHOLE)
+
+        await tool.mem_dedup_scan(after=typed, ctx=None)
+
+        app.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
+            threshold=0.92, limit=50, max_scan=500, after=UUID(int=500)
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_after_scans_from_the_start(self, monkeypatch):
+        tool, app = self._run(monkeypatch, [], self._WHOLE)
+
+        await tool.mem_dedup_scan(ctx=None)
+
+        app.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
+            threshold=0.92, limit=50, max_scan=500, after=None
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("typed", "shown"),
+        [
+            ("not-an-id", "'not-an-id'"),
+            ("", "''"),
+            ("00000000-0000-0000-0000-0000000001f", "'00000000-0000-0000-0000-0000000001f'"),
+            (" 00000000-0000-0000-0000-0000000001f4", "' 00000000-0000-0000-0000-0000000001f4'"),
+            (500, "500"),
+            (["00000000-0000-0000-0000-0000000001f4"], "['00000000-0000-0000-0000-0000000001f4']"),
+        ],
+        ids=["words", "empty", "one-digit-short", "leading-space", "int", "list"],
+    )
+    async def test_an_after_that_is_not_a_chunk_id_is_an_error_before_scanning(
+        self, monkeypatch, typed, shown
+    ):
+        tool, app = self._run(monkeypatch, [], self._WHOLE)
+
+        out = await tool.mem_dedup_scan(after=typed, ctx=None)
+
+        assert out == f"Error: after must be a chunk id, got {shown}."
+        app.dedup_scanner.scan_with_coverage.assert_not_awaited()
+
+
+class TestParseScanCursor:
+    def test_none_is_no_cursor(self):
+        assert parse_scan_cursor(None) is None
+
+    def test_a_uuid_object_is_not_a_typed_cursor(self):
+        # The surfaces hand over what a caller typed, which is text.
+        with pytest.raises(ValueError, match="after must be a chunk id"):
+            parse_scan_cursor(UUID(int=1))
+
+
+class TestCursorAndLimit:
+    """A scan continued with ``after``, and what ``limit`` cut from one pool."""
+
+    @pytest.mark.asyncio
+    async def test_the_cursor_reaches_storage_as_stored_id_text(self, scanner_factory):
+        chunks = [_mk(f"c{i}", id=UUID(int=n)) for i, n in enumerate((0xA, 0xB, 0xC))]
+        scanner, storage = scanner_factory(chunks)
+
+        _, first = await scanner.scan_with_coverage(max_scan=2)
+        _, second = await scanner.scan_with_coverage(max_scan=2, after=first.next_after)
+
+        assert storage.cursors == [None, "00000000-0000-0000-0000-00000000000b"]
+        assert (first.after, first.pool, first.remaining) == (None, 2, 1)
+        assert (second.after, second.pool, second.remaining) == (UUID(int=0xB), 1, 0)
+        assert second.next_after is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("limit", "returned"),
+        [(1, 1), (2, 2), (3, 3), (4, 3)],
+        ids=["cut-to-one", "cut-to-two", "exactly-all", "room-to-spare"],
+    )
+    async def test_pairs_found_is_the_count_before_the_limit(
+        self, scanner_factory, limit, returned
+    ):
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        same = [_mk("one text", created_at=t0 + timedelta(minutes=i)) for i in range(4)]
+        scanner, _ = scanner_factory(same)
+
+        candidates, coverage = await scanner.scan_with_coverage(limit=limit)
+
+        assert len(candidates) == returned
+        assert coverage.pairs_found == 3
+
+    @pytest.mark.asyncio
+    async def test_left_out_pairs_are_not_pairs_found(self, scanner_factory):
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        kept_a = _rw("note", source="/a.md", created_at=t0)
+        kept_b = _rw("note", source="/b.md", created_at=t0 + timedelta(hours=1))
+        scanner, _ = scanner_factory([_ro("{x}"), _ro("{x}"), kept_a, kept_b])
+
+        candidates, coverage = await scanner.scan_with_coverage()
+
+        assert len(candidates) == 1
+        assert (coverage.pairs_found, coverage.same_source_read_only) == (1, 1)
+
+    @pytest.mark.asyncio
+    async def test_a_smaller_pool_reports_other_pairs_than_the_ones_limit_cut(
+        self, scanner_factory
+    ):
+        # Why the coverage line names no smaller ``max_scan``: the exact phase
+        # pairs each copy with the oldest copy in its pool. 502 chunks with one
+        # body are 501 pairs with the first chunk, one more than a caller can
+        # ask for. Two pools of 251 are each within ``limit``, but the second
+        # pool's pairs are with its own oldest chunk, and the pair ``limit``
+        # cut is in neither.
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        same = [_mk("one text", created_at=t0 + timedelta(seconds=i)) for i in range(502)]
+        ids = [c.id for c in same]
+        scanner, _ = scanner_factory(same, dense_enabled=False)
+
+        def pairs(candidates):
+            return {(c.chunk_a.id, c.chunk_b.id) for c in candidates}
+
+        cut, whole = await scanner.scan_with_coverage(limit=500, max_scan=502)
+        half, first = await scanner.scan_with_coverage(limit=500, max_scan=251)
+        rest, second = await scanner.scan_with_coverage(
+            limit=500, max_scan=251, after=first.next_after
+        )
+
+        assert whole.pairs_found == 501
+        assert pairs(cut) == {(ids[0], dup) for dup in ids[1:501]}
+        assert (first.pairs_found, first.remaining) == (250, 251)
+        assert (second.pairs_found, second.remaining) == (250, 0)
+        assert pairs(half) == {(ids[0], dup) for dup in ids[1:251]}
+        assert pairs(rest) == {(ids[251], dup) for dup in ids[252:]}
+        assert (ids[0], ids[501]) not in pairs(half) | pairs(rest)
+
+    @pytest.mark.asyncio
+    async def test_a_near_pair_across_two_pools_is_reported_from_both_when_each_finds_the_other(
+        self, scanner_factory
+    ):
+        # Stated limit: neighbours are store-wide, so a member's pool finds the
+        # pair when that member's search returns the other. A walk's caller
+        # tells repeats apart by the two ids.
+        a, b = _mk("one text"), _mk("one txt")
+        scanner, _ = scanner_factory([a, b], _both_ways("one text", "one txt", 0.97))
+
+        first, coverage = await scanner.scan_with_coverage(max_scan=1)
+        second, _ = await scanner.scan_with_coverage(max_scan=1, after=coverage.next_after)
+
+        assert [{c.chunk_a.id, c.chunk_b.id} for c in first] == [{a.id, b.id}]
+        assert [{c.chunk_a.id, c.chunk_b.id} for c in second] == [{a.id, b.id}]
+
+    @pytest.mark.asyncio
+    async def test_a_near_pair_found_one_way_is_reported_from_one_pool_only(self, scanner_factory):
+        # A search returns a chunk's own nearest neighbours, so it is not
+        # symmetric: here the first chunk finds the second and is not found
+        # by it. The repeat is common, not guaranteed.
+        a, b = _mk("one text"), _mk("one txt")
+        scanner, _ = scanner_factory([a, b], {("one text", "one txt"): 0.97})
+
+        first, coverage = await scanner.scan_with_coverage(max_scan=1)
+        second, _ = await scanner.scan_with_coverage(max_scan=1, after=coverage.next_after)
+
+        assert [{c.chunk_a.id, c.chunk_b.id} for c in first] == [{a.id, b.id}]
+        assert second == []
+
+    @pytest.mark.asyncio
+    async def test_an_exact_pair_across_two_pools_is_not_found_without_vectors(
+        self, scanner_factory
+    ):
+        # Stated limit: the exact phase groups one pool. On a BM25-only store
+        # nothing else looks, so a walk in steps misses what one pool finds.
+        a, b = _mk("one text"), _mk("one text")
+        scanner, _ = scanner_factory([a, b], dense_enabled=False)
+
+        first, coverage = await scanner.scan_with_coverage(max_scan=1)
+        second, _ = await scanner.scan_with_coverage(max_scan=1, after=coverage.next_after)
+        together, _ = await scanner.scan_with_coverage(max_scan=2)
+
+        assert (first, second) == ([], [])
+        assert [(c.chunk_a.id, c.chunk_b.id, c.exact) for c in together] == [(a.id, b.id, True)]
 
 
 class TestMergeDryRun:

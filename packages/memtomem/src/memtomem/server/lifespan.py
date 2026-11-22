@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import logging.config
 import os
 import sys
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -36,9 +38,24 @@ class _ServerRuntimeState:
     owner: AppContext | None = None
     webhook_manager: object | None = None
     references: int = 0
+    # Set when the owner's own close raised, so its sequence did not finish;
+    # read by the shared daemon, which must exit non-zero then. A stage that
+    # close() logs and continues past (webhook, watcher, embedder) is not a
+    # failure here: the process exit releases it, as for a standalone server.
+    close_failed: bool = False
 
 
 _SERVER_RUNTIMES: dict[int, _ServerRuntimeState] = {}
+
+# The working directory of the client on the connection whose lifespan is being
+# entered. Set by the shared daemon in the task that calls ``Server.run`` for
+# that connection, immediately before the call; ``Server.run`` enters the
+# lifespan in the same task, so ``app_lifespan`` sees it and copies it onto the
+# connection's context. Never read by a handler: handlers take their context
+# from the request. Unset on every other transport.
+connection_client_cwd: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "memtomem_connection_client_cwd", default=None
+)
 
 
 def _runtime_state(server: object) -> _ServerRuntimeState:
@@ -51,7 +68,16 @@ def _runtime_state(server: object) -> _ServerRuntimeState:
     return state
 
 
-async def _acquire_server_runtime(server: object) -> tuple[_ServerRuntimeState, AppContext]:
+async def _acquire_server_runtime(
+    server: object,
+    configure_owner: Callable[[AppContext], None] | None = None,
+) -> tuple[_ServerRuntimeState, AppContext]:
+    """Take one reference on ``server``'s runtime, creating its owner if none exists.
+
+    ``configure_owner`` runs on a newly created owner before anything can use
+    it, warmup included. The shared daemon uses it to freeze the store before
+    any initialization can start.
+    """
     state = _runtime_state(server)
     async with state.lock:
         owner = state.owner
@@ -77,6 +103,12 @@ async def _acquire_server_runtime(server: object) -> tuple[_ServerRuntimeState, 
             except BaseException:
                 await _stop_quietly(webhook_mgr, "webhook_manager")
                 raise
+            if configure_owner is not None:
+                try:
+                    configure_owner(owner)
+                except BaseException:
+                    await _stop_quietly(webhook_mgr, "webhook_manager")
+                    raise
             state.owner = owner
             state.webhook_manager = webhook_mgr
             if config.warmup.enabled:
@@ -114,7 +146,8 @@ async def _release_server_runtime(
         except asyncio.CancelledError as exc:
             first_cancel = exc
         try:
-            await _stop_quietly(owner, "app_context")
+            if not await _stop_quietly(owner, "app_context"):
+                state.close_failed = True
         except asyncio.CancelledError as exc:
             if first_cancel is None:
                 first_cancel = exc
@@ -177,10 +210,6 @@ class _JsonFormatter(logging.Formatter):
 # ---------------------------------------------------------------------------
 
 
-# python-dotenv's own truthy spellings for ``PYTHON_DOTENV_DISABLED``
-# (``dotenv.main._load_dotenv_disabled``), copied because that helper is private.
-_DOTENV_DISABLED_VALUES = frozenset({"1", "true", "t", "yes", "y"})
-
 # The left-out ``.env`` names are logged once per process: every SSE
 # connection enters its own lifespan and reloads the file.
 _dotenv_left_out_logged = False
@@ -189,45 +218,14 @@ _dotenv_left_out_logged = False
 def _load_dotenv() -> list[str]:
     """Apply the ``MEMTOMEM_*`` keys of the nearest ``.env``; return the names left out.
 
-    Only the prefixed keys reach ``os.environ`` (#2824): the file found is
-    usually ``~/.env``, and its other keys — API keys for unrelated tools —
-    would otherwise enter this process and every subprocess it starts,
-    whatever environment filtering the MCP client applied.
-
-    Everything else matches ``load_dotenv()``. ``find_dotenv()`` is called
-    from here, so the search still starts at this file rather than the CWD.
-    Values are resolved by python-dotenv's own ``DotEnv`` with
-    ``load_dotenv()``'s arguments spelled out: ``override=False`` keeps an
-    exported value ahead of the file inside ``${VAR}`` (``dotenv_values()``
-    would invert that), and the class's own defaults are a locale encoding
-    and ``override=True``. Resolving writes nothing, so an unrelated key never
-    enters the environment, even briefly. The prefix match is
-    case-insensitive like the settings binding, an exported value wins, and a
-    key with no value is not set.
+    The server's seam over :func:`memtomem._dotenv.load_dotenv`, which holds
+    the implementation so that a process that must not import this package
+    (the stdio bridge, #3381) loads the same file. Looked up at call time, so
+    replacing either function replaces it for every server caller.
     """
-    from dotenv import find_dotenv
-    from dotenv.main import DotEnv
+    from memtomem import _dotenv
 
-    if os.environ.get("PYTHON_DOTENV_DISABLED", "").casefold() in _DOTENV_DISABLED_VALUES:
-        return []
-    path = find_dotenv()
-    if not path:
-        return []
-    values = DotEnv(path, encoding="utf-8", interpolate=True, override=False).dict()
-    left_out: list[str] = []
-    for key, value in values.items():
-        if not key.upper().startswith("MEMTOMEM_"):
-            left_out.append(key)
-            continue
-        if value is None or key in os.environ:
-            continue
-        try:
-            os.environ[key] = value
-        except ValueError:
-            # A quoted key containing ``=`` is not a legal variable name.
-            # ``load_dotenv()`` raised here, out of server startup.
-            left_out.append(key)
-    return left_out
+    return _dotenv.load_dotenv()
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +271,9 @@ async def app_lifespan(_server: MCPServer[AppContext]) -> AsyncIterator[AppConte
         )
 
     state, ctx = await _acquire_server_runtime(_server)
+    client_cwd = connection_client_cwd.get()
+    if client_cwd is not None:
+        ctx.client_cwd = client_cwd
 
     try:
         yield ctx

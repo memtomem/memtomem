@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 
-CORE_VERSION = "0.7.10"
+CORE_VERSION = "0.7.13"
 MAX_QUERY_CHARS = 500
 MAX_CONTEXT_CHARS = 10_000
 SUPPORTED_SUFFIXES = {
@@ -169,7 +169,10 @@ def _session_start() -> None:
     if executable and version == CORE_VERSION:
         return
     if not executable:
-        detail = f"Install the optional automation dependency with `uv tool install memtomem=={CORE_VERSION}`."
+        detail = (
+            "Install the optional automation dependency with "
+            f"`uv tool install --python 3.12 memtomem=={CORE_VERSION}`."
+        )
     else:
         detail = f"memtomem automation requires mm {CORE_VERSION}; found {version or 'an unknown version'}."
     _emit_context("SessionStart", detail)

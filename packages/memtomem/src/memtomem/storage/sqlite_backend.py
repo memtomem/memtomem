@@ -39,6 +39,7 @@ from memtomem.storage.base import (
     NamespaceAssignResult,
     NamespaceChunkCandidate,
     NamespaceRenameResult,
+    VisiblePool,
 )
 from memtomem.models import (
     CONSOLIDATED_SUFFIX,
@@ -3730,24 +3731,43 @@ class SqliteBackend(
             rows = db.execute("SELECT DISTINCT source_file FROM chunks").fetchall()
         return {Path(row[0]) for row in rows}
 
-    async def list_visible_chunks_by_id(self, limit: int) -> tuple[list[Chunk], int]:
-        """The first ``limit`` visible chunks in ascending id order, and how many are visible.
+    async def list_visible_chunks_by_id(self, limit: int, after: str | None = None) -> VisiblePool:
+        """The first ``limit`` visible chunks in ascending id order, with the counts around them.
+
+        ``after`` is an exclusive cursor: only chunks whose stored id text
+        sorts above it are read. It need not name a stored chunk, so a walk
+        continues from the position of a chunk deleted since the last read.
 
         The order is a property of the stored rows alone, so every process
         selects the same chunks from the same store. The visibility rule is the
         path-level one a listing uses (``VISIBLE_SOURCE_PATH``). One statement
-        returns the rows and the count, so both describe one snapshot; it reads
-        stored keys and takes no path as input, so there is none to resolve.
+        returns the rows and both counts, so all three describe one snapshot
+        (a lease hands out a connection, not a snapshot, so two statements
+        could straddle a commit). The counts sit on their own row with the pool
+        joined to it, so they come back when the pool is empty: with a cursor
+        that no longer means nothing is visible. The statement reads stored
+        keys and takes no path as input, so there is none to resolve.
         """
+        above = "" if after is None else " AND chunks.id > ?"
         sql = (
-            f"SELECT (SELECT COUNT(*) FROM chunks WHERE {VISIBLE_SOURCE_PATH}), chunks.* "  # nosec B608
-            f"FROM chunks WHERE {VISIBLE_SOURCE_PATH} ORDER BY id LIMIT ?"
+            "SELECT n.visible, n.above_cursor, pool.* FROM ("  # nosec B608
+            f"SELECT (SELECT COUNT(*) FROM chunks WHERE {VISIBLE_SOURCE_PATH}) AS visible, "
+            f"(SELECT COUNT(*) FROM chunks WHERE {VISIBLE_SOURCE_PATH}{above}) AS above_cursor"
+            ") AS n LEFT JOIN ("
+            f"SELECT chunks.* FROM chunks WHERE {VISIBLE_SOURCE_PATH}{above} "
+            "ORDER BY chunks.id LIMIT ?"
+            ") AS pool ON 1 ORDER BY pool.id"
         )
+        params = (limit,) if after is None else (after, after, limit)
         async with self._lease_txn_read_db() as db:
-            rows = db.execute(sql, (limit,)).fetchall()
-        # No row carries the count when nothing is visible, and then it is zero.
-        visible = int(rows[0][0]) if rows else 0
-        return [self._row_to_chunk(row[1:]) for row in rows], visible
+            rows = db.execute(sql, params).fetchall()
+        # The counts row always comes back; an empty pool leaves its chunk
+        # columns NULL.
+        return VisiblePool(
+            chunks=[self._row_to_chunk(row[2:]) for row in rows if row[2] is not None],
+            visible=int(rows[0][0]),
+            above_cursor=int(rows[0][1]),
+        )
 
     async def get_orphan_candidate_source_files(self) -> set[Path]:
         """Exclude attached virtual summaries from filesystem checks.

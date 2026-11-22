@@ -111,6 +111,8 @@ TABLE: dict[str, dict[str, str]] = {
         "mem_context_detect": "include",
         "mem_context_diff": "include scope",
         "mem_dedup_merge": "keep_id delete_ids",
+        "mem_dedup_remove": "remove_id keep_id",
+        "mem_dedup_scan": "after",
         "mem_delete": "chunk_id namespace",
         "mem_do": "action",
         "mem_edit": "chunk_id new_content base_hash",
@@ -181,6 +183,10 @@ TABLE: dict[str, dict[str, str]] = {
 # ``(module, function, what it calls)``: the reads of the process working
 # directory that stay, and why each is right.
 PROCESS_CWD_READS: dict[tuple[str, str, str], str] = {
+    ("_bridge.py", "_join", "getcwd"): (
+        "the stdio bridge is one client's process: its working directory is the client's, "
+        "and it is what the bridge sends the daemon as that connection's client_cwd"
+    ),
     ("runtime/project_context.py", "_resolve_project_context_from_dirs", "getcwd"): (
         "the fallback when no anchor is passed: a connection with no client_cwd, and the "
         "CLI and web callers, which own their process"

@@ -70,7 +70,7 @@ def edit_base_mismatch_message(exc: EditBaseMismatchError) -> str:
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from memtomem.models import Chunk, ChunkMetadata, IndexingStats
     from memtomem.tools.memory_writer import Appended, JudgedSource, PreImage, Rewrite
@@ -500,6 +500,42 @@ async def _flag_imprecise_write(
         await mark_provenance_incomplete(app, session_id)
 
 
+def _entry_chunks_line(stats: IndexingStats) -> str:
+    """The ``- Entry chunks:`` line of a ``mem_add`` result (#3400).
+
+    ``- Chunks indexed`` is the whole file's upsert count, so it cannot say
+    whether the appended entry stayed in one chunk. This line can: it counts
+    the indexed chunks the entry's lines fall in, ``appended_chunk_ids``
+    (#3292), including a chunk that kept an existing id by content hash. The
+    count is by span, not by content, so a whitespace-only fragment inside the
+    entry counts too. It describes the file as this write indexed it; a later
+    write to the file can chunk the entry differently.
+
+    * ``exact``: the number alone. Every counted chunk holds only appended text.
+    * ``merged``: the number, and that the first chunk also holds text from
+      before the entry (a short entry merged into the previous section, or an
+      entry header that lands in that section's chunk, which counts even when
+      the entry's body stays in one chunk of its own).
+    * ``unverified``: ``unknown``. The spans cannot say what a chunk holds
+      (overlap, a masked projection, a chunker other than Markdown), or the
+      file was not the text this call wrote.
+    * The index pass did not leave the file's chunks current (``current_files``
+      is 0: an exclusion, a relink, an embedding failure, a suffix with no
+      chunker, a size or binary skip, any hold). Older rows can remain, a
+      reused entry chunk among them, so this is ``unknown``, not 0.
+
+    The number comes first, so a reader can match ``Entry chunks: (\\d+)``.
+    """
+    if not stats.current_files:
+        return "- Entry chunks: unknown (this write did not index the file)"
+    count = len(stats.appended_chunk_ids)
+    if stats.appended_attribution == "exact":
+        return f"- Entry chunks: {count}"
+    if stats.appended_attribution == "merged":
+        return f"- Entry chunks: {count} (shares its first chunk with text before the entry)"
+    return "- Entry chunks: unknown"
+
+
 async def _preflight_refusal(
     app: AppContext, path: Path, *, op: str, needs_valve: bool
 ) -> tuple[str | None, JudgedSource]:
@@ -854,6 +890,7 @@ async def _mem_add_core(
     event_type: str,
     confirmation_surface: str = "mem_add",
     file_name: str | None = None,
+    new_file_only: bool = False,
     on_appended: Callable[[str], None] | None = None,
 ) -> tuple[str, "IndexingStats | None"]:
     """Core logic for ``mem_add`` — also usable from internal callers that
@@ -902,6 +939,13 @@ async def _mem_add_core(
     ``consolidated_into`` edges (#2802). The file holds one namespace by
     construction, so it is never re-targeted the way a day file is (#2005).
     Ignored when ``file`` is given.
+
+    ``new_file_only`` refuses the write when the target file already exists,
+    before anything is written: for a ``file_name`` whose point is that the
+    entry is the file's only one (a share copy #3324, a consolidation summary
+    #3474). The check reads the
+    preflight's view of the file under the lock; a file created after it is
+    refused by the writer's exclusive create.
 
     ``on_appended`` is called once with the text this call appended, under the
     file lock, right after the append and before the re-index.
@@ -1254,6 +1298,12 @@ async def _mem_add_core(
                     )
                     if refusal is not None:
                         return (refusal, None)
+                    if new_file_only and judged.existed:
+                        return (
+                            f"Error: {target} already exists; nothing was written. "
+                            "Retry to write to a new file.",
+                            None,
+                        )
                     # Idempotency claim under the lock (issue #1573). The claim is a
                     # global (tool, key) row, not a file lock, so it also blocks a
                     # concurrent same-key call that targets a *different* file: exactly
@@ -1343,6 +1393,7 @@ async def _mem_add_core(
                         f"Memory added to {target}\n"
                         f"- Namespace: {display_ns}\n"
                         f"- Chunks indexed: {stats.indexed_chunks}\n"
+                        f"{_entry_chunks_line(stats)}\n"
                         f"- File: {target}"
                     )
                     # A fact of this write, not an advisory tail: stored with the
@@ -1758,6 +1809,90 @@ async def mem_edit(
         ) + _rewrite_notices("edit", stats, meta.source_file)
 
 
+async def _delete_chunk(
+    app: AppContext,
+    uid: UUID,
+    chunk_id: str,
+    confirm_project_shared: bool,
+    *,
+    surface: str = "mem_delete",
+    precheck: Callable[[Chunk], Awaitable[str | None]] | None = None,
+) -> str:
+    """Remove one chunk's lines from its file and re-index it: ``mem_delete``'s chunk branch.
+
+    ``precheck`` runs under the file's locks, after every gate and before the
+    pre-image read, on the fresh chunk; a string it returns is the refusal and
+    nothing past it runs. ``mem_dedup_remove`` uses it to check the member it
+    keeps. ``surface`` names the tool in the consent audit and its log line.
+    """
+    from memtomem import privacy
+    from memtomem.tools.memory_writer import remove_lines
+
+    # Serialize the read → rewrite → re-index → rollback span on the
+    # chunk's source file; re-fetch fresh under the lock (issue #1570).
+    async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err, cross_process_held):
+        if lock_err:
+            return lock_err
+        if not cross_process_held:
+            # See ``mem_edit``: this branch removes the chunk's lines from
+            # the file, so it may not run on a span that took no
+            # cross-process lock (#2346).
+            return _degraded_source_error(chunk_id)
+        assert chunk is not None
+        meta = chunk.metadata
+        if meta.source_read_only or meta.redaction_count:
+            return f"Error: {SOURCE_READ_ONLY_DETAIL}"
+        # Confirm gate on the fresh chunk: a migrate could have re-scoped
+        # it while we waited for the lock (see mem_edit for the rationale).
+        inferred_scope = meta.scope or "user"
+        if inferred_scope == "project_shared" and not confirm_project_shared:
+            logger.info(
+                f"{surface} rejected project_shared chunk without confirmation",
+                extra={"chunk_id": chunk_id, "scope": inferred_scope},
+            )
+            return (
+                "Error: deleting scope='project_shared' chunks requires "
+                "confirm_project_shared=True."
+            )
+        # Mirrors the gate's scope predicate: falling through also covers
+        # an ordinary user-tier delete, which asked for no consent and
+        # must not be recorded as having given one.
+        if inferred_scope == "project_shared":
+            privacy.emit_project_shared_confirmation(
+                surface=surface,
+                mechanism="param",
+                action="delete",
+                audit_context={"chunk_id": chunk_id},
+            )
+        if precheck is not None:
+            refusal = await precheck(chunk)
+            if refusal is not None:
+                return refusal
+        stats, mutate_err = await _mutate_file_and_reindex(
+            app,
+            meta.source_file,
+            # See ``mem_edit``: the pre-image's identity is what keeps this
+            # from recreating a source somebody else already removed (#2367).
+            lambda pre: remove_lines(
+                meta.source_file,
+                meta.start_line,
+                meta.end_line,
+                expected_source_span_hash=meta.source_span_hash,
+                expected_identity=pre.identity,
+            ),
+            op="delete",
+            stored=meta,
+        )
+        if mutate_err:
+            return mutate_err
+        assert stats is not None
+        return (
+            f"Memory deleted from {meta.source_file}\n"
+            f"- Lines {meta.start_line}-{meta.end_line} removed\n"
+            f"- Re-indexed: {stats.indexed_chunks} chunks"
+        ) + _rewrite_notices("delete", stats, meta.source_file)
+
+
 @mcp.tool()
 @tool_handler
 @register("crud")
@@ -1786,7 +1921,6 @@ async def mem_delete(
         confirm_project_shared: Required for project_shared chunks
     """
     from memtomem import privacy
-    from memtomem.tools.memory_writer import remove_lines
 
     app = await _get_app_initialized(ctx)
     # Captured before the branches below rather than inside them: each
@@ -1801,65 +1935,7 @@ async def mem_delete(
         except (ValueError, TypeError):
             return f"Error: invalid chunk ID format: {chunk_id}"
 
-        # Serialize the read → rewrite → re-index → rollback span on the
-        # chunk's source file; re-fetch fresh under the lock (issue #1570).
-        async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err, cross_process_held):
-            if lock_err:
-                return lock_err
-            if not cross_process_held:
-                # See ``mem_edit``: this branch removes the chunk's lines from
-                # the file, so it may not run on a span that took no
-                # cross-process lock (#2346).
-                return _degraded_source_error(chunk_id)
-            assert chunk is not None
-            meta = chunk.metadata
-            if meta.source_read_only or meta.redaction_count:
-                return f"Error: {SOURCE_READ_ONLY_DETAIL}"
-            # Confirm gate on the fresh chunk: a migrate could have re-scoped
-            # it while we waited for the lock (see mem_edit for the rationale).
-            inferred_scope = meta.scope or "user"
-            if inferred_scope == "project_shared" and not confirm_project_shared:
-                logger.info(
-                    "mem_delete rejected project_shared chunk without confirmation",
-                    extra={"chunk_id": chunk_id, "scope": inferred_scope},
-                )
-                return (
-                    "Error: deleting scope='project_shared' chunks requires "
-                    "confirm_project_shared=True."
-                )
-            # Mirrors the gate's scope predicate: falling through also covers
-            # an ordinary user-tier delete, which asked for no consent and
-            # must not be recorded as having given one.
-            if inferred_scope == "project_shared":
-                privacy.emit_project_shared_confirmation(
-                    surface="mem_delete",
-                    mechanism="param",
-                    action="delete",
-                    audit_context={"chunk_id": chunk_id},
-                )
-            stats, mutate_err = await _mutate_file_and_reindex(
-                app,
-                meta.source_file,
-                # See ``mem_edit``: the pre-image's identity is what keeps this
-                # from recreating a source somebody else already removed (#2367).
-                lambda pre: remove_lines(
-                    meta.source_file,
-                    meta.start_line,
-                    meta.end_line,
-                    expected_source_span_hash=meta.source_span_hash,
-                    expected_identity=pre.identity,
-                ),
-                op="delete",
-                stored=meta,
-            )
-            if mutate_err:
-                return mutate_err
-            assert stats is not None
-            return (
-                f"Memory deleted from {meta.source_file}\n"
-                f"- Lines {meta.start_line}-{meta.end_line} removed\n"
-                f"- Re-indexed: {stats.indexed_chunks} chunks"
-            ) + _rewrite_notices("delete", stats, meta.source_file)
+        return await _delete_chunk(app, uid, chunk_id, confirm_project_shared)
 
     if source_file:
         # ``source_file`` usually names a stored key, as ``mem_list`` prints it

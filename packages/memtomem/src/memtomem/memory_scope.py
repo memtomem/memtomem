@@ -344,6 +344,16 @@ _DAY_FILE_RE = re.compile(
     r"(?P<date>\d{4}-\d{2}-\d{2})--(?P<slug>.+)-(?P<digest>[0-9a-f]{%d})\.md" % _NS_DIGEST_LEN
 )
 
+#: How many hex digits of a random token :func:`share_copy_file_name` appends.
+_SHARE_TOKEN_LEN = 12
+
+#: A share copy's name: a day file's stem, ``-``, the token. A day file's own name
+#: never matches, because the 13th character before its ``.md`` is a digit of its
+#: 16-digit digest, not a ``-``. Other names can match (a consolidation summary's
+#: ends in a 12-digit token too), and declare nothing: a name declares only what
+#: remains without the token, so only when that is a day file's name.
+_SHARE_COPY_RE = re.compile(r"(?P<day>.+)-[0-9a-f]{%d}\.md" % _SHARE_TOKEN_LEN)
+
 #: How many candidates :func:`decode_day_file_namespace` tries before giving up
 #: (ADR-0043 §1). 2^16 is about 0.1 s of hashing, once per namespace per run.
 _DECODE_BUDGET = 1 << 16
@@ -403,11 +413,17 @@ def day_file_declaration(path: Path) -> tuple[str | None, bool]:
     indexer decides on the resolved path (``_index_file``'s ``decision_path``)
     while discovery keeps symlink names: decoding the link's name would preview
     one namespace and index another.
+
+    A share copy's name (:func:`share_copy_file_name`) declares what the day
+    file it was named after would: its token is dropped and the rest decoded.
     """
     try:
         name = resolve_path(path).name
     except OSError:
         name = path.name
+    copy = _SHARE_COPY_RE.fullmatch(name)
+    if copy is not None:
+        name = copy["day"] + ".md"
     return decode_day_file_namespace(name), _DAY_FILE_RE.fullmatch(name) is not None
 
 
@@ -447,10 +463,10 @@ def consolidation_file_name(source_name: str, run_id: int, *, date_str: str) -> 
     chunk id drops the ``consolidated_into`` edges that mark its originals as
     covered. The source name is only a readable hint, slugged like a day
     file's namespace. The run id names the ``maintenance_runs`` row, and the
-    random token keeps the name fresh when a reset store reuses run ids, since
-    an append into an existing file would put two entries in it again. The
-    name never ends in ``.consolidated.md``, the policy's virtual summary
-    suffix.
+    random token keeps the name fresh when a reset store reuses run ids. The
+    writer refuses a file that already exists rather than append a second
+    entry to it (``_mem_add_core``'s ``new_file_only``, #3474). The name never
+    ends in ``.consolidated.md``, the policy's virtual summary suffix.
     """
     stem = Path(source_name).stem
     slug = _FS_UNSAFE_RE.sub("-", stem).strip("-")
@@ -469,6 +485,31 @@ def consolidation_file_name(source_name: str, run_id: int, *, date_str: str) -> 
 _CONSOLIDATION_FILE_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}-(?:[A-Za-z0-9._-]+-)?run\d+-[0-9a-f]{12}\.md"
 )
+
+
+#: Directory, under a scope's memory base, that holds ``mem_agent_share`` copies.
+SHARE_COPY_DIR = "shared-copies"
+
+
+def share_copy_file_name(namespace: str | None, default_namespace: str, *, date_str: str) -> str:
+    """Return the file, relative to a scope base, for one share copy (#3324).
+
+    Each copy gets a file of its own, as a consolidation summary does (#2802).
+    In the namespace's day file a short copy is merged into the chunk of the
+    entry before it, and when that entry is an earlier copy its ``chunk_links``
+    row makes the re-index refuse to drop the old chunk id: the copy lands on
+    disk unindexed, and the whole file stops indexing. A file of its own holds
+    one entry, so nothing else is ever merged into or overlapped with it.
+
+    The name is the day file's name with a random token before ``.md``, so a
+    rebuild restores its namespace the way it restores a day file's
+    (:func:`day_file_declaration`), and moving it keeps it from ever becoming a
+    day file that later writes would append to. The writer refuses an existing
+    file rather than append to it (``_mem_add_core``'s ``new_file_only``).
+    """
+    day = day_file_name(namespace, default_namespace, date_str=date_str)
+    token = uuid.uuid4().hex[:_SHARE_TOKEN_LEN]
+    return f"{SHARE_COPY_DIR}/{day.removesuffix('.md')}-{token}.md"
 
 
 def is_consolidation_summary_file(path: Path) -> bool:

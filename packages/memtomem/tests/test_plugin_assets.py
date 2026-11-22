@@ -766,6 +766,49 @@ def test_bound_remember_never_passes_a_file() -> None:
     assert flat.index("Always leave `force_unsafe=false`") > flat.index("Any other result: stop")
 
 
+_REMEMBER_WORKFLOW = _ROOT / "packages/memtomem-plugin-assets/workflows/remember.md"
+# The markers start after the tool name: the OpenCode render rewrites `mem_add` to its own.
+_REMEMBER_REPORT = (
+    # The entry's own count as `mem_add` printed it, never the file-wide upsert count.
+    "confirms the write, report the effective scope, written file, and how many chunks the "
+    "memory's lines fall in: the value of the result's `- Entry chunks:` line, unchanged.",
+    "If the result has no such line, say that the server did not report it; do not "
+    "substitute `- Chunks indexed:`, which counts the whole file.",
+    # A refused write has no file and no count: without this sentence the fallback above
+    # would describe it as a write whose count the server did not report. No literal prefix
+    # is named: one refusal does not start with `Error:`, and a host can wrap the result.
+    "When the result is a refusal or an error instead, report it unchanged and add no file "
+    "or chunk count of your own.",
+)
+
+
+def test_remember_reports_the_entry_chunks_value() -> None:
+    """`remember` reports the written entry's own chunk count in every delivery (#3437)."""
+    source = _flat(_REMEMBER_WORKFLOW.read_text(encoding="utf-8"))
+    for marker in _REMEMBER_REPORT:
+        assert marker in source, marker
+    assert "indexed chunk count" not in source
+
+    rendered = _renderer().expected_files()  # type: ignore[attr-defined]
+    by_path = {path.relative_to(_ROOT).as_posix(): text for path, text in rendered.items()}
+    # By the skill directory's exact name: a checkout path can contain "remember" too.
+    deliveries = {
+        path: text
+        for path, text in by_path.items()
+        if path.endswith("/SKILL.md") and path.split("/")[-2] in {"remember", "memtomem-remember"}
+    }
+    # The two hosts that ship `remember` without `update` or `handoff`.
+    for package in ("packages/memtomem-hermes-plugin/", "packages/memtomem-openclaw-bundle/"):
+        assert any(path.startswith(package) for path in deliveries), package
+    commands = _opencode_commands(by_path["packages/opencode-memtomem/src/generated.ts"])
+    deliveries["opencode memtomem-remember command"] = commands["memtomem-remember"]["template"]
+    for label, text in deliveries.items():
+        flat = _flat(text)
+        for marker in _REMEMBER_REPORT:
+            assert marker in flat, (label, marker)
+        assert "indexed chunk count" not in flat, label
+
+
 def test_bound_skills_ship_only_in_the_antigravity_bundle() -> None:
     skills = {
         path.parent.name: path.read_text(encoding="utf-8")
@@ -835,13 +878,34 @@ def test_scope_selector_rejects_malformed_markers(text: str, message: str) -> No
         module._select_scope(text, "project")  # type: ignore[attr-defined]
 
 
+_HANDOFF_SAVE_REPORT = (
+    # Save reports the record's own count as `mem_add` printed it (#3400), never the
+    # file-wide upsert count, which also covers earlier sections of the day's file.
+    "confirms the write, report the exact `handoff_id`, effective scope, namespace, written "
+    "file, and how many chunks the record's lines fall in: the value of the result's "
+    "`- Entry chunks:` line, unchanged.",
+    "If the result has no such line, say that the server did not report it; do not "
+    "substitute `- Chunks indexed:`, which counts the whole file.",
+    # A refused write has no count: without this sentence the fallback above would describe
+    # it as a write whose count the server did not report (#3443). No literal prefix is
+    # named: one refusal does not start with `Error:`, and a host can wrap the result.
+    "When the result is a refusal or an error instead, report it unchanged and add no file "
+    "or chunk count of your own.",
+)
+# The condition itself, which the markers above start after: OpenCode names the tool
+# `memtomem_mem_add`, so the tool name is matched, not quoted.
+_HANDOFF_SAVE_CONDITION = re.compile(
+    r"\d\. When `(?:memtomem_)?mem_add` confirms the write, report the exact `handoff_id`"
+)
+
+
 def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
     contract = _contract()
     handoff = next(row for row in contract["workflows"] if row["id"] == "handoff")
     assert handoff["effect"] == "write"
     assert handoff["implicit"] is False
     assert handoff["tools"] == ["mem_status", "mem_recall", "mem_add"]
-    assert handoff["argument_hint"] == "[save|resume|s|r] [target runtime or handoff id]"
+    assert handoff["argument_hint"] == "[save|resume|list|s|r|l] [target runtime or handoff id]"
     # Host-tool grants stay subcommand-scoped: a bare ``Bash(git:*)`` would
     # also permit ``git -c alias.x=!<shell> x`` style execution while the
     # workflow resumes untrusted handoff text.
@@ -886,7 +950,10 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "check that it is a canonical UUID",
         "Reject anything else without calling a tool",
         '`scope="project_local"`, `limit=20`, and',
-        "read the id out of its `handoff-id-<id>` tag, and check that id is a canonical UUID",
+        "Require exactly one `handoff-id-<id>` tag on the newest row",
+        "With zero or several, report the row's `source` and `chunk_id` as unusable and stop",
+        "the same way the torn and mismatch failures are handled",
+        "Check that id is a canonical UUID exactly as in step 1",
         "`handoff_id` in the record's own content equals `selected_handoff_id`",
         "every required field is present, and `to_runtime` is the current runtime or `any`",
         "a matching tag is not evidence that the content is the record you asked for",
@@ -934,10 +1001,16 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "insufficient_input: work context",
         "insufficient_input: operation",
         # The one-letter aliases are only safe in the first-word position: a
-        # lone `s` or `r` later in the request is prose, not an operation.
-        "`s` means `save` and `r` means `resume`",
+        # lone `s`, `r` or `l` later in the request is prose, not an operation.
+        "Accept exactly one operation: `save`, `resume`, or `list`.",
+        "`s` means `save`, `r` means `resume`, and `l` means `list`",
         "only when it is the entire first word of the operation's arguments",
-        "A bare `s` or `r` anywhere else is not an operation",
+        "A bare `s`, `r`, or `l` anywhere else is not an operation",
+        # `list all`, `list then resume`: words after list are not a mode it has.
+        "`list` takes no argument: any words after it make the operation ambiguous",
+        # A number names a row of some listing, and only list's own pick can resolve it.
+        "A number is not an id either",
+        "point to `list`, which numbers the records and asks which one to resume",
         # #2930: a record that matched a stale local checkout passed resume. Each
         # outcome clause is pinned whole: an edit that keeps every command but
         # flips what an exit status means would pass an argv-only check.
@@ -989,14 +1062,17 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "normalize `claude` to `claude-code`, `codex` to `codex-cli`, `kimi` to `kimi-code`, "
         "and `antigravity` or `agy` to `antigravity-cli`",
         "insufficient_input: runtime",
+        *_HANDOFF_SAVE_REPORT,
     )
     for marker in required:
         assert marker in flat, marker
+    assert _HANDOFF_SAVE_CONDITION.search(flat)
+    assert "indexed chunk count" not in flat
     # The designs #2930's plan review rejected: a fetch's effect depends on refspec,
     # prune and fetch.all config; ancestry lazily fetches in a partial clone;
     # ``--get`` returns the last of several merge values; ``--abbrev-ref`` can name
     # another branch.
-    resume = flat.split("## Resume", 1)[1]
+    resume = flat.split("## Resume", 1)[1].split("## List", 1)[0]
     for rejected in (
         "git fetch",
         "--prune",
@@ -1040,6 +1116,110 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         encoding="utf-8"
     )
     assert not (kimi_root / "agents").exists()
+
+
+def _handoff_deliveries() -> dict[str, str]:
+    """Every shipped `handoff` text, by delivery: five SKILL.md files and OpenCode's command."""
+    rendered = _renderer().expected_files()  # type: ignore[attr-defined]
+    by_path = {path.relative_to(_ROOT).as_posix(): text for path, text in rendered.items()}
+    # By the skill directory's exact name: a checkout path can contain "handoff" too.
+    deliveries = {
+        path: text
+        for path, text in by_path.items()
+        if path.endswith("/SKILL.md") and path.split("/")[-2] in {"handoff", "memtomem-handoff"}
+    }
+    # The two hosts that ship the bound render.
+    for package in ("packages/memtomem-antigravity-plugin/", "packages/memtomem-cursor-plugin/"):
+        assert any(path.startswith(package) for path in deliveries), package
+    commands = _opencode_commands(by_path["packages/opencode-memtomem/src/generated.ts"])
+    deliveries["opencode memtomem-handoff command"] = commands["memtomem-handoff"]["template"]
+    assert len(deliveries) == 6, sorted(deliveries)
+    return deliveries
+
+
+def test_handoff_save_reports_a_refusal_in_every_delivery() -> None:
+    """Every host's `handoff` reports a refused `mem_add` as the refusal (#3443)."""
+    for label, text in _handoff_deliveries().items():
+        flat = _flat(text)
+        for marker in _HANDOFF_SAVE_REPORT:
+            assert marker in flat, (label, marker)
+        assert _HANDOFF_SAVE_CONDITION.search(flat), label
+
+
+# The tool the query goes to: OpenCode names it `memtomem_mem_recall`, so it is matched.
+_HANDOFF_LIST_CALL = re.compile(
+    r"1\. Call `(?:memtomem_)?mem_recall` with "
+    r'`tag_filter="handoff-to-<current-runtime>,handoff-to-any"`'
+)
+_HANDOFF_LIST = (
+    # The query: resume step 2's filter, so list shows what resume can load, on a bounded page.
+    '`tag_filter="handoff-to-<current-runtime>,handoff-to-any"`, '
+    '`namespace="shared:<project-slug>"`, `scope="project_local"`, `limit=30`, and '
+    '`output_format="structured"` — the filter resume step 2 uses.',
+    "The 30 rows are a bounded sample, not a count of records",
+    "List is read-only: it shows which records resume can load here and writes nothing.",
+    "It runs no Git command beyond the common checks.",
+    # The default candidate comes from the raw newest row: skipping a malformed row first
+    # would name an older record that plain resume never selects.
+    "Before skipping any row, look at the first (newest) row, as resume step 2 does.",
+    "If it carries exactly one `handoff-id-<id>` tag and that id is a canonical UUID",
+    "Otherwise do not predict: say that plain `resume` would not get a single valid id from the "
+    "newest record, and report that row's `chunk_id`.",
+    "Being selected is not being verified",
+    # Tags only, like brief: a body line on a partial page is not evidence of the field.
+    "Group the rows by tag, never by body.",
+    "Count and leave out any row with no such tag, with more than one, or with an id that is "
+    "not a canonical UUID.",
+    "in the order each id first appears in the newest-first page",
+    "Never read, quote, or summarize body text",
+    # Truncation: any entry can be incomplete, not only the last one.
+    "If exactly 30 rows came back, say that older handoffs may exist and that any listed entry "
+    "may have rows beyond this page",
+    "Do not page further.",
+    # The pick: resolved only against this run's list, then handed to resume's own checks.
+    "If no entry is listed, end here.",
+    "use the host's choice prompt within its own option limit",
+    "Accept only a listed number or the `handoff_id` of a listed entry, matched against the "
+    "list shown in this same run",
+    "never a number from an earlier run, never a new query to resolve the answer, and never an "
+    "id the list does not show",
+    "Any other answer: say so and stop, with no tool call and no second prompt.",
+    "continue at Resume step 1 with that entry's `handoff_id`",
+    "the order of this list is not evidence, and resume runs every check",
+    "in a non-interactive run, where you never ask",
+)
+
+
+def test_handoff_list_is_read_only_and_resolves_a_pick_in_every_delivery() -> None:
+    """`handoff list` shows what resume can load and hands a pick to resume's checks."""
+    for label, text in _handoff_deliveries().items():
+        listing = _flat(text).split("## List", 1)
+        assert len(listing) == 2, label
+        section = listing[1]
+        for marker in _HANDOFF_LIST:
+            assert marker in section, (label, marker)
+        assert _HANDOFF_LIST_CALL.search(section), label
+        # Read-only: no write tool, no search, and no Git call of its own.
+        for forbidden in ("mem_add", "mem_search", "git rev-parse", "git status", "git ls-remote"):
+            assert forbidden not in section, (label, forbidden)
+        # No host's option count in the shared prose: each host has its own limit.
+        assert "at most 4" not in section and "4 options" not in section, label
+
+
+_HANDOFF_RESUME_CARDINALITY = (
+    "Require exactly one `handoff-id-<id>` tag on the newest row.",
+    "With zero or several, report the row's `source` and `chunk_id` as unusable and stop, the "
+    "same way the torn and mismatch failures are handled.",
+    "Do not fall back to another record.",
+)
+
+
+def test_handoff_resume_tag_cardinality_in_every_delivery() -> None:
+    """Every host's `handoff` requires exactly one id tag on the newest row (#3475)."""
+    for label, text in _handoff_deliveries().items():
+        flat = _flat(text)
+        for marker in _HANDOFF_RESUME_CARDINALITY:
+            assert marker in flat, (label, marker)
 
 
 def test_brief_workflow_pins_read_only_project_local_contract() -> None:
@@ -1143,6 +1323,50 @@ def test_every_shipped_handoff_and_update_accepts_each_host_runtime_label() -> N
     )
     for label, content in surfaces.items():
         assert labels in " ".join(content.split()), label
+
+
+@pytest.mark.parametrize(
+    ("attribution", "current_files", "shape"),
+    [
+        pytest.param("exact", 1, r"\d+", id="exact"),
+        pytest.param("merged", 1, r"\d+ \(.+\)", id="merged"),
+        pytest.param("unverified", 1, r"unknown", id="unverified"),
+        pytest.param("exact", 0, r"unknown \(.+\)", id="not-indexed"),
+    ],
+)
+def test_workflows_read_the_entry_chunks_line_as_mem_add_prints_it(
+    attribution: str, current_files: int, shape: str
+) -> None:
+    """``update`` and ``handoff`` key on the shape of ``mem_add``'s ``- Entry chunks:`` value.
+
+    Their text quotes the line's prefix, tells a value that starts with an integer
+    from one that starts with ``unknown``, and a bare value from one with a note in
+    parentheses. ``remember`` quotes the prefix too and reports the value unchanged,
+    whatever its shape (#3437). A server string that leaves those shapes fails here,
+    so the workflow text is read again with it.
+    """
+    from uuid import uuid4
+
+    from memtomem.models import IndexingStats
+    from memtomem.server.tools.memory_crud import _entry_chunks_line
+
+    stats = IndexingStats(
+        1,
+        2,
+        2,
+        0,
+        0,
+        0.0,
+        current_files=current_files,
+        appended_chunk_ids=(uuid4(), uuid4()),
+        appended_attribution=attribution,  # type: ignore[arg-type]
+    )
+    line = _entry_chunks_line(stats)
+    prefix = "- Entry chunks: "
+    assert line.startswith(prefix), line
+    assert re.fullmatch(shape, line.removeprefix(prefix)), line
+    for workflow in ("update", "handoff", "remember"):
+        assert f"`{prefix.rstrip()}`" in _project_body(workflow), workflow
 
 
 def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
@@ -1280,9 +1504,33 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         "giving its weighted count",
         "An item whose weighted count is 1,000 or less is not over the limit",
         "items written over the length limit (each with its weighted count)",
+        # The item's own count is the `- Entry chunks:` value (#3400), reported as printed.
+        # It is how many chunks the item's lines fall in, not a verdict on what separated:
+        # a count of 2 with a note can be the previous section's chunk holding the item's
+        # heading plus an intact body. Under the real E5 tokenizer an item of 399 tokens
+        # reported 2, its citation alone in the second (test_mem_add_entry_chunks.py).
+        "Read the item's chunk count from the result's `- Entry chunks:` line and from no "
+        "other line: `- Chunks indexed:` counts the whole file, not this item",
+        "The value is everything after `- Entry chunks: ` on that line; report it unchanged, "
+        "including any note in parentheses",
+        "A value that starts with an integer: that is how many chunks the item's lines fall in",
+        "It does not show which text landed where",
+        "one of the chunks also holds text from before the item and may hold nothing of the "
+        "item but its heading",
+        "A value that starts with `unknown`, or a result with no such line (a server that does "
+        "not report it, or a replay of a result stored before it did): the count was not "
+        "reported",
+        "Say so, with the value when there is one",
+        "The count is a report, never a reason to write again: do not shorten, edit, or re-add "
+        "an item because of it",
+        "saved items (with their written files and each item's `Entry chunks` value as read "
+        "from its result)",
+        "items whose `Entry chunks` value starts with an integer of 2 or more (each with the "
+        "value unchanged)",
     )
     for marker in required:
         assert marker in flat, marker
+    assert "chunk counts" not in flat
     assert "at most 1,200 characters" not in flat
     assert "or at most 600 when any of it" not in flat
     assert "mem_do" not in body
@@ -1459,7 +1707,7 @@ def test_handoff_resume_points_to_brief_without_searching() -> None:
     assert "mem_search(" not in body
     assert "`mem_search`" not in body
     flat = " ".join(body.split())
-    resume = flat.split("## Resume", 1)[1]
+    resume = flat.split("## Resume", 1)[1].split("## List", 1)[0]
     assert "the brief workflow, run with this objective as its task" in resume
     assert "Do not run it and do not search from this workflow" in resume
 
@@ -1662,7 +1910,7 @@ from pathlib import Path
 with Path(os.environ["FAKE_MM_LOG"]).open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1:] == ["--version"]:
-    print(os.environ.get("FAKE_MM_VERSION", "mm, version 0.7.10"))
+    print(os.environ.get("FAKE_MM_VERSION", "mm, version 0.7.13"))
 elif sys.argv[1:2] == ["search"]:
     if os.environ.get("FAKE_MM_SEARCH_FAIL"):
         print(sys.argv[2], file=sys.stderr)
@@ -1779,13 +2027,38 @@ def test_automation_reports_incompatible_dependency(fake_mm: tuple[dict[str, str
     result = _dispatch("SessionStart", {"hook_event_name": "SessionStart"}, env)
     assert result.returncode == 0
     output = json.loads(result.stdout)
-    assert "requires mm 0.7.10" in output["hookSpecificOutput"]["additionalContext"]
+    assert "requires mm 0.7.13" in output["hookSpecificOutput"]["additionalContext"]
     _dispatch(
         "UserPromptSubmit",
         {"hook_event_name": "UserPromptSubmit", "prompt": "A sufficiently long prompt"},
         env,
     )
     assert _calls(log) == [["--version"]]
+
+
+def test_automation_missing_dependency_hint_is_the_readme_install_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no ``mm`` to find, SessionStart prints the README's fresh-install command."""
+    # PATH is replaced, where ``fake_mm`` prefixes it: a developer's global ``mm`` must not
+    # be found. Windows also searches the working directory ahead of PATH.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    env = os.environ.copy()
+    env.update({"PATH": str(empty), "CLAUDE_PLUGIN_DATA": str(tmp_path / "data")})
+
+    result = _dispatch("SessionStart", {"hook_event_name": "SessionStart"}, env)
+
+    assert result.returncode == 0
+    # Unquoted on purpose: cmd.exe passes single quotes through as part of the argument.
+    command = f"uv tool install --python 3.12 memtomem=={_contract()['core']['version']}"
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert context == f"Install the optional automation dependency with `{command}`."
+    readme = (_ROOT / "packages/memtomem-claude-automation-plugin/README.md").read_text(
+        encoding="utf-8"
+    )
+    assert command in readme.splitlines()
 
 
 def test_automation_failure_log_does_not_store_prompt(
@@ -1807,6 +2080,27 @@ def test_automation_failure_log_does_not_store_prompt(
 
 
 _PROJECT_WORKFLOWS_GUIDE = _ROOT / "docs/guides/project-workflows.md"
+_CROSS_RUNTIME_HANDOFF_GUIDE = _ROOT / "docs/guides/integrations/cross-runtime-handoff.md"
+
+
+def _named_operations(flat: str) -> set[str]:
+    """The backticked words of the one sentence that says which operations exist."""
+    sentences = re.findall(r"exactly one operation[:,] (.*?)\.", flat)
+    assert len(sentences) == 1, sentences
+    return set(re.findall(r"`([a-z]+)`", sentences[0]))
+
+
+def test_project_workflows_guide_names_every_handoff_operation() -> None:
+    """The guide's operation sentence names the same operations the workflow accepts.
+
+    Compared as sets, not by substring: a guide that still said "`save` or `resume`" next
+    to a new paragraph about `list` would pass a presence check.
+    """
+    workflow = _named_operations(_flat(_project_body("handoff")))
+    guide = _named_operations(_flat(_PROJECT_WORKFLOWS_GUIDE.read_text(encoding="utf-8")))
+    assert workflow == guide == {"save", "resume", "list"}
+
+
 _ROOT_README = _ROOT / "README.md"
 _PYPI_README = _ROOT / "packages/memtomem/README.md"
 _UPDATE_WORKFLOW = _ROOT / "packages/memtomem-plugin-assets/workflows/update.md"
@@ -1926,6 +2220,27 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
         f"is at most {limits[1]} characters, with each Korean, Japanese, or Chinese "
         f"character counted as {limits[2]}," in flat_guide
     ), limits.groups()
+
+    # Chunk counts: the guides name the value both workflows report, not the file-wide count.
+    assert "the written file, and the value of the result's `Entry chunks` line" in flat_guide
+    assert (
+        "When `mem_add` refuses the record or returns an error, Save reports that result "
+        "unchanged and adds no file or chunk count of its own." in flat_guide
+    )
+    assert "the saved items with their files and each item's `Entry chunks` value" in flat_guide
+    assert "Items whose value is 2 or more are listed separately" in flat_guide
+    handoff_guide = " ".join(_CROSS_RUNTIME_HANDOFF_GUIDE.read_text(encoding="utf-8").split())
+    assert "written file, and the `Entry chunks` value its `mem_add` result printed" in (
+        handoff_guide
+    )
+    assert "Each save that `mem_add` confirms must report its `handoff_id`" in handoff_guide
+    assert (
+        "A save that `mem_add` refuses, or that ends in an error, must report that result "
+        "unchanged, with no file or chunk count added." in handoff_guide
+    )
+    for text in (flat_guide, handoff_guide):
+        assert "indexed chunk count" not in text
+        assert "chunk counts" not in text
 
     # Host table: one row per surface, shipped hosts carry the invocation, the rest say so.
     host_rows = {row[0]: row for row in _table_rows(guide, "") if len(row) == 5}

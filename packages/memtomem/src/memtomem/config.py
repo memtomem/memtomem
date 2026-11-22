@@ -2308,6 +2308,104 @@ def _validate_loaded_section(
         raise generic_error
 
 
+class RelativeConfigPathError(ValueError):
+    """A configured path is relative in a process that refuses relative paths."""
+
+
+# Set only by a shared daemon (``memtomem.server.daemon``). A daemon runs in a
+# neutral working directory and serves clients in many others, so a relative
+# configured path has no meaning there; every other process keeps today's
+# meaning, relative to its own working directory.
+_refuse_relative_paths = False
+
+# The configured filesystem paths, per section class. A relative value in a
+# neutral working directory would open, watch or write the wrong place, or, for
+# the masking manifest, stop applying it silently.
+_RELATIVE_PATH_FIELDS: dict[type, tuple[str, ...]] = {
+    StorageConfig: ("sqlite_path",),
+    IndexingConfig: (
+        "memory_dirs",
+        "project_memory_dirs",
+        "read_only_memory_dirs",
+        "retain_missing_dirs",
+        "index_masking_manifest_path",
+        "chunk_tokenizer_path",
+    ),
+    EmbeddingConfig: ("onnx_artifact_path",),
+    ContextGatewayConfig: ("known_projects_path",),
+    SessionTraceConfig: ("jsonl_path",),
+}
+
+_SECTION_NAMES: dict[type, str] = {
+    StorageConfig: "storage",
+    IndexingConfig: "indexing",
+    EmbeddingConfig: "embedding",
+    ContextGatewayConfig: "context_gateway",
+    SessionTraceConfig: "session_trace",
+}
+
+
+def refuse_relative_config_paths() -> None:
+    """Make every later config build and section assignment refuse relative paths."""
+    global _refuse_relative_paths
+    _refuse_relative_paths = True
+
+
+def _is_relative_path_value(field: str, value: object) -> bool:
+    text = str(value)
+    if text == "":
+        return False
+    if field == "sqlite_path" and (text == ":memory:" or text.startswith("file:")):
+        # Not paths; a daemon refuses them separately, as stores it cannot name.
+        return False
+    if field == "chunk_tokenizer_path":
+        from memtomem.embedding.profiles import is_tokenizer_identifier
+
+        if is_tokenizer_identifier(text):
+            return False
+    return not Path(text).expanduser().is_absolute()
+
+
+def relative_section_paths(section_obj: object) -> list[str]:
+    """The dotted names of ``section_obj``'s configured paths that are relative."""
+    section_cls = type(section_obj)
+    fields = _RELATIVE_PATH_FIELDS.get(section_cls, ())
+    found: list[str] = []
+    for field in fields:
+        value = getattr(section_obj, field)
+        values = value if isinstance(value, list) else [value]
+        if any(_is_relative_path_value(field, item) for item in values):
+            found.append(f"{_SECTION_NAMES[section_cls]}.{field}")
+    return found
+
+
+def relative_config_paths(config: Mem2MemConfig) -> list[str]:
+    """The dotted names of every configured path in ``config`` that is relative."""
+    found: list[str] = []
+    for section_name in _SECTION_NAMES.values():
+        found.extend(relative_section_paths(getattr(config, section_name)))
+    return found
+
+
+def _relative_paths_error(names: list[str]) -> RelativeConfigPathError:
+    return RelativeConfigPathError(
+        "a shared daemon cannot use a relative configured path, because it has no "
+        "working directory of its own: " + ", ".join(names) + ". Use an absolute path or ~."
+    )
+
+
+def check_relative_config_paths(config: Mem2MemConfig) -> None:
+    """Raise :class:`RelativeConfigPathError` if refusing and ``config`` has one."""
+    if not _refuse_relative_paths:
+        return
+    try:
+        found = relative_config_paths(config)
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise RelativeConfigPathError(f"a configured path cannot be checked: {exc}") from exc
+    if found:
+        raise _relative_paths_error(found)
+
+
 def assign_section_fields(section_obj: object, updates: Mapping[str, object]) -> dict[str, object]:
     """Assign already-coerced values to one config section, invariants enforced.
 
@@ -2338,6 +2436,15 @@ def assign_section_fields(section_obj: object, updates: Mapping[str, object]) ->
     for key, value in updates.items():
         setattr(section_obj, key, value)
     invalid = section_invariant_error(section_obj, updates.keys())
+    if invalid is None and _refuse_relative_paths:
+        try:
+            relative = relative_section_paths(section_obj)
+        except (RuntimeError, ValueError, OSError) as exc:
+            # ``expanduser`` of an unknown ``~user`` raises; refuse, and roll back below.
+            invalid = f"a configured path cannot be checked: {exc}"
+        else:
+            if relative:
+                invalid = str(_relative_paths_error(relative))
     if invalid is not None:
         for key, old in old_values.items():
             setattr(section_obj, key, old)

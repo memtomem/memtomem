@@ -1099,7 +1099,8 @@ def create_tables(
             last_run_at     TEXT,
             last_run_status TEXT,
             last_run_error  TEXT,
-            last_run_result TEXT
+            last_run_result TEXT,
+            job_state       TEXT
         )
     """)
     # Idempotent migration: the runner's result summary (#2471), a JSON envelope
@@ -1107,6 +1108,14 @@ def create_tables(
     # column stale, and readers detect that (ScheduleMixin's _decode_result).
     try:
         db.execute("ALTER TABLE schedules ADD COLUMN last_run_result TEXT")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+    # Idempotent migration: where a job that continues between runs left off
+    # (#3432), a JSON object. No SCHEMA_VERSION bump: an older binary neither
+    # reads nor writes the column, so its runs leave the position alone.
+    try:
+        db.execute("ALTER TABLE schedules ADD COLUMN job_state TEXT")
     except sqlite3.OperationalError as e:
         if "duplicate column" not in str(e).lower():
             raise

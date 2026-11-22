@@ -77,12 +77,12 @@ class TestDiscovery:
         key = norm_path(held)
         reads = 0
 
-        async def held_while_read(limit):
+        async def held_while_read(limit, after=None):
             nonlocal reads
             reads += 1
             await comp.storage.hold_source(held, REDACTION_BLOCKED_HOLD)
             try:
-                return await real(limit)
+                return await real(limit, after)
             finally:
                 db = comp.storage._get_db()
                 db.execute("DELETE FROM held_sources WHERE source_file=?", (key,))
@@ -90,11 +90,11 @@ class TestDiscovery:
 
         monkeypatch.setattr(comp.storage, "list_visible_chunks_by_id", held_while_read)
 
-        chunks, eligible = await DedupScanner(comp.storage)._select_pool(100)
+        pool = await DedupScanner(comp.storage)._select_pool(100)
 
         assert reads == 1
-        assert {c.id for c in chunks} == {c.id for c in visible}
-        assert eligible == len(visible)
+        assert {c.id for c in pool.chunks} == {c.id for c in visible}
+        assert pool.visible == pool.above_cursor == len(visible)
         assert not await comp.storage.is_source_held(held)
 
     async def test_consolidation_candidates_preview_no_held_rows(

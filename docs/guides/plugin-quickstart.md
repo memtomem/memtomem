@@ -50,9 +50,9 @@ uvx --version
 
 If either command is not found, follow the [official uv installation
 guide](https://docs.astral.sh/uv/getting-started/installation/) and open a new
-terminal. memtomem runs on Python 3.12 or newer, and the first run needs a
-network connection to download the exactly pinned packages. You do not need
-an embedding model or an API key.
+terminal. The first run needs a network connection to download the exactly
+pinned packages, and the commands below ask uv for Python 3.12 (step 2 says
+what that needs). You do not need an embedding model or an API key.
 
 Then check **only** the tool you use:
 
@@ -77,9 +77,23 @@ machine.
 Seeing an existing ONNX/E5 configuration is normal; this walkthrough does not change your model or database.
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.10' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.7.10' mm status
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm init --preset minimal --non-interactive --mcp skip
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm status
 ```
+
+These commands and the plugin's own server launch pass `--python 3.12`, so
+they need a Python 3.12 that uv can find or download; by default uv downloads
+one when it finds none. Where uv may not download Python on its own
+(`python-downloads = "never"` or `"manual"` in its configuration), a machine
+with only a newer Python stops with `No interpreter found for Python 3.12`, and
+the plugin's server does not start either. An offline uv cannot download one
+either: with the packages already cached, the plugin's server still does not
+start unless a Python 3.12 was installed beforehand. Install a Python 3.12
+first (`uv python install 3.12` downloads one under `"manual"`, not under
+`"never"`), or skip the plugin: follow the
+[Getting Started Quickstart](getting-started.md#quickstart), which installs
+memtomem with the Python you have and sets up the store, then register
+`memtomem-server` as [MCP clients](mcp-clients.md) shows for your tool.
 
 `--mcp skip` leaves other clients' settings alone, because the plugin in the
 next step provides the MCP connection. The command installs the ONNX
@@ -102,7 +116,7 @@ Open the terminal in **the root of the project you are onboarding**, and run
 this diagnostic from the same folder:
 
 ```bash
-uvx --from "memtomem[all]==0.7.10" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.13" mm doctor --claude-mcp
 ```
 
 The plugin does not put `mm` on your PATH, so use the pinned command above.
@@ -113,6 +127,12 @@ was detected, `1` means a duplicate is likely, and `2` means the check was
 incomplete. `0` does not prove that the MCP connection works. Running the
 diagnostic from a separate `[all]` environment does not install or repair
 packages for the plugin's server.
+
+Before the plugin is installed, the diagnostic compares your registrations
+with the plugin launch command known to the release it runs. The marketplace
+can serve a plugin newer than that release, with a different launch command,
+so a `0` here is a prediction. Run the diagnostic again after installing: it
+then reads the installed plugin's own command.
 
 If you already registered memtomem by hand, use Claude Code's `/mcp` to tell
 that server's name and scope apart from the plugin's server. In the project
@@ -176,7 +196,7 @@ You are connected when you see a real MCP tool call and the storage and
 database path match the ones you saw earlier. An install message, a list of
 tool names, or an internal error is not success. If there is an error, check
 the plugin's actual launch command and dependencies; the default server pin is
-`memtomem[onnx]==0.7.10`. Confirming the plugin is enabled and successfully
+`memtomem[onnx]==0.7.13`. Confirming the plugin is enabled and successfully
 reading data are separate steps.
 
 If you use Codex CLI, skip this section and follow Path B only.
@@ -283,7 +303,7 @@ specific test before every PR", needs its own store. Initialize it at the root
 of the actual Git repository:
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.10' mm mem init --scope project_local
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm mem init --scope project_local
 ```
 
 This creates and registers a local memory tier that is not committed to Git.

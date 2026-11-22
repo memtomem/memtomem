@@ -19,6 +19,24 @@ const DEDUP_SCAN_TIMEOUT_MS = 120_000;
 // the end of this section re-renders the JS-owned strings from these.
 let _dedupEmptyKind = 'initial';
 let _dedupLastThreshold = null;
+// Pairs the last scan left out (read-only chunks of one file, #3418). Shown
+// under both the candidate list and the no-results message, so an empty list
+// is not read as a clean store; 0 hides the note.
+let _dedupOmitted = 0;
+
+function _renderDedupOmitted() {
+  const el = qs('dedup-omitted');
+  if (!_dedupOmitted) {
+    el.textContent = '';
+    hide(el);
+    return;
+  }
+  const key = _dedupOmitted === 1
+    ? 'settings.dedup.omitted_one' : 'settings.dedup.omitted_other';
+  // textContent only: a locale value containing markup stays inert.
+  el.textContent = t(key, { count: _dedupOmitted });
+  show(el);
+}
 
 function _renderDedupEmpty(kind) {
   _dedupEmptyKind = kind;
@@ -34,6 +52,8 @@ function resetDedupPanel() {
   // Don't reset while a scan is still running — keep the UI consistent
   if (STATE.dedupScanActive) return;
   hide(qs('dedup-list'));
+  _dedupOmitted = 0;
+  _renderDedupOmitted();
   _renderDedupEmpty('initial');
   show(qs('dedup-empty'));
 }
@@ -49,6 +69,8 @@ async function runDedupScan() {
   btnLoading(btn, true);
   hide(qs('dedup-list'));
   hide(qs('dedup-msg'));
+  _dedupOmitted = 0;
+  _renderDedupOmitted();
   show(empty);
   empty.innerHTML = `<div class="spinner-panel"></div>${srLoading()}`;
 
@@ -65,7 +87,9 @@ async function runDedupScan() {
       throw new Error(typeof err.detail === 'string' ? err.detail : res.statusText);
     }
     const data = await res.json();
+    _dedupOmitted = Number(data.same_source_read_only_pairs) || 0;
     renderDedupCandidates(data.candidates, threshold);
+    _renderDedupOmitted();
   } catch (err) {
     const msg = err.name === 'AbortError' ? t('settings.dedup.scan_timeout') : err.message;
     setMsg(qs('dedup-msg'), t('settings.dedup.scan_error', { error: msg }), true);
@@ -208,6 +232,7 @@ window.addEventListener('langchange', () => {
     }
     _applyDedupLinesText(list);
   }
+  _renderDedupOmitted();
   // Skip while a scan is running — ``dedup-empty`` holds the spinner then,
   // and the post-scan render uses the new locale anyway.
   if (!STATE.dedupScanActive && !qs('dedup-empty').hidden && _dedupEmptyKind) {

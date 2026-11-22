@@ -332,28 +332,34 @@ def test_active_switch_clears_runtime_filter(page, mm_web_url: str) -> None:
     )
 
 
-def test_install_guide_bodies_carry_verbatim_commands(page, mm_web_url: str) -> None:
-    """Each per-client guide body must carry the registration command verbatim from
-    docs/guides/mcp-clients.md (the CLAUDE.md/STM SoT invariant). Only kimi renders
-    as a not-installed chip in the fixture, so drive the other clients directly."""
+def test_install_guide_bodies_carry_the_no_install_launch(page, mm_web_url: str) -> None:
+    """The Claude Code, Antigravity and Codex guide bodies carry the no-install ``uvx``
+    registration whole; the Kimi body carries its ``mm init --mcp kimi`` instruction.
+
+    ``docs/guides/mcp-clients.md`` registers the installed ``memtomem-server`` for
+    Antigravity and Codex; these modals give the ``uvx`` variant instead, so the
+    complete argv is asserted rather than borrowed from the guide. It asks uv for
+    Python 3.12 because the requirement names an extra (#3493). Only kimi renders as
+    a not-installed chip in the fixture, so drive the other clients directly."""
     _stub_portal(page)
     _open_portal(page, mm_web_url)
 
+    argv = '"--python", "3.12", "--isolated", "--from", "memtomem[all]==0.7.13", "memtomem-server"'
     cases = {
         "claude": [
             "claude mcp add memtomem -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- ",
-            "uvx --isolated --from 'memtomem[all]==0.7.10' memtomem-server",
+            "uvx --python 3.12 --isolated --from 'memtomem[all]==0.7.13' memtomem-server",
         ],
         "antigravity": [
             "~/.gemini/config/mcp_config.json",
             '"command": "uvx"',
-            '"memtomem[all]==0.7.10"',
+            f'"args": [{argv}]',
             '"env": {"MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}',
         ],
         "codex": [
             "[mcp_servers.memtomem]",
             'command = "uvx"',
-            '"memtomem[all]==0.7.10"',
+            f"args = [{argv}]",
             'env = { MEMTOMEM_EXTRA_TOOLS = "mem_update_coverage" }',
         ],
         "kimi": ["mm init --mcp kimi"],

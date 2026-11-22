@@ -32,9 +32,9 @@ behaviour is the same everywhere and only the invocation differs.
 | Hermes Agent plugin | — | — | — | not shipped: these need a project root, and Hermes starts the server outside one |
 | Gemini CLI | — | — | — | not shipped: this repository ships no workflows for it |
 
-This guide describes the workflows as shipped with memtomem `0.7.10` and these
+This guide describes the workflows as shipped with memtomem `0.7.13` and these
 plugin versions:
-`claude` 0.5.38 · `codex` 0.3.36 · `opencode` 0.3.34 · `kimi` 0.2.26 · `antigravity` 0.2.15 · `cursor` 0.1.0.
+`claude` 0.5.44 · `codex` 0.3.42 · `opencode` 0.3.40 · `kimi` 0.2.30 · `antigravity` 0.2.21 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).
@@ -59,9 +59,9 @@ fall back to your user-scope memory for project records.
 
 ## handoff
 
-`handoff` takes exactly one operation, `save` or `resume`. As a shorthand, `s`
-and `r` count only when they are the whole first word after the invocation, as
-in `s to codex-cli` or `r <handoff-id>`. The target runtime is one of
+`handoff` takes exactly one operation, `save`, `resume`, or `list`. As a
+shorthand, `s`, `r`, and `l` count only when they are the whole first word after
+the invocation, as in `s to codex-cli` or `r <handoff-id>`. The target runtime is one of
 `claude-code`, `codex-cli`, `kimi-code`, `opencode`, `antigravity-cli`,
 `cursor`, or `any` (the default).
 
@@ -80,7 +80,11 @@ next_action
 The record goes to `scope="project_local"` with the tags `handoff`,
 `from-<runtime>`, `to-<runtime>`, `handoff-to-<runtime>`, and
 `handoff-id-<id>`. Save reports the `handoff_id`, the effective scope and
-namespace, the written file, and the indexed chunk count.
+namespace, the written file, and the value of the result's `Entry chunks` line:
+how many chunks the record's lines fall in. When the server does not print that
+line, Save says so instead of reporting another number. When `mem_add` refuses
+the record or returns an error, Save reports that result unchanged and adds no
+file or chunk count of its own.
 
 **Resume** loads one record: the one whose `handoff_id` you name, or otherwise
 the newest one addressed to the current runtime or to `any`. It treats the
@@ -96,6 +100,17 @@ GitHub issue or pull request as `owner/repo#N` or a full URL, resume reports
 its state when the host can query GitHub. Resume never deletes, edits, or
 replaces a handoff. It runs no memory search; it ends by telling you that `brief`,
 run with the record's objective as its task, lists related project memories.
+A number is not a `handoff_id`: `resume 2` is rejected and points you to `list`.
+
+**List** shows which records resume can load here, read-only. It reads the
+newest 30 rows addressed to the current runtime or to `any`, says which record a
+plain `resume` would select, and groups the rows by their `handoff-id-<id>` tag.
+Each entry shows only tag and row data (id, sender, recipient, time, and how many
+of its rows the page holds), never the record's text. When the page is full it
+says that older records may exist and that any entry may be incomplete. In an
+interactive session it then numbers the entries and asks which one to resume;
+a number or id from that list hands the record to resume, which runs every
+check. `list` takes no argument.
 
 ## brief
 
@@ -173,8 +188,16 @@ or the variable not set. `topic` mode never touches coverage, so it keeps
 working either way.
 
 The report names the mode, `git_head`, the commits read, the coverage result,
-the saved items with their files and chunk counts, the skipped duplicates, and
-the yield as `commit-derived: <N>` and `session-derived: <M>`. An incremental
+the saved items with their files and each item's `Entry chunks` value, the
+skipped duplicates, and the yield as `commit-derived: <N>` and
+`session-derived: <M>`. The `Entry chunks` value is the one `mem_add` printed
+for that item. An integer is how many chunks the item's lines fall in, and it
+is followed by a note in parentheses when the first of those chunks also holds
+earlier text. Items whose value is 2 or more are listed separately. The integer
+does not say which text landed in which chunk, and `update` never rewrites an
+item because of it. When the value starts with `unknown`, or the server does
+not print the line, the report says the count was not reported and keeps the
+value when there is one. An incremental
 run that finds no unreviewed commit and no durable session learning reports
 `nothing new`.
 

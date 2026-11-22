@@ -20,12 +20,18 @@ or connected AI editor for the first success.
 ## Quickstart
 
 ```bash
-uv tool install 'memtomem[all]'
+uv tool install --python 3.12 'memtomem[all]'
 mm init
 mm status
 mm add "Deployment checklist uses blue-green rollout" --tags ops
 mm search "blue-green"
 ```
+
+`--python 3.12` needs a Python 3.12 that uv can find or download (see
+[Prerequisites](#prerequisites)). Where uv may not download Python, install a
+Python 3.12 first, or run the install with the Python you have, such as
+`uv tool install --python 3.13 'memtomem[all]'` with your version in place of
+`3.13`.
 
 The last command should return the sentence you just added. `mm add` creates a
 Markdown file under your configured user memory directory and indexes it
@@ -57,9 +63,22 @@ installed or removed separately.
 
 | Requirement | Install | Verify |
 |---|---|---|
-| Python 3.12+ | [python.org](https://python.org) | `python3 --version` |
+| Python 3.12 | [python.org](https://python.org), or let uv download it | `uv python find --system 3.12` |
+| Python 3.12+ (pipx only) | [python.org](https://python.org) | `python3 --version` |
 | `uv` or `pipx` | [uv installation](https://docs.astral.sh/uv/getting-started/installation/) | `uv --version` |
 | An AI editor | Optional for the terminal first success | — |
+
+The `uv tool install` and `uvx` commands in this guide that pass
+`--python 3.12` need a Python 3.12 that uv can find or download; by default uv
+downloads one when none is installed. Where uv may not download Python on its
+own (`python-downloads = "never"` or `"manual"` in its configuration), they
+stop with `No interpreter found for Python 3.12` on a machine with only a newer
+Python. An offline uv cannot download one either: with the packages already
+cached, a launch still stops that way unless a Python 3.12 was installed
+beforehand. Install a Python 3.12 first (`uv python install 3.12` downloads one
+under `"manual"`, not under `"never"`), or change `3.12` in the install command
+to the Python you have (tested:
+`uv tool install --python 3.13 'memtomem[all]==0.7.13'`).
 
 The Quickstart installs the `all` extra so every documented path is available.
 For the smallest installation, omit `[all]`: it searches by keyword (BM25)
@@ -74,7 +93,7 @@ install, where commands are invoked as `mm ...`.
 ### Option A: From PyPI (recommended for most users)
 
 ```bash
-uv tool install 'memtomem[all]'       # or: pipx install 'memtomem[all]'
+uv tool install --python 3.12 'memtomem[all]'   # or: pipx install 'memtomem[all]'
 mm --version
 ```
 
@@ -82,7 +101,7 @@ mm --version
 (keyword search until you configure Ollama or OpenAI):
 
 ```bash
-uv tool install memtomem
+uv tool install --python 3.12 memtomem
 ```
 
 Add features later with a reinstall such as:
@@ -280,8 +299,10 @@ which the plugins' `update` workflow needs outside `topic` mode (see
 [Project workflows](project-workflows.md)).
 
 This reuses the persistent `memtomem[all]` environment installed above. For a
-one-off setup without a persistent install, use `uvx --isolated --from
-"memtomem[all]==0.7.10" memtomem-server`. Claude Code users can instead
+one-off setup without a persistent install, use `uvx --python 3.12 --isolated
+--from "memtomem[all]==0.7.13" memtomem-server`; like the install, it needs a
+Python 3.12 that uv can find or download ([Prerequisites](#prerequisites)).
+Claude Code users can instead
 install the [memtomem plugin](integrations/claude-code.md#mcp-server-setup),
 which provides an exact-pinned MCP server and nine focused workflows. Automatic
 indexing hooks are supplied only by the separate `memtomem-automation` plugin.

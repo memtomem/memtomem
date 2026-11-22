@@ -22,12 +22,13 @@ write-time indexing.
 ## What this plugin runs and connects to
 
 - **One local MCP server.** Claude Code starts `memtomem-server` over stdio with
-  `uvx --from 'memtomem[onnx]==0.7.10'`. On first launch uv downloads that exact
-  version and its dependencies from PyPI (or the package index your own uv
-  configuration names) and caches them. If the machine has no Python 3.12 or
-  newer, uv also downloads a managed CPython build from Astral's
-  `python-build-standalone` releases, unless your uv configuration disables
-  Python downloads. The plugin ships no hooks, scripts, or binaries of its own.
+  `uvx --python 3.12 --from 'memtomem[onnx]==0.7.13'`. On first launch uv downloads
+  that exact version and its dependencies from PyPI (or the package index your own
+  uv configuration names) and caches them. If uv finds no Python 3.12, it also
+  downloads a managed CPython 3.12 build from Astral's `python-build-standalone`
+  releases; with Python downloads disabled in your uv configuration, the server
+  does not start until a Python 3.12 is installed. The plugin ships no hooks,
+  scripts, or binaries of its own.
 - **Local storage.** Memories stay in your Markdown files; the search index is a
   SQLite database at `~/.memtomem/memtomem.db` unless you configure another path.
 - **Local search history.** The same database records each `mem_search`: the
@@ -81,7 +82,7 @@ Before installing, inspect existing servers with `/mcp` in Claude Code, then
 run the read-only diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.7.10" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.13" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin does not put `mm` on your PATH —
@@ -90,13 +91,16 @@ it registers an MCP server, not the CLI. If you already have the CLI installed,
 scope-specific removal guidance below covers the same ground by hand.
 
 It reports current registrations and predicts conflicts with this release's
-plugin command. Exit codes: `0` no detected conflict, `1` duplicate risk,
-`2` incomplete inspection. `--json` provides structured findings. Keep your
+plugin command. The marketplace can serve a plugin newer than that release,
+with a different launch command, so repeat the check after installing: it then
+reads the installed plugin's own command. Exit codes: `0` no detected conflict,
+`1` duplicate risk, `2` incomplete inspection. `--json` provides structured
+findings. Keep your
 existing uv installation; resolve any manual MCP registration shown by the
 check before installing. The check does not intercept `/plugin install`.
 
 Before installation, doctor compares manual registrations with the launch this
-release's plugin bundles (`memtomem[onnx]==0.7.10`). After installation, it reads
+release's plugin bundles (`memtomem[onnx]==0.7.13`). After installation, it reads
 the actual plugin manifest. Use `/mcp` to verify the session, and repeat the
 diagnostic after installation.
 
@@ -117,8 +121,8 @@ Model artifacts are fetched only when the configured workflow needs them.
 On a completely fresh machine or HOME, initialize the user-owned store once:
 
 ```bash
-uvx --from 'memtomem[onnx]==0.7.10' mm init --preset minimal --non-interactive --mcp skip
-uvx --from 'memtomem[onnx]==0.7.10' mm status
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm init --preset minimal --non-interactive --mcp skip
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm status
 ```
 
 The plugin intentionally cannot perform this trust-establishing step over MCP.
@@ -129,7 +133,7 @@ gitignored local tier explicitly:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem[onnx]==0.7.10' mm mem init --scope project_local
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm mem init --scope project_local
 ```
 
 After that, `/memtomem:setup /path/to/notes` performs a one-shot index and

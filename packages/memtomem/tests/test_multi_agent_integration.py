@@ -45,10 +45,14 @@ Cases:
 
 from __future__ import annotations
 
+import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+from memtomem.cli import cli
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     INVALID_OUTPUT_FORMAT_PREFIX,
@@ -287,6 +291,179 @@ class TestCaseBShareTrail:
         )
         assert "connection pool" not in out
         assert "include_shared=False needs a resolved agent" in out
+
+    def test_share_title_hierarchy_integration_across_surfaces(self, tmp_path, monkeypatch):
+        """#3470: end-to-end integration test across mem_agent_share and mm agent share.
+
+        Pins:
+        1. Markdown heading markers (## ) are stripped on both surfaces, so copy
+           headings become '## Shared: Cache decision', not '## Shared: ## Cache decision'.
+        2. Re-sharing a copy through either surface collapses 'Shared: ' without
+           stacking prefixes.
+        3. Markdown headings containing '#' (e.g. '## # of users') keep the text.
+        4. Non-markdown hierarchy entries (JSON key '# cache', reST title '# cache')
+           preserve their leading '# '.
+        """
+        import asyncio
+
+        from memtomem.config import Mem2MemConfig
+        from memtomem.server.component_factory import close_components, create_components
+
+        isolate_memtomem_env(monkeypatch)
+
+        db_path = tmp_path / "bm25.db"
+        mem_dir = tmp_path / "memories"
+        mem_dir.mkdir(exist_ok=True)
+
+        config = Mem2MemConfig()
+        config.storage.sqlite_path = db_path
+        config.indexing.memory_dirs = [mem_dir]
+        config.embedding.dimension = 1024
+        config.search.enable_dense = False
+
+        comp = asyncio.run(create_components(config))
+
+        try:
+            app = AppContext.from_components(comp)
+            ctx = StubCtx(app)
+
+            @asynccontextmanager
+            async def fake_components():
+                yield comp
+
+            monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_components)
+            monkeypatch.setattr(
+                "memtomem.runtime.project_context._resolve_project_context_root", lambda comp: None
+            )
+
+            runner = CliRunner()
+            db = comp.storage._get_db()
+
+            # 1. Markdown file indexed and shared via mem_agent_share (MCP)
+            md_file = mem_dir / "note.md"
+            md_file.write_text("## Cache decision\n\nCache body text\n", encoding="utf-8")
+            asyncio.run(comp.index_engine.index_file(md_file, ingress_guarded=True))
+            row = db.execute(
+                "SELECT id, heading_hierarchy FROM chunks WHERE source_file = ?", (str(md_file),)
+            ).fetchone()
+            source_id = row[0]
+            assert json.loads(row[1]) == ["## Cache decision"]
+
+            res_mcp = asyncio.run(
+                mem_agent_share(chunk_id=source_id, target=SHARED_NAMESPACE, ctx=ctx)  # type: ignore[arg-type]
+            )
+            assert res_mcp.startswith("Shared to namespace")
+
+            mcp_copy = db.execute(
+                "SELECT id, heading_hierarchy FROM chunks WHERE namespace = ? AND content LIKE '%Cache body text%'",
+                (SHARED_NAMESPACE,),
+            ).fetchone()
+            assert json.loads(mcp_copy[1]) == ["## Shared: Cache decision"]
+
+            # Re-share via mem_agent_share: prefix collapses cleanly
+            res_mcp_reshare = asyncio.run(
+                mem_agent_share(chunk_id=mcp_copy[0], target=SHARED_NAMESPACE, ctx=ctx)  # type: ignore[arg-type]
+            )
+            assert res_mcp_reshare.startswith("Shared to namespace")
+            mcp_copy_2 = db.execute(
+                "SELECT id, heading_hierarchy FROM chunks WHERE namespace = ? AND id != ? AND content LIKE '%Cache body text%'",
+                (SHARED_NAMESPACE, mcp_copy[0]),
+            ).fetchone()
+            assert json.loads(mcp_copy_2[1]) == ["## Shared: Cache decision"]
+
+            # 2. Markdown file indexed and shared via mm agent share (CLI)
+            cli_md_file = mem_dir / "cli_note.md"
+            cli_md_file.write_text("## CLI Cache decision\n\nCLI body text\n", encoding="utf-8")
+            asyncio.run(comp.index_engine.index_file(cli_md_file, ingress_guarded=True))
+            cli_source_row = db.execute(
+                "SELECT id, heading_hierarchy FROM chunks WHERE source_file = ?",
+                (str(cli_md_file),),
+            ).fetchone()
+            assert json.loads(cli_source_row[1]) == ["## CLI Cache decision"]
+
+            res_cli = runner.invoke(
+                cli, ["agent", "share", cli_source_row[0], "--target", SHARED_NAMESPACE]
+            )
+            assert res_cli.exit_code == 0, res_cli.output
+
+            cli_copy = db.execute(
+                "SELECT id, heading_hierarchy FROM chunks WHERE namespace = ? AND content LIKE '%CLI body text%'",
+                (SHARED_NAMESPACE,),
+            ).fetchone()
+            assert json.loads(cli_copy[1]) == ["## Shared: CLI Cache decision"]
+
+            # Re-share via mm agent share (CLI): prefix collapses cleanly
+            res_cli_reshare = runner.invoke(
+                cli, ["agent", "share", cli_copy[0], "--target", SHARED_NAMESPACE]
+            )
+            assert res_cli_reshare.exit_code == 0, res_cli_reshare.output
+            cli_copy_2 = db.execute(
+                "SELECT id, heading_hierarchy FROM chunks WHERE namespace = ? AND id != ? AND content LIKE '%CLI body text%'",
+                (SHARED_NAMESPACE, cli_copy[0]),
+            ).fetchone()
+            assert json.loads(cli_copy_2[1]) == ["## Shared: CLI Cache decision"]
+
+            # 3. Markdown with '#' in heading text: '## # of users'
+            users_file = mem_dir / "users.md"
+            users_file.write_text("## # of users\n\nUser count text\n", encoding="utf-8")
+            asyncio.run(comp.index_engine.index_file(users_file, ingress_guarded=True))
+            users_source = db.execute(
+                "SELECT id, heading_hierarchy FROM chunks WHERE source_file = ?", (str(users_file),)
+            ).fetchone()
+            assert json.loads(users_source[1]) == ["## # of users"]
+
+            res_users = runner.invoke(
+                cli, ["agent", "share", users_source[0], "--target", SHARED_NAMESPACE]
+            )
+            assert res_users.exit_code == 0, res_users.output
+            users_copy = db.execute(
+                "SELECT heading_hierarchy FROM chunks WHERE namespace = ? AND content LIKE '%User count text%'",
+                (SHARED_NAMESPACE,),
+            ).fetchone()
+            assert json.loads(users_copy[0]) == ["## Shared: # of users"]
+
+            # 4. Structured JSON: key '# cache' must survive
+            json_file = mem_dir / "settings.json"
+            json_file.write_text(json.dumps({"# cache": "fast memory settings"}), encoding="utf-8")
+            asyncio.run(comp.index_engine.index_file(json_file, ingress_guarded=True))
+            json_source = db.execute(
+                "SELECT id, heading_hierarchy FROM chunks WHERE source_file = ?", (str(json_file),)
+            ).fetchone()
+            assert json.loads(json_source[1]) == ["settings", "# cache"]
+
+            res_json = runner.invoke(
+                cli, ["agent", "share", json_source[0], "--target", SHARED_NAMESPACE]
+            )
+            assert res_json.exit_code == 0, res_json.output
+            json_copy = db.execute(
+                "SELECT heading_hierarchy FROM chunks WHERE namespace = ? AND content LIKE '%fast memory settings%'",
+                (SHARED_NAMESPACE,),
+            ).fetchone()
+            assert json.loads(json_copy[0]) == ["## Shared: settings > # cache"]
+
+            # 5. reST file: section title with '# cache' must survive
+            rst_file = mem_dir / "notes.rst"
+            rst_file.write_text(
+                "Section: # cache\n================\nRestructured text body.\n",
+                encoding="utf-8",
+            )
+            asyncio.run(comp.index_engine.index_file(rst_file, ingress_guarded=True))
+            rst_source = db.execute(
+                "SELECT id, heading_hierarchy FROM chunks WHERE source_file = ?", (str(rst_file),)
+            ).fetchone()
+            assert json.loads(rst_source[1]) == ["Section: # cache"]
+
+            res_rst = runner.invoke(
+                cli, ["agent", "share", rst_source[0], "--target", SHARED_NAMESPACE]
+            )
+            assert res_rst.exit_code == 0, res_rst.output
+            rst_copy = db.execute(
+                "SELECT heading_hierarchy FROM chunks WHERE namespace = ? AND content LIKE '%Restructured text body.%'",
+                (SHARED_NAMESPACE,),
+            ).fetchone()
+            assert json.loads(rst_copy[0]) == ["## Shared: Section: # cache"]
+        finally:
+            asyncio.run(close_components(comp))
 
 
 # ── Case C — session→agent_id inheritance (PR-2) ────────────────────────
