@@ -30,6 +30,7 @@ from memtomem.cli._index_progress import (
     run_with_progress as _run_index_with_progress,
 )
 from memtomem._claude_plugin_contract import LAUNCH_ENV
+from memtomem._runtime_paths import scrub_text
 from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
 from memtomem.config import validate_default_namespace_write
 from memtomem.cli.wizard import (
@@ -1225,11 +1226,13 @@ def _step_settings(state: dict) -> None:
             click.secho(f"  {exc.message}", fg="red")
             click.echo()
             return
+        # A target is a path and a reason can embed one (a malformed canonical names
+        # its own), so both are shown through `scrub_text` (#3512).
         for name, r in results.items():
             if r.status == "ok":
-                click.secho(f"  Merged → {r.target}", fg="green")
+                click.secho(f"  Merged → {scrub_text(str(r.target))}", fg="green")
             elif r.status == "skipped":
-                click.secho(f"  skipped {name}: {r.reason}", fg="yellow")
+                click.secho(f"  skipped {name}: {scrub_text(r.reason)}", fg="yellow")
             elif r.status == "needs_confirmation":
                 # The host-write guard refused this target. Surface it instead
                 # of silently dropping the status (#1123 B7-4) — the user-scope
@@ -1241,7 +1244,7 @@ def _step_settings(state: dict) -> None:
                 )
             else:
                 # Defensive: never swallow an unrecognized status (e.g. error).
-                click.secho(f"  {name}: {r.status}: {r.reason}", fg="yellow")
+                click.secho(f"  {name}: {r.status}: {scrub_text(r.reason)}", fg="yellow")
 
         click.echo()
         click.echo("  Empty hooks file created. Add hooks to .memtomem/settings.json,")
@@ -1877,12 +1880,15 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
     if target in ("workspace", "project"):
         # `_runtime_profile` sets the directory whenever it names either type.
         root = (state or {})["_profile"].cwd_install_dir
+        # Prose, not a command, so the path is shown through `scrub_text` (#3512).
+        shown = scrub_text(str(root))
         if target == "workspace":
-            return f"run uv sync --dev in {root}"
+            return f"run uv sync --dev in {shown}"
         names = ", ".join(f'"{name}"' for name in extras)
+        pyproject = scrub_text(str(root / "pyproject.toml"))
         return (
-            f"add {names} to the memtomem requirement's extras in {root / 'pyproject.toml'}, "
-            f"then {_PROJECT_SYNC} in {root}"
+            f"add {names} to the memtomem requirement's extras in {pyproject}, "
+            f"then {_PROJECT_SYNC} in {shown}"
         )
     return f'{_EXTRA_INSTALL_HINT_PREFIX}[all]"'
 
@@ -2876,9 +2882,8 @@ def _write_config_and_summary(
         if source_install:
             sync_line = f"Workspace .venv not found — {_extra_install_hint([], state)} first."
         else:
-            sync_line = (
-                f"Project .venv not found — {_PROJECT_SYNC} in {profile.cwd_install_dir} first."
-            )
+            shown = scrub_text(str(profile.cwd_install_dir))
+            sync_line = f"Project .venv not found — {_PROJECT_SYNC} in {shown} first."
         click.secho(f"  {sync_line}", fg="yellow")
     else:
         missing = _collect_missing_extras(state)
@@ -3499,11 +3504,11 @@ def init(
 
     if profile.cwd_install_type == "source":
         click.secho("  Detected: source install", fg="blue")
-        click.echo(f"  Source directory: {profile.cwd_install_dir}")
+        click.echo(f"  Source directory: {scrub_text(str(profile.cwd_install_dir))}")
         click.echo()
     elif profile.cwd_install_type == "project":
         click.secho("  Detected: project install", fg="blue")
-        click.echo(f"  Project directory: {profile.cwd_install_dir}")
+        click.echo(f"  Project directory: {scrub_text(str(profile.cwd_install_dir))}")
         click.echo()
     elif profile.mm_binary_origin == "uvx":
         click.secho("  Detected: uvx (ephemeral) install", fg="blue")

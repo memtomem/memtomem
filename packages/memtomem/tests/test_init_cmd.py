@@ -9424,3 +9424,251 @@ class TestWorkspaceExtraHintNamesMemtomemsRoot:
         expected = f"  Install first: {self._project_hint(root, '"onnx"')}"
         assert recovery == [expected]
         assert not (home / ".memtomem" / "config.json").exists()
+
+
+class TestCheckoutPathsPrintedEscaped:
+    """(#3512) ``mm init`` prints a checkout's path through ``scrub_text``: a newline or
+    another control character in a directory name is shown as ``\\xNN`` and cannot split
+    a message or act on the terminal.
+
+    The profiles are built directly and nothing with these names is created on disk.
+    Newline and BEL are used because Click strips ANSI sequences from non-terminal
+    output, which would hide an ESC; every check compares a whole expected line, so a
+    line cut short by a raw newline cannot pass."""
+
+    _SYNC = "run the project's usual uv sync, with all its options,"
+
+    @staticmethod
+    def _profile(tmp_path: Path, kind: Literal["source", "project"]) -> RuntimeProfile:
+        return RuntimeProfile(
+            cwd_install_type=kind,
+            cwd_install_dir=tmp_path / "a\nb\x07c",
+            runtime_interpreter=Path(sys.executable),
+            workspace_venv_path=None,
+            mm_binary_origin="uv-tool",
+            runtime_matches_workspace=False,
+        )
+
+    def _hint(self, root: Path, kind: Literal["source", "project"]) -> str:
+        """The recovery for ``onnx`` with the root escaped, written out in full."""
+        from memtomem._runtime_paths import scrub_text
+
+        shown = scrub_text(str(root))
+        if kind == "source":
+            return f"run uv sync --dev in {shown}"
+        pyproject = scrub_text(str(root / "pyproject.toml"))
+        return (
+            f'add "onnx" to the memtomem requirement\'s extras in {pyproject}, '
+            f"then {self._SYNC} in {shown}"
+        )
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_venv_missing_line(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        kind: Literal["source", "project"],
+    ) -> None:
+        from click import unstyle
+
+        from memtomem._runtime_paths import scrub_text
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        state = _make_init_state(tmp_path)
+        state["_profile"] = self._profile(tmp_path, kind)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        root = state["_profile"].cwd_install_dir
+        assert init_cmd._workspace_needs_sync(state) is True
+
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        shown = scrub_text(str(root))
+        expected = {
+            "source": f"  Workspace .venv not found — run uv sync --dev in {shown} first.",
+            "project": f"  Project .venv not found — {self._SYNC} in {shown} first.",
+        }[kind]
+        assert [ln for ln in out.splitlines() if ".venv not found" in ln] == [expected]
+        assert "\x07" not in out
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_missing_extras_recovery(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        kind: Literal["source", "project"],
+    ) -> None:
+        from click import unstyle
+
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        # A checkout interpreter that answers without one on disk: only onnx is missing.
+        monkeypatch.setattr(init_cmd, "_workspace_python", lambda state: Path("python"))
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: {"fastapi", "uvicorn"})
+        state = _make_init_state(tmp_path)
+        state["_profile"] = self._profile(tmp_path, kind)
+        state["provider"] = "onnx"
+        state["model"] = "bge-m3"
+        state["dimension"] = 1024
+        root = state["_profile"].cwd_install_dir
+
+        init_cmd._write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        lines = out.splitlines()
+        assert "  [!] Missing extras: onnx" in lines
+        assert [ln for ln in lines if ln.startswith("      → ")] == [
+            f"      → {self._hint(root, kind)}"
+        ]
+        assert "\x07" not in out
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_inline_onnx_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: Literal["source", "project"]
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+        from memtomem.cli.wizard import run_steps
+
+        monkeypatch.setitem(sys.modules, "fastembed", None)
+        state: dict = {"_profile": self._profile(tmp_path, kind)}
+        root = state["_profile"].cwd_install_dir
+
+        @click.command()
+        def cmd() -> None:
+            run_steps([init_cmd._step_embedding], state)
+
+        result = CliRunner().invoke(cmd, [], input="2\n4\n")
+        assert result.exit_code == 0, result.output
+        assert state["provider"] == "onnx", result.output
+        lines = click.unstyle(result.output).splitlines()
+        assert [ln for ln in lines if ln.startswith("  To enable it: ")] == [
+            f"  To enable it: {self._hint(root, kind)}"
+        ]
+        assert "\x07" not in result.output
+
+    @pytest.mark.parametrize(
+        ("kind", "label"), [("source", "Source directory"), ("project", "Project directory")]
+    )
+    def test_detected_directory_banner(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: Literal["source", "project"],
+        label: str,
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem._runtime_paths import scrub_text
+        from memtomem.cli import cli, init_cmd
+
+        home = tmp_path / "home"
+        home.mkdir()
+        set_home(monkeypatch, home)
+        profile = self._profile(tmp_path, kind)
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: profile)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "--non-interactive",
+                "--preset",
+                "minimal",
+                "--memory-dir",
+                str(tmp_path / "memories"),
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        assert f"  {label}: {scrub_text(str(profile.cwd_install_dir))}" in lines
+        assert "\x07" not in result.output
+        assert (home / ".memtomem" / "config.json").exists()
+
+    def test_scripted_refusal_line(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli, init_cmd
+
+        home = tmp_path / "home"
+        home.mkdir()
+        set_home(monkeypatch, home)
+        profile = self._profile(tmp_path, "project")
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: profile)
+        # No checkout interpreter, so the wizard's own is asked, and it lacks fastembed.
+        monkeypatch.setattr(init_cmd, "_have_module", lambda name: False)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "init",
+                "--non-interactive",
+                "--provider",
+                "onnx",
+                "--model",
+                "bge-small-en-v1.5",
+                "--mcp",
+                "skip",
+            ],
+        )
+
+        assert result.exit_code == 1, result.output
+        # The refusal is a ClickException, so its text is on stderr only.
+        expected = f"  Install first: {self._hint(profile.cwd_install_dir, 'project')}"
+        assert [ln for ln in result.stderr.splitlines() if ln.startswith("  Install first:")] == [
+            expected
+        ]
+        assert "Install first:" not in result.stdout
+        assert "\x07" not in result.output
+        assert not (home / ".memtomem" / "config.json").exists()
+
+    def test_settings_step_result_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The hooks step prints each runtime's target and reason; the reasons from
+        ``generate_all_settings`` embed the project's path."""
+        from memtomem._runtime_paths import scrub_text
+        from memtomem.cli import init_cmd
+        from memtomem.context.settings import SettingsSyncResult
+
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        set_home(monkeypatch, home)
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setattr(init_cmd, "step_header", lambda *a, **k: None)
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **k: True)
+
+        weird = tmp_path / "a\nb\x07c"
+        results = {
+            "claude": SettingsSyncResult(status="ok", target=weird / "settings.json"),
+            "codex": SettingsSyncResult(status="skipped", reason=f"nothing at {weird}"),
+            "gemini": SettingsSyncResult(status="error", reason=f"{weird} is not valid JSON"),
+        }
+        monkeypatch.setattr(
+            "memtomem.context.settings.generate_all_settings",
+            lambda project_root, scope, **_: results,
+        )
+        # Captured raw, before Click strips anything.
+        buf: list[str] = []
+        monkeypatch.setattr(click, "echo", lambda *a, **k: buf.append(str(a[0]) if a else ""))
+        monkeypatch.setattr(click, "secho", lambda msg="", *a, **k: buf.append(str(msg)))
+
+        init_cmd._step_settings({})
+
+        shown = scrub_text(str(weird))
+        assert f"  Merged → {scrub_text(str(weird / 'settings.json'))}" in buf
+        assert f"  skipped codex: nothing at {shown}" in buf
+        assert f"  gemini: error: {shown} is not valid JSON" in buf
+        assert not [line for line in buf if "\x07" in line or "\n" in line]
