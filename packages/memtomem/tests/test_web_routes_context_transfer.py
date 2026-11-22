@@ -117,6 +117,38 @@ def _other_project(tmp_path: Path, name: str = "proj-b", *, store: bool = True) 
     return other
 
 
+def _collision_message(kind: str, name: str, tier: str) -> str:
+    return (
+        f"destination already exists: {kind} '{name}' in the {tier} tier of the "
+        "destination. Resolve manually or remove the existing entry first."
+    )
+
+
+def _strings(value: object) -> list[str]:
+    """Every key and string value of a decoded JSON body, recursively."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for k, v in value.items() for s in (*_strings(k), *_strings(v))]
+    if isinstance(value, list):
+        return [s for item in value for s in _strings(item)]
+    return []
+
+
+def _assert_path_free(body: object, *leaky: Path) -> None:
+    """No decoded string carries a leaky path (given or resolved form) or ``$HOME``.
+
+    Walks the decoded body rather than ``json.dumps`` of it: serialized, a
+    Windows path's backslashes are doubled and the raw path never matches.
+    """
+    forbidden = {str(Path.home())}
+    for p in leaky:
+        forbidden |= {str(p), str(p.resolve())}
+    for s in _strings(body):
+        for f in forbidden:
+            assert f not in s, (f, s)
+
+
 # ── apply: cross-project move / copy ────────────────────────────────────
 
 
@@ -302,10 +334,92 @@ async def test_collision_409_destination_exists(client, cwd_root: Path, tmp_path
         },
     )
     assert resp.status_code == 409, resp.text
+    # The engine names the destination by its absolute path (#3302).
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "conflict"
     assert detail["reason_code"] == "destination_exists"
-    assert "destination already exists" in detail["message"]
+    assert detail["message"] == _collision_message("agents", "foo", "project_shared")
+
+
+@pytest.mark.asyncio
+async def test_collision_409_names_the_renamed_destination(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """``as_name`` is the name that collided, and the tier is the one asked for."""
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    _write_agent(_local_agents(other), "bar", "---\nname: bar\n---\n\nresident\n")
+    scope_b = await _register(client, other)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "to_target_scope": "project_local",
+            "to_project_scope_id": scope_b,
+            "as_name": "bar",
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "destination_exists"
+    assert detail["message"] == _collision_message("agents", "bar", "project_local")
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_symlinks
+async def test_collision_409_in_symlinked_store_is_path_free(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """The engine resolves the destination store, so a store linked out of the
+    project names a directory under neither root — the route's own message
+    must not depend on stripping it."""
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    external = tmp_path / "external-agents"
+    _write_agent(external, "foo", "---\nname: foo\n---\n\nresident\n")
+    _shared_agents(other).symlink_to(external, target_is_directory=True)
+    scope_b = await _register(client, other)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "to_target_scope": "project_shared",
+            "to_project_scope_id": scope_b,
+            "confirm_project_shared": True,
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, external, cwd_root, other)
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "destination_exists"
+    assert detail["message"] == _collision_message("agents", "foo", "project_shared")
+
+
+@pytest.mark.asyncio
+async def test_collision_409_user_tier_is_path_free(client, cwd_root: Path, tmp_path: Path) -> None:
+    """The user tier resolves under the request-time HOME, which the import-time
+    ``$HOME`` collapse does not know about."""
+    _write_agent(_shared_agents(cwd_root), "foo")
+    _write_agent(Path.home() / ".memtomem" / "agents", "foo", "---\nname: foo\n---\n\nhost\n")
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "move",
+            "from_scope": "project_shared",
+            "to_target_scope": "user",
+            "allow_host_writes": True,
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root)
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "destination_exists"
+    assert detail["message"] == _collision_message("agents", "foo", "user")
 
 
 def _usurp_staging_after_scan(monkeypatch, dst_store):
