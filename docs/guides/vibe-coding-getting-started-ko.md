@@ -48,11 +48,9 @@ uvx --version
 ```
 
 명령을 찾지 못하면 [uv 공식 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를
-따른 뒤 터미널을 새로 여세요. memtomem은 Python 3.12 이상 환경에서
-실행되며, 첫 실행에는 정확히 고정된 패키지를 내려받을 네트워크 연결이
-필요합니다. 아래 명령은 `--python 3.12`를 넘기므로, Python 3.12를 찾지 못하면
-uv가 내려받습니다. 단, uv 설정에서 Python 다운로드를 꺼 둔 경우는 예외입니다.
-임베딩 모델이나 API key는 필요하지 않습니다.
+따른 뒤 터미널을 새로 여세요. 첫 실행에는 정확히 고정된 패키지를 내려받을
+네트워크 연결이 필요하고, 아래 명령은 uv에 Python 3.12를 요청합니다(무엇이
+필요한지는 2단계에서 설명합니다). 임베딩 모델이나 API key는 필요하지 않습니다.
 
 그다음 평소 쓰는 도구 **하나만** 확인합니다.
 
@@ -81,6 +79,19 @@ Claude Code와 Codex CLI 중 어느 쪽을 쓰더라도 완전히 새 환경에�
 uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm init --preset minimal --non-interactive --mcp skip
 uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm status
 ```
+
+이 명령과 플러그인이 서버를 띄우는 명령은 `--python 3.12`를 넘기므로,
+uv가 찾거나 내려받을 수 있는 Python 3.12가 필요합니다. 기본 설정에서는
+Python 3.12를 찾지 못하면 uv가 내려받지만, uv가 Python을 스스로 내려받지
+않도록 설정된 경우(uv 설정의 `python-downloads = "never"` 또는 `"manual"`)
+더 새로운 Python만 있는 컴퓨터에서는 `No interpreter found for Python 3.12`로
+멈추고 플러그인 서버도 시작되지 않습니다. 오프라인인 uv도 Python을 내려받을
+수 없으므로, 패키지가 이미 캐시돼 있어도 Python 3.12를 미리 설치해 두지
+않았다면 플러그인 서버가 시작되지 않습니다. 먼저 Python 3.12를 설치하세요
+(`uv python install 3.12`는 `"manual"`에서는 내려받고 `"never"`에서는
+거부됩니다). 또는 플러그인 대신, [시작 가이드의 Quickstart](getting-started.md#quickstart)를
+따라 지금 있는 Python으로 memtomem을 설치하고 저장소를 준비한 뒤, [MCP 클라이언트 수동
+설정](mcp-clients.md)에 나온 대로 쓰는 도구에 `memtomem-server`를 등록하세요.
 
 `--mcp skip`은 다음 단계의 플러그인이 MCP 연결을 제공하므로 다른
 클라이언트 설정을 건드리지 않겠다는 뜻입니다.

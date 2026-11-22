@@ -5,6 +5,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **The guides that teach a `--python 3.12` command say what it needs when uv cannot
+  download Python (#3498).** The README, the getting-started, MCP clients, Claude Code, Kimi
+  Code and OpenCode guides and the plugin quickstart (English and Korean) now say, beside
+  their install or launch commands (the README's beside its Quick Start install, which its
+  setup prompt links to, and beside its "No install" registration; the MCP clients guide's
+  in its Claude Code and OpenCode sections), that such a command needs a Python 3.12 uv can
+  find or download, and what to do where uv may not download Python on its own
+  (`python-downloads = "never"` or `"manual"`): install a Python 3.12 first, or install
+  memtomem with the Python you have, putting its version in place of the `3.13` the
+  example command names, and register `memtomem-server` (the plugin quickstart points to
+  the getting-started Quickstart for that install and the store setup, then to the manual
+  registration). The
+  README, the getting-started prerequisite and the plugin quickstart add that an offline uv
+  cannot download Python either, so a Python 3.12 has to be installed beforehand. The
+  getting-started prerequisite read "Python 3.12+"; it is now "Python 3.12", checked with
+  `uv python find --system 3.12` rather than `python3 --version`. Without `--system` the
+  check also reports a project `.venv`'s Python: with a 3.12 visible only through `.venv`,
+  `uv python find 3.12` exited 0 while `uv python find --system 3.12` and the `uvx` launch
+  each exited 2, and with a Homebrew 3.12 on `PATH` the `--system` check exited 0. Measured
+  with uv 0.12.13 on macOS, with only Python 3.13.7 and 3.14.4 visible to uv and
+  `python-downloads = "never"`:
+  `uvx --python 3.12 --isolated --from 'memtomem[all]==0.7.12' memtomem-server --help` and
+  `uv tool install --python 3.12 'memtomem[all]==0.7.12'` each exited 2 with
+  `No interpreter found for Python 3.12 in managed installations or search path`, and
+  `uv python install 3.12` exited 1 ("Python downloads are not allowed"). Under
+  `python-downloads = "manual"` the launch exited 2 with the same error, and
+  `uv python install 3.12` installed 3.12.14, after which the launch printed the help. The
+  same launch with `--python 3.13`, and `uv tool install --python 3.13
+  'memtomem[all]==0.7.12'` followed by the installed `memtomem-server --help`, each exited 0
+  under `"never"`. Offline (`UV_OFFLINE=1`) with the packages cached, the launch exited 2
+  with the same error without a Python 3.12 and printed the help with one. Re-measured for
+  the getting-started example after 0.7.13: with Python 3.13 available and
+  `UV_PYTHON_DOWNLOADS=never`, `uv tool install --python 3.13 'memtomem[all]==0.7.13'` and
+  the installed `memtomem-server --help` each exited 0.
+
 ## [0.7.13] — 2026-11-22
 
 A patch whose main change is the Python the plugins ask for: the Claude Code, Codex and

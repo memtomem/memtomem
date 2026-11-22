@@ -123,7 +123,13 @@ Both write to `~/.claude.json` — no need to edit that file by hand.
 
 These commands reuse the persistent environment that provides `mm`. If you
 intentionally do not install memtomem, replace `memtomem-server` with `uvx
---python 3.12 --isolated --from "memtomem[all]==0.7.13" memtomem-server`.
+--python 3.12 --isolated --from "memtomem[all]==0.7.13" memtomem-server`. That
+launch needs a Python 3.12 that uv can find or download. Where uv may not
+download Python on its own (`python-downloads = "never"` or `"manual"` in its
+configuration) and only a newer Python is installed, it stops with `No interpreter
+found for Python 3.12`: install a Python 3.12 first, or install memtomem with
+the Python you have (`uv tool install --python 3.13 'memtomem[all]'`, with your
+version in place of `3.13`) and keep the `memtomem-server` commands above.
 
 For the safe plugin experience (bundled MCP server plus nine focused skills),
 install `/plugin install memtomem@memtomem`. Prompt retrieval and write-time
@@ -388,6 +394,13 @@ skills — configure the released MCP server directly instead:
   }
 }
 ```
+
+That launch needs a Python 3.12 that uv can find or download, as the plugin's
+does. Where uv may not download Python on its own and only a newer Python is
+installed, install a Python 3.12 first, or install memtomem with the Python you
+have (`uv tool install --python 3.13 'memtomem[all]'`, with your version in
+place of `3.13`) and use `"command": ["memtomem-server"]`
+([OpenCode guide](integrations/opencode.md#manual-mcp-alternative)).
 
 See the [OpenCode integration guide](integrations/opencode.md) for precedence,
 permission, platform, and development-install details.

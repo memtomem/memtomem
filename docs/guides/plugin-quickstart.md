@@ -50,11 +50,9 @@ uvx --version
 
 If either command is not found, follow the [official uv installation
 guide](https://docs.astral.sh/uv/getting-started/installation/) and open a new
-terminal. memtomem runs on Python 3.12 or newer, and the first run needs a
-network connection to download the exactly pinned packages. The commands
-below pass `--python 3.12`, so uv downloads Python 3.12 when it finds none,
-unless your uv configuration disables Python downloads. You do not need an
-embedding model or an API key.
+terminal. The first run needs a network connection to download the exactly
+pinned packages, and the commands below ask uv for Python 3.12 (step 2 says
+what that needs). You do not need an embedding model or an API key.
 
 Then check **only** the tool you use:
 
@@ -82,6 +80,20 @@ Seeing an existing ONNX/E5 configuration is normal; this walkthrough does not ch
 uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm init --preset minimal --non-interactive --mcp skip
 uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm status
 ```
+
+These commands and the plugin's own server launch pass `--python 3.12`, so
+they need a Python 3.12 that uv can find or download; by default uv downloads
+one when it finds none. Where uv may not download Python on its own
+(`python-downloads = "never"` or `"manual"` in its configuration), a machine
+with only a newer Python stops with `No interpreter found for Python 3.12`, and
+the plugin's server does not start either. An offline uv cannot download one
+either: with the packages already cached, the plugin's server still does not
+start unless a Python 3.12 was installed beforehand. Install a Python 3.12
+first (`uv python install 3.12` downloads one under `"manual"`, not under
+`"never"`), or skip the plugin: follow the
+[Getting Started Quickstart](getting-started.md#quickstart), which installs
+memtomem with the Python you have and sets up the store, then register
+`memtomem-server` as [MCP clients](mcp-clients.md) shows for your tool.
 
 `--mcp skip` leaves other clients' settings alone, because the plugin in the
 next step provides the MCP connection. The command installs the ONNX
