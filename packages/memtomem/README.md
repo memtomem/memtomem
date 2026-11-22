@@ -2,9 +2,43 @@
 
 # memtomem
 
-> 🧪 **Beta** — the nine core MCP tools, the `mm` CLI, and the format of your memory files and config files change only with an `Upgrading` note in the [CHANGELOG](https://github.com/memtomem/memtomem/blob/main/CHANGELOG.md), and behind a deprecation window where one is possible. Features marked **experimental** can change or go away without either — see [Stability](https://github.com/memtomem/memtomem#stability). Feedback and issue reports are especially welcome at [github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
+[![Status: beta](https://img.shields.io/badge/status-beta-orange)](https://github.com/memtomem/memtomem#stability)
 
 Local-first long-term memory for AI coding agents: Markdown files you own, found again with hybrid keyword + semantic search. Core usage is hook-free by default: your `.md` files are the source of truth, the search index is rebuilt from them (tag edits and working state live only in the database), and memory changes happen only when you or your agent explicitly call memtomem. Optional client hooks are separate, visible integrations.
+
+## Install
+
+You need [uv](https://docs.astral.sh/uv/getting-started/installation/), which also provides the `uvx` the plugins start their server with, and the agent you add the plugin to, installed and signed in ([Claude Code](https://code.claude.com/docs/en/quickstart), [Codex CLI](https://learn.chatgpt.com/docs/codex/cli)). Install the `mm` CLI:
+
+```bash
+uv tool install --python 3.12 'memtomem[all]'
+```
+
+This and the plugin's server need a Python 3.12 that uv can find or download. If `mm` is not found afterwards, run `uv tool update-shell` and open a new shell. Then create your memory store once, as [step 2 of the plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md#2-shared-setup-initialize-your-user-memory-store-once) shows; that step also says to skip it if you already have saved memories or memtomem settings, and what to do when uv cannot get Python 3.12.
+
+If you registered memtomem as an MCP server by hand before, read [Keep manual MCP and plugin skills](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md#keep-manual-mcp-and-plugin-skills) before you start a session with the plugin: a manual entry and the plugin's server can both run, or the manual one can serve in its place; that section gives the read-only check for each host.
+
+Then add the plugin for the agent you use. Claude Code (user scope; for one project only, see the [plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md#install-with-an-explicit-project-scope)):
+
+```bash
+claude plugin marketplace add memtomem/memtomem
+claude plugin install memtomem@memtomem
+```
+
+Codex CLI:
+
+```bash
+codex plugin marketplace add memtomem/memtomem
+codex plugin add memtomem@memtomem
+```
+
+In each project, register the memory tier the session loop writes to. Run this in the project's Git root:
+
+```bash
+mm mem init --scope project_local
+```
+
+Start a new Claude Code or Codex CLI session from that same Git root and run `/memtomem:brief` in Claude Code or `$memtomem-brief` in Codex CLI. The [plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md) also covers a memtomem server you registered by hand before, and checking the connection. OpenCode, Kimi Code, Antigravity, and Cursor each have their own steps under [Coding agents](https://github.com/memtomem/memtomem#coding-agents) on GitHub; for any other MCP client, follow the [Quick Start](https://github.com/memtomem/memtomem#quick-start), or [let your coding agent set it up](https://github.com/memtomem/memtomem#set-it-up-from-your-coding-agent).
 
 ## The session loop
 
@@ -85,7 +119,7 @@ mm search "blue-green"
 
 The search should return the sentence you just added. `mm add` writes to your configured user memory directory and indexes the entry immediately, so this path works without an existing notes directory or a connected editor. Choose **Minimal** in the setup picker for a no-model-download first proof and rerun `mm init` later to add semantic search. To index existing files next, run `mm index /path/to/your/notes`.
 
-To run the session loop, install the plugin for your coding agent ([Claude Code](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-claude-plugin), [Codex CLI](https://github.com/memtomem/memtomem/tree/main/plugins/memtomem), [OpenCode](https://github.com/memtomem/memtomem/tree/main/packages/opencode-memtomem), [Kimi Code](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-kimi-skills), [Antigravity](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-antigravity-plugin), or [Cursor](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-cursor-plugin)), then register the project memory tier with `cd <your-project> && mm mem init --scope project_local` and run the brief workflow in a new session (`/memtomem:brief` in Claude Code; the guide above lists each host's name). The [Claude Code & Codex CLI plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md) ([한국어](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md)) walks through plugin installation and a first memory save-and-search round trip in 10–15 minutes; [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) covers install alternatives and [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) covers manual registration for other editors.
+To run the session loop, install the plugin for your coding agent (the Claude Code and Codex CLI commands are under Install above; [OpenCode](https://github.com/memtomem/memtomem/tree/main/packages/opencode-memtomem), [Kimi Code](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-kimi-skills), [Antigravity](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-antigravity-plugin), or [Cursor](https://github.com/memtomem/memtomem/tree/main/packages/memtomem-cursor-plugin)), then register the project memory tier with `cd <your-project> && mm mem init --scope project_local` and run the brief workflow in a new session (`/memtomem:brief` in Claude Code; the guide above lists each host's name). The [Claude Code & Codex CLI plugin quickstart](https://github.com/memtomem/memtomem/blob/main/docs/guides/plugin-quickstart.md) ([한국어](https://github.com/memtomem/memtomem/blob/main/docs/guides/vibe-coding-getting-started-ko.md)) walks through plugin installation and a first memory save-and-search round trip in 10–15 minutes; [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) covers install alternatives and [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) covers manual registration for other editors.
 
 `[all]` includes local ONNX embeddings, Korean tokenization, code chunking, the Web UI, Langfuse tracing, and LangGraph Store support. The Ollama and OpenAI embedding providers need no extra, so a bare `memtomem` install can use them; without a provider it searches by keyword (BM25). OpenAI embeddings, a cloud LLM, or the Cohere reranker send note text to that service; see [What leaves your machine](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#what-leaves-your-machine). See the [optional extras table](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md#optional-extras) for smaller bundles. If `mm` is not on PATH, run `uv tool update-shell` and open a new shell. If an install appears stale, re-run it with `--refresh`. To upgrade an existing uv tool install, run `mm upgrade` rather than `uv tool install` again: it keeps the extras it detects and, on macOS and Linux, stops running servers first (see the [CLI reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/data-config-cli.md#cli-reference)).
 
