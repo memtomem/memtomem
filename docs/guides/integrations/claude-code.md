@@ -58,6 +58,10 @@ the diagnostic from the project you want to inspect:
 uvx --python 3.12 --from "memtomem[all]==0.7.13" mm doctor --claude-mcp
 ```
 
+Like the plugin's server launch below, this needs a Python 3.12 that uv can
+find or download; the paragraph after the install commands says what to do
+where uv may not download Python on its own.
+
 The pin is there because installing the plugin registers an MCP server; it does
 not put `mm` on your PATH. If you already have the CLI installed,
 `mm doctor --claude-mcp` is the same check. Neither is required — `/mcp` and the
@@ -82,7 +86,13 @@ explains effective enablement and disabling a manual server only in that project
 
 The plugin launches the server via an exact reviewed
 `uvx --python 3.12 --from memtomem[onnx]==<version>` pin, so
-[uv](https://docs.astral.sh/uv/) must be on your PATH. BM25 works with the default `embedding.provider=none`; embeddings are
+[uv](https://docs.astral.sh/uv/) must be on your PATH, and the server needs a
+Python 3.12 that uv can find or download. Where uv may not download Python on its own (`python-downloads =
+"never"` or `"manual"` in its configuration), the server does not start on a
+machine with only a newer Python until you install a Python 3.12
+(`uv python install 3.12` downloads one under `"manual"`, not under `"never"`);
+[Option B](#option-b-register-the-mcp-server-manually) can use the Python you
+have. BM25 works with the default `embedding.provider=none`; embeddings are
 optional.
 
 > **Already registered via `claude mcp add`?** What happens depends on
@@ -189,7 +199,12 @@ that file by hand.
 
 The direct command preserves the extras in the persistent environment used by
 `mm`. For a no-install setup, use `uvx --python 3.12 --isolated --from
-"memtomem[all]==0.7.13" memtomem-server`. If an older user-scope registration
+"memtomem[all]==0.7.13" memtomem-server`, which needs a Python 3.12 that uv can
+find or download: where uv may not download Python on its own and only a newer
+Python is installed, it stops with `No interpreter found for Python 3.12`. Then install a
+Python 3.12 first, or install memtomem with the Python you have
+(`uv tool install --python 3.13 'memtomem[all]'`, with your version in place of
+`3.13`) and use the direct command above. If an older user-scope registration
 already exists, replace it explicitly:
 
 ```bash

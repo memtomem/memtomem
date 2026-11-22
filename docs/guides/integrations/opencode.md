@@ -8,7 +8,8 @@ skills without adding event hooks or automatic indexing.
 
 - OpenCode `>=1.17.18 <2`
 - macOS, Linux, or Windows through WSL
-- `uvx` available on `PATH`
+- `uvx` available on `PATH`, and a Python 3.12 it can find or download (the
+  plugin's server launch asks for 3.12)
 
 Native Windows has not yet been verified.
 
@@ -62,6 +63,13 @@ instead:
   }
 }
 ```
+
+That launch needs a Python 3.12 that uv can find or download. Where uv may not
+download Python on its own (`python-downloads = "never"` or `"manual"` in its
+configuration) and only a newer Python is installed, it stops with `No interpreter found for
+Python 3.12`: install a Python 3.12 first, or install memtomem with the Python
+you have (`uv tool install --python 3.13 'memtomem[all]'`, with your version in
+place of `3.13`) and use `"command": ["memtomem-server"]`.
 
 `MEMTOMEM_EXTRA_TOOLS` matters once you add the plugin too: an existing
 `mcp.memtomem` keeps serving (see the permission policy below), and the
