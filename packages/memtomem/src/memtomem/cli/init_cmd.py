@@ -30,6 +30,7 @@ from memtomem.cli._index_progress import (
     run_with_progress as _run_index_with_progress,
 )
 from memtomem._claude_plugin_contract import LAUNCH_ENV
+from memtomem._runtime_paths import scrub_text
 from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
 from memtomem.config import validate_default_namespace_write
 from memtomem.cli.wizard import (
@@ -355,15 +356,23 @@ class RuntimeProfile:
       ``None`` for ``pypi``.
     - ``runtime_interpreter`` — ``sys.executable`` as a ``Path`` (raw, no
       ``.resolve()`` — see ``feedback_venv_raw_path_check.md``).
-    - ``workspace_venv_path`` — ``<cwd_install_dir>/.venv`` if it exists,
-      ``None`` otherwise. Used to probe extras via the workspace's
-      interpreter rather than the wizard's own.
+    - ``workspace_venv_path`` — the environment ``uv run --directory
+      <cwd_install_dir>`` uses (:func:`_uv_project_environment`) if that
+      directory exists, ``None`` otherwise. For a project at a uv workspace
+      member it is the workspace root's environment, not ``<member>/.venv``.
+      Used to probe extras via that environment's interpreter rather than the
+      wizard's own.
     - ``mm_binary_origin`` — how the running ``mm`` was installed/invoked
       (``uv-tool`` / ``uvx`` / ``venv-relative`` / ``system`` / ``unknown``).
-    - ``runtime_matches_workspace`` — does ``runtime_interpreter`` actually
-      live under ``workspace_venv_path``? If True the user is running
-      ``uv run mm`` from the workspace; if False the wizard's interpreter
-      and the workspace venv are different envs."""
+    - ``runtime_matches_workspace`` — is ``runtime_interpreter`` that
+      environment's interpreter? If True the user is running ``uv run mm``
+      from the workspace; if False the wizard's interpreter and the workspace
+      environment are different envs.
+    - ``workspace_env_error`` — for a source/project install whose environment
+      uv could not report, why, with what to do about it; ``None`` otherwise.
+      When set, ``workspace_venv_path`` is ``None`` and nothing stands in for
+      the unknown environment: not ``<cwd_install_dir>/.venv`` and not the
+      wizard's interpreter."""
 
     cwd_install_type: CwdInstallType
     cwd_install_dir: Path | None
@@ -371,6 +380,107 @@ class RuntimeProfile:
     workspace_venv_path: Path | None
     mm_binary_origin: MmBinaryOrigin
     runtime_matches_workspace: bool
+    workspace_env_error: str | None = None
+
+
+# ``uv workspace dir`` reads manifests only: it runs no build backend, needs no
+# lockfile and writes nothing (uv 0.11.16 and 0.12.17, measured with a missing
+# lock, a garbage lock and a member whose version is dynamic). ``uv sync
+# --dry-run`` was rejected: without ``--frozen`` it ran a setuptools member's
+# build backend, which wrote ``<member>/<name>.egg-info`` into the source tree,
+# and with ``--frozen`` it fails on a missing or outdated lock.
+_UV_DISCOVERY_TIMEOUT_S = 10
+
+
+def _uv_workspace_root(directory: Path) -> tuple[Path | None, str | None]:
+    """Ask uv which workspace root ``uv run --directory <directory>`` uses.
+
+    Returns ``(root, None)``, or ``(None, reason)`` when uv cannot say. uv's
+    own discovery decides membership: ``members`` / ``exclude`` globs, a
+    workspace root nested inside a member, a project that is in no workspace
+    (its root is itself). An unparseable ancestor ``pyproject.toml`` or a
+    ``[tool.uv] managed = false`` project is an error there, so it is unknown
+    here too.
+
+    It runs with the wizard's ``PATH`` and environment. An MCP client that
+    finds another ``uv`` on its own ``PATH`` can resolve differently.
+
+    ``UV_NO_PROJECT`` and ``UV_ISOLATED`` make ``uv run`` skip the project's
+    environment while ``uv workspace dir`` still names the root (uv 0.12.17),
+    so either one set to anything but a false value is unknown here."""
+    for name in ("UV_NO_PROJECT", "UV_ISOLATED"):
+        if os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off"):
+            return None, f"{name} is set, so `uv run` does not use the project's environment"
+    uv = shutil.which("uv")
+    if uv is None:
+        return None, (
+            "uv is not on PATH. Install uv or put it on PATH; the MCP command "
+            "`mm init` writes runs `uv run` as well"
+        )
+    cmd = [uv, "workspace", "dir", "--offline", "--directory", str(directory)]
+    shown = f"`uv workspace dir --offline --directory {directory}`"
+    try:
+        # Bytes, not ``text=True``: the locale codec would decode the path
+        # before it could be checked as UTF-8.
+        result = subprocess.run(cmd, capture_output=True, timeout=_UV_DISCOVERY_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return None, f"{shown} did not finish in {_UV_DISCOVERY_TIMEOUT_S} s"
+    except OSError as exc:
+        return None, f"{shown} could not run ({exc.strerror or exc})"
+    if result.returncode != 0:
+        return None, f"{shown} exited with {result.returncode}; run it to see uv's error"
+    try:
+        out = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, f"{shown} printed a path that is not UTF-8"
+    # One line terminated by ``\n``: uv prints ``\n`` on every platform, so a
+    # ``\r`` before it belongs to the directory name. Not ``splitlines()``: it
+    # also splits on characters a directory name can hold. A NUL can be in no
+    # path, and ``os.stat`` would raise ``ValueError`` on it.
+    line = out.removesuffix("\n")
+    if not line or "\n" in line or "\x00" in line or not Path(line).is_absolute():
+        return None, f"{shown} did not print one absolute path"
+    return Path(line), None
+
+
+def _uv_project_environment(root: Path) -> Path:
+    """The environment uv uses for the workspace at *root*.
+
+    ``UV_PROJECT_ENVIRONMENT`` when set and non-empty (a relative value is
+    joined to *root*, an absolute one used as given, ``~`` not expanded),
+    else ``<root>/.venv`` — uv's rule in 0.11.16 and 0.12.17. With the
+    ``centralized-project-envs`` preview, ``<root>/.venv`` is a symlink to
+    the cached environment and resolves to the same interpreter."""
+    override = os.environ.get("UV_PROJECT_ENVIRONMENT")
+    if override:
+        env = Path(override)
+        return env if env.is_absolute() else root / env
+    return root / ".venv"
+
+
+def _path_exists(path: Path) -> bool:
+    """Whether *path* exists, following symlinks. Raises ``OSError`` when
+    that cannot be told — a symlink whose target the user cannot access, a
+    symlink loop — rather than calling it absent. Not ``Path.exists()``: for
+    the denied symlink it raises ``PermissionError`` on Python 3.12.12 and
+    3.13.9 and answers ``False`` on 3.14.7 (measured)."""
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
+
+
+def _venv_interpreter_dirs(env: Path) -> tuple[Path, Path]:
+    return env / "bin", env / "Scripts"
+
+
+def _same_directory(a: Path, b: Path) -> bool:
+    """Whether *a* and *b* name one directory, through symlinks and aliases."""
+    try:
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except (OSError, ValueError):
+        return False
 
 
 def _runtime_profile() -> RuntimeProfile:
@@ -395,19 +505,27 @@ def _runtime_profile() -> RuntimeProfile:
         cwd_install_dir = None
 
     runtime_interpreter = Path(sys.executable)
-    workspace_venv_path: Path | None
+    workspace_venv_path: Path | None = None
+    workspace_env_error: str | None = None
     if cwd_install_dir is not None:
-        candidate = cwd_install_dir / ".venv"
-        workspace_venv_path = candidate if candidate.exists() else None
-    else:
-        workspace_venv_path = None
+        root, workspace_env_error = _uv_workspace_root(cwd_install_dir)
+        if root is not None:
+            env = _uv_project_environment(root)
+            try:
+                workspace_venv_path = env if _path_exists(env) else None
+            except OSError as exc:
+                # Not absent: a sync line would be wrong, and the wizard's
+                # interpreter must not stand in for it.
+                workspace_env_error = f"{env} cannot be read ({exc.strerror or exc})"
 
-    runtime_matches_workspace = False
-    if workspace_venv_path is not None:
-        try:
-            runtime_matches_workspace = runtime_interpreter.is_relative_to(workspace_venv_path)
-        except (OSError, ValueError):
-            runtime_matches_workspace = False
+    # The interpreter's own directory against the environment's ``bin`` /
+    # ``Scripts``, both normalized; the interpreter's final symlink is not
+    # followed (it can point at the base Python). Containment would match an
+    # environment nested inside the selected one.
+    runtime_matches_workspace = workspace_venv_path is not None and any(
+        _same_directory(runtime_interpreter.parent, d)
+        for d in _venv_interpreter_dirs(workspace_venv_path)
+    )
 
     mm_binary_origin = _detect_mm_binary_origin(
         runtime_interpreter, runtime_matches_workspace=runtime_matches_workspace
@@ -420,6 +538,7 @@ def _runtime_profile() -> RuntimeProfile:
         workspace_venv_path=workspace_venv_path,
         mm_binary_origin=mm_binary_origin,
         runtime_matches_workspace=runtime_matches_workspace,
+        workspace_env_error=workspace_env_error,
     )
 
 
@@ -1709,7 +1828,10 @@ _SEED_MAX_BYTES: int = 64 * 1024
 
 
 def _workspace_python(state: dict) -> Path | None:
-    """Return ``<workspace_venv_path>/bin/python`` if it exists, else ``None``.
+    """Return ``<workspace_venv_path>/bin/python`` (``Scripts/python.exe``)
+    if it exists, else ``None``. An interpreter whose existence cannot be
+    told is returned too, so the probe fails on it and the extras are
+    reported as not checked rather than the environment as unsynced.
 
     This is the reconcile hook between the cwd-filesystem axis
     (:attr:`RuntimeProfile.cwd_install_type`) and the runtime-interpreter axis
@@ -1726,9 +1848,16 @@ def _workspace_python(state: dict) -> Path | None:
     profile = state["_profile"]
     if profile.workspace_venv_path is None:
         return None
-    for relative in (("bin", "python"), ("Scripts", "python.exe")):
-        py = profile.workspace_venv_path.joinpath(*relative)
-        if py.exists():
+    bindir, scripts = _venv_interpreter_dirs(profile.workspace_venv_path)
+    posix, windows = bindir / "python", scripts / "python.exe"
+    # This platform's layout first: a stale entry in the other one must not
+    # win over it, and only a native interpreter that is absent lets the
+    # other layout answer.
+    for py in (windows, posix) if sys.platform == "win32" else (posix, windows):
+        try:
+            if _path_exists(py):
+                return py
+        except OSError:
             return py
     return None
 
@@ -1737,19 +1866,27 @@ def _probe_workspace_extras(py: Path) -> set[str] | None:
     """Ask a foreign Python which of ``fastembed`` / ``fastapi`` / ``uvicorn``
     are importable. Returns the importable subset, or ``None`` on subprocess
     failure (a binary that is missing or cannot run, timeout, non-zero rc, bad
-    JSON). ``None`` means unknown: :func:`_collect_missing_extras` falls back to the
-    in-process probe, and :func:`_onnx_preset_will_work` counts it as missing."""
+    JSON). ``None`` means unknown: :func:`_check_extras` reports the extras as
+    not checked, and :func:`_onnx_preset_will_work` counts them as missing."""
     try:
-        result = _run([str(py), "-c", _PROBE_EXTRAS_CODE], timeout=5)
-    except (OSError, subprocess.TimeoutExpired):
+        # Bytes: with ``text=True`` an undecodable byte raises on POSIX and,
+        # on Windows, leaves ``stdout`` as ``None`` (decoded in a reader thread).
+        # ``-P``: without it ``-c`` puts the current directory first on
+        # ``sys.path``, so a ``fastembed.py`` there would pass for the extra.
+        # memtomem needs 3.12+, which has the flag; an older Python rejects it
+        # and the extras read as not checked.
+        result = subprocess.run(
+            [str(py), "-P", "-c", _PROBE_EXTRAS_CODE], capture_output=True, timeout=5
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
         return None
     try:
-        parsed = json.loads(result.stdout.strip())
-    except (json.JSONDecodeError, ValueError):
+        parsed = json.loads(result.stdout.decode("utf-8").strip())
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
         return None
-    if not isinstance(parsed, list):
+    if not isinstance(parsed, list) or not all(isinstance(name, str) for name in parsed):
         return None
     return set(parsed)
 
@@ -1757,7 +1894,8 @@ def _probe_workspace_extras(py: Path) -> set[str] | None:
 def _inproc_have_extras() -> tuple[bool, bool]:
     """Return ``(have_fastembed, have_web)`` via :func:`_have_module` /
     :func:`memtomem.cli.web._missing_web_deps`. Used when not a
-    source/project install, or when the workspace-python probe fails.
+    source/project install, or when a source/project install's environment
+    has not been created yet (:func:`_workspace_needs_sync`).
 
     Phase 3 (#363): both call sites now use ``find_spec`` semantics under
     the hood — ``_have_module`` directly, and ``_missing_web_deps`` after
@@ -1787,12 +1925,13 @@ def _onnx_preset_will_work(state: dict) -> bool:
 
 
 def _workspace_needs_sync(state: dict) -> bool:
-    """True iff source/project install detected but ``<dir>/.venv/`` is
-    absent — a fresh clone / fresh worktree. The summary shows a single
-    ``.venv not found`` sync line in this case instead of a noisy missing-
-    extras warning that would have probed the wrong interpreter."""
+    """True iff source/project install detected and uv names an environment
+    that has no interpreter yet — a fresh clone / fresh worktree. The summary
+    shows a single ``.venv not found`` sync line in this case instead of a
+    noisy missing-extras warning that would have probed the wrong interpreter.
+    False when uv could not name the environment: nothing says it is absent."""
     profile = state["_profile"]
-    if profile.cwd_install_type == "pypi":
+    if profile.cwd_install_type == "pypi" or profile.workspace_env_error is not None:
         return False
     return _workspace_python(state) is None
 
@@ -2287,11 +2426,22 @@ def _maybe_offer_startup_backfill(state: dict) -> None:
 def _collect_missing_extras(state: dict) -> list[str]:
     """Return ordered list of missing extras the chosen config will need.
 
-    Source/project install: probes the workspace ``.venv/bin/python`` — the
-    interpreter ``uv run mm`` will use — so the warning matches what
-    ``Next steps`` will actually run. If the workspace venv is absent the
-    caller shows a ``.venv not found`` sync line instead, so this path
-    only fires when the probe has authoritative state.
+    Empty when they could not be checked; :func:`_check_extras` says why."""
+    return _check_extras(state)[0]
+
+
+def _check_extras(state: dict) -> tuple[list[str], str | None]:
+    """Return ``(missing, unchecked)``: the ordered missing extras the chosen
+    config will need, and ``None`` — or, when they could not be checked, an
+    empty list and the reason.
+
+    Source/project install: probes the interpreter of the environment
+    ``uv run --directory <dir>`` uses — the one ``Next steps`` will actually
+    run. When uv could not name that environment, or its interpreter could
+    not be probed, the extras are unchecked: no other interpreter stands in.
+    If uv names an environment that does not exist yet, the summary shows a
+    ``.venv not found`` sync line instead and this falls back to the wizard's
+    interpreter (only the ``--non-interactive`` gate reads it then).
 
     Everything else (PyPI / ``uv tool install``) uses in-process
     ``find_spec`` as before — it matches the ``mm`` binary the wizard is
@@ -2308,30 +2458,42 @@ def _collect_missing_extras(state: dict) -> list[str]:
     state dicts without constructing a full profile."""
     profile = state.get("_profile")
     source = profile is not None and profile.cwd_install_type in ("source", "project")
+    if source and profile.workspace_env_error is not None:
+        return [], (
+            "could not ask uv which environment `uv run --directory "
+            f"{profile.cwd_install_dir}` uses: {profile.workspace_env_error}"
+        )
     ws_py = _workspace_python(state) if source else None
 
     if source and ws_py is not None:
         importable = _probe_workspace_extras(ws_py)
-        if importable is not None:
-            have_fastembed = "fastembed" in importable
-            have_web = {"fastapi", "uvicorn"}.issubset(importable)
-            have_kiwipiepy = "kiwipiepy" in importable
-        else:
-            have_fastembed, have_web = _inproc_have_extras()
-            have_kiwipiepy = _have_module("kiwipiepy")
+        if importable is None:
+            return [], f"running {ws_py} to list its installed extras failed"
+        have_fastembed = "fastembed" in importable
+        have_web = {"fastapi", "uvicorn"}.issubset(importable)
+        have_kiwipiepy = "kiwipiepy" in importable
     else:
         have_fastembed, have_web = _inproc_have_extras()
         have_kiwipiepy = _have_module("kiwipiepy")
 
-    missing: list[str] = []
+    have = {"onnx": have_fastembed, "korean": have_kiwipiepy, "web": have_web}
+    missing = [x for x in _extras_needed(state) if not have[x]]
+    warned = state.get("_extras_warned_inline") or set()
+    return [x for x in missing if x not in warned], None
+
+
+def _extras_needed(state: dict) -> list[str]:
+    """The extras the chosen config needs, in :func:`_check_extras` order,
+    whether or not they are installed."""
+    needed: list[str] = []
     # [onnx] = fastembed. Both the embedder and the fastembed reranker share
     # this package — either on its own is enough to require the extra.
     provider = state.get("provider")
     needs_fastembed = provider == "onnx" or (
         state.get("rerank_enabled") and state.get("rerank_model")
     )
-    if needs_fastembed and not have_fastembed:
-        missing.append("onnx")
+    if needs_fastembed:
+        needed.append("onnx")
     # NOTE: the ``ollama`` / ``openai`` providers need NO extra. Their embedders
     # call the Ollama server / OpenAI API over HTTP via ``httpx`` (a core
     # dependency) and never import the ``ollama`` / ``openai`` PyPI clients, so
@@ -2342,13 +2504,10 @@ def _collect_missing_extras(state: dict) -> list[str]:
     # [korean] = kiwipiepy. The tokenizer falls back to unicode61 at runtime
     # if kiwipiepy is absent, so missing it is not fatal — but `mm init --non-interactive
     # --tokenizer kiwipiepy` should still be caught up front (#396).
-    if state.get("tokenizer") == "kiwipiepy" and not have_kiwipiepy:
-        missing.append("korean")
-    if not have_web:
-        missing.append("web")
-
-    warned = state.get("_extras_warned_inline") or set()
-    return [x for x in missing if x not in warned]
+    if state.get("tokenizer") == "kiwipiepy":
+        needed.append("korean")
+    needed.append("web")
+    return needed
 
 
 # Extras that ``--non-interactive`` must refuse to write a config for when absent. ``web``
@@ -2356,9 +2515,9 @@ def _collect_missing_extras(state: dict) -> list[str]:
 # to run the web UI, and the runtime fallback (clear ``mm web`` error on
 # missing fastapi) is already loud. ``ollama`` / ``openai`` are excluded too:
 # their providers run on ``httpx`` (core) without the PyPI clients, so a
-# missing client never blocks a valid config (see ``_collect_missing_extras``).
+# missing client never blocks a valid config (see ``_extras_needed``).
 # Update this set alongside new provider/tokenizer entries in
-# ``_collect_missing_extras`` if they gain a runtime fallback that silently
+# ``_extras_needed`` if they gain a runtime fallback that silently
 # flips the user-visible config.
 _REQUIRED_EXTRAS_FOR_NON_INTERACTIVE: frozenset[str] = frozenset({"onnx", "korean"})
 
@@ -2379,12 +2538,14 @@ def _emit_cwd_runtime_mismatch_banner(state: dict) -> None:
 
     Phase 3 (#363): reads ``cwd_install_type`` and ``runtime_matches_workspace``
     from :class:`RuntimeProfile`. The legacy ``_runtime_under_workspace_venv``
-    helper has been folded into ``RuntimeProfile`` (raw-path comparison
-    semantics preserved — see ``feedback_venv_raw_path_check.md``)."""
+    helper has been folded into ``RuntimeProfile`` (the interpreter's final
+    symlink is still not followed — see ``feedback_venv_raw_path_check.md``).
+    Also silent when uv could not name the workspace environment: a runtime
+    that is not known to differ from it is not a mismatch."""
     profile = state["_profile"]
     if profile.cwd_install_type == "pypi":
         return
-    if profile.runtime_matches_workspace:
+    if profile.runtime_matches_workspace or profile.workspace_env_error is not None:
         return
     cwd_type = profile.cwd_install_type
     click.echo()
@@ -2881,8 +3042,12 @@ def _write_config_and_summary(
             )
         click.secho(f"  {sync_line}", fg="yellow")
     else:
-        missing = _collect_missing_extras(state)
-        if missing:
+        missing, unchecked = _check_extras(state)
+        if unchecked is not None:
+            click.echo()
+            # The reason carries workspace and environment paths.
+            click.secho(f"  Extras not checked: {scrub_text(unchecked)}.", fg="yellow")
+        elif missing:
             installed = _install_extras(install_type_lit, missing, confirm=False)
             if installed:
                 click.echo()
@@ -3621,7 +3786,20 @@ def init(
         # Gate runs BEFORE any disk side effect (memory_dir mkdir, config
         # write) so a refused -y leaves the filesystem untouched. The earlier
         # mkdir-then-gate ordering left ``~/memories`` behind on rejected runs.
-        missing = _collect_missing_extras(state)
+        missing, unchecked = _check_extras(state)
+        if unchecked is not None:
+            # Not checked is not "installed": refuse a config that needs a
+            # required extra nobody could verify. One that needs none passes.
+            unverified = [
+                x for x in _extras_needed(state) if x in _REQUIRED_EXTRAS_FOR_NON_INTERACTIVE
+            ]
+            if unverified:
+                raise click.ClickException(
+                    f"Cannot check the extras `mm init --non-interactive` needs "
+                    f"({', '.join(unverified)}): {scrub_text(unchecked)}.\n"
+                    f"  Or drop the flag(s) that require them "
+                    f"(e.g. --provider none, --tokenizer unicode61)."
+                )
         required = [x for x in missing if x in _REQUIRED_EXTRAS_FOR_NON_INTERACTIVE]
         if required:
             if _extra_hint_target(state) == "uvx":

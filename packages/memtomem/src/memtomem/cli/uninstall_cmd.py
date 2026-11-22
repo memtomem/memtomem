@@ -693,16 +693,16 @@ def _binary_uninstall_hint(profile: RuntimeProfile) -> tuple[str, list[str]]:
             "uvx (ephemeral — auto-cleaned on process exit)",
             ["No binary uninstall needed for the uvx caller."],
         )
-    if origin == "venv-relative":
-        venv_str = (
-            str(profile.workspace_venv_path) if profile.workspace_venv_path else "<workspace>/.venv"
-        )
+    if origin == "venv-relative" and profile.workspace_venv_path is not None:
+        # ``venv-relative`` means the running interpreter is the one of the
+        # environment uv uses for the workspace, so name that interpreter: a
+        # bare ``uv pip uninstall`` picks whichever environment is active or
+        # nearest. No ``rm -rf`` of the environment: at a workspace root it
+        # serves every member, and ``UV_PROJECT_ENVIRONMENT`` can put it
+        # anywhere.
         return (
-            f"workspace venv ({scrub_text(venv_str)})",
-            [
-                "uv pip uninstall memtomem",
-                f"  # or: rm -rf -- {_hint_quote(venv_str)}",
-            ],
+            f"workspace venv ({scrub_text(str(profile.workspace_venv_path))})",
+            [f"uv pip uninstall --python {_hint_quote(profile.runtime_interpreter)} memtomem"],
         )
     if origin == "system":
         return (
