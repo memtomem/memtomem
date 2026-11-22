@@ -762,14 +762,14 @@ class TestMissingExtrasWarning:
         )
 
     def test_extra_install_hint_source_install_uses_uv_sync(self, tmp_path: Path) -> None:
-        """Source-install state → ``uv sync`` of the detected root, whichever
+        """Source-install state → ``uv sync --dev`` of the detected root, whichever
         extras are missing. Issue #360 Phase 1: workspace ``.venv`` is what
         ``uv run mm`` uses; #3500: its root defines no ``--extra``."""
         from memtomem.cli.init_cmd import _extra_install_hint
 
         state = {"_profile": _make_test_profile(tmp_path, kind="source")}
         for extras in (["onnx"], ["web"], ["onnx", "web"]):
-            assert _extra_install_hint(extras, state) == f"run uv sync in {tmp_path}"
+            assert _extra_install_hint(extras, state) == f"run uv sync --dev in {tmp_path}"
 
     def test_extra_install_hint_project_install_names_the_requirement(self, tmp_path: Path) -> None:
         """Project-install (``uv add memtomem`` in a non-source project) → the
@@ -906,7 +906,7 @@ class TestInstallAxesReconcile:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Acceptance #2: workspace ``.venv/`` exists but lacks both extras
-        → ``uv sync`` of the root, not the tool-install reinstall."""
+        → ``uv sync --dev`` of the root, not the tool-install reinstall."""
         from memtomem.cli import init_cmd
 
         monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
@@ -915,12 +915,12 @@ class TestInstallAxesReconcile:
         state["provider"] = "onnx"
         missing = init_cmd._collect_missing_extras(state)
         assert missing == ["onnx", "web"]
-        assert init_cmd._extra_install_hint(missing, state) == f"run uv sync in {tmp_path}"
+        assert init_cmd._extra_install_hint(missing, state) == f"run uv sync --dev in {tmp_path}"
 
     def test_source_cwd_workspace_missing_onnx_only_suggests_uv_sync(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Workspace has web deps but not fastembed → the same root ``uv sync``:
+        """Workspace has web deps but not fastembed → the same root ``uv sync --dev``:
         the root's ``dev`` group brings every extra."""
         from memtomem.cli import init_cmd
 
@@ -934,7 +934,7 @@ class TestInstallAxesReconcile:
         state["provider"] = "onnx"
         missing = init_cmd._collect_missing_extras(state)
         assert missing == ["onnx"]
-        assert init_cmd._extra_install_hint(missing, state) == f"run uv sync in {tmp_path}"
+        assert init_cmd._extra_install_hint(missing, state) == f"run uv sync --dev in {tmp_path}"
 
     def test_pypi_install_preserves_uv_tool_reinstall_hint(
         self, monkeypatch: pytest.MonkeyPatch
@@ -989,7 +989,7 @@ class TestInstallAxesReconcile:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Source/project install detected but ``.venv/`` is absent (fresh
-        worktree) → summary shows a single ``run uv sync first`` line, NOT
+        worktree) → summary shows a single ``.venv not found`` sync line, NOT
         the ``[!] Missing extras`` warning. No noisy probe of the wrong
         interpreter."""
         from click import unstyle
@@ -1015,7 +1015,7 @@ class TestInstallAxesReconcile:
 
         init_cmd._write_config_and_summary(state, tmp_path)
         out = unstyle(capsys.readouterr().out)
-        assert f"Workspace .venv not found — run uv sync in {tmp_path} first." in out
+        assert f"Workspace .venv not found — run uv sync --dev in {tmp_path} first." in out
         assert "Missing extras:" not in out
 
     def test_subprocess_timeout_falls_back_to_inproc(
@@ -6981,7 +6981,7 @@ class TestNonInteractiveExtrasValidation:
 
         assert result.exit_code != 0, result.output
         assert self._recovery_lines(result.output) == [
-            f"  Install first: run uv sync in {workspace}"
+            f"  Install first: run uv sync --dev in {workspace}"
         ]
         assert not (home / ".memtomem" / "config.json").exists()
 
@@ -8903,7 +8903,7 @@ class TestWorkspaceExtraHintNamesMemtomemsRoot:
 
         root = self._root(tmp_path)
         state = {"_profile": _make_test_profile(root, kind="source")}
-        assert _extra_install_hint(extras, state) == f"run uv sync in {root}"
+        assert _extra_install_hint(extras, state) == f"run uv sync --dev in {root}"
 
     def test_source_hint_keeps_the_root_out_of_the_command(self, tmp_path: Path) -> None:
         """The root is named, not spliced into a command: no quoting survives every shell
@@ -8914,7 +8914,7 @@ class TestWorkspaceExtraHintNamesMemtomemsRoot:
         root = tmp_path / "R&D $HOME"
         root.mkdir()
         state = {"_profile": _make_test_profile(root, kind="source")}
-        assert _extra_install_hint(["onnx"], state) == f"run uv sync in {root}"
+        assert _extra_install_hint(["onnx"], state) == f"run uv sync --dev in {root}"
 
     def test_project_hint_names_the_requirement_to_edit(self, tmp_path: Path) -> None:
         from memtomem.cli.init_cmd import _extra_install_hint
@@ -8988,7 +8988,7 @@ class TestWorkspaceExtraHintNamesMemtomemsRoot:
         out = unstyle(capsys.readouterr().out)
         lines = [ln for ln in out.splitlines() if ".venv not found" in ln]
         expected = {
-            "source": f"  Workspace .venv not found — run uv sync in {root} first.",
+            "source": f"  Workspace .venv not found — run uv sync --dev in {root} first.",
             "project": f"  Project .venv not found — {self._SYNC} in {root} first.",
         }[kind]
         assert lines == [expected]

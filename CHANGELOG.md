@@ -15,15 +15,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   root, `memtomem-workspace` defines no extras: with uv 0.12.13, dry runs of
   `uv sync --extra onnx` and `--extra all` there both stopped with ``Extra `…` is not
   defined``. In a downstream project the flag selected that project's own extra. A source
-  checkout is now told to run `uv sync` in its root, both for a missing extra and for a missing
-  `.venv`. The root's `dev` group installs `memtomem[all]`, and the hint names the root because
-  the checkout is detected from up to four levels below it. A dry run of a bare `uv sync` in
-  `packages/memtomem` would have removed `fastembed` and `kiwipiepy`. A project is told to add
-  the extras to its memtomem requirement in its `pyproject.toml`, then run its usual `uv sync`,
-  with all its options, in its root. Both name the directory instead of putting it inside a
-  command, so a path holding `&` or `$` is not read as shell syntax, and the inline ONNX line
-  for either leads with `To enable it:` instead of `Get it with:`. The wizard no longer offers
-  to install extras in either case. It still offers the `uv tool` reinstall.
+  checkout is now told to run `uv sync --dev` in its root, both for a missing extra and for a
+  missing `.venv`. The root's `dev` group installs `memtomem[all]`; `--dev` keeps it selected
+  under an inherited `UV_NO_DEV=1`, where a dry run of plain `uv sync` would have uninstalled
+  memtomem (#3507). The hint names the root because the checkout is detected from up to four
+  levels below it. A dry run of a bare `uv sync` in `packages/memtomem` would have removed
+  `fastembed` and `kiwipiepy`. A project is told to add the extras to its memtomem requirement
+  in its `pyproject.toml`, then run its usual `uv sync`, with all its options, in its root.
+  Both name the directory instead of putting it inside a command, so a path holding `&` or `$`
+  is not read as shell syntax, and the inline ONNX line for either leads with `To enable it:`
+  instead of `Get it with:`. The wizard no longer offers to install extras in either case. It
+  still offers the `uv tool` reinstall.
 
 ## [0.7.13] — 2026-11-22
 

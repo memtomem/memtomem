@@ -1748,7 +1748,7 @@ def _onnx_preset_will_work(state: dict) -> bool:
 def _workspace_needs_sync(state: dict) -> bool:
     """True iff source/project install detected but ``<dir>/.venv/`` is
     absent — a fresh clone / fresh worktree. The summary shows a single
-    ``run uv sync first`` line in this case instead of a noisy missing-
+    ``.venv not found`` sync line in this case instead of a noisy missing-
     extras warning that would have probed the wrong interpreter."""
     profile = state["_profile"]
     if profile.cwd_install_type == "pypi":
@@ -1800,11 +1800,14 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
     memtomem: the source root ``memtomem-workspace`` defines none, and in a
     project it names the project's own extra (#3500).
 
-    - source checkout → ``run uv sync in <root>``. The root's ``dev`` group
-      holds ``memtomem[all]``; the root is named because the checkout is
-      detected from up to four levels below it, and with uv 0.12.13 a bare
-      ``uv sync`` in ``packages/memtomem`` syncs only that member (a dry run
-      would have removed fastembed and kiwipiepy).
+    - source checkout → ``run uv sync --dev in <root>``. The root's ``dev``
+      group holds ``memtomem[all]``, and ``--dev`` names it: with uv 0.12.13 and
+      ``UV_NO_DEV=1`` set, a dry run of ``uv sync`` reported it would uninstall
+      memtomem itself, and adding ``--dev`` restored the plan seen with the
+      variable unset (#3507). The root is named because the checkout is detected from up
+      to four levels below it, and a bare ``uv sync`` in ``packages/memtomem``
+      syncs only that member (a dry run would have removed fastembed and
+      kiwipiepy).
     - project install → add the extras to the memtomem requirement in the
       project's ``pyproject.toml``, then the project's usual sync from its root
       (see ``_PROJECT_SYNC``). ``uv add`` would write a second entry when
@@ -1834,7 +1837,7 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
         # `_runtime_profile` sets the directory whenever it names either type.
         root = (state or {})["_profile"].cwd_install_dir
         if target == "workspace":
-            return f"run uv sync in {root}"
+            return f"run uv sync --dev in {root}"
         names = ", ".join(f'"{name}"' for name in extras)
         return (
             f"add {names} to the memtomem requirement's extras in {root / 'pyproject.toml'}, "
@@ -2246,7 +2249,7 @@ def _collect_missing_extras(state: dict) -> list[str]:
     Source/project install: probes the workspace ``.venv/bin/python`` — the
     interpreter ``uv run mm`` will use — so the warning matches what
     ``Next steps`` will actually run. If the workspace venv is absent the
-    caller shows a ``run uv sync first`` one-liner instead, so this path
+    caller shows a ``.venv not found`` sync line instead, so this path
     only fires when the probe has authoritative state.
 
     Everything else (PyPI / ``uv tool install``) uses in-process
@@ -2361,7 +2364,7 @@ def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
     adds no output noise. When non-empty, names the missing extras, lists
     which ``Next steps`` commands will fail without them, and prints a single
     recovery. The hint is branched by install type: a source checkout gets
-    ``run uv sync in <root>``, a project the requirement to edit; tool
+    ``run uv sync --dev in <root>``, a project the requirement to edit; tool
     installs get ``uv tool install --reinstall "memtomem[all]"``
     and ``uvx`` runs a ``uvx`` re-invocation from ``memtomem[all]``, both
     whichever extras are missing (see :func:`_extra_install_hint`). On a
@@ -2805,7 +2808,7 @@ def _write_config_and_summary(
     #
     # Source/project install + workspace .venv absent (fresh worktree) →
     # the missing-extras probe has no authoritative interpreter to query;
-    # show a single ``run uv sync first`` line instead. Otherwise probe the
+    # show a single ``.venv not found`` sync line instead. Otherwise probe the
     # workspace venv (if present) or in-process and emit the regular
     # warning. Issue #360 Phase 1.
     #
@@ -2830,9 +2833,7 @@ def _write_config_and_summary(
     if _workspace_needs_sync(state):
         click.echo()
         if source_install:
-            sync_line = (
-                f"Workspace .venv not found — run uv sync in {profile.cwd_install_dir} first."
-            )
+            sync_line = f"Workspace .venv not found — {_extra_install_hint([], state)} first."
         else:
             sync_line = (
                 f"Project .venv not found — {_PROJECT_SYNC} in {profile.cwd_install_dir} first."
