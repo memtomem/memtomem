@@ -1028,7 +1028,22 @@ not registered and stay invisible to it.
 
 An existing manual MCP registration can supply tools while the host plugin supplies
 workflow skills. Installing a static plugin bundle cannot prompt for this choice.
-Use the coexistence diagnostic before starting a new client session.
+Use the coexistence diagnostic before starting a new client session. When each
+host's check can see a duplicate differs:
+
+- **Claude Code:** run it from the project root. It reads that directory's
+  project and local registrations, and settings in a parent project make the
+  inspection incomplete. Before the plugin is installed it compares your
+  registrations with the launch its own release bundles, so repeat it after
+  installing.
+- **Antigravity CLI and Codex CLI:** run it after installing the plugin and
+  before starting a new session or thread. These checks compare manual entries
+  with the bundled server of an installed, enabled plugin. Before installation
+  there is nothing to compare them with, so a complete inspection with one usable
+  manual registration passes (`0`), and that registration and the plugin's
+  server can both start once the plugin is installed and enabled. For Codex,
+  only a manual entry named `memtomem` takes precedence over the plugin's
+  server; under any other name both can start.
 
 The `--mcp-client`, `--reconcile` and `--apply` options below need memtomem
 0.7.1 or later (`mm --version`). Without `mm` on your `PATH`, as in a uvx-only

@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The plugin quickstarts no longer tell a store configured only through `config.d/` or
+  `MEMTOMEM_*` variables to run `mm init`, and the coexistence guide says when each host's
+  check can see a duplicate (#3517).** `mm status` reports `memtomem is not configured`
+  whenever `~/.memtomem/config.json` is absent, and the troubleshooting row for that message
+  said to rerun init. The `config.json` init writes replaces the database path, memory
+  directories and embedding model a fragment sets, so the existing store could look empty.
+  The English and Korean quickstarts now treat fragments and variables as an existing setup,
+  preview it with `mm config show` and confirm the database path with the plugin's status
+  check. In `docs/guides/mcp-clients.md`, the Antigravity and Codex checks are to be run after
+  installing the plugin: before then there is no bundled server to compare with, so a complete
+  check with one usable manual entry under another name passes, and both can start once the
+  plugin is installed and enabled. The Claude check runs from the project root.
+
 - **`mm init` no longer treats every monorepo with a `pyproject.toml` and a `packages/`
   directory as a memtomem source checkout (#3510).** Inside one, it wrote
   `uv run --directory <root> memtomem-server` as the MCP command, printed `uv run` next
