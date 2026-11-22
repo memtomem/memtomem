@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mm init` in a source checkout or a project that depends on memtomem no longer hints or
+  runs `uv sync --extra <name>` for a missing extra (#3500).** That flag selects an extra of
+  the project uv finds, not of memtomem. The hint printed `uv sync --extra <name>` (`--extra
+  all` for two or more), the install the wizard offered ran it, and the
+  `Workspace .venv not found — run uv sync --extra all first` line suggested it. At the source
+  root, `memtomem-workspace` defines no extras: with uv 0.12.13, dry runs of
+  `uv sync --extra onnx` and `--extra all` there both stopped with ``Extra `…` is not
+  defined``. In a downstream project the flag selected that project's own extra. A source
+  checkout is now told to run `uv sync` in its root, both for a missing extra and for a missing
+  `.venv`. The root's `dev` group installs `memtomem[all]`, and the hint names the root because
+  the checkout is detected from up to four levels below it. A dry run of a bare `uv sync` in
+  `packages/memtomem` would have removed `fastembed` and `kiwipiepy`. A project is told to add
+  the extras to its memtomem requirement in its `pyproject.toml`, then run its usual `uv sync`,
+  with all its options, in its root. Both name the directory instead of putting it inside a
+  command, so a path holding `&` or `$` is not read as shell syntax, and the inline ONNX line
+  for either leads with `To enable it:` instead of `Get it with:`. The wizard no longer offers
+  to install extras in either case. It still offers the `uv tool` reinstall.
+
 ## [0.7.13] — 2026-11-22
 
 A patch whose main change is the Python the plugins ask for: the Claude Code, Codex and
