@@ -511,7 +511,10 @@ def _step_embedding(state: dict) -> None:
             # Use the install-type-aware hint so the inline message matches
             # what the summary would otherwise print, then mark the warning
             # as already surfaced so ``_collect_missing_extras`` skips it.
-            click.echo(f"  Get it with: {_extra_install_hint(['onnx'], state)}")
+            # A checkout's hint is prose naming a directory, not a command to paste.
+            checkout = _extra_hint_target(state) in ("workspace", "project")
+            lead = "To enable it" if checkout else "Get it with"
+            click.echo(f"  {lead}: {_extra_install_hint(['onnx'], state)}")
             click.echo(_y_refuse_hint("--provider onnx", "onnx"))
             click.echo()
             state.setdefault("_extras_warned_inline", set()).add("onnx")
@@ -1615,15 +1618,26 @@ async def _check_embedding_mismatch(state: dict, *, interactive: bool) -> None:
         await storage.close()
 
 
-# Canonical hint prefixes. ``_extra_hint_target`` picks the environment and
-# ``_extra_install_hint`` maps it to a command: source/project installs use the
-# workspace ``uv sync`` path so the extras land in the same ``.venv`` that
-# ``uv run mm`` will use; a ``uvx`` run's environment is ephemeral, so its hint
-# is a ``uvx`` re-invocation (``_uvx_extra_prefix``); everything else
-# (``uv tool install`` / PyPI) stays on the tool-env reinstall path that the
-# global ``mm`` binary relies on.
+# Canonical hint prefix. ``_extra_hint_target`` picks the environment and
+# ``_extra_install_hint`` maps it to a recovery: a source checkout syncs its root
+# and a project edits its memtomem requirement, so the extras land in the
+# ``.venv`` that ``uv run mm`` will use; a ``uvx`` run's environment is
+# ephemeral, so its hint is a ``uvx`` re-invocation (``_uvx_extra_prefix``);
+# everything else (``uv tool install`` / PyPI) stays on the tool-env reinstall
+# path that the global ``mm`` binary relies on.
 _EXTRA_INSTALL_HINT_PREFIX: str = 'uv tool install --reinstall "memtomem'
-_UV_SYNC_HINT_PREFIX: str = "uv sync --extra "
+
+# Both checkout recoveries name the directory to run in rather than put it inside a
+# command: no one quoting survives every shell a user pastes into (POSIX, ``cmd``,
+# PowerShell), and a path is the user's own text.
+#
+# A project that depends on memtomem may hold it in an optional extra or a non-default
+# dependency group, which plain ``uv sync`` leaves out, and an exact sync removes
+# whatever the options it is not given installed. So the project's usual command with
+# all its options, run from its root: detection walks past a nested ``pyproject.toml``
+# that does not depend on memtomem, where ``uv sync`` would sync that one instead.
+_PROJECT_SYNC: str = "run the project's usual uv sync, with all its options,"
+
 
 # Probe snippet for extras presence in a foreign Python. ``find_spec`` is
 # cheaper than ``__import__`` and matches ``_collect_missing_extras``'s
@@ -1734,7 +1748,7 @@ def _onnx_preset_will_work(state: dict) -> bool:
 def _workspace_needs_sync(state: dict) -> bool:
     """True iff source/project install detected but ``<dir>/.venv/`` is
     absent — a fresh clone / fresh worktree. The summary shows a single
-    ``run uv sync first`` line in this case instead of a noisy missing-
+    ``.venv not found`` sync line in this case instead of a noisy missing-
     extras warning that would have probed the wrong interpreter."""
     profile = state["_profile"]
     if profile.cwd_install_type == "pypi":
@@ -1742,17 +1756,21 @@ def _workspace_needs_sync(state: dict) -> bool:
     return _workspace_python(state) is None
 
 
-def _extra_hint_target(state: dict | None) -> Literal["workspace", "uvx", "tool"]:
+def _extra_hint_target(state: dict | None) -> Literal["workspace", "project", "uvx", "tool"]:
     """Which environment a missing-extra hint has to reach.
 
-    The workspace comes first: ``uvx … mm init`` from a source or project
-    checkout still prints ``uv run mm`` next steps, which use the workspace
-    ``.venv``. A missing ``_profile`` is a tool install, as ``state=None`` is."""
+    The checkout comes first: ``uvx … mm init`` from a source checkout
+    (``workspace``) or a project that depends on memtomem (``project``) still
+    prints ``uv run mm`` next steps, which assume they run from that directory
+    and so use its ``.venv``. A missing ``_profile`` is a tool install, as
+    ``state=None`` is."""
     profile = (state or {}).get("_profile")
     if profile is None:
         return "tool"
-    if profile.cwd_install_type in ("source", "project"):
+    if profile.cwd_install_type == "source":
         return "workspace"
+    if profile.cwd_install_type == "project":
+        return "project"
     if profile.mm_binary_origin == "uvx":
         return "uvx"
     return "tool"
@@ -1775,12 +1793,26 @@ def _uvx_extra_prefix() -> str:
 
 
 def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
-    """Return the install command for one or more missing extras, branched
-    by :func:`_extra_hint_target`.
+    """Return the recovery for one or more missing extras, branched by
+    :func:`_extra_hint_target`.
 
-    - source / project install → ``uv sync --extra <name>`` (single) or
-      ``uv sync --extra all`` (two+). The workspace ``.venv`` is what
-      ``uv run mm`` will use, so ``uv sync`` is the right install path.
+    ``uv sync --extra <name>`` selects an extra of the project uv finds, not of
+    memtomem: the source root ``memtomem-workspace`` defines none, and in a
+    project it names the project's own extra (#3500).
+
+    - source checkout → ``run uv sync --dev in <root>``. The root's ``dev``
+      group holds ``memtomem[all]``, and ``--dev`` names it: with uv 0.12.13 and
+      ``UV_NO_DEV=1`` set, a dry run of ``uv sync`` reported it would uninstall
+      memtomem itself, and adding ``--dev`` restored the plan seen with the
+      variable unset (#3507). The root is named because the checkout is detected from up
+      to four levels below it, and a bare ``uv sync`` in ``packages/memtomem``
+      syncs only that member (a dry run would have removed fastembed and
+      kiwipiepy).
+    - project install → add the extras to the memtomem requirement in the
+      project's ``pyproject.toml``, then the project's usual sync from its root
+      (see ``_PROJECT_SYNC``). ``uv add`` would write a second entry when
+      memtomem sits in an optional extra or a dependency group, which
+      :func:`_pyproject_depends_on_memtomem` accepts.
     - ``uvx`` run → ``uvx --python 3.12 --from "memtomem[all]" memtomem
       init`` (see :func:`_uvx_extra_prefix`), with ``--non-interactive
       <same options>`` when ``state["non_interactive"]`` is set so a scripted
@@ -1801,9 +1833,16 @@ def _extra_install_hint(extras: list[str], state: dict | None = None) -> str:
     if target == "uvx":
         rerun = " --non-interactive <same options>" if (state or {}).get("non_interactive") else ""
         return f"{_uvx_extra_prefix()} memtomem init{rerun}"
-    if target == "workspace":
-        name = extras[0] if len(extras) == 1 else "all"
-        return f"{_UV_SYNC_HINT_PREFIX}{name}"
+    if target in ("workspace", "project"):
+        # `_runtime_profile` sets the directory whenever it names either type.
+        root = (state or {})["_profile"].cwd_install_dir
+        if target == "workspace":
+            return f"run uv sync --dev in {root}"
+        names = ", ".join(f'"{name}"' for name in extras)
+        return (
+            f"add {names} to the memtomem requirement's extras in {root / 'pyproject.toml'}, "
+            f"then {_PROJECT_SYNC} in {root}"
+        )
     return f'{_EXTRA_INSTALL_HINT_PREFIX}[all]"'
 
 
@@ -1812,7 +1851,6 @@ def _install_extras(
     extras: list[str],
     *,
     confirm: bool = False,
-    workspace_dir: Path | None = None,
 ) -> bool:
     """Confirm-then-subprocess install for python package extras.
 
@@ -1829,10 +1867,12 @@ def _install_extras(
     the user has already typed through the wizard and a ``[all]`` reinstall
     is heavy).
 
-    ``workspace_dir`` is REQUIRED when ``install_type`` is ``"source"`` or
-    ``"project"`` (used as ``subprocess.run`` ``cwd=`` for ``uv sync``)
-    and MUST be ``None`` for ``"tool"`` / ``"uvx"``. Callers are expected
-    to branch on the install type before calling.
+    Only a tool install is installed into. A source checkout or a project
+    install returns ``False`` without a prompt, so the caller prints the hint
+    from :func:`_extra_install_hint`: the ``uv sync --extra <name>`` this ran
+    there selected the project's extras, not memtomem's, and failed at the
+    source root (#3500). A project needs its own ``pyproject.toml`` edited,
+    which the wizard does not do.
 
     Non-interactive contexts (no TTY on stdin — scripted ``mm init --non-interactive
     </dev/null``, CI jobs, Docker build steps) skip the prompt entirely
@@ -1845,12 +1885,12 @@ def _install_extras(
     not a prompt).
 
     Returns ``True`` only when a subprocess actually ran and exited 0. In
-    every other case — empty ``extras``, missing ``workspace_dir`` for
-    source/project, ``uvx`` branch (hint-only, no install semantic),
-    non-TTY stdin, user decline, ``FileNotFoundError``, ``TimeoutExpired``,
-    or non-zero rc — returns ``False`` so the caller falls back to the
+    every other case — empty ``extras``, a source/project install, ``uvx``
+    branch (hint-only, no install semantic), non-TTY stdin, user decline,
+    ``FileNotFoundError``, ``TimeoutExpired``, or non-zero rc — returns
+    ``False`` so the caller falls back to the
     Phase 1 :func:`_emit_missing_extras_warning` hint path."""
-    if not extras:
+    if not extras or install_type in ("source", "project"):
         return False
 
     if install_type == "uvx":  # ephemeral env; a non-ephemeral install is meaningless
@@ -1864,29 +1904,16 @@ def _install_extras(
     if not sys.stdin.isatty():
         return False
 
-    cwd: str | None
-    if install_type in ("source", "project"):
-        if workspace_dir is None:
-            return False
-        name = extras[0] if len(extras) == 1 else "all"
-        cmd = ["uv", "sync", "--extra", name]
-        cwd = str(workspace_dir)
-    else:  # install_type == "tool"
-        # `[all]` for the reason in `_extra_install_hint`: `--reinstall` drops
-        # every extra the requirement does not name.
-        name = "all"
-        cmd = ["uv", "tool", "install", "--reinstall", f"memtomem[{name}]"]
-        cwd = None
-
-    prompt = f"  Install memtomem[{name}] now?"
-    if not nav_confirm(prompt, default=confirm):
+    # `[all]` for the reason in `_extra_install_hint`: `--reinstall` drops every
+    # extra the requirement does not name.
+    cmd = ["uv", "tool", "install", "--reinstall", "memtomem[all]"]
+    if not nav_confirm("  Install memtomem[all] now?", default=confirm):
         return False
 
     click.echo(f"  Running: {' '.join(cmd)}")
     try:
         result = subprocess.run(
             cmd,
-            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=600,
@@ -2222,7 +2249,7 @@ def _collect_missing_extras(state: dict) -> list[str]:
     Source/project install: probes the workspace ``.venv/bin/python`` — the
     interpreter ``uv run mm`` will use — so the warning matches what
     ``Next steps`` will actually run. If the workspace venv is absent the
-    caller shows a ``run uv sync first`` one-liner instead, so this path
+    caller shows a ``.venv not found`` sync line instead, so this path
     only fires when the probe has authoritative state.
 
     Everything else (PyPI / ``uv tool install``) uses in-process
@@ -2336,9 +2363,9 @@ def _emit_missing_extras_warning(missing: list[str], state: dict) -> None:
     Silent when ``missing`` is empty so the common "already installed" path
     adds no output noise. When non-empty, names the missing extras, lists
     which ``Next steps`` commands will fail without them, and prints a single
-    install command. The hint is branched by install type: workspace installs
-    get ``uv sync --extra …`` (per-extra when one is missing, ``[all]`` when
-    two+); tool installs get ``uv tool install --reinstall "memtomem[all]"``
+    recovery. The hint is branched by install type: a source checkout gets
+    ``run uv sync --dev in <root>``, a project the requirement to edit; tool
+    installs get ``uv tool install --reinstall "memtomem[all]"``
     and ``uvx`` runs a ``uvx`` re-invocation from ``memtomem[all]``, both
     whichever extras are missing (see :func:`_extra_install_hint`). On a
     ``uvx`` run this line is the only one that prints the command;
@@ -2444,7 +2471,6 @@ def _write_config_and_summary(
     # can land.
     profile = state["_profile"]
     source_install = profile.cwd_install_type == "source"
-    project_install = profile.cwd_install_type == "project"
 
     # Write ~/.memtomem/config.json (read-merge-write to preserve non-init fields)
     click.secho("Writing configuration...", fg="green")
@@ -2782,7 +2808,7 @@ def _write_config_and_summary(
     #
     # Source/project install + workspace .venv absent (fresh worktree) →
     # the missing-extras probe has no authoritative interpreter to query;
-    # show a single ``run uv sync first`` line instead. Otherwise probe the
+    # show a single ``.venv not found`` sync line instead. Otherwise probe the
     # workspace venv (if present) or in-process and emit the regular
     # warning. Issue #360 Phase 1.
     #
@@ -2806,15 +2832,17 @@ def _write_config_and_summary(
         install_type_lit = "tool"
     if _workspace_needs_sync(state):
         click.echo()
-        click.secho(
-            "  Workspace .venv not found — run `uv sync --extra all` first.",
-            fg="yellow",
-        )
+        if source_install:
+            sync_line = f"Workspace .venv not found — {_extra_install_hint([], state)} first."
+        else:
+            sync_line = (
+                f"Project .venv not found — {_PROJECT_SYNC} in {profile.cwd_install_dir} first."
+            )
+        click.secho(f"  {sync_line}", fg="yellow")
     else:
         missing = _collect_missing_extras(state)
         if missing:
-            ws = profile.cwd_install_dir if (source_install or project_install) else None
-            installed = _install_extras(install_type_lit, missing, confirm=False, workspace_dir=ws)
+            installed = _install_extras(install_type_lit, missing, confirm=False)
             if installed:
                 click.echo()
                 click.secho(
