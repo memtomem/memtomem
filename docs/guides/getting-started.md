@@ -30,7 +30,8 @@ mm search "blue-green"
 `--python 3.12` needs a Python 3.12 that uv can find or download (see
 [Prerequisites](#prerequisites)). Where uv may not download Python, install a
 Python 3.12 first, or run the install with the Python you have, such as
-`uv tool install --python 3.13 'memtomem[all]'`.
+`uv tool install --python 3.13 'memtomem[all]'` with your version in place of
+`3.13`.
 
 The last command should return the sentence you just added. `mm add` creates a
 Markdown file under your configured user memory directory and indexes it

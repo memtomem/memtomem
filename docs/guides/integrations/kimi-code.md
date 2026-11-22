@@ -25,7 +25,8 @@ Python 3.12 that uv can find or download, for this entry and for the one
 Python on its own (`python-downloads = "never"` or `"manual"` in its
 configuration) and only a newer Python is installed, the server stops with `No interpreter found for
 Python 3.12`. Then install a Python 3.12 first, or install memtomem with the
-Python you have (`uv tool install --python 3.13 'memtomem[all]'`) and set
+Python you have (`uv tool install --python 3.13 'memtomem[all]'`, with your
+version in place of `3.13`) and set
 `"command": "memtomem-server"` with no `args`. The `env` block exposes
 `mem_update_coverage`, which the `memtomem-update` skill needs for its
 default incremental mode and for `full`; without that setting the skill

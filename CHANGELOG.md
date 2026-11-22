@@ -80,8 +80,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   in its Claude Code and OpenCode sections), that such a command needs a Python 3.12 uv can
   find or download, and what to do where uv may not download Python on its own
   (`python-downloads = "never"` or `"manual"`): install a Python 3.12 first, or install
-  memtomem with the Python you have and register `memtomem-server` (the plugin quickstart
-  gives that install command and its `mm init` step before the manual registration). The
+  memtomem with the Python you have, putting its version in place of the `3.13` the
+  example command names, and register `memtomem-server` (the plugin quickstart points to
+  the getting-started prerequisite for that install, then to the manual registration). The
   README, the getting-started prerequisite and the plugin quickstart add that an offline uv
   cannot download Python either, so a Python 3.12 has to be installed beforehand. The
   getting-started prerequisite read "Python 3.12+"; it is now "Python 3.12", checked with

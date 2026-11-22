@@ -90,11 +90,9 @@ the plugin's server does not start either. An offline uv cannot download one
 either: with the packages already cached, the plugin's server still does not
 start unless a Python 3.12 was installed beforehand. Install a Python 3.12
 first (`uv python install 3.12` downloads one under `"manual"`, not under
-`"never"`), or skip the plugin: install memtomem with the Python you have
-(`uv tool install --python 3.13 'memtomem[all]'`), run the two commands above
-as plain `mm` (`mm init --preset minimal --non-interactive --mcp skip`, then
-`mm status`), and register `memtomem-server` as [MCP clients](mcp-clients.md)
-shows for your tool.
+`"never"`), or skip the plugin: install memtomem with the Python you have, as
+[Getting Started](getting-started.md#prerequisites) describes, then register
+`memtomem-server` as [MCP clients](mcp-clients.md) shows for your tool.
 
 `--mcp skip` leaves other clients' settings alone, because the plugin in the
 next step provides the MCP connection. The command installs the ONNX

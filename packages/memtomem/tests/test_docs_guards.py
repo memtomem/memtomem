@@ -2215,6 +2215,10 @@ _PY312_NEEDS_KO = "uv가 찾거나 내려받을 수 있는 Python 3.12"
 _PY312_INSTALL = "install a Python 3.12"
 _PY312_INSTALL_KO = "Python 3.12를 설치"
 _PY313_TOOL_INSTALL = "uv tool install --python 3.13"
+# 3.13 is an example: a machine that has only 3.14 needs its own version there.
+_PY313_REMEDY = (_PY313_TOOL_INSTALL, "with your version in place of `3.13`")
+_PY312_OFFLINE = "an offline uv cannot download"
+_PY312_OFFLINE_KO = "오프라인인 uv도 Python을 내려받을"
 
 
 class TestPython312CommandsSayWhatTheyNeed:
@@ -2230,7 +2234,11 @@ class TestPython312CommandsSayWhatTheyNeed:
     part of the remedy, links included."""
 
     _ROWS = (
-        ("README.md", "### 1. Install", (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL)),
+        (
+            "README.md",
+            "### 1. Install",
+            (_PY312_NEEDS, _PY312_OFFLINE, _PY312_INSTALL, *_PY313_REMEDY),
+        ),
         # The "No install" registration sits in the collapsed install options under § 5.
         (
             "README.md",
@@ -2240,7 +2248,7 @@ class TestPython312CommandsSayWhatTheyNeed:
         (
             "docs/guides/getting-started.md",
             "## Quickstart",
-            (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL),
+            (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY),
         ),
         (
             "docs/guides/getting-started.md",
@@ -2250,12 +2258,12 @@ class TestPython312CommandsSayWhatTheyNeed:
         (
             "docs/guides/mcp-clients.md",
             "### Add via command (`local` / `user`)",
-            (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL),
+            (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY),
         ),
         (
             "docs/guides/mcp-clients.md",
             "## 8. OpenCode",
-            (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL, '"command": ["memtomem-server"]'),
+            (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY, '"command": ["memtomem-server"]'),
         ),
         (
             "docs/guides/integrations/claude-code.md",
@@ -2265,7 +2273,7 @@ class TestPython312CommandsSayWhatTheyNeed:
         (
             "docs/guides/integrations/claude-code.md",
             "#### Add via command (`local` / `user`)",
-            (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL),
+            (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY),
         ),
         (
             "docs/guides/integrations/kimi-code.md",
@@ -2273,23 +2281,26 @@ class TestPython312CommandsSayWhatTheyNeed:
             (
                 _PY312_NEEDS,
                 _PY312_INSTALL,
-                _PY313_TOOL_INSTALL,
+                *_PY313_REMEDY,
                 '`"command": "memtomem-server"` with no `args`',
             ),
         ),
         (
             "docs/guides/integrations/opencode.md",
             "### Manual MCP alternative",
-            (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL, '"command": ["memtomem-server"]'),
+            (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY, '"command": ["memtomem-server"]'),
         ),
+        # The plugin path's fallback points at the tested remedy and the manual registration
+        # instead of restating their steps here.
         (
             "docs/guides/plugin-quickstart.md",
             "## 2. Shared setup: initialize your user memory store once",
             (
                 _PY312_NEEDS,
+                _PY312_OFFLINE,
                 _PY312_INSTALL,
-                _PY313_TOOL_INSTALL,
-                "`mm init --preset minimal --non-interactive --mcp skip`",
+                "(getting-started.md#prerequisites)",
+                "register `memtomem-server`",
                 "(mcp-clients.md)",
             ),
         ),
@@ -2298,9 +2309,10 @@ class TestPython312CommandsSayWhatTheyNeed:
             "## 2. 공통 준비: 사용자 기억 저장소를 한 번 초기화",
             (
                 _PY312_NEEDS_KO,
+                _PY312_OFFLINE_KO,
                 _PY312_INSTALL_KO,
-                _PY313_TOOL_INSTALL,
-                "`mm init --preset minimal --non-interactive --mcp skip`",
+                "(getting-started.md#prerequisites)",
+                "`memtomem-server`를 등록",
                 "(mcp-clients.md)",
             ),
         ),
@@ -2333,6 +2345,10 @@ class TestPython312CommandsSayWhatTheyNeed:
             "uv python find --system 3.12",
         ]
         assert _PY312_NEEDS in _unwrapped(section)
+        assert _PY312_OFFLINE in _unwrapped(section).casefold()
+        assert "change `3.12` in the install command to the Python you have" in (
+            _unwrapped(section)
+        )
 
 
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"

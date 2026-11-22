@@ -203,8 +203,8 @@ The direct command preserves the extras in the persistent environment used by
 find or download: where uv may not download Python on its own and only a newer
 Python is installed, it stops with `No interpreter found for Python 3.12`. Then install a
 Python 3.12 first, or install memtomem with the Python you have
-(`uv tool install --python 3.13 'memtomem[all]'`) and use the direct command
-above. If an older user-scope registration
+(`uv tool install --python 3.13 'memtomem[all]'`, with your version in place of
+`3.13`) and use the direct command above. If an older user-scope registration
 already exists, replace it explicitly:
 
 ```bash
