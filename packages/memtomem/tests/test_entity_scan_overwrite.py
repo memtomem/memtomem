@@ -386,6 +386,11 @@ class TestLlmFailureLeavesChunksUnchanged:
         comp.llm = _RaisingLLM()
         before = comp.search_pipeline._cache_version
 
-        await _scan(comp, overwrite=True)
+        out = await _scan(comp, overwrite=True)
 
+        # The scan must have run to the end and reached the provider: an error
+        # string from ``tool_handler`` would leave the version unchanged too.
+        assert out.startswith("Entity scan complete"), out
+        assert comp.llm.calls == 1
+        assert "- Chunks left unchanged (LLM extraction failed): 1" in out.splitlines()
         assert comp.search_pipeline._cache_version == before
