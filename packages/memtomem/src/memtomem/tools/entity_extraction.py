@@ -397,13 +397,16 @@ async def extract_entities_llm(
     # ``NONE`` counts only as the whole answer, the way ``_parse_entity_response``
     # reads it: a ``NONE`` line beside malformed ones is not the model saying
     # there is nothing here.
-    if answer.strip().upper() != "NONE" and not _parse_entity_response(raw):
+    entities = _parse_entity_response(raw)
+    if answer.strip().upper() != "NONE" and not entities:
         raise LLMError(
             "LLM gave no usable answer to the entity extraction prompt "
             "(neither NONE nor a TYPE|VALUE line)"
         )
-    types_set = set(entity_types) if entity_types else None
-    return _parse_entity_response(raw, types_set)
+    if entity_types:
+        types_set = set(entity_types)
+        entities = [e for e in entities if e.entity_type in types_set]
+    return entities
 
 
 class EntityExtraction(NamedTuple):
