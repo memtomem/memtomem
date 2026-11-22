@@ -658,6 +658,7 @@ class TestOptionalClaudeAutomationDocs:
                 for handler in rule["hooks"]:
                     assert handler["command"] == "uv"
                     assert handler["args"][:3] == ["run", "--no-project", "python"]
+                    assert handler["args"][3] == "${CLAUDE_PLUGIN_ROOT}/bin/hook_dispatch.py"
                     assert handler["args"][-1] == event
                     assert 0 < handler["timeout"] <= 120
 

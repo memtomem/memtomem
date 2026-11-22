@@ -7,6 +7,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The automation plugin's hooks start on Python 3.8 and later (#3484).** The hooks run
+  `uv run --no-project python .../hook_dispatch.py`, which uses the first interpreter uv
+  finds, such as the Python 3.9 that macOS Command Line Tools installs. The dispatcher
+  imported `datetime.UTC`, which Python 3.11 added, so on an older interpreter it exited with
+  an `ImportError` before handling any event: no hook ran, and the SessionStart hint that says
+  how to install `mm` was never shown. It now uses `datetime.timezone.utc`, and a CI job runs
+  every hook event through it on Python 3.8. The plugin README and the Claude Code guide state
+  that floor. `mm` itself still needs Python 3.12 or newer.
+
 - **`mm init` no longer treats every monorepo with a `pyproject.toml` and a `packages/`
   directory as a memtomem source checkout (#3510).** Inside one, it wrote
   `uv run --directory <root> memtomem-server` as the MCP command, printed `uv run` next
