@@ -41,10 +41,12 @@ one id tag. `handoff list` is new, and the PyPI project page and summary line ch
   `mm upgrade --version 0.7.13`; otherwise upgrade memtomem in the environment that
   supplies that `mm`. Confirm with `mm --version`, then start a new Claude Code session.
 - **Claude plugin users with a manual MCP registration: align it with the new
-  launch.** The plugin now launches `uvx --python 3.12 --from memtomem[onnx]==0.7.13
+  launch.** The plugin now launches `uvx --python 3.12 --from 'memtomem[onnx]==0.7.13'
   memtomem-server`. A manual entry that launches anything else, an earlier release or the
   same release without `--python 3.12`, no longer matches the plugin's launch, so Claude
   cannot deduplicate the two and may expose duplicate tools. Run `mm doctor --claude-mcp`
+  (with no `mm` on `PATH`, as a plugin-only install has none:
+  `uvx --python 3.12 --from "memtomem[all]==0.7.13" mm doctor --claude-mcp`)
   and follow the Claude Code guide's "Already registered via `claude mcp add`?" note,
   which says which registration wins in each case and how to keep a manual entry.
 - **Any other MCP entry that launches an exact release keeps serving that
