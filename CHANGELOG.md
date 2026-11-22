@@ -5,6 +5,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.13] — 2026-11-22
+
+A patch whose main change is the Python the plugins ask for: the Claude Code, Codex and
+OpenCode plugins now ask uv for Python 3.12 when they start the server, as the Cursor,
+Antigravity, Hermes and OpenClaw bundles already did, so on a machine whose first Python is
+older than 3.12 their server starts instead of stopping with `No solution found`. `mm init`
+run from `uvx` outside a workspace asks for 3.12 in the MCP launch it writes, and its hints
+and the guides' manual registrations ask for it as well (see Fixed). Also fixed: one schedule
+memtomem cannot read no longer stops every other schedule, a second short share into the same
+namespace on the same day is indexed, share titles drop Markdown heading markers, a
+consolidation summary never appends to an existing file, a contended pid-file probe withholds
+the pid when its two reads differ, and handoff resume refuses a newest row without exactly
+one id tag. `handoff list` is new, and the PyPI project page and summary line change.
+
+### Upgrading
+
+- **The plugins move their pin to 0.7.13 in the same release; a plugin that is not updated
+  keeps launching 0.7.12.** For Claude Code, Codex and OpenCode that older launch also lacks
+  `--python 3.12`. This release delivers Claude `0.5.44`, Codex `0.3.42`,
+  `memtomem-automation` `0.3.27`, OpenCode `0.3.40`, Hermes `0.1.28`, Antigravity `0.2.21`,
+  OpenClaw `0.1.5` and Kimi `0.2.30` (its handoff skill gains `list` and resume's tag rule).
+  Cursor keeps the version `0.1.0`; its files in this release launch 0.7.13 and carry the
+  same handoff skill changes. The Hermes memory provider stays `0.2.2`. The Hermes catalog
+  entries install a pinned commit, which today carries plugin `0.1.23` and provider `0.2.1`,
+  so `hermes plugins install` keeps installing those until the catalog moves its pin.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.27 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.13;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.13`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  launch.** The plugin now launches `uvx --python 3.12 --from memtomem[onnx]==0.7.13
+  memtomem-server`. A manual entry that launches anything else, an earlier release or the
+  same release without `--python 3.12`, no longer matches the plugin's launch, so Claude
+  cannot deduplicate the two and may expose duplicate tools. Run `mm doctor --claude-mcp`,
+  align the manual entry's launch with the plugin or remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.13, and add `--python 3.12` where it runs `uvx`.**
+  Updating a plugin or the `mm` CLI does not touch it. That covers an entry copied
+  from the guides (`uvx --isolated --from "memtomem[all]==0.7.12" memtomem-server`),
+  one `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.12` to `==0.7.13`,
+  and in an entry that runs `uvx` with a requirement naming an extra, put
+  `--python 3.12` right after `uvx` (`"--python", "3.12"` first in a JSON or TOML
+  `args` array), so the copied guide entry becomes
+  `uvx --python 3.12 --isolated --from "memtomem[all]==0.7.13" memtomem-server`.
+  Changing only the pin keeps the failure #3493 describes on a machine whose first
+  Python is older than 3.12; where uv is configured never to download Python, the
+  entry then needs a Python 3.12 on the machine. Restart the client afterwards; for
+  Kimi Code, re-running `mm init --mcp kimi` with the 0.7.13 CLI rewrites the entry.
+  An entry that launches an installed interpreter (`… -m memtomem.server`) runs
+  whatever memtomem that interpreter's environment has: `mm upgrade --version 0.7.13`
+  covers it when the interpreter belongs to the `uv tool` install; for any other
+  environment, upgrade memtomem there.
+
 ### Added
 
 - **`handoff list` shows which handoffs resume can load (#3477).** `handoff` accepted only
@@ -16,6 +74,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the entries and asks which one to resume. A pick is accepted only from that same list, and
   resume then runs every check on the picked record. `resume <number>` is rejected and points
   to `list`.
+
+- **`mm config --help` and `mm session --help` end with examples (#2994).** Each group's
+  help now closes with three commands to copy, one per line: `mm config show --json`,
+  `mm config set search.default_top_k 20` and `mm config unset search.default_top_k`;
+  `mm session start --agent-id planner --title "Release prep"`, `mm session end --auto` and
+  `mm session list --since 2026-10-01 --limit 10`.
 
 ### Fixed
 
