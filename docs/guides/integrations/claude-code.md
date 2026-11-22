@@ -55,7 +55,7 @@ Before `/plugin install`, review existing registrations in `/mcp`, then run
 the diagnostic from the project you want to inspect:
 
 ```bash
-uvx --python 3.12 --from "memtomem[all]==0.7.12" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.13" mm doctor --claude-mcp
 ```
 
 The pin is there because installing the plugin registers an MCP server; it does
@@ -87,7 +87,7 @@ optional.
 
 > **Already registered via `claude mcp add`?** What happens depends on
 > whether your manual entry launches the server with the **same command and
-> arguments** as the plugin — `uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' memtomem-server`
+> arguments** as the plugin — `uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' memtomem-server`
 > (environment variables are not compared; measured on Claude Code 2.1.218):
 >
 > - **Same command** — Claude Code suppresses the plugin-managed copy, your
@@ -97,7 +97,7 @@ optional.
 > - **Different command** — and the manual registrations this guide and
 >   [mcp-clients.md](../mcp-clients.md) teach (`memtomem-server` from your
 >   environment, or `uvx --python 3.12 --isolated --from
->   "memtomem[all]==0.7.12" memtomem-server`) *are* different — **duplicate registrations are possible**,
+>   "memtomem[all]==0.7.13" memtomem-server`) *are* different — **duplicate registrations are possible**,
 >   exposing tools under
 >   `mcp__memtomem__mem_*` plus `mcp__plugin_memtomem_memtomem__mem_*`.
 >
@@ -189,7 +189,7 @@ that file by hand.
 
 The direct command preserves the extras in the persistent environment used by
 `mm`. For a no-install setup, use `uvx --python 3.12 --isolated --from
-"memtomem[all]==0.7.12" memtomem-server`. If an older user-scope registration
+"memtomem[all]==0.7.13" memtomem-server`. If an older user-scope registration
 already exists, replace it explicitly:
 
 ```bash
@@ -318,15 +318,15 @@ only when those side effects are wanted:
 Install the exact CLI version expected by the automation bundle:
 
 ```bash
-uv tool install --python 3.12 memtomem==0.7.12
+uv tool install --python 3.12 memtomem==0.7.13
 ```
 
 That command installs no extras. If your store uses a local ONNX model (the
-`mm init` English and Korean presets do), install `'memtomem[onnx]==0.7.12'`
-or `'memtomem[all]==0.7.12'` instead; a base-only `mm` reports the missing
+`mm init` English and Korean presets do), install `'memtomem[onnx]==0.7.13'`
+or `'memtomem[all]==0.7.13'` instead; a base-only `mm` reports the missing
 ONNX dependencies rather than indexing.
 
-Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.7.12`
+Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.7.13`
 instead of reinstalling; the
 [CLI reference](../reference/data-config-cli.md#cli-reference) covers what it
 preserves and stops.

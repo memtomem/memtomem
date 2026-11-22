@@ -344,11 +344,11 @@ def test_install_guide_bodies_carry_the_no_install_launch(page, mm_web_url: str)
     _stub_portal(page)
     _open_portal(page, mm_web_url)
 
-    argv = '"--python", "3.12", "--isolated", "--from", "memtomem[all]==0.7.12", "memtomem-server"'
+    argv = '"--python", "3.12", "--isolated", "--from", "memtomem[all]==0.7.13", "memtomem-server"'
     cases = {
         "claude": [
             "claude mcp add memtomem -e MEMTOMEM_EXTRA_TOOLS=mem_update_coverage -- ",
-            "uvx --python 3.12 --isolated --from 'memtomem[all]==0.7.12' memtomem-server",
+            "uvx --python 3.12 --isolated --from 'memtomem[all]==0.7.13' memtomem-server",
         ],
         "antigravity": [
             "~/.gemini/config/mcp_config.json",

@@ -72,7 +72,7 @@ and interpreter request resolve to, run them with this terminal's uv
 configuration and cache:
 
 ```bash
-uvx --python 3.12 --from 'memtomem[onnx]==0.7.12' python -c "from importlib.metadata import version; print(version('anyio'))"
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' python -c "from importlib.metadata import version; print(version('anyio'))"
 ```
 
 For a different launcher, substitute its exact `--from` value and preserve any

@@ -5,6 +5,74 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.13] — 2026-11-22
+
+A patch whose main change is the Python the plugins ask for: the Claude Code, Codex and
+OpenCode plugins now ask uv for Python 3.12 when they start the server, as the Cursor,
+Antigravity, Hermes and OpenClaw bundles already did, so on a machine whose first Python is
+older than 3.12 uv no longer resolves their launch against it and stops with
+`No solution found`; it uses a Python 3.12 it finds or downloads. `mm init`
+run from `uvx` outside a workspace asks for 3.12 in the MCP launch it writes, and its hints
+and the guides' manual registrations ask for it as well (see Fixed). Also fixed: one schedule
+whose stored JSON or timestamp memtomem cannot read no longer stops every other schedule, a
+second short share into the same
+namespace on the same day is indexed, share titles drop Markdown heading markers, a
+consolidation summary never appends to an existing file, a contended pid-file probe withholds
+the pid when its two reads differ, and handoff resume refuses a newest row without exactly
+one id tag. `handoff list` is new, and the PyPI project page and summary line change.
+
+### Upgrading
+
+- **The plugins move their pin to 0.7.13 in the same release; a plugin from 0.7.12 that
+  starts the server and is not updated keeps launching 0.7.12.** For Claude Code, Codex and
+  OpenCode that older launch also lacks `--python 3.12`. This release delivers Claude
+  `0.5.44`, Codex `0.3.42`, `memtomem-automation` `0.3.27`, OpenCode `0.3.40`, Hermes
+  `0.1.28`, Antigravity `0.2.21`,
+  OpenClaw `0.1.5` and Kimi `0.2.30` (its handoff skill gains `list` and resume's tag rule).
+  Cursor keeps the version `0.1.0`; its files in this release launch 0.7.13 and carry the
+  same handoff skill changes. The Hermes memory provider stays `0.2.2`. The Hermes catalog
+  entries install a pinned commit, which today carries plugin `0.1.27` (its server launches
+  0.7.12) and provider `0.2.2`, so `hermes plugins install` keeps installing those until the
+  catalog moves its pin; the Docs entry below describes that 0.1.27 update.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.27 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.13;
+  updating the plugins does not upgrade that CLI. For a `uv tool` install run
+  `mm upgrade --version 0.7.13`; otherwise upgrade memtomem in the environment that
+  supplies that `mm`. Confirm with `mm --version`, then start a new Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  launch.** The plugin now launches `uvx --python 3.12 --from 'memtomem[onnx]==0.7.13'
+  memtomem-server`. A manual entry that launches anything else, an earlier release or the
+  same release without `--python 3.12`, no longer matches the plugin's launch, so Claude
+  cannot deduplicate the two and may expose duplicate tools. Run `mm doctor --claude-mcp`
+  (with no `mm` on `PATH`, as a plugin-only install has none:
+  `uvx --python 3.12 --from "memtomem[all]==0.7.13" mm doctor --claude-mcp`)
+  and follow the Claude Code guide's "Already registered via `claude mcp add`?" note,
+  which says which registration wins in each case and how to keep a manual entry.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.13, and make a `uvx` entry ask for Python 3.12.**
+  Updating a plugin or the `mm` CLI does not touch it. That covers an entry copied
+  from the guides (`uvx --isolated --from "memtomem[all]==0.7.12" memtomem-server`),
+  one `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Edit the entry in place: change
+  `==0.7.12` to `==0.7.13`, and in an entry that runs `uvx` with a requirement naming an
+  extra and asks for no Python, put `--python 3.12` right after `uvx` (`"--python", "3.12"`
+  first in a JSON or TOML `args` array, right after `"uvx"` in OpenCode's `command`
+  array), so the copied guide entry becomes
+  `uvx --python 3.12 --isolated --from "memtomem[all]==0.7.13" memtomem-server`. An entry
+  that already asks for 3.12 needs only the pin. Changing only the pin of one that does not
+  keeps the failure #3493 describes on a machine whose first Python is older than 3.12;
+  where uv is configured never to download Python, the entry then needs a Python 3.12 on
+  the machine. Restart the client afterwards. For Kimi Code too, edit the entry:
+  `mm init --mcp kimi` is a reconfiguration, not an upgrade, and replaces the whole
+  `mcpServers.memtomem` entry, environment variables you added included.
+  An entry that launches an installed interpreter (`… -m memtomem.server`) runs
+  whatever memtomem that interpreter's environment has: `mm upgrade --version 0.7.13`
+  covers it when the interpreter belongs to the `uv tool` install; for any other
+  environment, upgrade memtomem there.
+
 ### Added
 
 - **`handoff list` shows which handoffs resume can load (#3477).** `handoff` accepted only
@@ -16,6 +84,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the entries and asks which one to resume. A pick is accepted only from that same list, and
   resume then runs every check on the picked record. `resume <number>` is rejected and points
   to `list`.
+
+- **`mm config --help` and `mm session --help` end with examples (#2994).** Each group's
+  help now closes with three commands to copy, one per line: `mm config show --json`,
+  `mm config set search.default_top_k 20` and `mm config unset search.default_top_k`;
+  `mm session start --agent-id planner --title "Release prep"`, `mm session end --auto` and
+  `mm session list --since 2026-10-01 --limit 10`.
 
 ### Fixed
 
@@ -155,11 +229,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   preserving multi-level ` > ` path joins and non-Markdown heading text.
 
 - **A second short `mem_agent_share` into the same namespace on the same day is indexed (#3324).**
-  Every copy went to the namespace's day file, and a short copy merged into the chunk of the
-  entry before it. When that entry was an earlier copy, its `chunk_links` row made the re-index
-  refuse with `Reindex would remove linked chunk identities; explicit link migration is
-  required`: the copy stayed on disk unindexed, and every later write to that day file failed
-  the same way. `mem_agent_share` and `mm agent share` now write each copy to a file of its own,
+  Every copy went to the namespace's day file, where a short copy could merge into the chunk
+  of the entry before it and get no chunk of its own. When that entry was an earlier copy
+  shared through `mem_agent_share`, its `chunk_links` row made the re-index refuse with
+  `Reindex would remove linked chunk identities; explicit link migration is required`: the
+  copy stayed on disk unindexed, and every later write to that day file failed the same way.
+  `mm agent share` recorded no such link in 0.7.12, so there the second copy merged into the
+  first copy's chunk without that error. `mem_agent_share` and `mm agent share` now write each copy to a file of its own,
   `shared-copies/<day file name without .md>-<12 hex>.md`, and refuse to write into a file that
   already exists. A rebuild reads the copy's namespace back from that name, as it does for a day
   file. A day file already stuck this way stays stuck. In the measured case, two short
