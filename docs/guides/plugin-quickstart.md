@@ -86,10 +86,13 @@ they need a Python 3.12 that uv can find or download; by default uv downloads
 one when it finds none. Where uv may not download Python on its own
 (`python-downloads = "never"` or `"manual"` in its configuration), a machine
 with only a newer Python stops with `No interpreter found for Python 3.12`, and
-the plugin's server does not start either. Install a Python 3.12 first
-(`uv python install 3.12` downloads one under `"manual"`, not under `"never"`),
-or use the manual setup in
-[MCP clients](mcp-clients.md), which can use the Python you have.
+the plugin's server does not start either. An offline uv cannot download one
+either: with the packages already cached, the plugin's server still does not
+start unless a Python 3.12 was installed beforehand. Install a Python 3.12
+first (`uv python install 3.12` downloads one under `"manual"`, not under
+`"never"`), or skip the plugin: install memtomem with the Python you have
+([Getting Started](getting-started.md#install)), then register
+`memtomem-server` as [MCP clients](mcp-clients.md) shows for your tool.
 
 `--mcp skip` leaves other clients' settings alone, because the plugin in the
 next step provides the MCP connection. The command installs the ONNX

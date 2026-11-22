@@ -76,12 +76,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   download Python (#3498).** The README, the getting-started, MCP clients, Claude Code, Kimi
   Code and OpenCode guides and the plugin quickstart (English and Korean) now say, beside
   their install or launch commands (the README's beside its Quick Start install, which its
-  setup prompt links to), that such a command needs a Python 3.12 uv can find or download,
-  and what to do where uv may not download Python on its own (`python-downloads = "never"`
-  or `"manual"`): install a Python 3.12 first, or, outside the plugins, install memtomem
-  with the Python you have and register `memtomem-server`. The getting-started prerequisite
-  read "Python 3.12+"; it is now "Python 3.12", checked with `uv python find 3.12` rather
-  than `python3 --version`. Measured with uv 0.12.13 on macOS, with only Python 3.13.7 and
+  setup prompt links to, and beside its "No install" registration; the MCP clients guide's
+  in its Claude Code and OpenCode sections), that such a command needs a Python 3.12 uv can
+  find or download, and what to do where uv may not download Python on its own
+  (`python-downloads = "never"` or `"manual"`): install a Python 3.12 first, or install
+  memtomem with the Python you have and register `memtomem-server` (the plugin quickstart
+  links to the install and to the manual registration for that). The README, the
+  getting-started prerequisite and the plugin quickstart add that an offline uv cannot
+  download Python either, so a Python 3.12 has to be installed beforehand. The
+  getting-started prerequisite read "Python 3.12+"; it is now "Python 3.12", checked with
+  `uv python find 3.12` rather than `python3 --version`. Measured with uv 0.12.13 on macOS, with only Python 3.13.7 and
   3.14.4 visible to uv and `python-downloads = "never"`:
   `uvx --python 3.12 --isolated --from 'memtomem[all]==0.7.12' memtomem-server --help` and
   `uv tool install --python 3.12 'memtomem[all]==0.7.12'` each exited 2 with
@@ -92,8 +96,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   same launch with `--python 3.13`, and `uv tool install --python 3.13
   'memtomem[all]==0.7.12'` followed by the installed `memtomem-server --help`, each exited 0
   under `"never"`. Offline (`UV_OFFLINE=1`) with the packages cached, the launch exited 2
-  with the same error without a Python 3.12 and printed the help with one. The guides do not
-  describe offline use.
+  with the same error without a Python 3.12 and printed the help with one.
 
 - **A contended pid-file probe withholds the pid when its two reads differ (#3423).**
   `probe_pid_file` reads the pid file before its lock attempt, and on contention it returned

@@ -72,7 +72,9 @@ The `uv tool install` and `uvx` commands in this guide that pass
 downloads one when none is installed. Where uv may not download Python on its
 own (`python-downloads = "never"` or `"manual"` in its configuration), they
 stop with `No interpreter found for Python 3.12` on a machine with only a newer
-Python. Install a Python 3.12 first (`uv python install 3.12` downloads one
+Python. An offline uv cannot download one either: with the packages already
+cached, a launch still stops that way unless a Python 3.12 was installed
+beforehand. Install a Python 3.12 first (`uv python install 3.12` downloads one
 under `"manual"`, not under `"never"`), or change `3.12` in the install command
 to the Python you have (tested:
 `uv tool install --python 3.13 'memtomem[all]==0.7.12'`).

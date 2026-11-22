@@ -2231,6 +2231,12 @@ class TestPython312CommandsSayWhatTheyNeed:
 
     _ROWS = (
         ("README.md", "### 1. Install", (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL)),
+        # The "No install" registration sits in the collapsed install options under § 5.
+        (
+            "README.md",
+            "### 5. Open the Web UI (optional)",
+            (_PY312_NEEDS, "(#1-install)", "(docs/guides/mcp-clients.md#1-claude-code)"),
+        ),
         (
             "docs/guides/getting-started.md",
             "## Quickstart",
@@ -2245,6 +2251,11 @@ class TestPython312CommandsSayWhatTheyNeed:
             "docs/guides/mcp-clients.md",
             "### Add via command (`local` / `user`)",
             (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL),
+        ),
+        (
+            "docs/guides/mcp-clients.md",
+            "## 8. OpenCode",
+            (_PY312_NEEDS, _PY312_INSTALL, _PY313_TOOL_INSTALL, '"command": ["memtomem-server"]'),
         ),
         (
             "docs/guides/integrations/claude-code.md",
@@ -2274,12 +2285,17 @@ class TestPython312CommandsSayWhatTheyNeed:
         (
             "docs/guides/plugin-quickstart.md",
             "## 2. Shared setup: initialize your user memory store once",
-            (_PY312_NEEDS, _PY312_INSTALL, "(mcp-clients.md)"),
+            (_PY312_NEEDS, _PY312_INSTALL, "(getting-started.md#install)", "(mcp-clients.md)"),
         ),
         (
             "docs/guides/vibe-coding-getting-started-ko.md",
             "## 2. 공통 준비: 사용자 기억 저장소를 한 번 초기화",
-            (_PY312_NEEDS_KO, _PY312_INSTALL_KO, "(mcp-clients.md)"),
+            (
+                _PY312_NEEDS_KO,
+                _PY312_INSTALL_KO,
+                "(getting-started.md#install)",
+                "(mcp-clients.md)",
+            ),
         ),
     )
 

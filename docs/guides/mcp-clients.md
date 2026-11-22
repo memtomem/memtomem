@@ -395,6 +395,13 @@ skills — configure the released MCP server directly instead:
 }
 ```
 
+That launch needs a Python 3.12 that uv can find or download, as the plugin's
+does. Where uv may not download Python on its own and only a newer Python is
+installed, install a Python 3.12 first, or install memtomem with the Python you
+have (`uv tool install --python 3.13 'memtomem[all]'`) and use
+`"command": ["memtomem-server"]`
+([OpenCode guide](integrations/opencode.md#manual-mcp-alternative)).
+
 See the [OpenCode integration guide](integrations/opencode.md) for precedence,
 permission, platform, and development-install details.
 
