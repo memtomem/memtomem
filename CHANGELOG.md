@@ -78,6 +78,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `UV_PYTHON_DOWNLOADS=never`, `uv tool install --python 3.13 'memtomem[all]==0.7.13'` and
   the installed `memtomem-server --help` each exited 0.
 
+### Documentation
+
+- **The README and the PyPI page open with how to install.** A new Install section, right
+  under the title, gathers the setup steps both pages already gave further down (the CLI
+  install, `mm mem init --scope project_local` and the first `brief`) and adds the Claude
+  Code and Codex CLI plugin commands, which neither page gave before. It names the agent to
+  have installed and signed in, says that its `uv tool install --python 3.12` command and
+  the plugin's server need a Python 3.12, links the MCP clients guide's coexistence section,
+  with each host's read-only check, for a reader who registered memtomem by hand, and says
+  to start the session from the Git root where the project tier was registered. For creating
+  the memory store it links step 2 of the plugin quickstart, which says when to skip that
+  step and what to do when uv cannot get Python 3.12, instead of running `mm init` on the
+  first screen: on a machine that already has memtomem settings, a re-run replaces the
+  store's embedding provider, database path and memory directories. The Beta banner is now a
+  badge linking to Stability, which states the same commitment, now says experimental
+  features can change without an `Upgrading` note as well as without a window, and holds the
+  feedback links. memtomem is still beta.
+
 ## [0.7.13] — 2026-11-22
 
 A patch whose main change is the Python the plugins ask for: the Claude Code, Codex and
