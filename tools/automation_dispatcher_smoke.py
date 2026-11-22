@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -65,9 +66,8 @@ class Scenario:
                 env["PATHEXT"] = f".BAT{os.pathsep}{env.get('PATHEXT', '')}"
             else:
                 launcher = bin_dir / "mm"
-                launcher.write_text(
-                    f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8"
-                )
+                command = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
+                launcher.write_text(f'#!/bin/sh\nexec {command} "$@"\n', encoding="utf-8")
                 launcher.chmod(0o755)
             env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         else:

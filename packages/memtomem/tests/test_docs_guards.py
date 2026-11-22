@@ -657,9 +657,15 @@ class TestOptionalClaudeAutomationDocs:
             for rule in rules:
                 for handler in rule["hooks"]:
                     assert handler["command"] == "uv"
-                    assert handler["args"][:3] == ["run", "--no-project", "python"]
-                    assert handler["args"][3] == "${CLAUDE_PLUGIN_ROOT}/bin/hook_dispatch.py"
-                    assert handler["args"][-1] == event
+                    # The whole list: the dispatcher takes exactly one argument, so anything
+                    # between the script and the event makes it exit without doing anything.
+                    assert handler["args"] == [
+                        "run",
+                        "--no-project",
+                        "python",
+                        "${CLAUDE_PLUGIN_ROOT}/bin/hook_dispatch.py",
+                        event,
+                    ]
                     assert 0 < handler["timeout"] <= 120
 
 
