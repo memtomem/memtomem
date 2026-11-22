@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -1636,13 +1637,12 @@ class TestRuntimeProfile:
     def test_source_install_profile_fields_populated(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Source workspace marker (``pyproject.toml`` + ``packages/``) +
+        """memtomem source workspace (see :func:`_write_memtomem_workspace`) +
         existing ``.venv/`` + matching interpreter → all six fields filled
         with the source-install variant."""
         from memtomem.cli import init_cmd
 
-        (tmp_path / "pyproject.toml").write_text("[project]\nname='mm'\n", encoding="utf-8")
-        (tmp_path / "packages").mkdir()
+        _write_memtomem_workspace(tmp_path)
         venv_bin = tmp_path / ".venv" / "bin"
         venv_bin.mkdir(parents=True)
         (venv_bin / "python").touch()
@@ -1669,11 +1669,10 @@ class TestRuntimeProfile:
     def test_project_install_profile_no_packages_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``pyproject.toml`` WITHOUT a ``packages/`` dir AND declaring
-        ``memtomem`` as a dep → project install, not source. The
-        ``packages/`` marker disambiguates the memtomem monorepo from a
-        user project that ``uv add memtomem``'d; the dep check filters
-        out foreign sibling repos that share neither marker."""
+        """``pyproject.toml`` declaring ``memtomem`` as a dep, with no uv
+        workspace that resolves memtomem from a member → project install,
+        not source. The dep check filters out foreign sibling repos that
+        do not depend on memtomem."""
         from memtomem.cli import init_cmd
 
         (tmp_path / "pyproject.toml").write_text(
@@ -1806,9 +1805,9 @@ class TestRuntimeProfile:
     def test_project_install_canonical_name_match(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Dependency name comparison normalizes per PEP 503 — ``Memtomem``,
-        ``mem-tomem``, ``mem_tomem`` all match ``memtomem``. Locks the
-        canonicalization seam against drift."""
+        """Dependency name comparison normalizes per PEP 503: case folds, so
+        ``Memtomem`` matches ``memtomem``. Locks the canonicalization seam
+        against drift."""
         from memtomem.cli import init_cmd
 
         (tmp_path / "pyproject.toml").write_text(
@@ -1887,39 +1886,440 @@ class TestRuntimeProfile:
         assert profile.workspace_venv_path is None
         assert profile.runtime_matches_workspace is False
 
-    def test_source_install_takes_precedence_over_foreign_nested_pyproject(
+
+_REAL_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+_MEMTOMEM_WORKSPACE_ROOT = (
+    "[project]\n"
+    "name = 'memtomem-workspace'\n"
+    "version = '0'\n"
+    "dependencies = []\n"
+    "\n"
+    "[tool.uv.workspace]\n"
+    "members = ['packages/memtomem']\n"
+    "\n"
+    "[tool.uv.sources]\n"
+    "memtomem = { workspace = true }\n"
+    "\n"
+    "[dependency-groups]\n"
+    "dev = ['memtomem[all]', 'pytest']\n"
+)
+
+
+def _write_memtomem_workspace(
+    root: Path,
+    root_toml: str = _MEMTOMEM_WORKSPACE_ROOT,
+    member_rel: str = "packages/memtomem",
+) -> Path:
+    """Write a memtomem source workspace at *root*: a uv workspace whose
+    root installs ``memtomem`` (dev group by default) from the member at
+    *member_rel*. Returns the member directory."""
+    member = root / member_rel
+    member.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(root_toml, encoding="utf-8")
+    (member / "pyproject.toml").write_text(
+        "[project]\nname = 'memtomem'\nversion = '0'\n", encoding="utf-8"
+    )
+    return member
+
+
+def _foreign_monorepo(
+    root: Path, *, root_deps: str = "[]", member_deps: str = "['click']", member: str = "foo"
+) -> Path:
+    """Write a foreign ``pyproject.toml`` + ``packages/<member>`` monorepo
+    (a uv workspace that is not memtomem's). Returns the member directory."""
+    member_dir = root / "packages" / member
+    member_dir.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(
+        "[project]\n"
+        "name = 'monorepo'\n"
+        f"dependencies = {root_deps}\n"
+        "\n"
+        "[tool.uv.workspace]\n"
+        "members = ['packages/*']\n",
+        encoding="utf-8",
+    )
+    (member_dir / "pyproject.toml").write_text(
+        f"[project]\nname = '{member}'\ndependencies = {member_deps}\n", encoding="utf-8"
+    )
+    return member_dir
+
+
+def _neutral_interpreter(monkeypatch: pytest.MonkeyPatch, base: Path) -> None:
+    """Point ``sys.executable`` / ``sys.prefix`` at a path outside every
+    fixture and outside uv's tool/cache layouts."""
+    from memtomem.cli import init_cmd
+
+    monkeypatch.setattr(init_cmd.sys, "executable", str(base / "elsewhere" / "bin" / "python"))
+    monkeypatch.setattr(init_cmd.sys, "prefix", str(base / "elsewhere"))
+
+
+class TestSourceWorkspaceMarker:
+    """#3510 — ``source`` means a uv workspace that installs memtomem from a
+    member, not any ``pyproject.toml`` + ``packages/`` tree; a foreign
+    monorepo is ``project`` when the walk finds a dependent pyproject."""
+
+    def test_foreign_monorepo_without_memtomem_is_pypi(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Outer ancestor with the source workspace markers
-        (``pyproject.toml`` + ``packages/``) wins over a closer ancestor
-        carrying a foreign ``pyproject.toml``. Locks the source-first /
-        project-second invariant the dep-check fix relies on: a
-        sub-package layout inside the memtomem monorepo
-        (``packages/foo/pyproject.toml``) classifies as ``source``
-        regardless of what the nested pyproject declares as deps.
-        ``_detect_project_install`` itself returns ``None`` because its
-        walk skips ancestors with ``packages/`` and the nested pyproject
-        has no memtomem dep — making the source-takes-precedence
-        outcome a property of both the routing AND the underlying
-        function, not just one or the other."""
         from memtomem.cli import init_cmd
 
-        outer = tmp_path / "monorepo"
-        nested = outer / "packages" / "foo"
-        nested.mkdir(parents=True)
-        (outer / "pyproject.toml").write_text("[project]\nname='monorepo'\n", encoding="utf-8")
-        (nested / "pyproject.toml").write_text(
-            "[project]\nname='foo'\ndependencies = ['click']\n",
-            encoding="utf-8",
+        member = _foreign_monorepo(tmp_path / "mono")
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "pypi"
+        assert profile.cwd_install_dir is None
+        assert init_cmd._detect_source_install() is None
+        assert init_cmd._detect_project_install() is None
+
+    def test_foreign_monorepo_whose_root_depends_is_project_at_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = _foreign_monorepo(root, root_deps="['memtomem[onnx]>=0.7']")
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "project"
+        assert profile.cwd_install_dir == root
+
+    def test_foreign_monorepo_member_that_depends_is_project_at_member(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        member = _foreign_monorepo(tmp_path / "mono", member_deps="['memtomem']")
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "project"
+        assert profile.cwd_install_dir == member
+
+    @pytest.mark.parametrize(
+        ("label", "old", "new"),
+        [
+            ("no workspace table", "[tool.uv.workspace]\nmembers = ['packages/memtomem']\n", ""),
+            ("no sources entry", "memtomem = { workspace = true }\n", ""),
+            (
+                "sources entry not a workspace",
+                "memtomem = { workspace = true }\n",
+                "memtomem = { workspace = false }\n",
+            ),
+            (
+                "sources entry not a table",
+                "memtomem = { workspace = true }\n",
+                "memtomem = 'workspace'\n",
+            ),
+            (
+                "sources key is another name",
+                "memtomem = { workspace = true }\n",
+                "mem_tomem = { workspace = true }\n",
+            ),
+            ("root does not install memtomem", "dev = ['memtomem[all]', 'pytest']\n", "dev = []\n"),
+            (
+                "memtomem only in a non-dev group",
+                "dev = ['memtomem[all]', 'pytest']\n",
+                "docs = ['memtomem[all]']\n",
+            ),
+            (
+                "memtomem only in an optional extra",
+                "dev = ['memtomem[all]', 'pytest']\n",
+                "dev = []\n\n[project.optional-dependencies]\nfull = ['memtomem[all]']\n",
+            ),
+        ],
+    )
+    def test_each_marker_condition_is_required(
+        self,
+        label: str,
+        old: str,
+        new: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        assert old in _MEMTOMEM_WORKSPACE_ROOT, label
+        member = _write_memtomem_workspace(
+            tmp_path / "ws", _MEMTOMEM_WORKSPACE_ROOT.replace(old, new)
         )
-        monkeypatch.chdir(nested)
-        monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
-        monkeypatch.setattr(init_cmd.sys, "prefix", "/usr/local")
+        monkeypatch.chdir(member)
+
+        assert init_cmd._detect_source_install() is None, label
+        assert init_cmd._is_memtomem_workspace(tmp_path / "ws") is False, label
+
+    @pytest.mark.parametrize(
+        "root_toml",
+        [
+            _MEMTOMEM_WORKSPACE_ROOT,
+            _MEMTOMEM_WORKSPACE_ROOT.replace(
+                "memtomem = { workspace = true }", "Memtomem = { workspace = true }"
+            ),
+            _MEMTOMEM_WORKSPACE_ROOT.replace(
+                "dev = ['memtomem[all]', 'pytest']\n", "dev = []\n"
+            ).replace("dependencies = []", "dependencies = ['memtomem>=0.7']"),
+            _MEMTOMEM_WORKSPACE_ROOT.replace(
+                "members = ['packages/memtomem']", "members = ['packages/*']"
+            ),
+            _MEMTOMEM_WORKSPACE_ROOT.replace(
+                "dev = ['memtomem[all]', 'pytest']\n",
+                "dev = []\n\n[tool.uv]\ndev-dependencies = ['memtomem[all]']\n",
+            ).replace("members = ['packages/memtomem']", "members = ['libs/core']"),
+        ],
+        ids=[
+            "dev-group",
+            "canonical-source-key",
+            "project-dependency",
+            "glob-members",
+            "legacy-dev-dependencies-other-layout",
+        ],
+    )
+    def test_memtomem_workspace_is_source_from_deep_cwd(
+        self, root_toml: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "ws"
+        member_rel = "libs/core" if "'libs/core'" in root_toml else "packages/memtomem"
+        member = _write_memtomem_workspace(root, root_toml, member_rel)
+        deep = member / "src" / "memtomem"
+        deep.mkdir(parents=True)
+        monkeypatch.chdir(deep)
+        _neutral_interpreter(monkeypatch, tmp_path)
 
         profile = init_cmd._runtime_profile()
         assert profile.cwd_install_type == "source"
+        assert profile.cwd_install_dir == root
+        # The root's dev group makes it eligible for ``project`` too, so the
+        # source-before-project order in ``_runtime_profile`` is what decides.
+        if "dev = ['memtomem[all]'" in root_toml:
+            assert init_cmd._detect_project_install() == root
+
+    @pytest.mark.skipif(
+        not (_REAL_REPO_ROOT / "packages" / "langchain-memtomem" / "pyproject.toml").is_file(),
+        reason="needs the monorepo checkout layout (absent in an unpacked sdist)",
+    )
+    @pytest.mark.parametrize(
+        "rel",
+        [".", "packages/memtomem", "packages/memtomem/src/memtomem", "packages/langchain-memtomem"],
+    )
+    def test_real_checkout_is_source_where_project_is_also_eligible(
+        self, rel: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The repository's own layout satisfies the marker, so the rule is
+        pinned to the real workspace and not only to fixtures. From the root
+        (dev group) and the LangChain member (depends on memtomem) the
+        project detector also returns a directory."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.chdir(_REAL_REPO_ROOT / rel)
+        _neutral_interpreter(monkeypatch, tmp_path)
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "source"
+        assert profile.cwd_install_dir == _REAL_REPO_ROOT
+        if rel in (".", "packages/langchain-memtomem"):
+            assert init_cmd._detect_project_install() is not None
+
+    def test_invalid_utf8_pyproject_falls_through_to_pypi(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        (tmp_path / "pyproject.toml").write_bytes(b"[project]\nname = '\x80'\n")
+        monkeypatch.chdir(tmp_path)
+        _neutral_interpreter(monkeypatch, tmp_path)
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "pypi"
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or os.geteuid() == 0,
+        reason="needs POSIX permission bits that the current user cannot bypass",
+    )
+    @pytest.mark.requires_symlinks
+    def test_denied_pyproject_symlink_walks_on_to_dependent_ancestor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``pyproject.toml`` symlink into a directory the user cannot
+        enter makes ``Path.exists()`` raise ``PermissionError`` on Python
+        3.13; the walks skip it and reach the dependent ancestor, and the
+        workspace-venv lookup above it does not raise either."""
+        from memtomem.cli import init_cmd
+
+        outer = tmp_path / "outer"
+        inner = outer / "sub"
+        locked = tmp_path / "locked"
+        inner.mkdir(parents=True)
+        locked.mkdir()
+        (locked / "real.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+        (outer / "pyproject.toml").write_text(
+            "[project]\nname = 'outer'\ndependencies = ['memtomem']\n", encoding="utf-8"
+        )
+        (inner / "pyproject.toml").symlink_to(locked / "real.toml")
+        (tmp_path / "pyproject.toml").symlink_to(locked / "real.toml")
+        monkeypatch.chdir(inner)
+        _neutral_interpreter(monkeypatch, tmp_path)
+
+        locked.chmod(0)
+        try:
+            profile = init_cmd._runtime_profile()
+        finally:
+            locked.chmod(0o755)
+        assert profile.cwd_install_type == "project"
         assert profile.cwd_install_dir == outer
-        assert init_cmd._detect_project_install() is None
+        assert profile.workspace_venv_path is None
+
+    def test_invalid_utf8_nested_pyproject_walks_on_to_dependent_ancestor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        outer = tmp_path / "outer"
+        inner = outer / "sub"
+        inner.mkdir(parents=True)
+        (outer / "pyproject.toml").write_text(
+            "[project]\nname = 'outer'\ndependencies = ['memtomem']\n", encoding="utf-8"
+        )
+        (inner / "pyproject.toml").write_bytes(b"[project]\nname = '\x80'\n")
+        monkeypatch.chdir(inner)
+        _neutral_interpreter(monkeypatch, tmp_path)
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "project"
+        assert profile.cwd_install_dir == outer
+
+
+class TestWorkspaceMemberProjectVenv:
+    """#3510 — a project found at a uv workspace member reads the workspace
+    root's ``.venv``, where uv keeps it, when the member has none."""
+
+    @staticmethod
+    def _member_layout(root: Path, members_dir: str = "libs") -> Path:
+        member = root / members_dir / "app"
+        member.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(
+            "[project]\nname = 'mono'\ndependencies = []\n\n"
+            f"[tool.uv.workspace]\nmembers = ['{members_dir}/*']\n",
+            encoding="utf-8",
+        )
+        (member / "pyproject.toml").write_text(
+            "[project]\nname = 'app'\ndependencies = ['memtomem[all]']\n", encoding="utf-8"
+        )
+        return member
+
+    @staticmethod
+    def _venv_python(venv: Path) -> Path:
+        bindir = venv / "bin"
+        bindir.mkdir(parents=True)
+        py = bindir / "python"
+        py.touch()
+        return py
+
+    @pytest.mark.parametrize("members_dir", ["libs", "packages"])
+    def test_member_without_venv_uses_workspace_root_venv(
+        self, members_dir: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root, members_dir)
+        py = self._venv_python(root / ".venv")
+        monkeypatch.chdir(member)
+        monkeypatch.setattr(init_cmd.sys, "executable", str(py))
+        monkeypatch.setattr(init_cmd.sys, "prefix", str(root / ".venv"))
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "project"
+        assert profile.cwd_install_dir == member
+        assert profile.workspace_venv_path == root / ".venv"
+        assert profile.runtime_matches_workspace is True
+        assert profile.mm_binary_origin == "venv-relative"
+
+    def test_member_own_venv_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        self._venv_python(root / ".venv")
+        self._venv_python(member / ".venv")
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+
+        assert init_cmd._runtime_profile().workspace_venv_path == member / ".venv"
+
+    def test_project_outside_any_workspace_keeps_no_venv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        proj = tmp_path / "outer" / "proj"
+        proj.mkdir(parents=True)
+        (proj / "pyproject.toml").write_text(
+            "[project]\nname = 'proj'\ndependencies = ['memtomem']\n", encoding="utf-8"
+        )
+        # A parent with a .venv but no uv workspace is not the project's env.
+        self._venv_python(tmp_path / "outer" / ".venv")
+        (tmp_path / "outer" / "pyproject.toml").write_text(
+            "[project]\nname = 'outer'\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(proj)
+        _neutral_interpreter(monkeypatch, tmp_path)
+
+        profile = init_cmd._runtime_profile()
+        assert profile.cwd_install_type == "project"
+        assert profile.workspace_venv_path is None
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or os.geteuid() == 0,
+        reason="needs POSIX permission bits that the current user cannot bypass",
+    )
+    @pytest.mark.requires_symlinks
+    def test_denied_workspace_venv_symlink_leaves_no_venv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A workspace ``.venv`` symlink whose target the user cannot access
+        makes ``Path.exists()`` raise ``PermissionError`` on Python 3.13; the
+        member stays a project with no detected venv."""
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        locked = tmp_path / "locked"
+        (locked / "venv").mkdir(parents=True)
+        (root / ".venv").symlink_to(locked / "venv", target_is_directory=True)
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+
+        locked.chmod(0)
+        try:
+            profile = init_cmd._runtime_profile()
+        finally:
+            locked.chmod(0o755)
+        assert profile.cwd_install_type == "project"
+        assert profile.cwd_install_dir == member
+        assert profile.workspace_venv_path is None
+
+    def test_uninstall_hint_names_workspace_root_venv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd, uninstall_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        py = self._venv_python(root / ".venv")
+        monkeypatch.chdir(member)
+        monkeypatch.setattr(init_cmd.sys, "executable", str(py))
+        monkeypatch.setattr(init_cmd.sys, "prefix", str(root / ".venv"))
+
+        label, lines = uninstall_cmd._binary_uninstall_hint(init_cmd._runtime_profile())
+        assert label == f"workspace venv ({root / '.venv'})"
+        assert lines[0] == "uv pip uninstall memtomem"
 
 
 class TestMmBinaryOriginDetection:
