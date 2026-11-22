@@ -6,8 +6,39 @@
 [![Downloads](https://img.shields.io/pypi/dm/memtomem)](https://pypi.org/project/memtomem/)
 [![GitHub stars](https://img.shields.io/github/stars/memtomem/memtomem)](https://github.com/memtomem/memtomem/stargazers)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Status: beta](https://img.shields.io/badge/status-beta-orange)](#stability)
 
-> 🧪 **Beta** — the nine core MCP tools, the `mm` CLI, and the format of your memory and config files change only with an `Upgrading` note in the [CHANGELOG](CHANGELOG.md). Features marked **experimental** can change without one; see [Stability](#stability). Feedback is welcome: [Issues](https://github.com/memtomem/memtomem/issues) · [Discussions](https://github.com/memtomem/memtomem/discussions).
+## Install
+
+You need [uv](https://docs.astral.sh/uv/getting-started/installation/), which also provides the `uvx` the plugins start their server with, and the agent you add the plugin to, installed and signed in ([Claude Code](https://code.claude.com/docs/en/quickstart), [Codex CLI](https://learn.chatgpt.com/docs/codex/cli)). Install the `mm` CLI:
+
+```bash
+uv tool install --python 3.12 'memtomem[all]'
+```
+
+This and the plugin's server need a Python 3.12 that uv can find or download. If `mm` is not found afterwards, run `uv tool update-shell` and open a new shell. Then create your memory store once, as [step 2 of the plugin quickstart](docs/guides/plugin-quickstart.md#2-shared-setup-initialize-your-user-memory-store-once) shows; that step also says to skip it if you already have saved memories or memtomem settings, and what to do when uv cannot get Python 3.12.
+
+Then add the plugin for the agent you use. Claude Code (user scope; for one project only, see the [plugin quickstart](docs/guides/plugin-quickstart.md#install-with-an-explicit-project-scope)):
+
+```bash
+claude plugin marketplace add memtomem/memtomem
+claude plugin install memtomem@memtomem
+```
+
+Codex CLI:
+
+```bash
+codex plugin marketplace add memtomem/memtomem
+codex plugin add memtomem@memtomem
+```
+
+In each project, register the memory tier the session loop writes to. Run this in the project's Git root:
+
+```bash
+mm mem init --scope project_local
+```
+
+Start a new Claude Code or Codex CLI session from that same Git root and run `/memtomem:brief` in Claude Code or `$memtomem-brief` in Codex CLI. The [plugin quickstart](docs/guides/plugin-quickstart.md) also covers a memtomem server you registered by hand before, and checking the connection. OpenCode, Kimi Code, Antigravity, and Cursor each have their own steps under [Coding agents](#coding-agents); for any other MCP client, follow the [Quick Start](#quick-start), or [let your coding agent set it up](#set-it-up-from-your-coding-agent).
 
 ## The session loop
 
@@ -115,7 +146,7 @@ The last command should return the sentence you just added. `mm add` writes to y
 
 ### 4. Connect your coding agent
 
-Install the plugin for your tool — [Claude Code](packages/memtomem-claude-plugin/), [Codex CLI](plugins/memtomem/), [OpenCode](packages/opencode-memtomem/), [Kimi Code](packages/memtomem-kimi-skills/), [Antigravity](packages/memtomem-antigravity-plugin/), or [Cursor](packages/memtomem-cursor-plugin/) — then, in the project you work on, register the memory tier the session loop writes to:
+Install the plugin for your tool: the commands for Claude Code and Codex CLI are under [Install](#install), and [OpenCode](packages/opencode-memtomem/), [Kimi Code](packages/memtomem-kimi-skills/), [Antigravity](packages/memtomem-antigravity-plugin/), and [Cursor](packages/memtomem-cursor-plugin/) each have their own steps. Then, in the project you work on, register the memory tier the session loop writes to:
 
 ```bash
 cd <your-project> && mm mem init --scope project_local
@@ -212,9 +243,9 @@ Everything here runs on the [**memtomem**](https://pypi.org/project/memtomem/) c
 
 ## Stability
 
-memtomem is beta (`0.x`). The nine core MCP tools, the `mm` CLI, and the format of your memory files and config files change only with an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and behind a deprecation window where one is possible. Other features are supported — maintained, with their changes recorded in the CHANGELOG — without that guarantee.
+memtomem is beta (`0.x`). The nine core MCP tools, the `mm` CLI, and the format of your memory files and config files change only with an `Upgrading` note in the [CHANGELOG](CHANGELOG.md), and behind a deprecation window where one is possible. Other features are supported — maintained, with their changes recorded in the CHANGELOG — without that guarantee. Feedback is welcome: [Issues](https://github.com/memtomem/memtomem/issues) · [Discussions](https://github.com/memtomem/memtomem/discussions).
 
-These are **experimental** — their behaviour, output, or format can still change or go away without a window, because a decision that shapes them is still open or an LLM writes what they produce:
+These are **experimental** — their behaviour, output, or format can still change or go away without an `Upgrading` note or a window, because a decision that shapes them is still open or an LLM writes what they produce:
 
 - **Multi-agent memory** — `mem_agent_register`, `mem_agent_search`, `mem_agent_share`, and per-agent session scopes (`mem_session_start` with `agent_id`). Open decisions: [#1477](https://github.com/memtomem/memtomem/issues/1477), [#1478](https://github.com/memtomem/memtomem/issues/1478).
 - **Memory export and import bundles** — `mem_export` / `mem_import` and the Web export/import. How a backup made before 0.7.0 (bundle v1–v3) that holds project memories should be restored is still open.

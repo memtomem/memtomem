@@ -1288,6 +1288,68 @@ class TestPublicReadmeAndExamples:
                 offenders.append(target)
         assert not offenders, f"PyPI README has relative Markdown links: {offenders}"
 
+    @staticmethod
+    def _install_section(text: str) -> str:
+        match = re.search(r"^## Install\s*$\n(.*?)(?=^##\s)", text, re.MULTILINE | re.DOTALL)
+        assert match is not None, "README lost its `## Install` section"
+        return match.group(1)
+
+    @staticmethod
+    def _bash_lines(text: str, pattern: str) -> list[str]:
+        """Every fenced Bash line matching ``pattern``, in order, duplicates kept."""
+        wanted = re.compile(pattern)
+        return [
+            line.strip()
+            for block in _fenced_blocks(text, "bash")
+            for line in block.splitlines()
+            if wanted.search(line.strip())
+        ]
+
+    _PLUGIN_INSTALL = (
+        r"^(claude plugin (marketplace add|install)|codex plugin (marketplace add|add)) "
+    )
+
+    @pytest.mark.parametrize("readme", [_README, _PYPI_README])
+    def test_install_section_plugin_commands_match_the_quickstart(self, readme: Path) -> None:
+        # The quickstart installs Claude Code at project scope; the README's first screen
+        # installs at the CLI's default scope and links there for one project only.
+        readme_lines = self._bash_lines(self._install_section(_read(readme)), self._PLUGIN_INSTALL)
+        guide = _read(_GUIDES / "plugin-quickstart.md")
+        guide_lines: list[str] = []
+        for line in self._bash_lines(guide, self._PLUGIN_INSTALL):
+            line = line.replace(" --scope project", "")
+            if line not in guide_lines:
+                guide_lines.append(line)
+        assert len(guide_lines) == 4, guide_lines
+        assert readme_lines == guide_lines
+
+    @pytest.mark.parametrize("readme", [_README, _PYPI_README])
+    def test_install_section_leaves_store_setup_to_the_plugin_quickstart(
+        self, readme: Path
+    ) -> None:
+        # Whether a reader already has a store (config.json, config.d fragments, env) is the
+        # quickstart's call; the first screen links its store step instead of running init.
+        section = self._install_section(_read(readme))
+        # Any user-store init, bare or through uvx; `mm mem init` registers a tier instead.
+        assert self._bash_lines(section, r"\bmm init\b") == []
+        guide = _read(_GUIDES / "plugin-quickstart.md")
+        store_steps = [
+            heading
+            for heading in re.findall(r"^## (.+)$", guide, re.MULTILINE)
+            if " mm init " in _heading_section(guide, f"## {heading}")
+        ]
+        assert len(store_steps) == 1, store_steps
+        anchors = re.findall(r"plugin-quickstart\.md#([\w-]+)\)", section)
+        assert _slug(store_steps[0]) in anchors, (store_steps, anchors)
+        # The brief stops until the project tier exists, so the fenced tier command comes
+        # before each host's brief.
+        bash = self._bash_lines(section, r".")
+        assert bash.count("mm mem init --scope project_local") == 1, bash
+        tier = section.index("```bash\nmm mem init --scope project_local\n```")
+        for brief in ("`/memtomem:brief`", "`$memtomem-brief`"):
+            assert brief in section, brief
+            assert tier < section.index(brief), brief
+
     def test_normal_mcp_examples_do_not_override_saved_memory_dirs(self) -> None:
         mcp_clients = _read(_GUIDES / "mcp-clients.md")
         ordinary, marker, overrides = mcp_clients.partition("## 11. Environment Variable Overrides")
@@ -2238,6 +2300,19 @@ class TestPython312CommandsSayWhatTheyNeed:
             "README.md",
             "### 1. Install",
             (_PY312_NEEDS, _PY312_OFFLINE, _PY312_INSTALL, *_PY313_REMEDY),
+        ),
+        # The first screen's install points at the plugin quickstart's store step for the
+        # remedy, since installing the CLI with another Python leaves the plugin's server
+        # still asking for 3.12.
+        (
+            "README.md",
+            "## Install",
+            (_PY312_NEEDS, "(docs/guides/plugin-quickstart.md#2-shared-setup-"),
+        ),
+        (
+            "packages/memtomem/README.md",
+            "## Install",
+            (_PY312_NEEDS, "/docs/guides/plugin-quickstart.md#2-shared-setup-"),
         ),
         # The "No install" registration sits in the collapsed install options under § 5.
         (
