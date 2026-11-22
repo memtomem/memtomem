@@ -2806,35 +2806,47 @@ class TestUvWorkspaceRoot:
         assert root is None
         assert error is not None and error.startswith("uv is not on PATH.")
 
+    @pytest.mark.parametrize("name", ["UV_NO_PROJECT", "UV_ISOLATED"])
     @pytest.mark.parametrize(
-        ("name", "value", "unknown"),
+        ("value", "outcome"),
         [
-            ("UV_NO_PROJECT", "1", True),
-            ("UV_ISOLATED", "true", True),
-            ("UV_NO_PROJECT", "0", False),
-            ("UV_ISOLATED", "", False),
+            ("1", "skips"),
+            ("TRUE", "skips"),
+            ("y", "skips"),
+            ("0", "uses"),
+            ("f", "uses"),
+            ("OFF", "uses"),
+            ("", "refused"),
+            (" false ", "refused"),
+            ("garbage", "refused"),
         ],
     )
-    def test_modes_where_uv_run_skips_the_project_are_unknown(
+    def test_uv_run_mode_variables_read_as_uv_reads_them(
         self,
         name: str,
         value: str,
-        unknown: bool,
+        outcome: str,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``uv workspace dir`` still names the root under these, but
-        ``uv run`` does not use the project's environment."""
+        """``uv workspace dir`` still names the root under these, but a true
+        value makes ``uv run`` skip the project's environment and a value uv
+        does not accept makes it refuse to run (uv 0.12.17, measured): both
+        are unknown. Only uv's false values leave discovery to uv."""
         calls = self._uv_prints(monkeypatch, (str(tmp_path) + "\n").encode())
         monkeypatch.setenv(name, value)
-        if unknown:
-            assert _real_uv_workspace_root(tmp_path) == (
+        result = _real_uv_workspace_root(tmp_path)
+        if outcome == "uses":
+            assert result == (tmp_path, None)
+            return
+        assert calls == []
+        if outcome == "skips":
+            assert result == (
                 None,
                 f"{name} is set, so `uv run` does not use the project's environment",
             )
-            assert calls == []
         else:
-            assert _real_uv_workspace_root(tmp_path) == (tmp_path, None)
+            assert result == (None, f"`uv run` refuses {name}={value!r}")
 
     @pytest.mark.parametrize(
         ("stdout", "returncode", "reason"),
@@ -2889,8 +2901,8 @@ class TestUvWorkspaceRoot:
     @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not installed")
     def test_real_uv_decides_membership_and_writes_nothing(self, tmp_path: Path) -> None:
         """The host's uv (CI pins 0.11.16): a member maps to the root, an
-        excluded project and a directory outside ``members`` to themselves.
-        No lockfile and no environment are created."""
+        excluded project and a standalone project outside the ``members``
+        globs to themselves. No lockfile and no environment are created."""
         root = tmp_path / "mono"
 
         def project(path: Path, extra: str = "") -> None:
@@ -2971,12 +2983,13 @@ class TestProbeWorkspaceExtrasOutput:
         assert init_cmd._probe_workspace_extras(tmp_path / "python") == {"fastembed", "uvicorn"}
         assert [{k: v for k, v in kw.items() if k in ("text", "encoding")} for kw in seen] == [{}]
 
-    def test_a_module_in_the_current_directory_does_not_pass_for_an_extra(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("where", ["cwd", "PYTHONPATH"])
+    def test_a_module_outside_the_environment_does_not_pass_for_an_extra(
+        self, where: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A real probe of this interpreter from a directory holding a
-        same-named module: ``-c`` alone would put that directory on
-        ``sys.path`` and report the module as installed."""
+        """A real probe of this interpreter with a same-named module in the
+        current directory, or in a directory on ``PYTHONPATH``: ``-c`` alone
+        would put either on ``sys.path`` and report the module as installed."""
         import importlib.util
 
         from memtomem.cli import init_cmd
@@ -2986,7 +2999,10 @@ class TestProbeWorkspaceExtrasOutput:
         if not absent:
             pytest.skip("every probed module is installed here")
         (tmp_path / f"{absent[0]}.py").write_text("", encoding="utf-8")
-        monkeypatch.chdir(tmp_path)
+        if where == "cwd":
+            monkeypatch.chdir(tmp_path)
+        else:
+            monkeypatch.setenv("PYTHONPATH", str(tmp_path))
         importable = init_cmd._probe_workspace_extras(Path(sys.executable))
         assert importable is not None
         assert absent[0] not in importable

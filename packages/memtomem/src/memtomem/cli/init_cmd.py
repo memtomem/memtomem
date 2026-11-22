@@ -391,6 +391,10 @@ class RuntimeProfile:
 # and with ``--frozen`` it fails on a missing or outdated lock.
 _UV_DISCOVERY_TIMEOUT_S = 10
 
+# How uv 0.12.17 reads a boolean environment variable (case-insensitive).
+_UV_FALSE_VALUES = frozenset({"0", "f", "false", "n", "no", "off"})
+_UV_TRUE_VALUES = frozenset({"1", "t", "true", "y", "yes", "on"})
+
 
 def _uv_workspace_root(directory: Path) -> tuple[Path | None, str | None]:
     """Ask uv which workspace root ``uv run --directory <directory>`` uses.
@@ -406,11 +410,17 @@ def _uv_workspace_root(directory: Path) -> tuple[Path | None, str | None]:
     finds another ``uv`` on its own ``PATH`` can resolve differently.
 
     ``UV_NO_PROJECT`` and ``UV_ISOLATED`` make ``uv run`` skip the project's
-    environment while ``uv workspace dir`` still names the root (uv 0.12.17),
-    so either one set to anything but a false value is unknown here."""
+    environment while ``uv workspace dir`` still names the root, so any value
+    but one uv reads as false is unknown here. uv 0.12.17 reads ``0``, ``f``,
+    ``false``, ``n``, ``no`` and ``off`` (any case) as false, and refuses to run
+    with an empty, space-padded or unrecognized value (measured)."""
     for name in ("UV_NO_PROJECT", "UV_ISOLATED"):
-        if os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off"):
+        value = os.environ.get(name)
+        if value is None or value.lower() in _UV_FALSE_VALUES:
+            continue
+        if value.lower() in _UV_TRUE_VALUES:
             return None, f"{name} is set, so `uv run` does not use the project's environment"
+        return None, f"`uv run` refuses {name}={value!r}"
     uv = shutil.which("uv")
     if uv is None:
         return None, (
@@ -1871,12 +1881,11 @@ def _probe_workspace_extras(py: Path) -> set[str] | None:
     try:
         # Bytes: with ``text=True`` an undecodable byte raises on POSIX and,
         # on Windows, leaves ``stdout`` as ``None`` (decoded in a reader thread).
-        # ``-P``: without it ``-c`` puts the current directory first on
-        # ``sys.path``, so a ``fastembed.py`` there would pass for the extra.
-        # memtomem needs 3.12+, which has the flag; an older Python rejects it
-        # and the extras read as not checked.
+        # ``-I``: without it ``-c`` puts the current directory first on
+        # ``sys.path`` and ``PYTHONPATH`` adds more, so a ``fastembed.py`` in
+        # either would pass for the installed extra.
         result = subprocess.run(
-            [str(py), "-P", "-c", _PROBE_EXTRAS_CODE], capture_output=True, timeout=5
+            [str(py), "-I", "-c", _PROBE_EXTRAS_CODE], capture_output=True, timeout=5
         )
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
@@ -2458,7 +2467,7 @@ def _check_extras(state: dict) -> tuple[list[str], str | None]:
     state dicts without constructing a full profile."""
     profile = state.get("_profile")
     source = profile is not None and profile.cwd_install_type in ("source", "project")
-    if source and profile.workspace_env_error is not None:
+    if profile is not None and source and profile.workspace_env_error is not None:
         return [], (
             "could not ask uv which environment `uv run --directory "
             f"{profile.cwd_install_dir}` uses: {profile.workspace_env_error}"

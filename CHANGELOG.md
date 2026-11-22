@@ -21,7 +21,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   environment's interpreter cannot be probed, the summary says `Extras not checked` with the
   reason instead of checking `mm init`'s own interpreter, and `mm init --non-interactive`
   refuses a configuration that needs `onnx` or `korean` before writing anything. The probe
-  no longer counts a same-named module in the current directory as an installed extra. A
+  no longer counts a same-named module in the current directory or on `PYTHONPATH` as an
+  installed extra. A
   `.venv` symlink whose target the user cannot access no longer stops `mm init` or
   `mm uninstall` with a `PermissionError` (Python 3.12 and 3.13), and `mm init` reports it
   the same way rather than as an environment to sync (on 3.14 the check answered "absent").
