@@ -1330,8 +1330,9 @@ class TestPublicReadmeAndExamples:
         # Whether a reader already has a store (config.json, config.d fragments, env) is the
         # quickstart's call; the first screen links its store step instead of running init.
         section = self._install_section(_read(readme))
-        # Any user-store init, bare or through uvx; `mm mem init` registers a tier instead.
-        assert self._bash_lines(section, r"\bmm init\b") == []
+        # Any user-store init, in a fence of any language or inline, bare or through uvx;
+        # `mm mem init` registers a tier instead.
+        assert re.findall(r".*\bmm\s+init\b.*", section) == []
         guide = _read(_GUIDES / "plugin-quickstart.md")
         store_steps = [
             heading
@@ -1341,6 +1342,14 @@ class TestPublicReadmeAndExamples:
         assert len(store_steps) == 1, store_steps
         anchors = re.findall(r"plugin-quickstart\.md#([\w-]+)\)", section)
         assert _slug(store_steps[0]) in anchors, (store_steps, anchors)
+        # The coexistence check named before the plugin commands is one `mm doctor` runs.
+        doctor = _CLI.get_command(click.Context(_CLI), "doctor")
+        assert doctor is not None
+        option = next(p for p in doctor.params if "--mcp-client" in getattr(p, "opts", ()))
+        named = re.findall(r"`mm doctor --mcp-client (\w+)`", section)
+        assert sorted(named) == ["claude", "codex"], named
+        assert set(named) <= set(option.type.choices), (named, option.type.choices)
+        assert section.index("mm doctor --mcp-client") < section.index("claude plugin install")
         # The brief stops until the project tier exists, so the fenced tier command comes
         # before each host's brief.
         bash = self._bash_lines(section, r".")
