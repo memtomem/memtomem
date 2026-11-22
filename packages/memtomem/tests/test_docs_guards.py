@@ -3887,6 +3887,7 @@ class TestExistingStoreIsNotReinitialized:
             "row_no_init": "do not initialize",
             "row_fresh": "On a new store,",
             "confirm": "the plugin's status check",
+            "confirm_what": "database path and memory directories",
             "checklist": "or an existing store's database path was confirmed",
         },
         _VIBE_GUIDE: {
@@ -3898,6 +3899,7 @@ class TestExistingStoreIsNotReinitialized:
             "row_no_init": "초기화하지 마세요",
             "row_fresh": "새 저장소라면",
             "confirm": "플러그인 status 확인",
+            "confirm_what": "database path와 기억 디렉터리",
             "checklist": "초기화했거나, 기존 저장소의 database path를 확인했다",
         },
     }
@@ -3912,7 +3914,10 @@ class TestExistingStoreIsNotReinitialized:
         words = self._LOCALES[path]
         section = _heading_section(_read(path), words["step"])
         flat = " ".join(section.split())
-        for phrase in ("storage.sqlite_path", words["confirm"]):
+        # The authoritative check is the connected server's status, and it has to cover
+        # where memories are written as well as the database: a terminal-only
+        # MEMTOMEM_INDEXING__MEMORY_DIRS leaves the database path equal on both sides.
+        for phrase in (words["confirm"], words["confirm_what"]):
             assert phrase in flat, f"{path.name} step 2 lost {phrase!r}"
         assert self._preview() in _fenced_commands(section), f"{path.name} lost the preview"
         # The refusal has to sit in the fragment/variable branch, not anywhere in the step:

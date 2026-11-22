@@ -126,15 +126,12 @@ database path는 나중에 두 도구가 같은 저장소를 보는지 확인할
 uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm config show
 ```
 
-stderr로 나오는 것까지 경고를 모두 읽으세요. fragment를 읽지 못했거나, 섹션이
-거부됐거나, 설정이 건너뛰어졌다면 보이는 값은 직접 쓴 값이 아닙니다. 그다음
-`storage.sqlite_path`가 기대한 database인지 확인합니다. 상대 경로는 프로세스마다
-시작한 디렉터리를 기준으로 풀리고 플러그인 서버는 이 터미널과 다른 디렉터리에서
-시작할 수 있으므로 절대 경로를 쓰세요. 이 미리 보기는 이
-터미널이 보는 설정이라 에이전트의 서버는 다른 환경 변수를 볼 수 있으므로,
-기억을 저장하기 전에 [3단계](#실제-연결-확인하기)나
-[4단계](#4-경로-b-codex-cli-플러그인-설치)의 플러그인 status 확인으로 같은
-database path인지 확인하세요.
+경고가 나오면(일부는 stderr로 나옵니다) fragment나 설정이 쓴 대로 적용되지
+않았다는 뜻입니다. 이 미리 보기는 이 터미널이 보는 설정만 보여 주고 플러그인
+서버는 다른 환경 변수를 볼 수 있으므로 최종 확인이 아닙니다. 기억을 저장하기 전에
+[3단계](#실제-연결-확인하기)나 [4단계](#4-경로-b-codex-cli-플러그인-설치)의
+플러그인 status 확인으로 database path와 기억 디렉터리가 설정에 적은 값인지
+확인하세요.
 
 ## 3. 경로 A: Claude Code 플러그인 설치
 
@@ -402,7 +399,7 @@ uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm mem init --scope project_lo
 | `uvx`를 찾지 못함 | uv 공식 설치 안내를 따른 뒤 새 터미널에서 `uvx --version`을 확인합니다. |
 | 플러그인을 찾지 못함 | marketplace 목록을 확인하고 설치 명령을 다시 실행합니다. |
 | workflow/skill이 보이지 않음 | Claude는 reload 또는 새 세션, Codex는 새 thread를 시작합니다. |
-| 저장소가 초기화되지 않았다고 나옴 | `config.d/` fragment나 `MEMTOMEM_*` 환경 변수가 저장소를 지정한다면 초기화하지 마세요. `mm status`는 `config.json`이 없으면 멈춥니다. [공통 준비](#2-공통-준비-사용자-기억-저장소를-한-번-초기화)의 `mm config show` 미리 보기를 실행하고 플러그인 status 확인으로 database path를 확인합니다. 새 저장소라면 공통 준비의 `mm init ... --mcp skip`과 `mm status`를 다시 실행합니다. |
+| 저장소가 초기화되지 않았다고 나옴 | `config.d/` fragment나 `MEMTOMEM_*` 환경 변수가 저장소를 지정한다면 초기화하지 마세요. `mm status`는 `config.json`이 없으면 멈춥니다. [공통 준비](#2-공통-준비-사용자-기억-저장소를-한-번-초기화)의 `mm config show` 미리 보기를 실행하고 플러그인 status 확인으로 database path와 기억 디렉터리를 확인합니다. 새 저장소라면 공통 준비의 `mm init ... --mcp skip`과 `mm status`를 다시 실행합니다. |
 | 프로젝트 기억을 저장할 수 없음 | 실제 Git 루트에서 `mm mem init --scope project_local`을 실행하고 도구를 다시 엽니다. |
 | 검색 결과가 0건 | status에서 chunk 수를 보고 저장 문장에 실제로 있는 단어로 다시 검색합니다. |
 | Claude와 Codex의 결과가 다름 | database path를 비교하고, 프로젝트 기억이면 프로젝트 루트와 저장 범위도 확인합니다. |
