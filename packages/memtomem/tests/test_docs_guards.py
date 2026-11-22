@@ -1290,9 +1290,20 @@ class TestPublicReadmeAndExamples:
 
     @staticmethod
     def _install_section(text: str) -> str:
-        match = re.search(r"^## Install\s*$\n(.*?)(?=^##\s)", text, re.MULTILINE | re.DOTALL)
-        assert match is not None, "README lost its `## Install` section"
-        return match.group(1)
+        # Parsed, not matched: a `## ` shell comment inside a fence is not a heading.
+        return _heading_section(text, "## Install")
+
+    @staticmethod
+    def _h2_headings(text: str) -> list[str]:
+        """The text of each level-2 heading, as markdown-it parses them."""
+        from markdown_it import MarkdownIt
+
+        lines = text.splitlines()
+        return [
+            lines[token.map[0]].rstrip().removeprefix("## ")
+            for token in MarkdownIt("commonmark").parse(text)
+            if token.type == "heading_open" and token.tag == "h2" and token.map
+        ]
 
     @staticmethod
     def _bash_lines(text: str, pattern: str) -> list[str]:
@@ -1336,7 +1347,7 @@ class TestPublicReadmeAndExamples:
         guide = _read(_GUIDES / "plugin-quickstart.md")
         store_steps = [
             heading
-            for heading in re.findall(r"^## (.+)$", guide, re.MULTILINE)
+            for heading in self._h2_headings(guide)
             if " mm init " in _heading_section(guide, f"## {heading}")
         ]
         assert len(store_steps) == 1, store_steps
