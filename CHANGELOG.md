@@ -17,6 +17,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   as the glob before it; when the value is otherwise well-formed, the message now names the
   NUL (a comma list mixed with a glob still gets that syntax error).
 
+- **`mm web` serves its OpenAPI schema at `/api/openapi.json` instead of `/openapi.json`
+  (#3272). The new URL is covered by the Host and Origin checks that cover `/api/*`.** FastAPI
+  served the schema at its default `/openapi.json`, outside the prefix the `mm web` guard
+  checks, so it answered a request whose `Host` was a rebound hostname with the full route
+  list. With the guard enforcing (the default), such a request now gets the same 403 as the
+  other `/api/*` routes, and `/openapi.json` returns 404. The `/api/docs` page fetches the new
+  URL; a client generator or script that fetched the schema by the old URL needs the new one.
+
 - **The interactive `mm init` wizard's Local ONNX and Korean tokenizer steps report the extra for
   the environment a source checkout or a project runs memtomem in (#3508).** Both steps imported
   `fastembed` or `kiwipiepy` in `mm init`'s own interpreter. A global `mm` (for example a
