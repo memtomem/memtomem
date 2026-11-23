@@ -263,7 +263,23 @@ def _step(document: dict, step_id: str) -> dict:
     return steps[0]
 
 
-def _assert_sbom_workflow(document: dict) -> None:
+def _action_refs(document: dict) -> dict[str, set[str]]:
+    """Each action's refs across every job's steps, whatever their shape.
+
+    A floating ref is kept, not skipped: ci.yml pinning an action at the SBOM's
+    SHA in one step and at ``@latest`` in another must not compare equal.
+    """
+    refs: dict[str, set[str]] = {}
+    for job in document.get("jobs", {}).values():
+        for step in job.get("steps", []):
+            uses = step.get("uses")
+            if isinstance(uses, str) and "@" in uses:
+                name, _, ref = uses.rpartition("@")
+                refs.setdefault(name, set()).add(ref)
+    return refs
+
+
+def _assert_sbom_workflow(document: dict, ci: dict | None = None) -> None:
     """The whole parsed workflow, compared to the one below.
 
     Closed-world for the same reason as ``_assert_closed_job`` in
@@ -278,10 +294,12 @@ def _assert_sbom_workflow(document: dict) -> None:
     shape instead, on the parsed value (the repository-wide scan in
     test_supply_chain_contracts.py reads lines, and a quoted key or a flow
     mapping slips past it): a full commit SHA, one per action across the
-    workflow. Equality then compares the action names, so which action runs,
-    and where, is still pinned.
+    workflow, and the same SHA ``ci.yml`` pins that action to (``ci``, read
+    from the checkout unless given). Dependabot's grouped bump moves both
+    files together; a change to this workflow alone, such as a rollback or a
+    mistyped SHA, does not match. Equality then compares the action names, so
+    which action runs, and where, is still pinned.
     """
-    refs: dict[str, set[str]] = {}
     normalized = copy.deepcopy(document)
     for job in normalized.get("jobs", {}).values():
         for step in job.get("steps", []):
@@ -289,10 +307,11 @@ def _assert_sbom_workflow(document: dict) -> None:
                 continue
             uses = step["uses"]
             assert isinstance(uses, str) and _ACTION_RE.fullmatch(uses), uses
-            name, ref = uses.split("@")
-            refs.setdefault(name, set()).add(ref)
-            step["uses"] = name
-    assert {name: len(pins) for name, pins in refs.items() if len(pins) > 1} == {}
+            step["uses"] = uses.split("@")[0]
+    refs = _action_refs(document)
+    ci_refs = _action_refs(_workflow("ci.yml") if ci is None else ci)
+    off = {n: p for n, p in refs.items() if len(p) != 1 or p != ci_refs.get(n)}
+    assert off == {}, (refs, ci_refs)
     assert normalized == _EXPECTED
 
 
@@ -607,6 +626,10 @@ def _diverging_checkouts(d: dict) -> None:
     d["jobs"]["sbom"]["steps"][1]["uses"] = "actions/checkout@" + "b" * 40
 
 
+def _sbom_only_sha_change(d: dict) -> None:
+    d["jobs"]["sbom"]["steps"][2]["uses"] = "astral-sh/setup-uv@" + "e" * 40
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -630,6 +653,7 @@ def _diverging_checkouts(d: dict) -> None:
         _floating_action_ref,
         _other_action,
         _diverging_checkouts,
+        _sbom_only_sha_change,
     ],
 )
 def test_the_sbom_workflow_guard_refuses_each_weakening(mutate: Callable[[dict], None]) -> None:
@@ -642,18 +666,54 @@ def test_the_sbom_workflow_guard_refuses_each_weakening(mutate: Callable[[dict],
 
 
 def test_the_sbom_workflow_guard_accepts_a_bump_of_every_action_sha() -> None:
-    """What Dependabot does: each action moves to another commit, the same one at every step."""
+    """What Dependabot does: each action moves to another commit, at every step of both files."""
     document = copy.deepcopy(_workflow())
+    ci = copy.deepcopy(_workflow("ci.yml"))
     bumped = {"actions/checkout": "c" * 40, "astral-sh/setup-uv": "d" * 40}
-    moved = 0
-    for step in document["jobs"]["sbom"]["steps"]:
-        if "uses" in step:
-            name, ref = step["uses"].split("@")
-            assert ref != bumped[name]
-            step["uses"] = f"{name}@{bumped[name]}"
-            moved += 1
-    assert moved == 3
-    _assert_sbom_workflow(document)
+    moved = {"sbom": 0, "ci": 0}
+    for label, doc in (("sbom", document), ("ci", ci)):
+        for job in doc["jobs"].values():
+            for step in job.get("steps", []):
+                name, _, ref = step.get("uses", "").partition("@")
+                if name in bumped:
+                    assert ref != bumped[name]
+                    step["uses"] = f"{name}@{bumped[name]}"
+                    moved[label] += 1
+    assert moved["sbom"] == 3 and moved["ci"] > 0
+    _assert_sbom_workflow(document, ci)
+    with pytest.raises(AssertionError):
+        _assert_sbom_workflow(document)  # the same bump against the unbumped ci.yml
+
+
+def test_the_sbom_workflow_guard_refuses_a_ci_that_also_floats_the_action() -> None:
+    """ci.yml keeps the matching SHA in one step and floats the action in another."""
+    ci = copy.deepcopy(_workflow("ci.yml"))
+    ci["jobs"]["extra"] = {"steps": [{"uses": "astral-sh/setup-uv@latest"}]}
+    assert _action_refs(ci)["astral-sh/setup-uv"] > _action_refs(_workflow())["astral-sh/setup-uv"]
+    with pytest.raises(AssertionError):
+        _assert_sbom_workflow(_workflow(), ci)
+
+
+def test_the_sbom_workflow_guard_refuses_a_floating_ref_even_if_ci_floats_it_too() -> None:
+    """The SHA shape check stands on its own, not only through the comparison with ci.yml."""
+    document = copy.deepcopy(_workflow())
+    _floating_action_ref(document)
+    ci = {"jobs": {"test": {"steps": [{"uses": "astral-sh/setup-uv@latest"}]}}}
+    ci["jobs"]["test"]["steps"].append({"uses": document["jobs"]["sbom"]["steps"][0]["uses"]})
+    assert _action_refs(ci) == _action_refs(document)
+    with pytest.raises(AssertionError):
+        _assert_sbom_workflow(document, ci)
+
+
+def test_the_sbom_workflow_guard_refuses_two_checkout_shas_even_if_ci_has_both() -> None:
+    """One SHA per action stands on its own, not only through the comparison with ci.yml."""
+    document = copy.deepcopy(_workflow())
+    _diverging_checkouts(document)
+    ci = copy.deepcopy(_workflow("ci.yml"))
+    ci["jobs"]["extra"] = {"steps": [{"uses": document["jobs"]["sbom"]["steps"][1]["uses"]}]}
+    assert _action_refs(ci)["actions/checkout"] == _action_refs(document)["actions/checkout"]
+    with pytest.raises(AssertionError):
+        _assert_sbom_workflow(document, ci)
 
 
 # --- the real export ---------------------------------------------------------------
