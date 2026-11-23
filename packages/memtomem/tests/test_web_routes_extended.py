@@ -648,6 +648,14 @@ class TestDedup:
         assert data["total"] == 0
         assert data["candidates"] == []
 
+    @pytest.mark.parametrize("limit", [0, -1])
+    async def test_dedup_scan_rejects_non_positive_limit(self, app, client: AsyncClient, limit):
+        resp = await client.get("/api/dedup/candidates", params={"limit": limit})
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"][0]["loc"] == ["query", "limit"]
+        app.state.dedup_scanner.scan_with_coverage.assert_not_awaited()
+
     async def test_dedup_scan_reports_what_it_covered(self, app, client: AsyncClient):
         # ``scanned_chunks`` used to echo the requested ``max_scan``; it is the
         # pool the scan actually selected, which a small store keeps below it.
