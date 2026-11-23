@@ -625,7 +625,7 @@ def _capped_korean_record() -> str:
         worktree_state="8 dirty:  M=5 ??=3; first=src/pkg/모듈_0.py",
         validation=_korean(90),
         blockers=_korean(60),
-        next_action=_korean(90),
+        next_action=_korean(120),
     )
 
 
@@ -637,7 +637,7 @@ _RAW_CAPS = {
     "worktree_state": 80,
     "validation": 90,
     "blockers": 60,
-    "next_action": 90,
+    "next_action": 120,
 }
 
 

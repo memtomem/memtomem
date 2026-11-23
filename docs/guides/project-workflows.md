@@ -75,8 +75,9 @@ with each Korean, Japanese, or Chinese character counted as two, and never more 
 indexing with an exact token ceiling (384 tokens under `multilingual-e5-small`); it is
 not a guarantee. To fit, Save shortens only prose and moves whole paths out of
 `changed_files` into its omitted count. The ids, the root, the commit, the worktree
-summary and the artifact paths are never changed, and a path, command or quote in
-the prose is kept whole or left out whole. A record that cannot meet the field caps
+summary and the artifact paths are never changed, and a path, symbol, command, GitHub
+reference or quote in the prose is kept whole or left out whole, except in `next_action`,
+where none is left out. A record that cannot meet the field caps
 and the 1,200 maximum that way is not saved; Save stops and names the value in the
 way. A record that meets them but stays over the size target is saved and reported
 with its weighted count.

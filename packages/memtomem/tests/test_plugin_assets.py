@@ -921,6 +921,12 @@ _HANDOFF_SIZE_TARGET = (
     # accept the empty line, and the record would carry no work.
     "when leaving one out would leave a prose field saying nothing, say in words what the "
     "field needs to convey instead",
+    # Leaving out what `next_action` acts on leaves words the next agent cannot act on, and
+    # Resume step 7 reads its GitHub reference (#3565 review). The exception covers every
+    # verbatim kind step 1 names rather than a list of its own: a listed subset left out the
+    # full URL Resume accepts and code symbols.
+    "The one exception is `next_action`: no verbatim string in it is ever left out,",
+    "when they still do not fit the `next_action` cap, that is a raw limit this rule cannot meet",
     "Every field keeps exactly one line",
     # The refusal comes before the fallback, so "save it anyway" never covers a record
     # that breaks a raw limit.
@@ -980,7 +986,11 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         'tag_filter="handoff-to-<current-runtime>,handoff-to-any"',
         'tag_filter="handoff-id-<handoff-id>"',
         "`opencode`, `antigravity-cli`, `cursor`, and `any`",
-        "Keep file paths, code symbols, command strings, and direct quotes of the user verbatim",
+        # GitHub references are verbatim too: Resume step 7 reads `next_action`'s, and
+        # step 2's `next_action` exception protects only what this list names (#3565 review).
+        "Keep file paths, code symbols, command strings, GitHub issue and pull request "
+        "references, and direct quotes of the user verbatim",
+        "(a file path, code symbol, command string, GitHub reference, or direct quote of the user)",
         "write the rest in the language this project's existing memories use",
         "inside one fenced ```text block",
         "The fence is load-bearing",
@@ -1041,7 +1051,7 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         # The value caps leave room under the size target (#3399).
         "`objective` 80 characters, `completed` 160, `changed_files` 120 and at most 8 paths, "
         "`artifacts` 160 and at most 4 paths, `worktree_state` 80, `validation` 90, "
-        "`blockers` 60, and `next_action` 90",
+        "`blockers` 60, and `next_action` 120",
         "changed_files: <comma-separated paths, at most 8; include an omitted count if needed>",
         *_HANDOFF_SIZE_TARGET,
         "does not capture the whole conversation",
@@ -1131,7 +1141,7 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "at most 10;",
         "`validation` 120",
         "`blockers` 80",
-        "`next_action` 120",
+        "`next_action` 90",
         "A full-size record, or a shorter one with Korean text",
     ):
         assert old_cap not in flat, old_cap
@@ -2405,6 +2415,11 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
     assert "and never more than 1,200 characters" in flat_guide
     assert "The whole record, fence lines included, aims for at most" in flat_guide
     assert "(384 tokens under `multilingual-e5-small`); it is not a guarantee." in flat_guide
+    # The guide's keep-or-omit rule carries the workflow's exception for `next_action`.
+    assert (
+        "a path, symbol, command, GitHub reference or quote in the prose is kept whole or left "
+        "out whole, except in `next_action`, where none is left out." in flat_guide
+    )
     # The refusal before the fallback, as in the workflow: "saved anyway" covers only a
     # record that meets the raw limits.
     refusal = flat_guide.index(

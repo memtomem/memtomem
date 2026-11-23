@@ -65,8 +65,9 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
 1. Read `git rev-parse HEAD` and `git status --porcelain=v1 --branch`. Summarize the work from
    the live repository and the current conversation. Do not include credentials, patch bodies,
    complete transcripts, or raw command-output dumps. Keep file paths, code symbols, command
-   strings, and direct quotes of the user verbatim — never translate or paraphrase them — and
-   write the rest in the language this project's existing memories use.
+   strings, GitHub issue and pull request references, and direct quotes of the user
+   verbatim — never translate or paraphrase them — and write the rest in the language this
+   project's existing memories use.
 2. Generate one canonical lowercase UUID as the `handoff_id` — nothing else is a valid id, and
    resume rejects anything that is not one. Create a single compact record in this exact field
    order and pass it to `mem_add` **inside one fenced ```text block**, fence lines included.
@@ -109,7 +110,7 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    Size the record last. The raw limits come first, counted in plain characters: the value
    caps — `objective` 80 characters, `completed` 160, `changed_files` 120 and at most 8 paths,
    `artifacts` 160 and at most 4 paths, `worktree_state` 80, `validation` 90, `blockers` 60,
-   and `next_action` 90 — and a hard maximum of 1,200 characters for the complete record;
+   and `next_action` 120 — and a hard maximum of 1,200 characters for the complete record;
    never call `mem_add` with an oversized record. Then the size target: aim for at most 850
    characters for the complete record, fence lines included, counting each Korean, Japanese,
    or Chinese character as two. The characters that count as two are Hangul, hiragana,
@@ -124,9 +125,13 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    paths out of `changed_files` into its omitted count. Nothing else changes: not
    `handoff_id`, the runtimes, `project_root`, `git_head`, `worktree_state`, or `artifacts`.
    Inside the prose, a verbatim string from step 1 (a file path, code symbol, command string,
-   or direct quote of the user) is kept whole or left out whole, never cut; when leaving one
-   out would leave a prose field saying nothing, say in words what the field needs to convey
-   instead. Every field keeps exactly one line. If the raw limits
+   GitHub reference, or direct quote of the user) is kept whole or left out whole, never cut;
+   when leaving one out would leave a prose field saying nothing, say in words what the field
+   needs to convey instead. The one exception is `next_action`: no verbatim string in it is
+   ever left out, because the next agent acts on exactly those strings and Resume step 7 reads
+   its GitHub reference. Shorten the words around them, and when they still do not fit the
+   `next_action` cap, that is a raw limit this rule cannot meet. Every field keeps exactly one
+   line. If the raw limits
    cannot be met this way, stop and report which value is in the way instead of calling
    `mem_add`. If they are met but the record is still over the target, save it anyway.
 

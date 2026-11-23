@@ -16,10 +16,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   most 850 characters for the whole record, fence lines included, with each Korean, Japanese,
   or Chinese character counted as two, and the per-field caps are lower: `objective` 80,
   `completed` 160, `changed_files` 120 with at most 8 paths, `validation` 90, `blockers` 60,
-  `next_action` 90, and `artifacts` now takes its 4-path limit while its paths are added.
-  Only prose gives way, and whole `changed_files` paths move into its omitted count: ids,
-  the root, the commit, `worktree_state` and `artifacts` are never changed, and a verbatim
-  path, symbol, command or quote is kept whole or left out whole. A record that cannot meet
+  and `artifacts` now takes its 4-path limit while its paths are added. `next_action` keeps
+  its 120. Only prose gives way, and whole `changed_files` paths move into its omitted count:
+  ids, the root, the commit, `worktree_state` and `artifacts` are never changed, and a
+  verbatim path, symbol, command, GitHub reference or quote is kept whole or left out whole,
+  except in `next_action`, where none is left out, so the next agent can act on it. A record
+  that cannot meet
   the caps and the 1,200-character maximum (counted plainly) that way is not saved: Save
   stops and names the value in the way. One that meets them but stays over the target is
   saved and reported with its weighted count. The 240-character root limit is unchanged.
