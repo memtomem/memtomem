@@ -705,6 +705,17 @@ def test_the_sbom_workflow_guard_refuses_a_floating_ref_even_if_ci_floats_it_too
         _assert_sbom_workflow(document, ci)
 
 
+def test_the_sbom_workflow_guard_refuses_another_action_even_if_ci_pins_it_there() -> None:
+    """Which action runs stands on its own, not only through the comparison with ci.yml."""
+    document = copy.deepcopy(_workflow())
+    _other_action(document)
+    ci = copy.deepcopy(_workflow("ci.yml"))
+    ci["jobs"]["extra"] = {"steps": [{"uses": document["jobs"]["sbom"]["steps"][2]["uses"]}]}
+    assert _action_refs(ci)["evil/setup-uv"] == _action_refs(document)["evil/setup-uv"]
+    with pytest.raises(AssertionError):
+        _assert_sbom_workflow(document, ci)
+
+
 def test_the_sbom_workflow_guard_refuses_two_checkout_shas_even_if_ci_has_both() -> None:
     """One SHA per action stands on its own, not only through the comparison with ci.yml."""
     document = copy.deepcopy(_workflow())
