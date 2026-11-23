@@ -1953,10 +1953,11 @@ async def _delete_chunk(
     nothing past it runs. ``mem_dedup_remove`` uses it to check the member it
     keeps. ``surface`` names the tool in the consent audit and its log line.
 
-    ``index_only_if_missing=True`` removes only the row when the source file is
-    missing, as the web route's chunk delete does (#2842); without it a missing
-    source is refused. It does not combine with ``precheck``, whose checks are
-    about the file the rewrite would change.
+    ``index_only_if_missing=True`` removes the chunk from the index without
+    writing the file when the source file is missing, as the web route's chunk
+    delete does (#2842); without it a missing source is refused. It does not
+    combine with ``precheck``, whose checks are about the file the rewrite
+    would change.
     """
     from memtomem.tools.memory_writer import remove_lines
 
