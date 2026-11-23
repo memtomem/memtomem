@@ -72,8 +72,20 @@ codex --version   # Codex CLI를 쓸 때
 Claude Code와 Codex CLI 중 어느 쪽을 쓰더라도 완전히 새 환경에서는
 다음 두 명령을 한 번 실행합니다.
 
-**이미 저장된 기억이나 설정이 있다면 초기화 명령은 건너뛰고 아래 상태 명령만 실행하세요.**
-기존 ONNX/E5 설정이 보이는 것은 정상입니다. 이 체험을 위해 기존 모델이나 DB를 바꾸지 않습니다.
+**이미 저장된 기억이나 설정이 있다면 초기화 명령은 건너뛰세요.** 대신 무엇을
+실행할지는 설정이 어디에 있는지에 따라 다릅니다.
+
+- 예전 초기화가 쓴 `~/.memtomem/config.json`에 있다면: 아래 상태 명령만
+  실행하세요. 기존 ONNX/E5 설정이 보이는 것은 정상입니다. 이 체험을 위해 기존
+  모델이나 DB를 바꾸지 않습니다.
+- `~/.memtomem/config.d/` fragment나 `MEMTOMEM_*` 환경 변수에만 있다면: 두 명령
+  모두 실행하지 않습니다. 대신 이 단계 끝에 나온 대로 설정을 미리 봅니다.
+  `mm status`는 `config.json`이 없으면 그 설정이 저장소를 지정하고 있어도
+  `memtomem is not configured`라고 알립니다. 이때 초기화하면 새로 쓰인
+  `config.json`이 fragment에서 지정한 database path, 기억 디렉터리, 임베딩 모델을
+  덮어써서 이미 있는 저장소가 비어 보일 수 있습니다. 환경 변수는 자기가 지정한
+  설정에서는 여전히 우선하지만, 지정하지 않은 설정(기억 디렉터리 등)은 초기화가
+  채워 넣습니다.
 
 ```bash
 uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm init --preset minimal --non-interactive --mcp skip
@@ -90,7 +102,8 @@ Python 3.12를 찾지 못하면 uv가 내려받지만, uv가 Python을 스스로
 않았다면 플러그인 서버가 시작되지 않습니다. 먼저 Python 3.12를 설치하세요
 (`uv python install 3.12`는 `"manual"`에서는 내려받고 `"never"`에서는
 거부됩니다). 또는 플러그인 대신, [시작 가이드의 Quickstart](getting-started.md#quickstart)를
-따라 지금 있는 Python으로 memtomem을 설치하고 저장소를 준비한 뒤, [MCP 클라이언트 수동
+따라 지금 있는 Python으로 memtomem을 설치하고 저장소를 준비한 뒤(이미 저장된
+기억이나 설정이 있다면 그 가이드의 설치 명령만 실행합니다), [MCP 클라이언트 수동
 설정](mcp-clients.md)에 나온 대로 쓰는 도구에 `memtomem-server`를 등록하세요.
 
 `--mcp skip`은 다음 단계의 플러그인이 MCP 연결을 제공하므로 다른
@@ -98,13 +111,26 @@ Python 3.12를 찾지 못하면 uv가 내려받지만, uv가 Python을 스스로
 기존 ONNX 설정도 사용할 수 있도록 필요한 패키지를 함께 설치하지만,
 새 저장소는 임베딩 모델 없는 BM25 기본 설정으로 시작합니다.
 
-상태 출력에서 다음을 확인합니다.
+상태 명령을 실행했다면 출력에서 다음을 확인합니다.
 
 - storage와 database path(기억 저장 위치)가 표시된다.
 - source와 chunk(검색된 문서 조각) 수가 0이어도 정상이다.
 - `provider=none` 또는 BM25-only는 오류가 아니라 기본 키워드 검색 상태다.
 
 database path는 나중에 두 도구가 같은 저장소를 보는지 확인할 때 사용합니다.
+
+설정이 `config.d/` fragment나 `MEMTOMEM_*` 환경 변수에만 있다면 대신 다음으로
+미리 봅니다.
+
+```bash
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm config show
+```
+
+경고가 나오면(일부는 stderr로 나옵니다) fragment나 설정이 쓴 대로 적용되지
+않았다는 뜻입니다. 이 미리 보기는 이 터미널이 보는 설정만 보여 주고 플러그인
+서버는 다른 환경 변수를 볼 수 있으므로 최종 확인이 아닙니다. 기억을 저장하기 전에
+[3단계](#실제-연결-확인하기)나 [4단계](#4-경로-b-codex-cli-플러그인-설치)의
+플러그인 status 확인으로 database path가 설정에 적은 값인지 확인하세요.
 
 ## 3. 경로 A: Claude Code 플러그인 설치
 
@@ -372,7 +398,7 @@ uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm mem init --scope project_lo
 | `uvx`를 찾지 못함 | uv 공식 설치 안내를 따른 뒤 새 터미널에서 `uvx --version`을 확인합니다. |
 | 플러그인을 찾지 못함 | marketplace 목록을 확인하고 설치 명령을 다시 실행합니다. |
 | workflow/skill이 보이지 않음 | Claude는 reload 또는 새 세션, Codex는 새 thread를 시작합니다. |
-| 저장소가 초기화되지 않았다고 나옴 | 공통 준비의 `mm init ... --mcp skip`과 `mm status`를 다시 실행합니다. |
+| 저장소가 초기화되지 않았다고 나옴 | `config.d/` fragment나 `MEMTOMEM_*` 환경 변수가 저장소를 지정한다면 초기화하지 마세요. `mm status`는 `config.json`이 없으면 멈춥니다. [공통 준비](#2-공통-준비-사용자-기억-저장소를-한-번-초기화)의 `mm config show` 미리 보기를 실행하고 플러그인 status 확인으로 database path를 확인합니다. 새 저장소라면 공통 준비의 `mm init ... --mcp skip`과 `mm status`를 다시 실행합니다. |
 | 프로젝트 기억을 저장할 수 없음 | 실제 Git 루트에서 `mm mem init --scope project_local`을 실행하고 도구를 다시 엽니다. |
 | 검색 결과가 0건 | status에서 chunk 수를 보고 저장 문장에 실제로 있는 단어로 다시 검색합니다. |
 | Claude와 Codex의 결과가 다름 | database path를 비교하고, 프로젝트 기억이면 프로젝트 루트와 저장 범위도 확인합니다. |
@@ -383,7 +409,7 @@ uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm mem init --scope project_lo
 ## 완료 체크
 
 - [ ] `uvx`와 Claude Code 또는 Codex CLI 하나가 실행된다.
-- [ ] 사용자 기억 저장소를 minimal preset과 `--mcp skip`으로 초기화했다.
+- [ ] 사용자 기억 저장소를 minimal preset과 `--mcp skip`으로 초기화했거나, 기존 저장소의 database path를 확인했다.
 - [ ] 플러그인 status에서 storage와 database path를 확인했다.
 - [ ] 개인 선호 하나를 명시적으로 저장했다.
 - [ ] 같은 단어로 검색해 문장과 source path를 찾았다.

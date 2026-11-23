@@ -172,9 +172,16 @@ class ConfigPatchChange(BaseModel):
     new_value: str
 
 
+class ConfigFtsRebuildSummary(BaseModel):
+    tokenizer: str
+    rebuilt_rows: int
+    warning: str | None = None
+
+
 class ConfigPatchResponse(BaseModel):
     applied: list[ConfigPatchChange]
     rejected: list[str]
+    fts_rebuild: ConfigFtsRebuildSummary | None = None
 
 
 class EmbeddingConfigInfo(BaseModel):

@@ -49,6 +49,7 @@ from memtomem.web.schemas.config import (
     BuiltinExcludePatternsResponse,
     ConfigDecayOut,
     ConfigEmbeddingOut,
+    ConfigFtsRebuildSummary,
     ConfigIndexingOut,
     ConfigLoadWarningOut,
     ConfigMMROut,
@@ -441,6 +442,7 @@ async def patch_config(
     applied: list[ConfigPatchChange] = []
     rejected: list[str] = []
     tokenizer_changed = False
+    fts_rebuild: ConfigFtsRebuildSummary | None = None
     onnx_batch_changed = False
     rerank_changed = False
     # Deferred live-fanout state (#1567): the reranker swap and tokenizer/FTS
@@ -676,6 +678,11 @@ async def patch_config(
                     count = await storage.rebuild_fts()
                     built = storage.fts_tokenizer_effective
                     fallback = hr.fts_rebuild_fallback_warning(storage)
+                    fts_rebuild = ConfigFtsRebuildSummary(
+                        tokenizer=built,
+                        rebuilt_rows=count,
+                        warning=fallback,
+                    )
                     if fallback is None:
                         logger.info("FTS index rebuilt with tokenizer=%s (%d chunks)", built, count)
                     else:
@@ -698,7 +705,7 @@ async def patch_config(
     except TimeoutError:
         raise HTTPException(503, "Config update timed out — another update may be in progress")
 
-    return ConfigPatchResponse(applied=applied, rejected=rejected)
+    return ConfigPatchResponse(applied=applied, rejected=rejected, fts_rebuild=fts_rebuild)
 
 
 @router.post("/config/save")

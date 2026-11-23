@@ -25,7 +25,9 @@ instead of reinstalling; the
 covers what it preserves and stops.
 
 The dispatcher is launched through `uv`, so it does not depend on a
-platform-specific `python3` command alias.
+platform-specific `python3` command alias. It runs on the interpreter uv finds
+first, which may be an older system Python: it needs Python 3.8 or newer, while
+`mm` itself needs Python 3.12 or newer, which its install command asks uv for.
 
 The plugin searches prompts longer than 20 characters, queues changed Write or
 Edit targets for indexing, and flushes that queue when a response stops. It
