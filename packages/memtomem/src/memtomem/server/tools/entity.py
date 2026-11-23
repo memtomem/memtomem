@@ -34,7 +34,7 @@ async def mem_entity_scan(
         namespace: Only scan chunks in this namespace
         source_filter: Only scan chunks from matching source files (glob)
         entity_types: Entity types to extract (default: all). Options: person, date, decision, action_item, technology, concept
-        overwrite: Replace existing entities for scanned chunks (default: false, skip already-scanned)
+        overwrite: Replace existing entities for scanned chunks (default: false, skip already-scanned); a chunk whose LLM extraction fails is left unchanged
         dry_run: Preview extraction without saving (default: false)
     """
     from memtomem.tools.entity_extraction import _VALID_ENTITY_TYPES, extract_entities_with_llm
@@ -63,6 +63,7 @@ async def mem_entity_scan(
     total_entities = 0
     scanned_sources = 0
     cleared_chunks = 0
+    llm_failed_chunks = 0
     entity_type_counts: dict[str, int] = {}
     # Every ``upsert_entities`` / ``delete_entities_for_chunk`` below commits on
     # its own, so a failure part-way through still leaves ranking inputs changed.
@@ -108,9 +109,17 @@ async def mem_entity_scan(
                 if not overwrite and str(chunk.id) in already_extracted:
                     continue
 
-                entities = await extract_entities_with_llm(
+                result = await extract_entities_with_llm(
                     chunk.content, entity_types, app.llm_provider
                 )
+                if result.llm_failed:
+                    # A failed LLM call is not an extraction: the regex result
+                    # it fell back to would replace the chunk's LLM rows, or
+                    # clear them when it found nothing. Leave the chunk as it
+                    # is, rows or none, and report it.
+                    llm_failed_chunks += 1
+                    continue
+                entities = result.entities
                 if not entities:
                     # An overwrite pass that now extracts nothing must clear the
                     # chunk's old rows. Skipping the write would strand entities
@@ -163,6 +172,14 @@ async def mem_entity_scan(
         lines.append(
             f"- Chunks cleared (no entities on re-scan): {cleared_chunks}"
             + (" (dry run — not applied)" if dry_run else "")
+        )
+    if llm_failed_chunks:
+        lines.append(
+            f"- Chunks left unchanged (LLM extraction failed): {llm_failed_chunks}"
+            + (" (dry run)" if dry_run else "")
+        )
+        lines.append(
+            "  (fix the LLM provider, then rerun with the same options; see the server log)"
         )
     if entity_type_counts:
         lines.append("- By type:")

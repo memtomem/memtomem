@@ -1436,7 +1436,10 @@ async def copy_hook_to_project(
             dst_scope=body.to_target_scope,
         )
     except HookNotFoundError as exc:
-        raise _error(404, "missing", str(exc)) from exc
+        # The engine names the source canonical by its absolute path.
+        raise _error(
+            404, "missing", _sanitize_transfer_message(str(exc), project_root, dst_root)
+        ) from exc
     except (AmbiguousHookSelectorError, ValueError) as exc:
         raise _error(
             400, "validation", _sanitize_transfer_message(str(exc), project_root, dst_root)

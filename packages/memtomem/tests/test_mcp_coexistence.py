@@ -200,6 +200,35 @@ def test_symlink_target_refused(host):
     assert target.read_bytes() == before
 
 
+def test_check_before_plugin_install_has_no_bundled_server_to_compare(host):
+    # mcp-clients.md tells Codex and Antigravity users to run this check after
+    # installing the plugin (#3517): before then the same alias that duplicates
+    # the bundled server passes, because there is nothing to compare it with.
+    if host.client == "codex":
+        host.config.write_text(
+            host.config.read_text().replace("mcp_servers.memtomem", "mcp_servers.alias")
+        )
+    else:
+        data = json.loads(host.config.read_text())
+        data["mcpServers"]["alias"] = data["mcpServers"].pop("memtomem")
+        write(host.config, data)
+    installed = host.rows
+    host.rows = []
+
+    before = invoke(host)
+    assert before.exit_code == 0, before.output
+    findings = json.loads(before.output)["findings"]
+    assert {"code": "manual_registration", "state": "configured"}.items() <= next(
+        f for f in findings if f["code"] == "manual_registration"
+    ).items()
+    assert "duplicate_risk" not in {f["code"] for f in findings}
+
+    host.rows = installed
+    after = invoke(host)
+    assert after.exit_code == 1, after.output
+    assert "duplicate_risk" in {f["code"] for f in json.loads(after.output)["findings"]}
+
+
 def test_codex_alias_is_not_name_dedup(host):
     if host.client != "codex":
         return

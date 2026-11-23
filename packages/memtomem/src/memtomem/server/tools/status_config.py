@@ -603,9 +603,11 @@ async def collect_status_report(app: AppContext) -> dict:
                     # content is unchanged bucket as ``unchanged``, never
                     # ``to_upsert``, so no chunk is rewritten and no entity is
                     # extracted. ``--force`` is what re-writes them.
-                    "fix": 'run mem_do(action="entity_scan") to populate entities, or '
-                    "re-index with mm index --force <path> (with "
-                    "indexing.extract_entities on, the default)",
+                    "fix": 'run mem_do(action="entity_scan") to populate entities (with '
+                    "an LLM provider configured it must be reachable: a chunk whose LLM "
+                    "call fails is left as it is; with llm.enabled=false the scan uses "
+                    "the regex extractor), or re-index with mm index --force "
+                    "<path> (with indexing.extract_entities on, the default)",
                 }
             )
 
