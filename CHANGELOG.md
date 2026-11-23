@@ -20,7 +20,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   its 120. Only prose gives way, and whole `changed_files` paths move into its omitted count:
   ids, the root, the commit, `worktree_state` and `artifacts` are never changed, and a
   verbatim path, symbol, command, GitHub reference or quote is kept whole or left out whole,
-  except in `next_action`, where none is left out, so the next agent can act on it. A record
+  except in `next_action`, where none is left out, so the next agent can act on it (one that
+  does not fit its cap or one line stops Save). A record
   that cannot meet
   the caps and the 1,200-character maximum (counted plainly) that way is not saved: Save
   stops and names the value in the way. One that meets them but stays over the target is

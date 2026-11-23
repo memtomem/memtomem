@@ -927,7 +927,11 @@ _HANDOFF_SIZE_TARGET = (
     # full URL Resume accepts and code symbols.
     "The one exception is `next_action`: no verbatim string in it is ever left out,",
     "when they still do not fit the `next_action` cap, that is a raw limit this rule cannot meet",
-    "Every field keeps exactly one line",
+    # A multi-line command in `next_action` can be neither left out nor joined, so the
+    # one-line rule must be a limit the refusal names (#3565 review).
+    "Every field keeps exactly one line, and that is a raw limit too: a verbatim string in "
+    "`next_action` that spans lines is neither joined nor left out, so it stops Save the "
+    "same way.",
     # The refusal comes before the fallback, so "save it anyway" never covers a record
     # that breaks a raw limit.
     "If the raw limits cannot be met this way, stop and report which value is in the way "

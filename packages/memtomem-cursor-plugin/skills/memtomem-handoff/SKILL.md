@@ -142,7 +142,8 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    ever left out, because the next agent acts on exactly those strings and Resume step 7 reads
    its GitHub reference. Shorten the words around them, and when they still do not fit the
    `next_action` cap, that is a raw limit this rule cannot meet. Every field keeps exactly one
-   line. If the raw limits
+   line, and that is a raw limit too: a verbatim string in `next_action` that spans lines is
+   neither joined nor left out, so it stops Save the same way. If the raw limits
    cannot be met this way, stop and report which value is in the way instead of calling
    `mem_add`. If they are met but the record is still over the target, save it anyway.
 
