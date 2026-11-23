@@ -448,8 +448,8 @@ async def test_deleting_the_last_chunk_of_a_held_source_clears_its_hold(env):
 
 
 @pytest.mark.parametrize("last", [True, False])
-async def test_the_last_chunk_takes_the_files_derived_summaries_with_it(env, last):
-    """The docs' claim: the consolidation summaries go only with the file's last chunk."""
+async def test_the_last_chunk_takes_the_files_unheld_policy_summary_with_it(env, last):
+    """An unheld policy summary at the file's derived path goes only with its last chunk."""
     comp, mem_dir = env
     path = mem_dir / "a.md"
     alpha, beta = await _indexed_pair(comp, path)

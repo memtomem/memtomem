@@ -674,9 +674,10 @@ whether the deletion survives:
   markdown file itself and re-indexes. The content is gone from disk, so
   re-indexing has nothing to restore. When the file is already missing from
   disk, it removes only that chunk's index row; if that was the file's last
-  chunk, the consolidation summaries derived from the file go with it —
-  except a summary whose own path is held or pending review, which stays,
-  hold included, so it can be recovered like any other held source.
+  chunk, the `auto_consolidate` policy's summary of the file goes with it,
+  unless the summary's own path is held or pending review: then its rows
+  stay, and so does that hold or pending check. A summary written with
+  `mem_consolidate_apply` is an ordinary memory entry and is not touched.
 
 All three forms take `confirm_project_shared=True` when the deletion would
 touch `project_shared` chunks — the same gate `mem_edit` takes above. The
