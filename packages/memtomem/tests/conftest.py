@@ -678,6 +678,34 @@ def _isolate_claude_projects_scan(
     monkeypatch.setattr(_proj, "_CLAUDE_PROJECTS_DIR", tmp_path / "no-claude-projects")
 
 
+@pytest.fixture(autouse=True)
+def _uv_workspace_root_is_the_directory(
+    _real_home_write_guard: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Answer ``uv workspace dir`` as uv does for a project in no workspace:
+    the directory itself.
+
+    ``mm init`` / ``mm uninstall`` ask the host's ``uv`` which environment a
+    source/project install uses. Unstubbed, every test that builds a
+    ``RuntimeProfile`` would depend on whether uv is installed, its version,
+    and whether it accepts the fixture's ``pyproject.toml`` (a manifest
+    without ``version`` is an error there). Tests of workspace membership or
+    of uv failing replace this with their own answer; the real-uv tests in
+    ``test_init_cmd.py`` call the function captured at import.
+
+    ``UV_PROJECT_ENVIRONMENT`` from the developer's shell would move the
+    environment those profiles name, and ``UV_NO_PROJECT`` / ``UV_ISOLATED``
+    make the real function answer unknown; tests that exercise them set them.
+    """
+    for name in ("UV_PROJECT_ENVIRONMENT", "UV_NO_PROJECT", "UV_ISOLATED"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        "memtomem.cli.init_cmd._uv_workspace_root",
+        lambda directory: (directory, None),
+    )
+
+
 @pytest.fixture
 def folds_unicode_forms(monkeypatch):
     """Key paths as macOS does: NFC and NFD spellings fold to one (#235).
