@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Two web error responses no longer name the project's settings file or the transfer
+  destination by an absolute host path (#3302).** The hook copy's 404
+  (`POST /api/context/settings/hooks/copy`, when the selector matches no hook or the source
+  has no readable canonical settings) named the source project's `.memtomem/settings.json` by
+  its absolute path; it now strips the project roots the same way the 400 next to it does. The
+  transfer's 409 `destination_exists` (`POST /api/context/{kind}/{name}/transfer`) passed on the
+  engine's text, which named the destination by its resolved absolute path; it now says which
+  artifact and which tier collided (`destination already exists: agents 'foo' in the
+  project_shared tier of the destination. …`). The CLI messages are unchanged.
+
 - **`mm init` checks for missing extras in the environment `uv run --directory <dir>` uses,
   which for a project at a uv workspace member is the workspace root's (#3514).** The MCP
   command `mm init` writes for a source checkout or a project,
