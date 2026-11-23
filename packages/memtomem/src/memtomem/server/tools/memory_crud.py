@@ -2041,7 +2041,8 @@ async def mem_delete(
     When chunk_id is given, the specific chunk's line range is removed from
     the markdown file and the file is re-indexed. If that file is missing
     from disk, only the chunk's index entry is removed (with the file's derived
-    summaries when it was the last chunk); the source is not written.
+    summaries when it was the last chunk, except a summary whose own path is
+    held or pending review); the source is not written.
     When source_file is given, all chunks from that file are removed from the
     index (the file itself is NOT deleted).
     When namespace is given, all chunks in that namespace are removed from the index.
