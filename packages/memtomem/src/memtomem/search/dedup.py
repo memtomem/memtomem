@@ -100,7 +100,7 @@ class DedupCoverage:
     # the number returned, the rest are not reachable by moving the cursor on:
     # the same pool has to be scanned again with a higher ``limit`` or an
     # ``offset``. A smaller ``max_scan`` selects another pool, whose exact phase
-    # reports other pairs.
+    # can report other pairs.
     pairs_found: int = 0
     after: UUID | None = None  # the cursor this scan started after
     # Visible chunks above the pool's last id, in the snapshot the pool was

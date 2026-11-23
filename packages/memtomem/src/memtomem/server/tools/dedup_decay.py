@@ -178,7 +178,7 @@ def _pair_page_clause(found: int, limit: int, offset: int) -> str:
     the same pool lists the same pairs and more of them, so it is named from
     the start while it can list them all; otherwise the next ``offset`` is.
     A smaller ``max_scan`` is never named: the exact phase pairs each copy with
-    the oldest copy in its pool, so a smaller pool reports other pairs.
+    the oldest copy in its pool, so a smaller pool can report other pairs.
     """
     # ``end`` is computed from ``offset``, an ``int``, so the offset named
     # below is one this tool accepts even when ``limit`` arrived as ``True``.
