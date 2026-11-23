@@ -673,11 +673,8 @@ whether the deletion survives:
 - `chunk_id=` is the outlier: it removes the chunk's line range from the
   markdown file itself and re-indexes. The content is gone from disk, so
   re-indexing has nothing to restore. When the file is already missing from
-  disk, it removes only that chunk's index row; if that was the file's last
-  chunk, the `auto_consolidate` policy's summary of the file goes with it,
-  unless the summary's own path is held or pending review: then its rows
-  stay, and so does that hold or pending check. A summary written with
-  `mem_consolidate_apply` is an ordinary memory entry and is not touched.
+  disk, it removes the chunk from the index instead and does not write the
+  file, as the Web UI's chunk delete does.
 
 All three forms take `confirm_project_shared=True` when the deletion would
 touch `project_shared` chunks — the same gate `mem_edit` takes above. The
