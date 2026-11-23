@@ -499,15 +499,16 @@ async def test_replaced_staging_409_transfer_staging_replaced(
     # frozen ``$HOME`` that occurs in the prose. The wire text must not care.
     monkeypatch.setattr(_errors_mod, "_HOME", "Inspect it by hand, then retry.")
 
-    resp = await client.post(
-        "/api/context/agents/foo/transfer",
-        json={
-            "mode": "copy",
-            "to_target_scope": "project_shared",
-            "to_project_scope_id": scope_b,
-            "confirm_project_shared": True,
-        },
-    )
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post(
+            "/api/context/agents/foo/transfer",
+            json={
+                "mode": "copy",
+                "to_target_scope": "project_shared",
+                "to_project_scope_id": scope_b,
+                "confirm_project_shared": True,
+            },
+        )
 
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
@@ -546,9 +547,10 @@ async def test_unverifiable_staging_409_carries_the_filesystem_remedy(
 
     # A copy: a move consumes the source first, and its later refusal is the
     # partial-commit 500, which keeps its paths on purpose.
-    resp = await client.post(
-        "/api/context/agents/foo/transfer", json={**_move_body(scope_b), "mode": "copy"}
-    )
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post(
+            "/api/context/agents/foo/transfer", json={**_move_body(scope_b), "mode": "copy"}
+        )
 
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
@@ -847,7 +849,7 @@ async def test_swap_recovery_409_secret_shaped_name_is_scanned(
 async def test_staging_busy_409_logs_the_occupied_paths(
     client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:
-    """The wire cuts the staging paths off; the server log is where they are (#3532)."""
+    """The wire gets a fixed sentence; the server log names the occupied paths (#3532)."""
     from memtomem.context import migrate as migrate_mod
 
     _write_agent(_shared_agents(cwd_root), "foo")
