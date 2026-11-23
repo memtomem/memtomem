@@ -61,7 +61,8 @@ sources" appears under the Search tab's source filter.
 
 ### Web API and readiness
 
-The local server exposes interactive OpenAPI documentation at `/api/docs`.
+The local server exposes interactive OpenAPI documentation at `/api/docs` and
+the OpenAPI schema it renders at `GET /api/openapi.json`.
 Use `GET /api/readiness` for orchestration: it returns `200` when the runtime
 is ready and `503` with `startup_unavailable` while required startup components
 are unavailable.
