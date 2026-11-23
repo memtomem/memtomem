@@ -27,7 +27,7 @@ export MEMTOMEM_LLM__PROVIDER=ollama
 > change without a deprecation window. The heuristic modes beside it are
 > supported. See [Stability](../../README.md#stability).
 
-Enabling an LLM upgrades four features. Each degrades gracefully — if a call fails, the heuristic fallback (the "disabled" column) runs automatically. For entity extraction and auto-tagging an empty answer from the model is a failed call:
+Enabling an LLM upgrades four features. Each degrades gracefully — if a call fails, the heuristic fallback (the "disabled" column) runs automatically. `mem_entity_scan` is the exception in what it keeps: the fallback still runs, but for a chunk whose call failed the scan discards its result and leaves the chunk's rows unchanged ([details](reference/organization-maintenance.md)). For entity extraction and auto-tagging an empty answer from the model is a failed call. For entity extraction, so is a reply that is neither exactly `NONE` nor contains at least one valid `TYPE|VALUE` line:
 
 | Feature | LLM enabled | LLM disabled (default) |
 |---------|-------------|------------------------|

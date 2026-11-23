@@ -73,8 +73,21 @@ Come back to this page once it is installed and you are signed in.
 Whichever tool you use, run these two commands once on a completely new
 machine.
 
-**If you already have saved memories or settings, skip the init command and run only the status command.**
-Seeing an existing ONNX/E5 configuration is normal; this walkthrough does not change your model or database.
+**If you already have saved memories or settings, skip the init command.** What
+to run instead depends on where those settings live:
+
+- In `~/.memtomem/config.json`, which an earlier init wrote: run only the
+  status command. Seeing an existing ONNX/E5 configuration is normal; this
+  walkthrough does not change your model or database.
+- Only in `~/.memtomem/config.d/` fragments or `MEMTOMEM_*` environment
+  variables: run neither command, and preview the settings as shown at the end
+  of this step. `mm status` reports `memtomem is not configured` whenever
+  `config.json` is absent, even when those settings configure a store. Running
+  init then writes a `config.json` that replaces the database path, memory
+  directories and embedding model the fragments set, so the store you already
+  have can look empty. An environment variable still wins for the setting it
+  names, but init fills in the ones it leaves unset, such as the memory
+  directories.
 
 ```bash
 uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm init --preset minimal --non-interactive --mcp skip
@@ -92,7 +105,8 @@ start unless a Python 3.12 was installed beforehand. Install a Python 3.12
 first (`uv python install 3.12` downloads one under `"manual"`, not under
 `"never"`), or skip the plugin: follow the
 [Getting Started Quickstart](getting-started.md#quickstart), which installs
-memtomem with the Python you have and sets up the store, then register
+memtomem with the Python you have and sets up the store (if you already have
+saved memories or settings, run only its install command), then register
 `memtomem-server` as [MCP clients](mcp-clients.md) shows for your tool.
 
 `--mcp skip` leaves other clients' settings alone, because the plugin in the
@@ -100,13 +114,28 @@ next step provides the MCP connection. The command installs the ONNX
 dependencies so an existing ONNX configuration still works, but a new store
 starts on BM25 keyword search with no embedding model.
 
-In the status output, check that:
+If you ran the status command, check in its output that:
 
 - the storage and database path (where memories are kept) are shown;
 - the source and chunk (indexed document piece) counts may be 0, which is normal;
 - `provider=none` or BM25-only is not an error; it is the default keyword search.
 
 You will use the database path later to confirm that two tools share one store.
+
+If your settings live only in `config.d/` fragments or `MEMTOMEM_*` variables,
+preview them instead:
+
+```bash
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm config show
+```
+
+A warning it prints, some of them on stderr, means a fragment or setting was not
+applied as written. The preview shows only what this terminal sees, and the
+plugin's server can see other environment variables, so it is not the final
+check: before saving a memory, use the plugin's status check in
+[step 3](#confirm-the-real-connection) or
+[step 4](#4-path-b-install-the-codex-cli-plugin) and confirm that its database
+path is the one your settings name.
 
 ## 3. Path A: install the Claude Code plugin
 
@@ -391,7 +420,7 @@ guide](integrations/codex.md).
 | `uvx` is not found | Follow the official uv installation guide, then check `uvx --version` in a new terminal. |
 | The plugin is not found | Check the marketplace list and rerun the install command. |
 | Workflows or skills do not appear | In Claude Code, reload or start a new session; in Codex, start a new thread. |
-| The store is reported as not initialized | Rerun `mm init ... --mcp skip` and `mm status` from the shared setup. |
+| The store is reported as not initialized | If `config.d/` fragments or `MEMTOMEM_*` variables configure your store, do not initialize: `mm status` stops when `config.json` does not exist. Run the [shared setup](#2-shared-setup-initialize-your-user-memory-store-once)'s `mm config show` preview and confirm the database path with the plugin's status check. On a new store, rerun `mm init ... --mcp skip` and `mm status` from the shared setup. |
 | You cannot save a project memory | Run `mm mem init --scope project_local` at the real Git root and reopen the tool. |
 | Search returns 0 results | Check the chunk count in status and search again with words that appear in the saved sentence. |
 | Claude Code and Codex return different results | Compare the database paths; for project memories, also compare the project root and scope. |
@@ -402,7 +431,7 @@ for manual MCP registration see [MCP Client Setup](mcp-clients.md).
 ## Checklist
 
 - [ ] `uvx` and either Claude Code or Codex CLI run.
-- [ ] The user memory store was initialized with the minimal preset and `--mcp skip`.
+- [ ] The user memory store was initialized with the minimal preset and `--mcp skip`, or an existing store's database path was confirmed.
 - [ ] The plugin's status showed the storage and database path.
 - [ ] One personal preference was saved explicitly.
 - [ ] Searching with the same words found the sentence and its source path.
