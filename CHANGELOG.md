@@ -7,6 +7,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm web` serves its OpenAPI schema at `/api/openapi.json` instead of `/openapi.json`
+  (#3272). The new URL is covered by the Host and Origin checks that cover `/api/*`.** FastAPI
+  served the schema at its default `/openapi.json`, outside the prefix the `mm web` guard
+  checks, so it answered a request whose `Host` was a rebound hostname with the full route
+  list. With the guard enforcing (the default), such a request now gets the same 403 as the
+  other `/api/*` routes, and `/openapi.json` returns 404. The `/api/docs` page fetches the new
+  URL; a client generator or script that fetched the schema by the old URL needs the new one.
+
 - **`mm init --mcp <mode>` no longer asks the Connect to AI Editor step in the interactive
   wizard and then discards the answer (#3515).** Without `--preset`, the picker path applied
   `--mcp` only after its steps had run, so the step asked and the flag then overwrote what was
