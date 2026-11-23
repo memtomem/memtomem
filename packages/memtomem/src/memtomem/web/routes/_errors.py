@@ -188,12 +188,23 @@ def _redact_message(message: str) -> str:
     ``privacy._sanitize_audit_value``. The ``error_kind`` field still
     tells the operator which category the failure fell into.
     """
-    redacted = message.replace(_HOME, "~") if _HOME else message
-    if _privacy_scan(redacted):
-        return _SECRET_REDACTED_MARKER
+    redacted = _scan_secrets(message.replace(_HOME, "~") if _HOME else message)
     if len(redacted) > _ERROR_MESSAGE_LIMIT:
         redacted = redacted[:_ERROR_MESSAGE_LIMIT]
     return redacted
+
+
+def _scan_secrets(message: str) -> str:
+    """*message*, or the fixed marker when the secret-class scanner hits anywhere in it.
+
+    The secret half of :func:`_redact_message` without the 200-character cut,
+    for text the caller composed itself and needs whole — a path-free
+    ``safe_message`` whose last clause would otherwise be cut, or a log line.
+    Whole-message replace for the same reason given there.
+    """
+    if _privacy_scan(message):
+        return _SECRET_REDACTED_MARKER
+    return message
 
 
 def _error(status_code: int, error_kind: str, message: str, **extra: Any) -> HTTPException:

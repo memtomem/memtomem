@@ -59,6 +59,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   artifact and which tier collided (`destination already exists: agents 'foo' in the
   project_shared tier of the destination. …`). The CLI messages are unchanged.
 
+- **Five more web transfer responses no longer name a host path, wherever the project or
+  store sits (#3532).** In `POST /api/context/{kind}/{name}/transfer`: the 404 for a missing
+  `mcp-servers` source passed on the engine's text with the source's absolute path; it now
+  names the logical location (`… not found at the source project:
+  .memtomem/mcp-servers/<name>.json`), also when the store is linked out of the project. The
+  409 `swap_recovery_pending` and the 500 for an unexpected failure passed engine text through
+  a redaction that only shortened paths under the server's `$HOME`. The 409 now says which
+  side and tier is wedged (`… skills/foo in the destination project_shared tier could not be
+  recovered automatically …`) instead of the swap's sentence, which named the trees and, for
+  a malformed marker, values read from it; the 500 says only that the server log has the
+  details. The 409 `transfer_staging_busy` and `transfer_staging_replaced` passed the engine's
+  text, whose staging paths come last, and only the 200-character cut kept them off the wire;
+  a `$HOME` collapse inside the prose could move the cut past them. Both now send a fixed
+  remediation sentence. The server log now gets one warning line for each staging or swap
+  refusal, with the paths the engine's error carries; the line is secret-scanned and never
+  carries the swap's sentence. The CLI messages are unchanged.
+
 - **`mm init` checks for missing extras in the environment `uv run --directory <dir>` uses,
   which for a project at a uv workspace member is the workspace root's (#3514).** The MCP
   command `mm init` writes for a source checkout or a project,
