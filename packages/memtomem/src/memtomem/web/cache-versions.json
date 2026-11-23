@@ -315,7 +315,8 @@
     },
     "/vendor/swagger/swagger-init.js": {
       "versions": {
-        "1": "754cb40e3d7d9896668852be2fc0bf6f6fefbcff5c6d308965d31381cb129b63"
+        "1": "754cb40e3d7d9896668852be2fc0bf6f6fefbcff5c6d308965d31381cb129b63",
+        "2": "c5b7905ec94fb046de282b031276cd8b186d455bef87fe1315a7db64269b5ad0"
       }
     },
     "/vendor/swagger/swagger-ui-bundle.js": {
