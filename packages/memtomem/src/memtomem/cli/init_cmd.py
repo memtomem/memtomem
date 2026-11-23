@@ -671,12 +671,10 @@ def _step_embedding(state: dict) -> None:
 
     elif choice == 2:
         provider = "onnx"
-        _onnx_available = False
-        try:
-            import fastembed  # noqa: F401
-
-            _onnx_available = True
-        except ImportError:
+        installed = _inline_extra_installed(state, "fastembed")
+        _onnx_available = installed is True
+        # Unknown says nothing here and leaves the extra to the summary's own check.
+        if installed is False:
             click.secho("  fastembed not installed.", fg="yellow")
             # Use the install-type-aware hint so the inline message matches
             # what the summary would otherwise print, then mark the warning
@@ -1282,11 +1280,10 @@ def _step_language(state: dict) -> None:
     tokenizer = "unicode61" if lang_choice == 1 else "kiwipiepy"
 
     if tokenizer == "kiwipiepy":
-        try:
-            import kiwipiepy  # noqa: F401
-
+        installed = _inline_extra_installed(state, "kiwipiepy")
+        if installed is True:
             click.secho("  kiwipiepy is installed.", fg="green")
-        except ImportError:
+        elif installed is False:
             click.secho("  kiwipiepy not installed.", fg="yellow")
             click.echo(_y_refuse_hint("--tokenizer kiwipiepy", "korean"))
     state["tokenizer"] = tokenizer
@@ -1934,6 +1931,35 @@ def _onnx_preset_will_work(state: dict) -> bool:
         return False
     importable = _probe_workspace_extras(workspace_python)
     return importable is not None and "fastembed" in importable
+
+
+def _inline_extra_installed(state: dict, module: str) -> bool | None:
+    """Whether ``module`` is installed where memtomem will run, for a wizard step's
+    inline message; ``None`` when that could not be checked.
+
+    A source or project checkout runs memtomem in its own environment, so unless the
+    wizard is already running there, that environment's interpreter is probed, the one
+    :func:`_check_extras` probes. An environment with no interpreter yet has nothing
+    installed, so the answer is ``False``. Everywhere else the module is imported here,
+    which also catches a package that is found but fails to import."""
+    profile = state.get("_profile")
+    if (
+        profile is None
+        or profile.cwd_install_type not in ("source", "project")
+        or profile.runtime_matches_workspace
+    ):
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            return False
+        return True
+    if profile.workspace_env_error is not None:
+        return None
+    workspace_python = _workspace_python(state)
+    if workspace_python is None:
+        return False
+    importable = _probe_workspace_extras(workspace_python)
+    return None if importable is None else module in importable
 
 
 def _workspace_needs_sync(state: dict) -> bool:
