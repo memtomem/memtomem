@@ -994,7 +994,7 @@ class TestMcpScanCoverage:
     async def test_at_the_largest_limit_the_cut_names_the_next_offset(self, monkeypatch):
         # 501 pairs cannot be asked for: the tool refuses a limit above 500.
         # The line names the offset that lists the rest of this pool, not a
-        # smaller pool, which would report other pairs.
+        # smaller pool, which can report other pairs.
         tool, _ = self._run(monkeypatch, [], {**self._WHOLE, "pairs_found": 501})
 
         out = await tool.mem_dedup_scan(limit=500, ctx=None)

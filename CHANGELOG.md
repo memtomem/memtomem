@@ -14,8 +14,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `offset`, the number of the pool's pairs to skip, and the tool's last line names the next
   one (`limit=500 kept 500 of 501 pairs: one call lists at most 500; to see the next ones,
   scan again from the same position with offset=500`, then
-  `offset=500 kept pairs 501 to 501 of 501`). A page past the last pair says so instead of
-  `No duplicate chunks found`. Each page scans the pool again, so pages line up only when
+  `offset=500 kept pairs 501 to 501 of 501`). A page past the last of a pool's pairs says so
+  instead of `No duplicate chunks found`, which still opens a pool that has no pairs. Each
+  page scans the pool again, so pages line up only when
   both scans produce the same list: exact pairs come first and depend on the pool alone, while
   the near pairs after them depend on which of several equally distant neighbours the vector
   search keeps at its cut, an order it does not promise. The scheduled `dedup_scan` job is
