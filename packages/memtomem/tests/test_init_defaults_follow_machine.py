@@ -36,7 +36,9 @@ def _run_step(step, state: dict, user_input: str = "\n") -> str:
 class _Profile:
     def __init__(self, kind: str, venv: Path | None) -> None:
         self.cwd_install_type = kind
+        self.cwd_install_dir = venv
         self.workspace_venv_path = venv
+        self.workspace_env_error = None
 
 
 @pytest.mark.parametrize(("onnx_will_work", "expected"), [(True, "english"), (False, "minimal")])
@@ -87,7 +89,9 @@ def test_failed_workspace_probe_counts_as_missing_only_for_the_picker(
     monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None)
     state = {"_profile": _Profile("source", tmp_path), "provider": "onnx"}
     assert init_cmd._onnx_preset_will_work(state) is False
-    assert init_cmd._collect_missing_extras(state) == []
+    missing, unchecked = init_cmd._check_extras(state)
+    assert missing == []
+    assert unchecked == f"running {tmp_path / 'bin' / 'python'} to list its installed extras failed"
 
 
 def test_workspace_interpreter_that_cannot_run_defaults_the_picker_to_minimal(
@@ -99,7 +103,7 @@ def test_workspace_interpreter_that_cannot_run_defaults_the_picker_to_minimal(
     def refuse(*args, **kwargs):
         raise PermissionError(13, "Permission denied")
 
-    monkeypatch.setattr(init_cmd, "_run", refuse)
+    monkeypatch.setattr(init_cmd.subprocess, "run", refuse)
     monkeypatch.setattr(init_cmd, "_have_module", lambda name: True)
     state: dict = {"_profile": _Profile("source", tmp_path)}
     _run_step(init_cmd._step_preset_picker, state)

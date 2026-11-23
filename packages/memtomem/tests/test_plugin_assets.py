@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -21,6 +22,7 @@ _ROOT = Path(__file__).resolve().parents[3]
 _CONTRACT = _ROOT / "packages/memtomem-plugin-assets/contract.toml"
 _DISPATCHER = _ROOT / "packages/memtomem-claude-automation-plugin/bin/hook_dispatch.py"
 _RENDERER = _ROOT / "tools/render_plugin_assets.py"
+_DISPATCHER_SMOKE = _ROOT / "tools/automation_dispatcher_smoke.py"
 _HERMES_SKILLS = _ROOT / "packages/memtomem-hermes-plugin/skills"
 _ANTIGRAVITY_SKILLS = _ROOT / "packages/memtomem-antigravity-plugin/skills"
 _CURSOR_SKILLS = _ROOT / "packages/memtomem-cursor-plugin/skills"
@@ -2059,6 +2061,70 @@ def test_automation_missing_dependency_hint_is_the_readme_install_command(
         encoding="utf-8"
     )
     assert command in readme.splitlines()
+
+
+def _dispatcher_floor() -> tuple[int, int]:
+    """The oldest Python the dispatcher promises, read from the CI job that runs it there."""
+    jobs = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+    runs = [
+        step["run"]
+        for step in jobs["automation-dispatcher-py38"]["steps"]
+        if "tools/automation_dispatcher_smoke.py" in step.get("run", "")
+    ]
+    assert len(runs) == 1, runs
+    match = re.fullmatch(
+        r"uv run --no-project --python (\d+)\.(\d+) python "
+        r"tools/automation_dispatcher_smoke\.py --repo-root \.",
+        runs[0].strip(),
+    )
+    assert match, runs[0]
+    return int(match.group(1)), int(match.group(2))
+
+
+def test_automation_dispatcher_floor_is_the_one_ci_runs_and_the_docs_state() -> None:
+    major, minor = _dispatcher_floor()
+    sentence = f"it needs Python {major}.{minor} or newer"
+    for doc in (
+        _ROOT / "packages/memtomem-claude-automation-plugin/README.md",
+        _ROOT / "docs/guides/integrations/claude-code.md",
+    ):
+        text = " ".join(doc.read_text(encoding="utf-8").split())
+        assert sentence in text, doc
+    docstring = ast.get_docstring(ast.parse(_DISPATCHER.read_text(encoding="utf-8"))) or ""
+    docstring = " ".join(docstring.split())
+    assert f"written for Python {major}.{minor} and later" in docstring, docstring
+    assert f"(Python {major}.{minor} smoke)" in docstring, docstring
+
+
+@pytest.mark.parametrize("path", [_DISPATCHER, _DISPATCHER_SMOKE], ids=lambda p: p.name)
+def test_automation_dispatcher_parses_at_its_floor(path: Path) -> None:
+    # Syntax only; the CI job is what sees a newer standard-library name.
+    ast.parse(path.read_text(encoding="utf-8"), feature_version=_dispatcher_floor())
+
+
+def test_automation_dispatcher_smoke_passes_on_this_interpreter() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-I", str(_DISPATCHER_SMOKE), "--repo-root", str(_ROOT)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    version = sys.version.split()[0]
+    assert completed.stdout == f"automation dispatcher smoke ok on Python {version}\n"
+
+
+def test_automation_dispatcher_smoke_refuses_to_run_with_asserts_stripped() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-I", "-O", str(_DISPATCHER_SMOKE), "--repo-root", str(_ROOT)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert "smoke ok" not in completed.stdout
 
 
 def test_automation_failure_log_does_not_store_prompt(

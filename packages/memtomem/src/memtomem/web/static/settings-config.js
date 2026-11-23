@@ -1586,6 +1586,9 @@ async function _saveSection(section) {
       _syncConfigToUI();
       // Check if changed fields need reindex/FTS rebuild
       _showReindexWarning(resp.applied);
+      if (resp.fts_rebuild?.warning) {
+        showToast(resp.fts_rebuild.warning, 'warning');
+      }
       // Surface the supported_extensions reindex nudge as a toast — the
       // ``applied`` list already filters to actual changes, so no extra
       // diff-tracking needed.
