@@ -155,7 +155,16 @@ class ArtifactNotFoundError(click.ClickException):
     Raised only by the :func:`_detect_source_scope` not-found branches;
     the multi-scope ambiguity raise stays a plain ``ClickException``
     (the artifact exists — the selector is what's wrong).
+
+    ``safe_message`` is the same statement without a host path, for a surface
+    that answers a remote caller (#3532). ``None`` when ``message`` already
+    names no path. Keyword-only with a default, so ``type(exc)(*exc.args)`` —
+    what ``copy`` and ``pickle`` do — still rebuilds the exception.
     """
+
+    def __init__(self, message: str, *, safe_message: str | None = None) -> None:
+        super().__init__(message)
+        self.safe_message = safe_message
 
 
 MigrateState = Literal[
