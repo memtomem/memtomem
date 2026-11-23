@@ -29,8 +29,9 @@ def _is_deterministic(cron_expr: str) -> bool:
     ``* , - / ? # l w`` or ASCII whitespace. A random or hashed field (``R``, ``r(28-30)``,
     ``H/5``) carries an ``r`` or ``h`` and so fails it, as would syntax a later croniter adds
     if it uses a character outside the allowlist.
-    Six- and seven-field expressions are left out: a year field can name a year past
-    croniter's search horizon, so finding no date there does not mean there is none.
+    Only five-field expressions are looked up. A seven-field expression's year field can
+    name a year past croniter's search horizon, so finding no date there does not mean
+    there is none; six-field ones (a seconds field) are left out with them.
     """
     lowered = cron_expr.lower()
     if len(_FIELD_RE.findall(lowered)) != 5:
