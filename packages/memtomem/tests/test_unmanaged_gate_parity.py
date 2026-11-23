@@ -45,6 +45,7 @@ _REASON = "unmanaged"
 _BY_ID = {
     ("server/tools/memory_crud.py", "_locked_chunk"),
     ("server/tools/memory_crud.py", "_mutate_file_and_reindex"),
+    ("server/tools/memory_crud.py", "_delete_row_of_missing_source"),
     ("tools/memory_mutation.py", "locked_source_chunk"),
     ("tools/memory_mutation.py", "mutate_source_and_reindex"),
     ("web/routes/chunks.py", "get_chunk_source"),

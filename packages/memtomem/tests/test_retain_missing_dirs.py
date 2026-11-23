@@ -10,18 +10,25 @@ lifted. Holds for anything other than absence stay.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
 from helpers import StubCtx
 from memtomem.config import IndexingConfig
 from memtomem.indexing.watcher import FileWatcher
+from memtomem.models import CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY, Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
 from memtomem.server.health_checks import check_orphan_count
 from memtomem.server.tools import dedup_decay, memory_crud
-from memtomem.source_provenance import SOURCE_MISSING_DETAIL
+from memtomem.source_provenance import (
+    SOURCE_MISSING_DETAIL,
+    SOURCE_READ_ONLY_DETAIL,
+    UNMANAGED_SOURCE_DETAIL,
+)
 from memtomem.storage import orphan_detect
 from memtomem.storage.orphan_detect import RetainRule
 from memtomem.storage.source_holds import REDACTION_BLOCKED_HOLD
@@ -327,6 +334,399 @@ async def test_editing_an_archived_chunk_is_refused(env):
     assert response.status_code == 409, response.text
     assert response.json()["detail"] == SOURCE_MISSING_DETAIL
     assert not path.exists()
+
+
+# --- deletes (#2842) ------------------------------------------------------------
+#
+# A chunk-id delete of a missing source removes the row and writes no source, on
+# MCP as on the web route. A refusal keeps the row; ``_row_exists`` reads it
+# without the withheld filter, so a hidden row still counts as kept.
+
+
+def _section(word: str) -> str:
+    # Each section is over ``min_chunk_tokens`` so the chunker keeps it apart.
+    return f"## {word.title()}\n\n" + " ".join(f"{word}{i}" for i in range(200)) + "\n\n"
+
+
+async def _indexed_pair(comp, path: Path) -> tuple:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_section("alpha") + _section("beta"), encoding="utf-8")
+    await comp.index_engine.index_file(path)
+    chunks = sorted(await comp.storage.list_chunks_by_source(path), key=lambda c: c.content)
+    assert len(chunks) == 2, [c.content[:20] for c in chunks]
+    return tuple(chunks)
+
+
+def _row_exists(comp, chunk) -> bool:
+    db = comp.storage._get_db()
+    return db.execute("SELECT 1 FROM chunks WHERE id=?", (str(chunk.id),)).fetchone() is not None
+
+
+def _set_scope(comp, chunk, scope: str, root: Path) -> None:
+    db = comp.storage._get_db()
+    db.execute(
+        "UPDATE chunks SET scope=?, project_root=? WHERE id=?", (scope, str(root), str(chunk.id))
+    )
+    db.commit()
+
+
+def _inside_project(monkeypatch, root: Path) -> None:
+    """Make both surfaces' callers run inside ``root``'s project boundary."""
+    monkeypatch.setattr(
+        "memtomem.server.tools.search._resolve_project_context_root", lambda _app: root
+    )
+    monkeypatch.setattr(
+        "memtomem.web.routes.chunks._resolve_project_context_from_dirs", lambda _dirs: root
+    )
+
+
+def _deleted_from_index(chunk) -> str:
+    return f"Memory deleted from the index: chunk {chunk.id}\n"
+
+
+async def _mcp_delete(comp, chunk, **kwargs) -> str:
+    ctx = StubCtx(AppContext.from_components(comp))
+    return await memory_crud.mem_delete(chunk_id=str(chunk.id), ctx=ctx, **kwargs)
+
+
+def _commit_before_the_delete_transaction(monkeypatch, write) -> None:
+    """Run ``write`` after the source locks are taken and before the writer is.
+
+    A write from inside the transaction would join it or wait on it, so it
+    could not show what the transaction's own re-fetch sees.
+    """
+    from contextlib import asynccontextmanager
+
+    original = memory_crud._gated_delete_transaction
+
+    @asynccontextmanager
+    async def wrapped(app):
+        await write()
+        async with original(app):
+            yield
+
+    monkeypatch.setattr(memory_crud, "_gated_delete_transaction", wrapped)
+
+
+@pytest.mark.parametrize("surface", ["mcp_delete", "web_delete"])
+async def test_deleting_an_archived_chunk_removes_only_its_row(env, surface):
+    from test_excluded_source_mutation import _request
+
+    comp, mem_dir = env
+    path = mem_dir / "a.md"
+    alpha, beta = await _indexed_pair(comp, path)
+    path.unlink()
+
+    result = await _request(comp, surface, alpha.id)
+
+    if isinstance(result, str):
+        assert result.startswith(_deleted_from_index(alpha)), result
+        assert "was missing and was left untouched" in result, result
+    else:
+        assert result.status_code == 200, result.text
+        assert result.json()["deleted"] == 1
+    assert not _row_exists(comp, alpha)
+    assert _row_exists(comp, beta)
+    assert not path.exists()
+
+
+async def test_deleting_the_last_chunk_of_a_held_source_clears_its_hold(env):
+    """Outside a retain dir the missing source is held, and still reachable by id."""
+    comp, mem_dir = env
+    comp.config.indexing.retain_missing_dirs = []
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    path.unlink()
+    await comp.index_engine.index_file(path)
+    assert await comp.storage.is_source_held(Path(norm_path(path)))
+
+    result = await _mcp_delete(comp, chunk)
+
+    assert result.startswith(_deleted_from_index(chunk)), result
+    assert not _row_exists(comp, chunk)
+    assert not await comp.storage.is_source_held(Path(norm_path(path)))
+
+
+@pytest.mark.parametrize("last", [True, False])
+async def test_the_last_chunk_takes_the_files_derived_summaries_with_it(env, last):
+    """The docs' claim: the consolidation summaries go only with the file's last chunk."""
+    comp, mem_dir = env
+    path = mem_dir / "a.md"
+    alpha, beta = await _indexed_pair(comp, path)
+    summary = Chunk(
+        content="summary of a.md",
+        metadata=ChunkMetadata(
+            source_file=Path(norm_path(path) + CONSOLIDATED_SUFFIX),
+            origin=ORIGIN_CONSOLIDATION_POLICY,
+        ),
+        content_hash=f"hash-{uuid4().hex}",
+        embedding=[0.1] * comp.embedder.dimension,
+    )
+    await comp.storage.upsert_chunks([summary])
+    path.unlink()
+    if last:
+        db = comp.storage._get_db()
+        db.execute("DELETE FROM chunks WHERE id=?", (str(beta.id),))
+        db.commit()
+
+    result = await _mcp_delete(comp, alpha)
+
+    assert result.startswith(_deleted_from_index(alpha)), result
+    assert _row_exists(comp, summary) is not last
+
+
+async def test_an_archived_project_shared_chunk_needs_confirmation(env, monkeypatch, tmp_path):
+    comp, mem_dir = env
+    root = tmp_path / "proj"
+    _inside_project(monkeypatch, root)
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    _set_scope(comp, chunk, "project_shared", root)
+    path.unlink()
+
+    refused = await _mcp_delete(comp, chunk)
+    assert refused == (
+        "Error: deleting scope='project_shared' chunks requires confirm_project_shared=True."
+    )
+    assert _row_exists(comp, chunk)
+
+    confirmed = await _mcp_delete(comp, chunk, confirm_project_shared=True)
+    assert confirmed.startswith(_deleted_from_index(chunk)), confirmed
+    assert not _row_exists(comp, chunk)
+
+
+@pytest.mark.parametrize("surface", ["mcp_delete", "web_delete"])
+async def test_an_archived_chunk_of_an_unregistered_tier_is_deleted(
+    env, monkeypatch, tmp_path, surface
+):
+    """The rewrite's scope guard is for a re-index, and nothing is re-indexed here."""
+    from test_excluded_source_mutation import _request
+
+    comp, mem_dir = env
+    root = tmp_path / "proj"
+    _inside_project(monkeypatch, root)
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    _set_scope(comp, chunk, "project_local", root)
+    path.unlink()
+
+    result = await _request(comp, surface, chunk.id)
+
+    if isinstance(result, str):
+        assert result.startswith(_deleted_from_index(chunk)), result
+    else:
+        assert result.status_code == 200, result.text
+    assert not _row_exists(comp, chunk)
+
+
+async def test_an_archived_chunk_under_a_read_only_root_is_refused(env):
+    """The config-level read-only gate runs before the locks, whatever the file's state."""
+    comp, mem_dir = env
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    path.unlink()
+    comp.config.indexing.read_only_memory_dirs = [mem_dir]
+
+    assert await _mcp_delete(comp, chunk) == f"Error: {SOURCE_READ_ONLY_DETAIL}"
+    assert _row_exists(comp, chunk)
+
+
+async def test_a_source_the_stat_cannot_answer_for_is_refused(env, monkeypatch):
+    """Only confirmed absence is an index-only delete; the web route's policy too."""
+    comp, mem_dir = env
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    denied = {str(path), norm_path(path)}
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if str(self) in denied:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    result = await _mcp_delete(comp, chunk)
+
+    assert result == (
+        f"Error: could not access chunk {chunk.id}'s source file; nothing was deleted. "
+        "Retry once it is accessible."
+    )
+    assert _row_exists(comp, chunk)
+
+
+async def test_a_directory_at_the_source_path_is_refused(env):
+    comp, mem_dir = env
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    path.unlink()
+    path.mkdir()
+
+    result = await _mcp_delete(comp, chunk)
+
+    assert result == (
+        f"Error: chunk {chunk.id}'s source is not a regular file; nothing was deleted. "
+        "Repair or reindex the source and retry."
+    )
+    assert _row_exists(comp, chunk)
+    assert path.is_dir()
+
+
+@contextmanager
+def _stale_pool(comp):
+    """Pin the read pool to one connection with a statement open (#3202).
+
+    A commit made inside this is not seen by a pool read, so a check that read
+    the pool instead of the writer would judge the row as it was before. The
+    query yields two rows per chunk so the statement is still stepping after
+    the first fetch: one that reached its end would release the snapshot. The
+    whole pool is back before the fixture closes the store.
+    """
+    pool = comp.storage._read_pool
+    reader = pool[0]
+    comp.storage._read_pool = [reader]
+    held = reader.execute("SELECT c.id FROM chunks c CROSS JOIN (SELECT 1 UNION ALL SELECT 2)")
+    try:
+        assert held.fetchone() is not None
+        yield
+    finally:
+        held.close()
+        comp.storage._read_pool = pool
+
+
+async def test_a_redaction_hold_committed_before_the_delete_is_honoured(env, monkeypatch):
+    comp, mem_dir = env
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    path.unlink()
+
+    async def hold():
+        await comp.storage.hold_source(Path(norm_path(path)), REDACTION_BLOCKED_HOLD)
+        assert await comp.storage.get_chunk(chunk.id, exclude_withheld=True) is not None
+
+    _commit_before_the_delete_transaction(monkeypatch, hold)
+    with _stale_pool(comp):
+        result = await _mcp_delete(comp, chunk)
+
+    assert result == f"Error: chunk {chunk.id} not found."
+    assert _row_exists(comp, chunk)
+
+
+async def test_a_rescope_committed_before_the_delete_meets_gate_b(env, monkeypatch, tmp_path):
+    comp, mem_dir = env
+    root = tmp_path / "proj"
+    _inside_project(monkeypatch, root)
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    path.unlink()
+
+    async def rescope():
+        _set_scope(comp, chunk, "project_shared", root)
+        pooled = await comp.storage.get_chunk(chunk.id)
+        assert pooled is not None and pooled.metadata.scope == "user"
+
+    _commit_before_the_delete_transaction(monkeypatch, rescope)
+    with _stale_pool(comp):
+        result = await _mcp_delete(comp, chunk)
+
+    assert result == (
+        "Error: deleting scope='project_shared' chunks requires confirm_project_shared=True."
+    )
+    assert _row_exists(comp, chunk)
+
+
+async def test_a_project_left_before_the_delete_hides_its_row(env, monkeypatch, tmp_path):
+    """The boundary is the caller's as of the delete, not as of the lock fetch."""
+    comp, mem_dir = env
+    root = tmp_path / "proj"
+    _inside_project(monkeypatch, root)
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    _set_scope(comp, chunk, "project_local", root)
+    path.unlink()
+
+    async def leave_the_project():
+        _inside_project(monkeypatch, None)
+
+    _commit_before_the_delete_transaction(monkeypatch, leave_the_project)
+
+    assert await _mcp_delete(comp, chunk) == f"Error: chunk {chunk.id} not found."
+    assert _row_exists(comp, chunk)
+
+
+async def test_a_row_moved_before_the_delete_is_retried_not_deleted(env, monkeypatch):
+    comp, mem_dir = env
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    path.unlink()
+    moved_to = norm_path(mem_dir / "moved.md")
+
+    async def move():
+        db = comp.storage._get_db()
+        db.execute("UPDATE chunks SET source_file=? WHERE id=?", (moved_to, str(chunk.id)))
+        db.commit()
+
+    _commit_before_the_delete_transaction(monkeypatch, move)
+
+    assert await _mcp_delete(comp, chunk) == (
+        f"Error (retryable): chunk {chunk.id} moved to another source file while it was "
+        "deleted; nothing was deleted. Retry."
+    )
+    assert _row_exists(comp, chunk)
+    assert [c.id for c in await comp.storage.list_chunks_by_source(Path(moved_to))] == [chunk.id]
+
+
+async def test_a_read_only_root_installed_before_the_delete_is_honoured(env, monkeypatch):
+    """Root reconciliation can declare the root read-only while the delete waits."""
+    comp, mem_dir = env
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    path.unlink()
+
+    async def declare_read_only():
+        comp.config.indexing.read_only_memory_dirs = [mem_dir]
+
+    _commit_before_the_delete_transaction(monkeypatch, declare_read_only)
+
+    assert await _mcp_delete(comp, chunk) == f"Error: {SOURCE_READ_ONLY_DETAIL}"
+    assert _row_exists(comp, chunk)
+
+
+async def test_a_memory_dir_dropped_before_the_delete_is_honoured(env, monkeypatch, tmp_path):
+    comp, mem_dir = env
+    path = await _indexed(comp, mem_dir / "a.md")
+    (chunk,) = await comp.storage.list_chunks_by_source(path)
+    path.unlink()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    async def drop_the_dir():
+        comp.config.indexing.memory_dirs = [elsewhere]
+        comp.config.indexing.retain_missing_dirs = []
+
+    _commit_before_the_delete_transaction(monkeypatch, drop_the_dir)
+
+    assert await _mcp_delete(comp, chunk) == f"Error: {UNMANAGED_SOURCE_DETAIL}"
+    assert _row_exists(comp, chunk)
+
+
+@pytest.mark.parametrize("missing", ["removed", "kept"])
+async def test_dedup_remove_still_refuses_a_missing_member(env, missing):
+    """``mem_dedup_remove`` checks both files; a missing one is not an index-only delete."""
+    comp, mem_dir = env
+    removed_path = await _indexed(comp, mem_dir / "a.md")
+    kept_path = await _indexed(comp, mem_dir / "b.md")
+    (removed,) = await comp.storage.list_chunks_by_source(removed_path)
+    (keeper,) = await comp.storage.list_chunks_by_source(kept_path)
+    (removed_path if missing == "removed" else kept_path).unlink()
+
+    result = await dedup_decay.mem_dedup_remove(
+        str(removed.id), str(keeper.id), ctx=StubCtx(AppContext.from_components(comp))
+    )
+
+    assert result.startswith("Error:"), result
+    assert _row_exists(comp, removed)
+    assert _row_exists(comp, keeper)
 
 
 # --- reports ------------------------------------------------------------------
