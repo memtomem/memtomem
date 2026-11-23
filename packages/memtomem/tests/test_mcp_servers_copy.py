@@ -184,6 +184,23 @@ def test_missing_source_typed_not_found(roots) -> None:
         _copy(roots, apply_=False)
     expected = roots["a"] / ".memtomem" / "mcp-servers" / "pg.json"
     assert exc_info.value.message == (f"mcp-servers/pg not found at the source project: {expected}")
+    # The path-free twin a web caller gets (#3532): the logical location.
+    assert exc_info.value.safe_message == (
+        "mcp-servers/pg not found at the source project: .memtomem/mcp-servers/pg.json"
+    )
+
+
+def test_not_found_safe_message_survives_copy_and_pickle() -> None:
+    """``copy`` and ``pickle`` rebuild an exception from ``args``; the keyword must not break that."""
+    import copy
+    import pickle
+
+    exc = ArtifactNotFoundError("full /abs/path", safe_message="path-free")
+    for clone in (copy.copy(exc), copy.deepcopy(exc), pickle.loads(pickle.dumps(exc))):
+        assert type(clone) is ArtifactNotFoundError
+        assert clone.message == "full /abs/path"
+        assert clone.safe_message == "path-free"
+    assert ArtifactNotFoundError("plain").safe_message is None
 
 
 def test_invalid_source_definition_refused(roots) -> None:

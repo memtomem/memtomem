@@ -58,6 +58,7 @@ import click
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from memtomem._runtime_paths import scrub_text
 from memtomem.config import TargetScope
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.mcp_servers import McpServerParseError
@@ -79,7 +80,11 @@ from memtomem.context.transfer import (
     transfer_artifact,
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
-from memtomem.web.routes._errors import _classify_exception, _error, _redact_message
+from memtomem.web.routes._errors import (
+    _classify_exception,
+    _error,
+    _scan_secrets,
+)
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes.context_projects import (
     _default_project_root,
@@ -328,6 +333,35 @@ async def _ensure_dest_local_gitignored(dst_root: Path) -> str:
     return msg
 
 
+#: The wire text of the two staging refusals (#3532): the engine's remediation
+#: without the staging paths its text ends with, which go to the log line.
+#: The replaced one covers both engine cases (``StagingClaim.assert_still_ours``),
+#: which the exception does not tell apart without its text.
+_STAGING_BUSY_MESSAGE = (
+    "transfer staging is blocked: a name it needs is already taken and was NOT removed, "
+    "because that entry can be an interrupted move's only copy of an artifact. Inspect it "
+    "by hand, then retry. The server log has the details."
+)
+_STAGING_REPLACED_MESSAGE = (
+    "transfer staging was replaced out of band, or this filesystem does not report file "
+    "identity: nothing was promoted and nothing was removed. Inspect the entry by hand, "
+    "then retry; if the filesystem is the cause, stage on one that reports it. The server "
+    "log has the details."
+)
+
+
+def _log_refusal(kind: str, name: str, reason_code: str, text: str) -> None:
+    """One warning line for a refusal whose wire message leaves out what an operator needs.
+
+    The whole line is secret-scanned, the caller-chosen name included, and no
+    ``exc_info``: the exception chain would carry the text past the scan. Then
+    ``scrub_text``, so a control character in a project path cannot split the
+    record or forge a line after it.
+    """
+    line = _scan_secrets(f"transfer {kind}/{name} refused ({reason_code}): {text}")
+    logger.warning("%s", scrub_text(line))
+
+
 @router.post("/context/{kind}/{name}/transfer")
 async def transfer_context_artifact(
     kind: str,
@@ -527,20 +561,40 @@ async def transfer_context_artifact(
         # sync surface emits — issue-pinned exception to the object envelope.
         raise HTTPException(422, exc.message) from exc
     except ArtifactNotFoundError as exc:
-        raise _error(404, "missing", exc.message) from exc
+        # ``safe_message`` when the engine's text names a path (#3532); the
+        # other not-found texts name none.
+        message = exc.message if exc.safe_message is None else exc.safe_message
+        raise _error(404, "missing", _scan_secrets(message)) from exc
     except TransferRecoveryError as exc:
         # BEFORE ``TransferCollisionError`` — it is a subclass, and inheriting
         # that arm would report an interrupted transaction as
         # ``destination_exists``. Nothing collided: the remediation is to
-        # inspect the two paths the engine names, not to remove something at the
-        # destination. Engine text, so it is redacted like every other raw
-        # exception on this route.
+        # inspect the entries the swap left, not to remove something at the
+        # destination.
+        #
+        # The engine's own sentence embeds those entries as host paths and, for
+        # a malformed marker, values read from it (#3532), so neither the wire
+        # nor the log gets it. The wire gets which side and tier is wedged; the
+        # log line gets the entries the error carries as data. Not cut at 200
+        # characters: every part is composed, and the last clause is the
+        # pointer to the log.
+        stated = (
+            exc.safe_message
+            if exc.safe_message is not None
+            else (
+                "an interrupted directory swap blocks this transfer and could not be "
+                "recovered automatically. Inspect it by hand, then retry."
+            )
+        )
+        public = f"{stated} The server log has the details."
+        entries = ", ".join(str(p) for p in exc.entries) or "none recorded"
+        _log_refusal(kind, name, "swap_recovery_pending", f"{stated} Entries: {entries}")
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "swap_recovery_pending",
-                "message": _redact_message(exc.message),
+                "message": _scan_secrets(public),
             },
         ) from exc
     except TransferCollisionError as exc:
@@ -569,19 +623,23 @@ async def transfer_context_artifact(
         # nothing is broken, a leftover is in the way and a human has to look
         # at it. Its own reason code, never ``destination_exists`` — the
         # destination is free; the remediation is to inspect the staging
-        # entries the message names, not to remove the destination.
+        # entries the engine names, not to remove the destination.
         #
-        # Redacted like every other raw engine string on this route: unlike
-        # ``MigratePartialError``, whose paths ARE the recovery steps for the
-        # operator who ran it, this one can reach a remote caller who has no
-        # business learning the destination store's absolute layout, and the
-        # unredacted text stays in the server log via ``raise ... from``.
+        # Unlike ``MigratePartialError``, whose paths ARE the recovery steps for
+        # the operator who ran it, this one can reach a remote caller who has no
+        # business learning the destination store's absolute layout. The
+        # engine's text ends with those paths, and redacting it only hid them by
+        # the 200-character cut — a ``$HOME`` collapse inside the prose moved the
+        # cut past them (#3532). So the wire gets the route's own sentence and
+        # the log line gets the engine's: an ``HTTPException`` raised ``from``
+        # its cause does not log the cause.
+        _log_refusal(kind, name, "transfer_staging_busy", str(exc))
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "transfer_staging_busy",
-                "message": _redact_message(str(exc)),
+                "message": _STAGING_BUSY_MESSAGE,
             },
         ) from exc
     except StagingIdentityLostError as exc:
@@ -590,14 +648,16 @@ async def transfer_context_artifact(
         # same reason as the busy arm above — nothing is broken, something is
         # in the way and a human has to look at it — with its own reason code,
         # because the remediation differs: a busy name is retried, a replaced
-        # entry has to be understood first. Redacted like its sibling; the
-        # unredacted text stays in the server log via ``raise ... from``.
+        # entry has to be understood first. The route's own sentence on the
+        # wire and the engine's in the log, like its sibling and for the same
+        # reasons.
+        _log_refusal(kind, name, "transfer_staging_replaced", str(exc))
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "transfer_staging_replaced",
-                "message": _redact_message(str(exc)),
+                "message": _STAGING_REPLACED_MESSAGE,
             },
         ) from exc
     except MigratePartialError as exc:
@@ -620,8 +680,14 @@ async def transfer_context_artifact(
         # multi-`name:` manifest, …) — bad request input, engine wording.
         raise _error(400, "validation", exc.message) from exc
     except Exception as exc:  # pragma: no cover - classified catch-all
+        # An unknown exception has no structure to build a path-free sentence
+        # from, so the caller gets the classification and a pointer (#3532).
         logger.error("transfer %s/%s failed", kind, name, exc_info=True)
-        raise _error(500, _classify_exception(exc), _redact_message(str(exc))) from exc
+        raise _error(
+            500,
+            _classify_exception(exc),
+            "transfer failed unexpectedly; the server log has the details",
+        ) from exc
 
     if gate is not None:
         flag, reason = gate

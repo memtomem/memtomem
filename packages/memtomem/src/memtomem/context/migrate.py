@@ -155,7 +155,16 @@ class ArtifactNotFoundError(click.ClickException):
     Raised only by the :func:`_detect_source_scope` not-found branches;
     the multi-scope ambiguity raise stays a plain ``ClickException``
     (the artifact exists — the selector is what's wrong).
+
+    ``safe_message`` is the same statement without a host path, for a surface
+    that answers a remote caller (#3532). ``None`` when ``message`` already
+    names no path. Keyword-only with a default, so ``type(exc)(*exc.args)`` —
+    what ``copy`` and ``pickle`` do — still rebuilds the exception.
     """
+
+    def __init__(self, message: str, *, safe_message: str | None = None) -> None:
+        super().__init__(message)
+        self.safe_message = safe_message
 
 
 MigrateState = Literal[
@@ -1014,13 +1023,13 @@ class StagingClaim:
     def assert_still_ours(self, action: str) -> None:
         """Refuse *action* when the pathname now names something else.
 
-        *action* is a short verb phrase and must not carry a path: both wires
-        that render this (``error_redact`` for MCP, the web route's twin)
-        hard-truncate an engine reason at 200 characters, so a remediation
-        written after the paths reaches a remote caller as a promise with no
-        instruction attached. Instruction FIRST, paths LAST — the same shape
-        :class:`TransferStagingBusyError` uses, pinned by a surface test on
-        each wire.
+        *action* is a short verb phrase and must not carry a path: the MCP wire
+        (``error_redact``) hard-truncates an engine reason at 200 characters,
+        so a remediation written after the paths reaches a remote caller as a
+        promise with no instruction attached. Instruction FIRST, paths LAST —
+        the same shape :class:`TransferStagingBusyError` uses. The web
+        transfer route sends its own fixed sentence instead and puts this text
+        in its server log line (#3532).
 
         An ABSENT entry is not a mismatch and is deliberately allowed through:
         there is nothing there to consume, and the operation's own ``ENOENT``
@@ -1216,13 +1225,12 @@ def _claim_transfer_staging(
         # -collision tests do exactly that), where naming one path twice
         # would read as a bug in the message rather than in the world.
         occupied = " and ".join(dict.fromkeys((str(first), str(second))))
-        # Instruction FIRST, inside 188 characters, paths LAST. Both wires
-        # (``error_redact`` for MCP, the web route's twin) hard-truncate an
-        # engine reason to 200 characters, so a remediation written after the
-        # paths reaches a remote caller as a promise with no instruction
-        # attached. The CLI prints this string whole, which is where the paths
-        # are worth having; on the wire they are what gets cut. A surface test
-        # on each wire pins that the instruction survives.
+        # Instruction FIRST, inside 188 characters, paths LAST. The MCP wire
+        # (``error_redact``) hard-truncates an engine reason to 200 characters,
+        # so a remediation written after the paths reaches a remote caller as
+        # a promise with no instruction attached. The CLI prints this string
+        # whole, which is where the paths are worth having. The web transfer
+        # route sends its own fixed sentence and logs this one (#3532).
         raise TransferStagingBusyError(
             "transfer staging is blocked: a name it needs is already taken and "
             "was NOT removed, because that entry can be an interrupted move's "
