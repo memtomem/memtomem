@@ -351,7 +351,9 @@ prompt or tool fields as shell variables. It validates the `mm` version at
 session start and fails open when input or dependencies are invalid. Logs live
 under `${CLAUDE_PLUGIN_DATA}/hook.log` and contain command status, not prompt
 content. The dispatcher runs through `uv`, including on Windows where a
-`python3` alias may not exist.
+`python3` alias may not exist. It runs on the interpreter uv finds first, which
+may be an older system Python: it needs Python 3.8 or newer, while `mm` itself
+needs Python 3.12 or newer, which its install command asks uv for.
 
 <details>
 <summary>Which settings file gets written? (hook tiers)</summary>

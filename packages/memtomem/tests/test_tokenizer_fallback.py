@@ -388,7 +388,11 @@ class TestWebRebuildReport:
             )
 
         assert resp.status_code == 200, resp.text
-        assert [c["field"] for c in resp.json()["applied"]] == ["search.tokenizer"]
+        body = resp.json()
+        assert [c["field"] for c in body["applied"]] == ["search.tokenizer"]
+        assert body["fts_rebuild"]["tokenizer"] == "unicode61"
+        assert body["fts_rebuild"]["rebuilt_rows"] == 1
+        assert "kiwipiepy is unavailable" in body["fts_rebuild"]["warning"]
         rebuilt = [r for r in caplog.records if r.getMessage().startswith("FTS index rebuilt")]
         assert [(r.levelno, r.getMessage().split(":")[0]) for r in rebuilt] == [
             (logging.WARNING, "FTS index rebuilt with tokenizer=unicode61 (1 chunks)")
