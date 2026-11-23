@@ -1115,9 +1115,9 @@ class TestInstallAxesReconcile:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Phase 2 regression: when ``_install_extras`` returns ``False``
-        (user declined / subprocess failed / empty contract) the summary
-        must still surface the Phase 1 ``[!] Missing extras:`` warning so
-        the hint path is never silently skipped."""
+        (a source checkout always does) the summary must still surface the
+        Phase 1 ``[!] Missing extras:`` warning so the hint path is never
+        silently skipped."""
         from click import unstyle
 
         from memtomem.cli import init_cmd
@@ -1145,24 +1145,40 @@ class TestInstallAxesReconcile:
         """Phase 2: when ``_install_extras`` returns ``True`` (subprocess
         ran and exited 0) the summary shows the success line and skips the
         Phase 1 warning — a hint after a successful install would be
-        noise."""
+        noise.
+
+        Exercises the tool-success branch with a uv-tool profile: ``tool`` is
+        the only install type ``_install_extras`` can succeed for, so the
+        summary must route that profile to it as ``"tool"``."""
         from click import unstyle
 
         from memtomem.cli import init_cmd
 
-        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
-        monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: True)
+        calls: list[tuple[str, list[str]]] = []
+
+        def _install(install_type: str, extras: list[str], **kw: object) -> bool:
+            calls.append((install_type, list(extras)))
+            return True
+
+        def _no_probe(py: Path) -> set[str]:
+            raise AssertionError(f"a tool install probed the workspace interpreter {py}")
+
+        monkeypatch.setattr(init_cmd, "_inproc_have_extras", lambda: (False, True))
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", _no_probe)
+        monkeypatch.setattr(init_cmd, "_install_extras", _install)
         set_home(monkeypatch, tmp_path)
 
-        state = self._make_state_source_with_venv(tmp_path)
+        state = _make_init_state(tmp_path)
+        state["_profile"] = _make_test_profile(kind="pypi", mm_binary_origin="uv-tool")
         state["provider"] = "onnx"
         state["model"] = "bge-m3"
         state["dimension"] = 1024
         init_cmd._write_config_and_summary(state, tmp_path)
 
-        out = unstyle(capsys.readouterr().out)
-        assert "Missing extras:" not in out
-        assert "Installed missing extras:" in out
+        assert calls == [("tool", ["onnx"])]
+        out = unstyle(capsys.readouterr().out).splitlines()
+        assert "  Installed missing extras: onnx." in out
+        assert not [ln for ln in out if "Missing extras:" in ln]
 
 
 class TestInstallExtrasHelper:
@@ -1607,31 +1623,33 @@ class TestMismatchBanner:
         assert "cwd: source / runtime: uv tool" in out
         assert "Workspace .venv not found" in out
 
-    def test_banner_still_fires_after_successful_install(
+    def test_banner_fires_beside_the_recovery_hint(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Banner is orthogonal to extras — a successful install does
-        NOT change the fact that cwd and runtime axes disagree. Banner
-        must still print after ``Installed missing extras: …``."""
+        """Banner is orthogonal to extras: it explains the cwd/runtime split
+        and the warning still names the recovery. A source checkout is never
+        installed into, so the real ``_install_extras`` runs here and the
+        banner sits beside the hint, not beside a success line."""
         from click import unstyle
 
         from memtomem.cli import init_cmd
 
         monkeypatch.setattr(init_cmd.sys, "executable", "/usr/local/bin/python")
-        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
-        monkeypatch.setattr(init_cmd, "_install_extras", lambda *a, **kw: True)
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: {"fastapi", "uvicorn"})
         set_home(monkeypatch, tmp_path)
 
         state = self._source_state_with_venv(tmp_path)
         init_cmd._write_config_and_summary(state, tmp_path)
 
-        out = unstyle(capsys.readouterr().out)
-        assert "cwd: source / runtime: uv tool" in out
-        assert "Installed missing extras:" in out
-        assert "Missing extras:" not in out
+        out = unstyle(capsys.readouterr().out).splitlines()
+        banner = "  i  cwd: source / runtime: uv tool — Next steps assume `uv run mm`."
+        warning = "  [!] Missing extras: onnx"
+        hint = f"      → run uv sync --dev in {tmp_path}"
+        assert out.index(banner) < out.index(warning) < out.index(hint)
+        assert not [ln for ln in out if "Installed missing extras" in ln]
 
 
 class TestRuntimeProfile:
