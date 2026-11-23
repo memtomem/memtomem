@@ -280,9 +280,21 @@ class TestAuxiliaryLegs:
             async with comp.storage._lease_read_db(deadline=time.monotonic() - 1):
                 pass
 
-    async def test_dense_retrieval_does_not_start_after_an_embedding_that_spent_the_budget(self):
+    async def test_dense_retrieval_does_not_start_after_an_embedding_that_spent_the_budget(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        import memtomem.search.deadline as deadline_mod
+
+        # The budget reads a clock that only the embedding moves, so no stage before it can
+        # spend the 50 ms on a slow runner and raise under its own name. Only the deadline
+        # module's ``time`` is replaced; asyncio keeps the real clock.
+        now = [1_000.0]
+        monkeypatch.setattr(deadline_mod, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
         async def slow_embed(*args, **kwargs):
-            await asyncio.sleep(0.2)
+            now[0] += 0.2
             return [0.1] * 8
 
         pipeline = _pipeline(embed=AsyncMock(side_effect=slow_embed), enable_dense=True)

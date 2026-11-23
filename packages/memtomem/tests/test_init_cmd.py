@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.metadata
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,10 @@ from memtomem.cli.init_cmd import (
     _write_kimi_mcp_json,
     _write_mcp_json,
 )
+
+# Captured at import, before the suite-wide ``_uv_workspace_root_is_the_directory``
+# fixture replaces the module attribute for each test.
+from memtomem.cli.init_cmd import _uv_workspace_root as _real_uv_workspace_root
 from memtomem.config import Mem2MemConfig
 
 from .helpers import set_home
@@ -1019,12 +1024,12 @@ class TestInstallAxesReconcile:
         assert f"Workspace .venv not found — run uv sync --dev in {tmp_path} first." in out
         assert "Missing extras:" not in out
 
-    def test_subprocess_timeout_falls_back_to_inproc(
+    def test_failed_workspace_probe_leaves_extras_unchecked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """If the workspace-python subprocess fails (``None`` sentinel),
-        fall back to in-process probe so the wizard still surfaces missing
-        extras (better than going silent)."""
+        """If the workspace-python subprocess fails (``None`` sentinel), the
+        extras are reported as not checked. The wizard's own interpreter does
+        not stand in: it is not the one ``uv run`` will use (#3514)."""
         from memtomem.cli import init_cmd
 
         # In-process probe says missing.
@@ -1038,7 +1043,10 @@ class TestInstallAxesReconcile:
 
         state = self._make_state_source_with_venv(tmp_path)
         state["provider"] = "onnx"
-        assert init_cmd._collect_missing_extras(state) == ["onnx"]
+        missing, unchecked = init_cmd._check_extras(state)
+        assert missing == []
+        assert unchecked is not None
+        assert unchecked.startswith("running ") and unchecked.endswith(" failed")
 
     def test_inline_warned_onnx_dedup_from_summary(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2231,10 +2239,11 @@ class TestSourceWorkspaceMarker:
 
 
 class TestWorkspaceMemberProjectVenv:
-    """#3510 — a project found at a uv workspace member probes only its own
-    ``.venv``. The workspace root's ``.venv`` is not borrowed: without a
-    membership check that matches uv, a project the workspace excludes would
-    have ``mm init`` run an unrelated interpreter for its extras probe."""
+    """#3514 — a project found at a uv workspace member probes the environment
+    ``uv run --directory <member>`` uses, which uv's own discovery decides:
+    the workspace root's for a member, the project's own for an excluded
+    project or one in no workspace. When uv cannot say, nothing stands in for
+    it — not ``<member>/.venv`` and not the wizard's interpreter."""
 
     @staticmethod
     def _member_layout(root: Path, members_dir: str = "libs") -> Path:
@@ -2258,24 +2267,49 @@ class TestWorkspaceMemberProjectVenv:
         py.touch()
         return py
 
+    @staticmethod
+    def _uv_answers(monkeypatch: pytest.MonkeyPatch, root: Path | None, error: str | None) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd, "_uv_workspace_root", lambda directory: (root, error))
+
     @pytest.mark.parametrize("members_dir", ["libs", "packages"])
-    def test_member_without_own_venv_does_not_borrow_workspace_venv(
-        self, members_dir: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("member_has_venv", [False, True])
+    def test_member_uses_the_environment_uv_names(
+        self,
+        members_dir: str,
+        member_has_venv: bool,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """uv answers the workspace root for a member, so its ``.venv`` is the
+        environment — also when the member has a ``.venv`` of its own, which
+        ``uv run --directory <member>`` does not use (measured on uv 0.12.17)."""
         from memtomem.cli import init_cmd
 
         root = tmp_path / "mono"
         member = self._member_layout(root, members_dir)
         self._venv_python(root / ".venv")
+        if member_has_venv:
+            self._venv_python(member / ".venv")
         monkeypatch.chdir(member)
         _neutral_interpreter(monkeypatch, tmp_path)
+        self._uv_answers(monkeypatch, root, None)
 
         profile = init_cmd._runtime_profile()
         assert profile.cwd_install_type == "project"
         assert profile.cwd_install_dir == member
-        assert profile.workspace_venv_path is None
+        assert profile.workspace_venv_path == root / ".venv"
+        assert profile.workspace_env_error is None
+        state = {"_profile": profile}
+        assert init_cmd._workspace_python(state) == root / ".venv" / "bin" / "python"
+        assert init_cmd._workspace_needs_sync(state) is False
 
-    def test_member_own_venv_is_used(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_project_uv_keeps_out_of_the_workspace_uses_its_own_venv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An excluded project: uv names the project itself, so the root's
+        ``.venv`` is not borrowed."""
         from memtomem.cli import init_cmd
 
         root = tmp_path / "mono"
@@ -2284,8 +2318,697 @@ class TestWorkspaceMemberProjectVenv:
         self._venv_python(member / ".venv")
         monkeypatch.chdir(member)
         _neutral_interpreter(monkeypatch, tmp_path)
+        self._uv_answers(monkeypatch, member, None)
 
         assert init_cmd._runtime_profile().workspace_venv_path == member / ".venv"
+
+    def test_root_environment_not_created_yet_needs_sync(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        self._venv_python(member / ".venv")
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+        self._uv_answers(monkeypatch, root, None)
+
+        profile = init_cmd._runtime_profile()
+        assert profile.workspace_venv_path is None
+        assert init_cmd._workspace_needs_sync({"_profile": profile}) is True
+
+    def test_uv_that_cannot_say_leaves_the_environment_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No fallback to the member's own ``.venv``, and no "not found"
+        line for an environment nobody located."""
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        self._venv_python(root / ".venv")
+        self._venv_python(member / ".venv")
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+        self._uv_answers(monkeypatch, None, "uv is not on PATH")
+
+        profile = init_cmd._runtime_profile()
+        assert profile.workspace_venv_path is None
+        assert profile.workspace_env_error == "uv is not on PATH"
+        assert profile.runtime_matches_workspace is False
+        state = {"_profile": profile, "provider": "onnx"}
+        assert init_cmd._workspace_needs_sync(state) is False
+        assert init_cmd._check_extras(state) == (
+            [],
+            f"could not ask uv which environment `uv run --directory {member}` uses: "
+            "uv is not on PATH",
+        )
+
+    @pytest.mark.parametrize("relative", [True, False])
+    def test_uv_project_environment_override(
+        self, relative: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``UV_PROJECT_ENVIRONMENT``: relative to the root uv names, or absolute."""
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        env = root / "custom-env" if relative else tmp_path / "envs" / "app"
+        self._venv_python(env)
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "custom-env" if relative else str(env))
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+        self._uv_answers(monkeypatch, root, None)
+
+        assert init_cmd._runtime_profile().workspace_venv_path == env
+
+    def test_empty_uv_project_environment_uses_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "")
+        assert init_cmd._uv_project_environment(tmp_path) == tmp_path / ".venv"
+
+    def test_runtime_in_the_environment_matches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        py = self._venv_python(root / ".venv")
+        monkeypatch.chdir(member)
+        monkeypatch.setattr(init_cmd.sys, "executable", str(py))
+        monkeypatch.setattr(init_cmd.sys, "prefix", str(root / ".venv"))
+        self._uv_answers(monkeypatch, root, None)
+
+        profile = init_cmd._runtime_profile()
+        assert profile.runtime_matches_workspace is True
+        assert profile.mm_binary_origin == "venv-relative"
+
+    def test_runtime_in_the_environment_through_a_symlinked_directory_matches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """uv names the real directory; the wizard was started through an
+        alias of it. One environment, so a match."""
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        self._venv_python(root / ".venv")
+        alias = tmp_path / "alias"
+        try:
+            alias.symlink_to(root, target_is_directory=True)
+        except OSError:
+            pytest.skip("cannot create a directory symlink here")
+        monkeypatch.chdir(member)
+        monkeypatch.setattr(init_cmd.sys, "executable", str(alias / ".venv" / "bin" / "python"))
+        self._uv_answers(monkeypatch, root, None)
+
+        assert init_cmd._runtime_profile().runtime_matches_workspace is True
+
+    def test_runtime_in_an_environment_nested_inside_the_selected_one_does_not_match(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``UV_PROJECT_ENVIRONMENT=/envs`` and a wizard running from
+        ``/envs/other/bin/python``: a different environment."""
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        envs = tmp_path / "envs"
+        self._venv_python(envs)
+        other = self._venv_python(envs / "other")
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(envs))
+        monkeypatch.chdir(member)
+        monkeypatch.setattr(init_cmd.sys, "executable", str(other))
+        self._uv_answers(monkeypatch, root, None)
+
+        assert init_cmd._runtime_profile().runtime_matches_workspace is False
+
+    def test_environment_that_cannot_be_checked_is_unknown_not_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``.venv`` symlink whose target the user cannot access:
+        ``Path.exists()`` raises ``PermissionError`` there on Python 3.12.12
+        and 3.13.9, which stopped ``mm init`` and ``mm uninstall``, and
+        answers ``False`` on 3.14.7, which would print a sync line and let the
+        wizard's own interpreter answer for the extras. ``Path.exists`` is
+        made to answer as 3.14 does, so the check must not rely on it."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(Path, "exists", lambda self, **kwargs: False)
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+        self._uv_answers(monkeypatch, root, None)
+        real_stat = os.stat
+
+        def stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if isinstance(path, (str, os.PathLike)) and Path(path) == root / ".venv":
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(init_cmd.os, "stat", stat)
+        profile = init_cmd._runtime_profile()
+        assert profile.workspace_venv_path is None
+        assert profile.workspace_env_error == f"{root / '.venv'} cannot be read (Permission denied)"
+        assert init_cmd._workspace_needs_sync({"_profile": profile}) is False
+
+    def test_interpreter_that_cannot_be_checked_is_probed_not_called_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        venv = tmp_path / ".venv"
+        venv.mkdir()
+        real_stat = os.stat
+
+        def stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if isinstance(path, (str, os.PathLike)) and Path(path) == venv / "bin" / "python":
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(init_cmd.os, "stat", stat)
+        state = {"_profile": _make_test_profile(tmp_path, kind="project")}
+        assert init_cmd._workspace_python(state) == venv / "bin" / "python"
+        assert init_cmd._workspace_needs_sync(state) is False
+
+    @pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+    def test_this_platforms_layout_wins(
+        self, platform: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both layouts present: a stale entry in the other platform's
+        layout must not answer for this one's interpreter."""
+        from memtomem.cli import init_cmd
+
+        venv = tmp_path / ".venv"
+        for rel in (("bin", "python"), ("Scripts", "python.exe")):
+            venv.joinpath(rel[0]).mkdir(parents=True, exist_ok=True)
+            venv.joinpath(*rel).touch()
+        monkeypatch.setattr(init_cmd.sys, "platform", platform)
+        state = {"_profile": _make_test_profile(tmp_path, kind="project")}
+        native = ("Scripts", "python.exe") if platform == "win32" else ("bin", "python")
+        assert init_cmd._workspace_python(state) == venv.joinpath(*native)
+
+    @pytest.mark.parametrize("platform", ["linux", "win32"])
+    def test_native_interpreter_that_cannot_be_checked_is_not_replaced(
+        self, platform: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other layout answers only for a native interpreter that is
+        absent; one whose existence cannot be told is returned, so its probe
+        fails and the extras read as not checked."""
+        from memtomem.cli import init_cmd
+
+        venv = tmp_path / ".venv"
+        for rel in (("bin", "python"), ("Scripts", "python.exe")):
+            venv.joinpath(rel[0]).mkdir(parents=True, exist_ok=True)
+            venv.joinpath(*rel).touch()
+        native = venv.joinpath(
+            *(("Scripts", "python.exe") if platform == "win32" else ("bin", "python"))
+        )
+        real_stat = os.stat
+
+        def stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if isinstance(path, (str, os.PathLike)) and Path(path) == native:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(init_cmd.sys, "platform", platform)
+        monkeypatch.setattr(init_cmd.os, "stat", stat)
+        state = {"_profile": _make_test_profile(tmp_path, kind="project")}
+        assert init_cmd._workspace_python(state) == native
+
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not installed")
+    def test_init_at_a_member_discovers_the_root_through_real_uv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Command level with the real ``_uv_workspace_root`` and the host's
+        uv: ``mm init`` in a member probes the root's interpreter. Nothing is
+        synced; the interpreter is a placeholder and the probe is recorded."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.setattr(init_cmd, "_uv_workspace_root", _real_uv_workspace_root)
+        root = (tmp_path / "mono").resolve()
+        member = root / "packages" / "app"
+        member.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(
+            "[project]\nname = 'mono'\nversion = '0.1'\nrequires-python = '>=3.12'\n"
+            "dependencies = []\n\n[tool.uv.workspace]\nmembers = ['packages/*']\n",
+            encoding="utf-8",
+        )
+        (member / "pyproject.toml").write_text(
+            "[project]\nname = 'app'\nversion = '0.1'\nrequires-python = '>=3.12'\n"
+            "dependencies = ['memtomem[all]']\n",
+            encoding="utf-8",
+        )
+        native = ("Scripts", "python.exe") if sys.platform == "win32" else ("bin", "python")
+        root_py = root.joinpath(".venv", *native)
+        root_py.parent.mkdir(parents=True)
+        root_py.touch()
+        member_py = member.joinpath(".venv", *native)
+        member_py.parent.mkdir(parents=True)
+        member_py.touch()
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+        probed: list[Path] = []
+
+        def probe(py: Path) -> set[str]:
+            probed.append(py)
+            return {"fastembed", "fastapi", "uvicorn"}
+
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", probe)
+
+        result = CliRunner().invoke(
+            init_cmd.init,
+            ["--non-interactive", "--provider", "onnx", "--memory-dir", str(tmp_path / "mem")],
+        )
+        assert result.exit_code == 0, result.output
+        assert probed
+        assert set(probed) == {root_py}
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_unreadable_venv_symlink_does_not_stop_the_profile(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root reads through the denied directory")
+        from memtomem.cli import init_cmd
+
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        locked = tmp_path / "locked"
+        (locked / "env").mkdir(parents=True)
+        (root / ".venv").symlink_to(locked / "env", target_is_directory=True)
+        locked.chmod(0)
+        try:
+            monkeypatch.chdir(member)
+            _neutral_interpreter(monkeypatch, tmp_path)
+            self._uv_answers(monkeypatch, root, None)
+            profile = init_cmd._runtime_profile()
+            assert profile.workspace_venv_path is None
+            assert profile.workspace_env_error is not None
+            assert profile.workspace_env_error.startswith(f"{root / '.venv'} cannot be read (")
+        finally:
+            locked.chmod(0o700)
+
+    def test_init_probes_the_root_interpreter_not_the_members(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Command level: the extras probe runs the interpreter uv will use."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        root_py = self._venv_python(root / ".venv")
+        self._venv_python(member / ".venv")
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+        self._uv_answers(monkeypatch, root, None)
+        probed: list[Path] = []
+
+        def probe(py: Path) -> set[str]:
+            probed.append(py)
+            return {"fastembed", "fastapi", "uvicorn"}
+
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", probe)
+
+        result = CliRunner().invoke(
+            init_cmd.init,
+            ["--non-interactive", "--provider", "onnx", "--memory-dir", str(tmp_path / "mem")],
+        )
+        assert result.exit_code == 0, result.output
+        assert probed
+        assert set(probed) == {root_py}
+
+    def test_init_with_uv_unable_to_say_reports_extras_not_checked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click import unstyle
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        self._venv_python(member / ".venv")
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+        self._uv_answers(monkeypatch, None, "uv is not on PATH")
+
+        def probe(py: Path) -> set[str]:
+            raise AssertionError(f"probed {py}")
+
+        def inproc() -> tuple[bool, bool]:
+            raise AssertionError("probed the wizard's interpreter")
+
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", probe)
+        monkeypatch.setattr(init_cmd, "_inproc_have_extras", inproc)
+
+        result = CliRunner().invoke(
+            init_cmd.init,
+            ["--non-interactive", "--provider", "none", "--memory-dir", str(tmp_path / "mem")],
+        )
+        assert result.exit_code == 0, result.output
+        out = unstyle(result.output)
+        assert (
+            "Extras not checked: could not ask uv which environment "
+            f"`uv run --directory {member}` uses: uv is not on PATH." in out
+        )
+        assert ".venv not found" not in out
+        assert "cwd: project / runtime" not in out
+
+    @pytest.mark.parametrize(
+        "flags", [["--provider", "onnx"], ["--provider", "none", "--tokenizer", "kiwipiepy"]]
+    )
+    def test_non_interactive_refuses_a_required_extra_it_cannot_check(
+        self, flags: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not checked is not installed: refused before anything is written."""
+        from click import unstyle
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        root = tmp_path / "mono"
+        member = self._member_layout(root)
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+        self._uv_answers(monkeypatch, None, "uv is not on PATH")
+        monkeypatch.setattr(init_cmd, "_inproc_have_extras", lambda: (True, True))
+        monkeypatch.setattr(init_cmd, "_have_module", lambda name: True)
+
+        result = CliRunner().invoke(
+            init_cmd.init,
+            ["--non-interactive", *flags, "--memory-dir", str(tmp_path / "mem")],
+        )
+        assert result.exit_code != 0
+        out = unstyle(result.output)
+        needed = "onnx" if "onnx" in flags else "korean"
+        assert (
+            f"Cannot check the extras `mm init --non-interactive` needs ({needed}): "
+            f"could not ask uv which environment `uv run --directory {member}` uses: "
+            "uv is not on PATH." in out
+        )
+        assert not (tmp_path / "mem").exists()
+        assert not (tmp_path / ".memtomem" / "config.json").exists()
+
+    @pytest.mark.parametrize("provider", ["none", "onnx"], ids=["summary", "refusal"])
+    def test_reason_with_a_control_character_is_scrubbed(
+        self, provider: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reason names paths from the environment (``UV_PROJECT_ENVIRONMENT``,
+        the workspace); a control sequence in one must not reach the terminal."""
+        from click.testing import CliRunner
+
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        member = self._member_layout(tmp_path / "mono")
+        monkeypatch.chdir(member)
+        _neutral_interpreter(monkeypatch, tmp_path)
+        self._uv_answers(monkeypatch, None, "/env\x1b]0;owned\x07 cannot be read")
+
+        result = CliRunner().invoke(
+            init_cmd.init,
+            ["--non-interactive", "--provider", provider, "--memory-dir", str(tmp_path / "mem")],
+        )
+        assert (result.exit_code == 0) is (provider == "none"), result.output
+        assert "cannot be read" in result.output
+        # CliRunner strips colour, so any ESC or BEL left came from the reason.
+        assert "\x1b" not in result.output
+        assert "\x07" not in result.output
+
+
+class TestUvWorkspaceRoot:
+    """#3514 — ``_uv_workspace_root`` reads ``uv workspace dir`` and treats
+    every answer it cannot use as unknown."""
+
+    @staticmethod
+    def _uv_prints(
+        monkeypatch: pytest.MonkeyPatch, stdout: bytes = b"", returncode: int = 0
+    ) -> list[list[str]]:
+        from memtomem.cli import init_cmd
+
+        calls: list[list[str]] = []
+
+        def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=b"")
+
+        monkeypatch.setattr(init_cmd.shutil, "which", lambda name: "/opt/uv/bin/uv")
+        monkeypatch.setattr(init_cmd.subprocess, "run", run)
+        return calls
+
+    def test_reads_the_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = tmp_path / "mono"
+        calls = self._uv_prints(monkeypatch, (str(root) + "\n").encode())
+        assert _real_uv_workspace_root(tmp_path / "mono" / "app") == (root, None)
+        assert calls == [
+            [
+                "/opt/uv/bin/uv",
+                "workspace",
+                "dir",
+                "--offline",
+                "--directory",
+                str(tmp_path / "mono" / "app"),
+            ]
+        ]
+
+    @pytest.mark.parametrize("name", [" mono ", "mono\r"], ids=["spaces", "trailing-cr"])
+    def test_keeps_the_directory_name_whole(
+        self, name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only uv's ``\\n`` terminator is removed: a ``\\r`` before it is part
+        of a POSIX directory name, not a Windows line ending (uv prints
+        ``\\n`` everywhere)."""
+        root = tmp_path / name
+        self._uv_prints(monkeypatch, (str(root) + "\n").encode())
+        assert _real_uv_workspace_root(root) == (root, None)
+
+    def test_no_uv(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd.shutil, "which", lambda name: None)
+        root, error = _real_uv_workspace_root(tmp_path)
+        assert root is None
+        assert error is not None and error.startswith("uv is not on PATH.")
+
+    @pytest.mark.parametrize("name", ["UV_NO_PROJECT", "UV_ISOLATED"])
+    @pytest.mark.parametrize(
+        ("value", "outcome"),
+        [
+            ("1", "skips"),
+            ("TRUE", "skips"),
+            ("y", "skips"),
+            ("0", "uses"),
+            ("f", "uses"),
+            ("OFF", "uses"),
+            ("", "refused"),
+            (" false ", "refused"),
+            ("garbage", "refused"),
+        ],
+    )
+    def test_uv_run_mode_variables_read_as_uv_reads_them(
+        self,
+        name: str,
+        value: str,
+        outcome: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``uv workspace dir`` still names the root under these, but a true
+        value makes ``uv run`` skip the project's environment and a value uv
+        does not accept makes it refuse to run (uv 0.12.17, measured): both
+        are unknown. Only uv's false values leave discovery to uv."""
+        calls = self._uv_prints(monkeypatch, (str(tmp_path) + "\n").encode())
+        monkeypatch.setenv(name, value)
+        result = _real_uv_workspace_root(tmp_path)
+        if outcome == "uses":
+            assert result == (tmp_path, None)
+            return
+        assert calls == []
+        if outcome == "skips":
+            assert result == (
+                None,
+                f"{name} is set, so `uv run` does not use the project's environment",
+            )
+        else:
+            assert result == (None, f"`uv run` refuses {name}={value!r}")
+
+    @pytest.mark.parametrize(
+        ("stdout", "returncode", "reason"),
+        [
+            (b"", 2, "exited with 2; run it to see uv's error"),
+            (b"\xff\xfe\n", 0, "printed a path that is not UTF-8"),
+            (b"", 0, "did not print one absolute path"),
+            (b"relative/dir\n", 0, "did not print one absolute path"),
+            (b"two\nlines\n", 0, "did not print one absolute path"),
+            (b"nul\n", 0, "did not print one absolute path"),
+        ],
+    )
+    def test_unusable_answers_are_unknown(
+        self,
+        stdout: bytes,
+        returncode: int,
+        reason: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        if stdout == b"two\nlines\n":
+            stdout = f"{tmp_path / 'a'}\n{tmp_path / 'b'}\n".encode()
+        elif stdout == b"nul\n":
+            stdout = f"{tmp_path / 'a'}\x00b\n".encode()
+        self._uv_prints(monkeypatch, stdout, returncode)
+        root, error = _real_uv_workspace_root(tmp_path)
+        assert root is None
+        assert error == f"`uv workspace dir --offline --directory {tmp_path}` {reason}"
+
+    @pytest.mark.parametrize(
+        ("exc", "reason"),
+        [
+            (subprocess.TimeoutExpired(["uv"], 10), "did not finish in 10 s"),
+            (PermissionError(13, "Permission denied"), "could not run (Permission denied)"),
+        ],
+    )
+    def test_uv_that_cannot_run_is_unknown(
+        self, exc: Exception, reason: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            raise exc
+
+        monkeypatch.setattr(init_cmd.shutil, "which", lambda name: "/opt/uv/bin/uv")
+        monkeypatch.setattr(init_cmd.subprocess, "run", run)
+        assert _real_uv_workspace_root(tmp_path) == (
+            None,
+            f"`uv workspace dir --offline --directory {tmp_path}` {reason}",
+        )
+
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not installed")
+    def test_real_uv_decides_membership_and_writes_nothing(self, tmp_path: Path) -> None:
+        """The host's uv (CI pins 0.11.16): a member maps to the root, an
+        excluded project and a standalone project outside the ``members``
+        globs to themselves. No lockfile and no environment are created."""
+        root = tmp_path / "mono"
+
+        def project(path: Path, extra: str = "") -> None:
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "pyproject.toml").write_text(
+                f"[project]\nname = '{path.name}'\nversion = '0.1'\n"
+                f"requires-python = '>=3.12'\ndependencies = []\n{extra}",
+                encoding="utf-8",
+            )
+
+        project(
+            root,
+            "\n[tool.uv.workspace]\nmembers = ['packages/*']\nexclude = ['packages/ex']\n",
+        )
+        project(root / "packages" / "app")
+        project(root / "packages" / "ex")
+        project(root / "other")
+        before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+
+        resolved = root.resolve()
+        assert _real_uv_workspace_root(root / "packages" / "app") == (resolved, None)
+        assert _real_uv_workspace_root(root) == (resolved, None)
+        assert _real_uv_workspace_root(root / "packages" / "ex") == (
+            resolved / "packages" / "ex",
+            None,
+        )
+        assert _real_uv_workspace_root(root / "other") == (resolved / "other", None)
+        assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before
+
+
+class TestProbeWorkspaceExtrasOutput:
+    """#3514 — output the probe cannot read is unknown (``None``), so the
+    extras are reported as not checked instead of the summary raising."""
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [b"\xff\n", b'[["fastembed"]]\n', b"[1]\n", b"[" * 100_000 + b"\n"],
+        ids=["undecodable", "nested-list", "non-string", "deeply-nested"],
+    )
+    def test_unreadable_output_is_unknown(
+        self, stdout: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=b"")
+
+        monkeypatch.setattr(init_cmd.subprocess, "run", run)
+        assert init_cmd._probe_workspace_extras(tmp_path / "python") is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell script as the interpreter")
+    def test_a_real_child_printing_an_undecodable_byte_is_unknown(self, tmp_path: Path) -> None:
+        from memtomem.cli import init_cmd
+
+        py = tmp_path / "python"
+        py.write_bytes(b"#!/bin/sh\nprintf '\\377\\n'\n")
+        py.chmod(0o755)
+        assert init_cmd._probe_workspace_extras(py) is None
+
+    def test_reads_the_importable_names_from_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The output is captured as bytes and decoded here. With ``text=True``,
+        an undecodable byte leaves ``stdout`` as ``None`` on Windows (CPython
+        decodes in a reader thread), which no POSIX run reproduces — hence
+        pinning the call shape."""
+        from memtomem.cli import init_cmd
+
+        seen: list[dict[str, object]] = []
+
+        def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            seen.append(kwargs)
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=b'["fastembed", "uvicorn"]\n', stderr=b""
+            )
+
+        monkeypatch.setattr(init_cmd.subprocess, "run", run)
+        assert init_cmd._probe_workspace_extras(tmp_path / "python") == {"fastembed", "uvicorn"}
+        assert [{k: v for k, v in kw.items() if k in ("text", "encoding")} for kw in seen] == [{}]
+
+    @pytest.mark.parametrize("where", ["cwd", "PYTHONPATH"])
+    def test_the_probe_sees_what_the_server_imports(
+        self, where: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real probe of this interpreter with a same-named module in the
+        current directory, or in a directory on ``PYTHONPATH``. ``-c`` alone
+        puts the current directory on ``sys.path``, which the
+        ``memtomem-server`` console script does not, so that module must not
+        count. ``PYTHONPATH`` reaches the server launched in the same
+        environment, so a package there must count (``-I`` hid it)."""
+        import importlib.util
+
+        from memtomem.cli import init_cmd
+
+        probed = ["fastembed", "fastapi", "uvicorn", "ollama", "openai", "kiwipiepy"]
+        absent = [name for name in probed if importlib.util.find_spec(name) is None]
+        if not absent:
+            pytest.skip("every probed module is installed here")
+        (tmp_path / f"{absent[0]}.py").write_text("", encoding="utf-8")
+        if where == "cwd":
+            monkeypatch.chdir(tmp_path)
+        else:
+            monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+        importable = init_cmd._probe_workspace_extras(Path(sys.executable))
+        assert importable is not None
+        assert (absent[0] in importable) is (where == "PYTHONPATH")
 
 
 class TestMmBinaryOriginDetection:

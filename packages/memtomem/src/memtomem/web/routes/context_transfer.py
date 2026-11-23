@@ -544,12 +544,22 @@ async def transfer_context_artifact(
             },
         ) from exc
     except TransferCollisionError as exc:
+        # The engine's text names the destination by its resolved absolute
+        # path, which can sit under neither project root nor the import-time
+        # ``$HOME`` (a store linked out of the project, the request-time user
+        # tier), so stripping roots out of it cannot make it path-free. The
+        # route states the collision in the terms the caller chose instead;
+        # the SPA keys on ``reason_code`` and shows its own advice.
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "destination_exists",
-                "message": exc.message,
+                "message": (
+                    f"destination already exists: {kind} '{body.as_name or name}' in the "
+                    f"{body.to_target_scope} tier of the destination. Resolve manually or "
+                    "remove the existing entry first."
+                ),
             },
         ) from exc
     except TransferStagingBusyError as exc:

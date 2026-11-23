@@ -291,7 +291,23 @@ and an unknown value is rejected outright. Silently ignoring a typo would make
 every chunk look entity-less, which under `overwrite=True` reads as "clear
 them all".
 
-> **LLM enhancement**: When LLM is enabled, `mem_entity_scan` uses LLM-based structured extraction for higher accuracy (especially person names and decisions). Falls back to regex/pattern matching when LLM is disabled or fails.
+When the LLM call for a chunk fails (provider unreachable, a timeout, an
+authentication error, or a reply that is neither exactly `NONE` nor contains
+at least one valid `TYPE|VALUE` line, judged before the `entity_types` filter),
+the scan leaves that chunk as it is: its existing rows are neither replaced nor
+cleared, and a chunk without rows stays without them. The summary counts these
+as `Chunks left unchanged (LLM extraction failed)`, and the server log has the
+error. Fix the provider and rerun with the same options. Under
+`overwrite=True` every matching chunk is tried again. A plain rerun tries only
+the matching chunks without rows, which is enough, since the others kept the
+rows they had. A `NONE` answer is not a failure: it means the content has no
+entities, and under `overwrite=True` it clears the chunk's rows as before.
+
+The scan stores nothing from the regex fallback for a failed chunk, so a chunk
+without rows stays without them even when the regex extractor would find
+something in it.
+
+> **LLM enhancement**: When LLM is enabled, `mem_entity_scan` uses LLM-based structured extraction for higher accuracy (especially person names and decisions). With LLM disabled it uses regex/pattern matching. When an LLM call fails, the chunk is left unchanged (see above) and nothing from the regex fallback is stored.
 
 ### Decay and expiration
 

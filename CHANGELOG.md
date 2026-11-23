@@ -15,6 +15,74 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   as it already did with `--preset`: the step is not shown. The flags that override a preset's
   fields (`--provider`, `--model`, `--tokenizer`, …) are still not applied in the Advanced paths.
 
+- **`mem_entity_scan` no longer replaces or clears a chunk's entities when the LLM call for it
+  fails (#3383).** The scan took the regex fallback's result as the chunk's new extraction, so
+  one `overwrite=True` scan while the provider was unreachable, timing out or refusing the key
+  replaced LLM-found rows such as `person|Alice` with regex rows, or deleted them and reported
+  `Chunks cleared` when the regex found nothing. A chunk whose LLM call fails is now left as it
+  is and counted as `Chunks left unchanged (LLM extraction failed)`. A reply that is neither
+  exactly `NONE` nor contains at least one valid `TYPE|VALUE` line (for example `I cannot
+  extract entities…`) now counts as a failed call too; `NONE` still clears. A chunk without
+  rows no longer gets the regex fallback's rows on a failed call; it stays without rows. The
+  `entity_boost_no_entities` advisory in `mem_status` says the provider must be reachable, and
+  that a scan with `llm.enabled=false` uses the regex extractor.
+
+- **The automation plugin's hooks start on Python 3.8 and later (#3484).** The hooks run
+  `uv run --no-project python .../hook_dispatch.py`, which uses the first interpreter uv
+  finds, such as the Python 3.9 that macOS Command Line Tools installs. The dispatcher
+  imported `datetime.UTC`, which Python 3.11 added, so on an older interpreter it exited with
+  an `ImportError` before handling any event: no hook ran, and the SessionStart hint that says
+  how to install `mm` was never shown. It now uses `datetime.timezone.utc`, and a CI job runs
+  every hook event through it on Python 3.8. The plugin README and the Claude Code guide state
+  that floor. `mm` itself still needs Python 3.12 or newer.
+
+- **Two web error responses no longer name the project's settings file or the transfer
+  destination by an absolute host path (#3302).** The hook copy's 404
+  (`POST /api/context/settings/hooks/copy`, when the selector matches no hook or the source
+  has no readable canonical settings) named the source project's `.memtomem/settings.json` by
+  its absolute path; it now strips the project roots the same way the 400 next to it does. The
+  transfer's 409 `destination_exists` (`POST /api/context/{kind}/{name}/transfer`) passed on the
+  engine's text, which named the destination by its resolved absolute path; it now says which
+  artifact and which tier collided (`destination already exists: agents 'foo' in the
+  project_shared tier of the destination. …`). The CLI messages are unchanged.
+
+- **`mm init` checks for missing extras in the environment `uv run --directory <dir>` uses,
+  which for a project at a uv workspace member is the workspace root's (#3514).** The MCP
+  command `mm init` writes for a source checkout or a project,
+  `uv run --directory <dir> memtomem-server`, runs in the environment uv picks for that
+  directory, but `mm init` probed `<dir>/.venv`. At a member without a `.venv` of its own it
+  said `Project .venv not found` in a workspace that was already synced; at a member with
+  one it checked an environment the server would not use. `mm init` now asks
+  `uv workspace dir --offline --directory <dir>` for the root (uv decides membership,
+  `exclude` included, and needs no lockfile) and uses `UV_PROJECT_ENVIRONMENT` or
+  `<root>/.venv`, as seen from the shell `mm init` runs in. When that cannot be told — uv not
+  on `PATH`, the command failing, or `UV_NO_PROJECT` / `UV_ISOLATED` set to a value uv reads
+  as true or refuses — or the environment's interpreter cannot be probed, the summary says
+  `Extras not checked` with the reason instead of checking `mm init`'s own interpreter, and
+  `mm init --non-interactive` refuses a configuration that needs `onnx` or `korean` before
+  writing anything. The probe no longer counts a same-named module in the current directory
+  as an installed extra; the server does not import from there. A
+  `.venv` symlink whose target the user cannot access no longer stops `mm init` or
+  `mm uninstall` with a `PermissionError` (Python 3.12 and 3.13), and `mm init` reports it
+  the same way rather than as an environment to sync (on 3.14 the check answered "absent").
+  When `mm uninstall` runs from that environment, its hint names the interpreter,
+  `uv pip uninstall --python <interpreter> memtomem`, and no longer suggests `rm -rf` of the
+  environment, which at a workspace root serves every member.
+
+- **The plugin quickstarts no longer tell a store configured only through `config.d/` or
+  `MEMTOMEM_*` variables to run `mm init`, and the coexistence guide says when each host's
+  check can see a duplicate (#3517).** `mm status` reports `memtomem is not configured`
+  whenever `~/.memtomem/config.json` is absent, and the troubleshooting row for that message
+  said to rerun init. The `config.json` init writes replaces the database path, memory
+  directories and embedding model a fragment sets, so the existing store could look empty.
+  The English and Korean quickstarts now treat fragments and variables as an existing setup,
+  preview it with `mm config show` and confirm the database path with the plugin's status
+  check. In `docs/guides/mcp-clients.md`, the Antigravity and Codex checks
+  are to be run after installing the plugin: before then there is no bundled server to compare
+  with, so a complete check with one usable manual entry under another name passes, and both
+  can start once the plugin is installed and enabled. The Claude check runs from the project
+  root.
+
 - **`mm init` no longer treats every monorepo with a `pyproject.toml` and a `packages/`
   directory as a memtomem source checkout (#3510).** Inside one, it wrote
   `uv run --directory <root> memtomem-server` as the MCP command, printed `uv run` next
@@ -24,8 +92,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `[project] dependencies`, the `dev` dependency group or `[tool.uv] dev-dependencies`.
   Any other monorepo is a project when `mm init` finds a `pyproject.toml` that depends on
   memtomem in the current directory or up to four levels above it (before, a directory with
-  `packages/` never counted), and otherwise a PyPI install. A project found at a workspace
-  member still probes only its own `.venv`, not the workspace root's. A `pyproject.toml`
+  `packages/` never counted), and otherwise a PyPI install. A `pyproject.toml`
   that is not valid UTF-8, or that is a symlink whose target the user cannot access, no
   longer stops `mm init` and `mm uninstall` with a `UnicodeDecodeError` or
   `PermissionError`, and one that is not a regular file (a FIFO would block) is not opened;
