@@ -17,8 +17,7 @@ import asyncio
 import json
 import logging
 
-from croniter import croniter  # type: ignore[import-untyped]
-
+from memtomem.scheduler.cron import new_cron_problem
 from memtomem.scheduler.jobs import (
     JOB_KINDS,
     run_job,
@@ -72,8 +71,9 @@ async def mem_schedule_register(
             ``params_model`` before storage. A key the model does not declare
             is refused.
     """
-    if not croniter.is_valid(cron):
-        return json.dumps({"ok": False, "reason": f"invalid cron expression: {cron!r}"})
+    cron_problem = new_cron_problem(cron)
+    if cron_problem is not None:
+        return json.dumps({"ok": False, "reason": cron_problem})
     spec = JOB_KINDS.get(job_kind)
     if spec is None:
         kinds = ", ".join(sorted(JOB_KINDS))

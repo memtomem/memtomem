@@ -7,6 +7,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm schedule add` and `mem_schedule_register` refuse a cron expression for a date that
+  never occurs (#3461).** Both checked only that croniter could parse the expression, so
+  `0 0 30 2 *` was stored and then skipped by the dispatcher on every tick. An expression of
+  five fields written with only digits, `* , - / ? # L W` and three-letter month and day names
+  is now refused when croniter finds no date for it:
+  `invalid cron expression: '0 0 30 2 *' matches no date croniter can find: …`. Any other
+  expression croniter parses — with a random `R` field, six or seven fields, or other
+  characters — is stored without that lookup, because a failed lookup there does not
+  show that no date exists; when the listing's own check finds no date for such a row,
+  `mm schedule list` marks it `cron check failed`. Schedules already stored are not changed.
+
 - **`mm init --mcp <mode>` no longer asks the Connect to AI Editor step in the interactive
   wizard and then discards the answer (#3515).** Without `--preset`, the picker path applied
   `--mcp` only after its steps had run, so the step asked and the flag then overwrote what was
