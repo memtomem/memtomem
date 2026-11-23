@@ -17,7 +17,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   summary probes. An environment with no interpreter yet counts as missing. When the
   environment cannot be checked, the step prints no status line. A wizard that already runs
   in the checkout's own environment, and every other install, still imports the module
-  in-process.
+  in-process. Going back from a Local ONNX choice that warned no longer keeps the summary from
+  reporting `onnx`, which a fastembed reranker still needs after switching provider.
 
 - **`mm init --mcp <mode>` no longer asks the Connect to AI Editor step in the interactive
   wizard and then discards the answer (#3515).** Without `--preset`, the picker path applied

@@ -658,6 +658,10 @@ def _step_embedding(state: dict) -> None:
     click.echo("    [4] OpenAI — cloud dense embeddings, needs API key")
     choice = nav_prompt("  Select", type=click.IntRange(1, 4), default=1)
     click.echo()
+    # Each pass answers again. A mark from an earlier pass, whatever provider this one
+    # picks, must not make the summary skip what it finds (a fastembed reranker needs
+    # ``onnx`` too).
+    state.get("_extras_warned_inline", set()).discard("onnx")
 
     api_key = ""
 
@@ -671,9 +675,6 @@ def _step_embedding(state: dict) -> None:
 
     elif choice == 2:
         provider = "onnx"
-        # A pass back through this step answers again: an earlier pass's mark must not
-        # make the summary skip what it finds.
-        state.get("_extras_warned_inline", set()).discard("onnx")
         installed = _inline_extra_installed(state, "fastembed")
         _onnx_available = installed is True
         # Unknown says nothing here and leaves the extra to the summary's own check.

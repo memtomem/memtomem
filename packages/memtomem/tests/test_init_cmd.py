@@ -3721,6 +3721,30 @@ class TestInlineExtraChecksReadTheCheckout:
         assert answers == []
 
     @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_switching_provider_after_back_drops_the_onnx_mark(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        """Keyword-only on the second pass, then a fastembed reranker: the reranker still
+        needs ``onnx``, so the first pass's mark must not hide it from the summary."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
+        state = {"_profile": self._checkout(tmp_path, kind)}
+
+        assert self._WARN in self._onnx(state)
+        assert state["_extras_warned_inline"] == {"onnx"}
+
+        self._run_step(init_cmd._step_embedding, state, "1\n")
+        assert state["provider"] == "none"
+        assert "onnx" not in state.get("_extras_warned_inline", set())
+
+        state["rerank_enabled"] = True
+        state["rerank_model"] = "Xenova/ms-marco-MiniLM-L-6-v2"
+        missing, unchecked = init_cmd._check_extras(state)
+        assert unchecked is None
+        assert "onnx" in missing
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
     def test_env_error_says_nothing_inline(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
     ) -> None:
