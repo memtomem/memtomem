@@ -23,6 +23,7 @@ import yaml
 
 from .test_release_preflight import _single_command_argv
 from .test_release_sbom import _write_lock
+from .test_supply_chain_contracts import _ACTION_RE
 
 _ROOT = Path(__file__).resolve().parents[3]
 _WORKFLOW = "release-langchain-sbom.yml"
@@ -271,8 +272,28 @@ def _assert_sbom_workflow(document: dict) -> None:
     a workflow-level ``shell: bash -n {0}``, setup-uv at ``latest``), each in
     a key nobody had thought to check. Equality has no such key. A deliberate
     change edits this test with it.
+
+    Action refs are the one exception: Dependabot moves their SHAs in every
+    workflow at once and cannot edit this file. Each ref is checked here for
+    shape instead, on the parsed value (the repository-wide scan in
+    test_supply_chain_contracts.py reads lines, and a quoted key or a flow
+    mapping slips past it): a full commit SHA, one per action across the
+    workflow. Equality then compares the action names, so which action runs,
+    and where, is still pinned.
     """
-    assert document == _EXPECTED
+    refs: dict[str, set[str]] = {}
+    normalized = copy.deepcopy(document)
+    for job in normalized.get("jobs", {}).values():
+        for step in job.get("steps", []):
+            if "uses" not in step:
+                continue
+            uses = step["uses"]
+            assert isinstance(uses, str) and _ACTION_RE.fullmatch(uses), uses
+            name, ref = uses.split("@")
+            refs.setdefault(name, set()).add(ref)
+            step["uses"] = name
+    assert {name: len(pins) for name, pins in refs.items() if len(pins) > 1} == {}
+    assert normalized == _EXPECTED
 
 
 _CONTRACT_SCRIPT = r"""set -euo pipefail
@@ -323,7 +344,7 @@ sha256sum "$generated" | tee -a "$GITHUB_STEP_SUMMARY"
 } >> "$GITHUB_STEP_SUMMARY"
 """
 
-_CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+_CHECKOUT = "actions/checkout"
 _TAG_INPUT = {"required": True, "type": "string"}
 _PY = "uv run --no-project --python 3.12 python tooling/tools"
 _VERSION = "${{ steps.contract.outputs.version }}"
@@ -376,7 +397,7 @@ _EXPECTED = {
                     },
                 },
                 {
-                    "uses": "astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2",
+                    "uses": "astral-sh/setup-uv",
                     "with": {"version": "${{ env.UV_VERSION }}"},
                 },
                 {
@@ -574,6 +595,18 @@ def _unpinned_uv(d: dict) -> None:
     d["jobs"]["sbom"]["steps"][2]["with"]["version"] = "latest"
 
 
+def _floating_action_ref(d: dict) -> None:
+    d["jobs"]["sbom"]["steps"][2]["uses"] = "astral-sh/setup-uv@latest"
+
+
+def _other_action(d: dict) -> None:
+    d["jobs"]["sbom"]["steps"][2]["uses"] = "evil/setup-uv@" + "a" * 40
+
+
+def _diverging_checkouts(d: dict) -> None:
+    d["jobs"]["sbom"]["steps"][1]["uses"] = "actions/checkout@" + "b" * 40
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -594,6 +627,9 @@ def _unpinned_uv(d: dict) -> None:
         _wider_token,
         _syntax_check_only,
         _unpinned_uv,
+        _floating_action_ref,
+        _other_action,
+        _diverging_checkouts,
     ],
 )
 def test_the_sbom_workflow_guard_refuses_each_weakening(mutate: Callable[[dict], None]) -> None:
@@ -603,6 +639,21 @@ def test_the_sbom_workflow_guard_refuses_each_weakening(mutate: Callable[[dict],
     assert document != before, "the mutation no longer applies to the workflow"
     with pytest.raises(AssertionError):
         _assert_sbom_workflow(document)
+
+
+def test_the_sbom_workflow_guard_accepts_a_bump_of_every_action_sha() -> None:
+    """What Dependabot does: each action moves to another commit, the same one at every step."""
+    document = copy.deepcopy(_workflow())
+    bumped = {"actions/checkout": "c" * 40, "astral-sh/setup-uv": "d" * 40}
+    moved = 0
+    for step in document["jobs"]["sbom"]["steps"]:
+        if "uses" in step:
+            name, ref = step["uses"].split("@")
+            assert ref != bumped[name]
+            step["uses"] = f"{name}@{bumped[name]}"
+            moved += 1
+    assert moved == 3
+    _assert_sbom_workflow(document)
 
 
 # --- the real export ---------------------------------------------------------------
