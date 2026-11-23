@@ -648,6 +648,14 @@ class TestDedup:
         assert data["total"] == 0
         assert data["candidates"] == []
 
+    @pytest.mark.parametrize("limit", [0, -1])
+    async def test_dedup_scan_rejects_non_positive_limit(self, app, client: AsyncClient, limit):
+        resp = await client.get("/api/dedup/candidates", params={"limit": limit})
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"][0]["loc"] == ["query", "limit"]
+        app.state.dedup_scanner.scan_with_coverage.assert_not_awaited()
+
     async def test_dedup_scan_reports_what_it_covered(self, app, client: AsyncClient):
         # ``scanned_chunks`` used to echo the requested ``max_scan``; it is the
         # pool the scan actually selected, which a small store keeps below it.
@@ -727,27 +735,20 @@ class TestDedup:
         app.state.dedup_scanner.scan_with_coverage.assert_not_awaited()
 
     @pytest.mark.parametrize(
-        "params",
-        [
-            {"limit": 0},
-            {"limit": -1},
-            {"threshold": -0.1},
-            {"threshold": 1.5},
-            {"threshold": "NaN"},
-            {"threshold": "inf"},
-        ],
-        ids=["limit-0", "limit-neg", "threshold-neg", "threshold-above-1", "nan", "inf"],
+        "threshold",
+        [-0.1, 1.5, "NaN", "inf"],
+        ids=["threshold-neg", "threshold-above-1", "nan", "inf"],
     )
-    async def test_dedup_scan_rejects_a_limit_below_1_or_a_threshold_outside_0_to_1(
-        self, app, client: AsyncClient, params
+    async def test_dedup_scan_rejects_a_threshold_outside_0_to_1(
+        self, app, client: AsyncClient, threshold
     ):
         # The tool and the scheduled job refuse these values; the route passed
-        # them to the scanner unchecked and answered 200 (#3435).
-        resp = await client.get("/api/dedup/candidates", params=params)
+        # them to the scanner unchecked and answered 200 (#3562).
+        resp = await client.get("/api/dedup/candidates", params={"threshold": threshold})
 
         assert resp.status_code == 422
         (error,) = resp.json()["detail"]
-        assert error["loc"] == ["query", next(iter(params))]
+        assert error["loc"] == ["query", "threshold"]
         app.state.dedup_scanner.scan_with_coverage.assert_not_awaited()
 
     @pytest.mark.parametrize(
