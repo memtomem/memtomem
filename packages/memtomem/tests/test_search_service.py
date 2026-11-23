@@ -734,6 +734,21 @@ class TestValidateScopeVocabulary:
         assert named in str(exc.value)
         assert "is not a scope tier" in str(exc.value)
 
+    @pytest.mark.parametrize("value", ["project_*\x00x", "user\x00", "user*\x00"])
+    def test_a_value_containing_nul_is_refused_as_such(self, value: str) -> None:
+        """No tier contains a NUL, and the glob check cannot be asked.
+
+        SQLite's ``LIKE`` stops reading a pattern at its first NUL, and
+        ``ScopeFilter.matches`` mirrors that, so ``project_*\\x00x`` would
+        select the project tiers exactly as ``project_*`` does. A NUL in a
+        scope is never what anyone meant, so it is refused by name rather
+        than searched as the prefix before it.
+        """
+        with pytest.raises(InvalidScopeFilterError) as exc:
+            validate_scope_vocabulary(value)
+
+        assert "NUL" in str(exc.value)
+
     def test_a_comma_glob_mix_keeps_its_own_reason(self) -> None:
         """Validation runs after the parse, so the syntax error wins.
 
@@ -746,6 +761,14 @@ class TestValidateScopeVocabulary:
 
         assert "mixes a comma list with a glob" in str(exc.value)
         assert "matches no scope tier" not in str(exc.value)
+
+    def test_a_comma_glob_mix_with_a_nul_keeps_its_own_reason(self) -> None:
+        """The NUL refusal runs after the parse too, so it cannot mask the mix."""
+        with pytest.raises(InvalidScopeFilterError) as exc:
+            validate_scope_vocabulary("project_*\x00x,user")
+
+        assert "mixes a comma list with a glob" in str(exc.value)
+        assert "NUL" not in str(exc.value)
 
     def test_a_wildcard_pile_up_is_answered_promptly(self) -> None:
         """Matching a glob against the vocabulary must not be a CPU sink.
