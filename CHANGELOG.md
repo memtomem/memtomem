@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **The `handoff` workflow aims a saved record at a size the E5 token budget can hold in one
+  chunk (#3399).** A record could run to 1,200 characters, but a store indexing under
+  `multilingual-e5-small` splits any chunk over 384 tokens, so a record near that limit was
+  almost always split across rows that rank on their own in search and take separate slots
+  in brief's recall window. Of 399 stored
+  records, 270 of the 336 within 1,200 weighted characters had split. Save now aims for at
+  most 850 characters for the whole record, fence lines included, with each Korean, Japanese,
+  or Chinese character counted as two, and the per-field caps are lower: `objective` 80,
+  `completed` 160, `changed_files` 120 with at most 8 paths, `validation` 90, `blockers` 60,
+  `next_action` 90, and `artifacts` now takes its 4-path limit while its paths are added.
+  Only prose gives way, and whole `changed_files` paths move into its omitted count: ids,
+  the root, the commit, `worktree_state` and `artifacts` are never changed, and a verbatim
+  path, symbol, command or quote is kept whole or left out whole. A record that cannot meet
+  the caps and the 1,200-character maximum (counted plainly) that way is not saved: Save
+  stops and names the value in the way. One that meets them but stays over the target is
+  saved and reported with its weighted count. The 240-character root limit is unchanged.
+  In an experiment that applied the new caps to every stored record and then cut its prose
+  from the end until it was at or below 850 (which can cut a verbatim string, so it
+  measures token density, not compliant records), none exceeded 384 tokens (the largest was
+  383); at or below 900, 15 did. The target is
+  not a guarantee: a long root or many artifact paths can still split a record. Resume is
+  unchanged: it combines the rows it reads and rejects a torn or incomplete record. The delivery versions move with that text: Claude `0.5.45`, Codex `0.3.43`, OpenCode `0.3.41`, Kimi
+  `0.2.31`, Antigravity `0.2.22`. Cursor stays `0.1.0` while its first marketplace review is
+  open, but its rendered skill changes too.
+
 ### Fixed
 
 - **The interactive `mm init` wizard's Local ONNX and Korean tokenizer steps report the extra for
