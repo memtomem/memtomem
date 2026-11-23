@@ -671,6 +671,9 @@ def _step_embedding(state: dict) -> None:
 
     elif choice == 2:
         provider = "onnx"
+        # A pass back through this step answers again: an earlier pass's mark must not
+        # make the summary skip what it finds.
+        state.get("_extras_warned_inline", set()).discard("onnx")
         installed = _inline_extra_installed(state, "fastembed")
         _onnx_available = installed is True
         # Unknown says nothing here and leaves the extra to the summary's own check.

@@ -3696,6 +3696,31 @@ class TestInlineExtraChecksReadTheCheckout:
         assert calls == [tmp_path / ".venv" / "bin" / "python"]
 
     @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_rerun_after_back_drops_the_earlier_warning_mark(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        """A second pass through the step answers for itself: an unknown result must not
+        keep the first pass's mark, or the summary's own finding is filtered out."""
+        from memtomem.cli import init_cmd
+
+        answers: list[set[str] | None] = [set(), None, set()]
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: answers.pop(0))
+        state = {"_profile": self._checkout(tmp_path, kind)}
+
+        first = self._onnx(state)
+        assert self._WARN in first
+        assert state["_extras_warned_inline"] == {"onnx"}
+
+        second = self._onnx(state)
+        assert self._WARN not in second
+        assert "onnx" not in state.get("_extras_warned_inline", set())
+
+        missing, unchecked = init_cmd._check_extras(state)
+        assert unchecked is None
+        assert "onnx" in missing
+        assert answers == []
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
     def test_env_error_says_nothing_inline(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
     ) -> None:
