@@ -540,3 +540,47 @@ def test_each_required_test_check_gates_only_its_own_os() -> None:
         assert result == f"${{{{ needs.{shard_job}.result }}}}", (check, result)
         # rstrip: a ``run: |`` block of the same command ends in a newline.
         assert gate["run"].rstrip("\n") == 'test "$SHARD_RESULT" = success', check
+
+
+def test_security_gates_runs_after_any_dependency_result() -> None:
+    """``security-gates`` is a required check standing in for five jobs that are not.
+
+    Without ``always()`` it is skipped when a dependency fails, and a skipped
+    required check counts as passing. ``!cancelled()`` is not enough either:
+    cancelling a PR's current run would skip it the same way (#3569).
+    """
+    [job] = [job for job in _ci_jobs().values() if job.get("name") == "security-gates"]
+    needs = ["test-js", "test-opencode-plugin", "vendored-assets", "python-deps", "bandit"]
+
+    assert job["needs"] == needs, job["needs"]
+    assert job["if"] == "${{ always() }}"
+    assert "continue-on-error" not in job
+    [gate] = job["steps"]
+    assert set(gate) == {"name", "env", "run"}, sorted(gate)
+    expected = {f"${{{{ needs.{need}.result }}}}" for need in needs}
+    assert set(gate["env"].values()) == expected, gate["env"]
+    [loop] = [line for line in gate["run"].splitlines() if line.startswith("for result in")]
+    assert loop.split(";")[0].split()[3:] == [f'"${name}"' for name in gate["env"]], loop
+    assert 'if [ "$result" != "success" ]; then' in gate["run"]
+
+
+def test_ci_cancels_only_a_pull_requests_superseded_runs() -> None:
+    """A PR push cancels that PR's older run; no other event cancels anything.
+
+    A group shared by every ``main`` push would also drop a pending run when a
+    newer one queues, even without ``cancel-in-progress``, so those events key
+    on ``github.run_id``. ``github.ref`` is ``refs/pull/<n>/merge`` for every
+    ``pull_request`` activity this workflow takes.
+    """
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8"))
+
+    assert workflow["concurrency"] == {
+        "group": "ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
+    # YAML 1.1 reads the ``on:`` key as the boolean True. A ``types:`` list
+    # would add activities whose ref this key has not been checked against.
+    assert set(workflow[True]) == {"push", "pull_request", "workflow_dispatch"}, workflow[True]
+    assert set(workflow[True]["pull_request"]) == {"branches"}, workflow[True]["pull_request"]
+    for job_id, job in workflow["jobs"].items():
+        assert "concurrency" not in job, job_id

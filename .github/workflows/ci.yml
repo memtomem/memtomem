@@ -21,6 +21,18 @@ on:
   # schedule:
   #   - cron: "17 5 * * *"   # nightly — enable once LLM secrets are provisioned
 
+# A newer run for a PR cancels that PR's older one, whose result no longer
+# gates the merge. Every other event keys on its own run id, so no main push or
+# manual dispatch cancels, or displaces a pending, run. The four aggregators
+# (test (<os>), security-gates) stay `always()`: they are the required checks,
+# and a skipped required check counts as passing. GitHub does not order runs
+# within a group, and a rerun of a superseded run joins the same group, so a
+# PR's current run can occasionally be the one cancelled; its aggregators then
+# fail rather than pass, and rerunning that run recovers.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Single source of truth for the uv toolchain setup-uv installs. Pinning (vs
 # "latest") keeps CI reproducible; Dependabot's github-actions updater can't
 # touch a `with:` input, so bump this by hand — in lockstep with the same pin
