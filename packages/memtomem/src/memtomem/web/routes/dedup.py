@@ -25,7 +25,7 @@ _DEDUP_SCAN_TIMEOUT = 120  # seconds
 @router.get("/candidates", response_model=DedupScanResponse)
 async def scan_duplicates(
     threshold: float = 0.92,
-    limit: int = 100,
+    limit: int = Query(100, ge=1),
     max_scan: int = Query(500, ge=1),
     after: str | None = None,
     dedup_scanner=Depends(get_dedup_scanner),
