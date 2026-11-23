@@ -658,6 +658,10 @@ def _step_embedding(state: dict) -> None:
     click.echo("    [4] OpenAI — cloud dense embeddings, needs API key")
     choice = nav_prompt("  Select", type=click.IntRange(1, 4), default=1)
     click.echo()
+    # Each pass answers again. A mark from an earlier pass, whatever provider this one
+    # picks, must not make the summary skip what it finds (a fastembed reranker needs
+    # ``onnx`` too).
+    state.get("_extras_warned_inline", set()).discard("onnx")
 
     api_key = ""
 
@@ -671,12 +675,10 @@ def _step_embedding(state: dict) -> None:
 
     elif choice == 2:
         provider = "onnx"
-        _onnx_available = False
-        try:
-            import fastembed  # noqa: F401
-
-            _onnx_available = True
-        except ImportError:
+        installed = _inline_extra_installed(state, "fastembed")
+        _onnx_available = installed is True
+        # Unknown says nothing here and leaves the extra to the summary's own check.
+        if installed is False:
             click.secho("  fastembed not installed.", fg="yellow")
             # Use the install-type-aware hint so the inline message matches
             # what the summary would otherwise print, then mark the warning
@@ -1282,11 +1284,10 @@ def _step_language(state: dict) -> None:
     tokenizer = "unicode61" if lang_choice == 1 else "kiwipiepy"
 
     if tokenizer == "kiwipiepy":
-        try:
-            import kiwipiepy  # noqa: F401
-
+        installed = _inline_extra_installed(state, "kiwipiepy")
+        if installed is True:
             click.secho("  kiwipiepy is installed.", fg="green")
-        except ImportError:
+        elif installed is False:
             click.secho("  kiwipiepy not installed.", fg="yellow")
             click.echo(_y_refuse_hint("--tokenizer kiwipiepy", "korean"))
     state["tokenizer"] = tokenizer
@@ -1379,10 +1380,9 @@ def _step_settings(state: dict) -> None:
 
 
 def _step_mcp(state: dict) -> None:
-    # #449: ``--mcp`` pre-sets ``state["mcp_choice"]`` via ``_override_from_flags``
-    # in the ``--preset`` branch. Skip the prompt so the flag isn't silently
-    # discarded. The ``--non-interactive`` branch omits this step entirely; the picker
-    # branch applies overrides *after* ``run_steps`` so the key is absent here.
+    # #449/#3515: ``init`` pre-sets ``state["mcp_choice"]`` from ``--mcp`` before any
+    # branch runs its steps. Skip the prompt so the flag isn't silently discarded. The
+    # ``--non-interactive`` branch omits this step entirely.
     if "mcp_choice" in state:
         return
     step_header(state, "Connect to AI Editor")
@@ -1935,6 +1935,35 @@ def _onnx_preset_will_work(state: dict) -> bool:
         return False
     importable = _probe_workspace_extras(workspace_python)
     return importable is not None and "fastembed" in importable
+
+
+def _inline_extra_installed(state: dict, module: str) -> bool | None:
+    """Whether ``module`` is installed where memtomem will run, for a wizard step's
+    inline message; ``None`` when that could not be checked.
+
+    A source or project checkout runs memtomem in its own environment, so unless the
+    wizard is already running there, that environment's interpreter is probed, the one
+    :func:`_check_extras` probes. An environment with no interpreter yet has nothing
+    installed, so the answer is ``False``. Everywhere else the module is imported here,
+    which also catches a package that is found but fails to import."""
+    profile = state.get("_profile")
+    if (
+        profile is None
+        or profile.cwd_install_type not in ("source", "project")
+        or profile.runtime_matches_workspace
+    ):
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            return False
+        return True
+    if profile.workspace_env_error is not None:
+        return None
+    workspace_python = _workspace_python(state)
+    if workspace_python is None:
+        return False
+    importable = _probe_workspace_extras(workspace_python)
+    return None if importable is None else module in importable
 
 
 def _workspace_needs_sync(state: dict) -> bool:
@@ -3499,10 +3528,14 @@ def _override_from_flags(
     if api_key is not None:
         state["api_key"] = api_key
     if mcp_mode is not None:
-        state["mcp_choice"] = {"claude": 1, "json": 2, "skip": 3, "kimi": 4}.get(mcp_mode, 3)
+        state["mcp_choice"] = _MCP_MODE_CHOICES.get(mcp_mode, 3)
 
 
 # ── CLI entry point ───────────────────────────────────────────────────
+
+
+# ``--mcp`` value → the connect step's menu number (see ``_step_mcp``).
+_MCP_MODE_CHOICES: dict[str, int] = {"claude": 1, "json": 2, "skip": 3, "kimi": 4}
 
 
 _MODEL_DIMS: dict[str, int] = {
@@ -3718,6 +3751,11 @@ def init(
     # directories or settings. --mcp skip / kimi do not inspect Claude.
     if mcp_mode in ("claude", "json"):
         _preflight_mcp_choice(1 if mcp_mode == "claude" else 2)
+    # Before any branch runs its steps, so `_step_mcp` does not ask a question whose
+    # answer the flag would discard: the picker branch applies the preset-field flags
+    # only after its steps, and the Advanced paths do not apply them at all (#3515).
+    if mcp_mode is not None:
+        state["mcp_choice"] = _MCP_MODE_CHOICES[mcp_mode]
 
     advanced_steps = [
         _step_embedding,
@@ -3870,9 +3908,10 @@ def init(
         except _AdvancedSelected:
             run_steps(advanced_steps, state)
         else:
-            # CLI flag overrides apply only to the preset branch — advanced
-            # prompts for every field interactively, so there's no preset
-            # baseline to override there.
+            # The preset-field overrides apply only to the preset branch —
+            # advanced prompts for every field interactively, so there's no
+            # preset baseline to override there. `--mcp` is set before the
+            # steps run, in every branch.
             _override_from_flags(
                 state,
                 provider=provider,

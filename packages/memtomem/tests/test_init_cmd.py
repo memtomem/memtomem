@@ -3543,6 +3543,276 @@ class TestMissingExtraWordingFitsEveryInstall:
         assert not [line for line in lines if "until installed" in line]
 
 
+class TestInlineExtraChecksReadTheCheckout:
+    """The ONNX and Korean steps answer for the environment a checkout runs memtomem in,
+    not for the wizard's own interpreter, whenever the two differ (#3508)."""
+
+    _WARN = "  fastembed not installed."
+    _SELECTED = "  Model 'multilingual-e5-small' selected."
+    _KIWI_OK = "  kiwipiepy is installed."
+    _KIWI_MISSING = "  kiwipiepy not installed."
+
+    @staticmethod
+    def _run_step(step, state: dict, keys: str) -> list[str]:
+        from click.testing import CliRunner
+
+        from memtomem.cli.wizard import run_steps
+
+        @click.command()
+        def cmd() -> None:
+            run_steps([step], state)
+
+        result = CliRunner().invoke(cmd, [], input=keys)
+        assert result.exit_code == 0, result.output
+        assert result.exception is None, result.output
+        return click.unstyle(result.output).splitlines()
+
+    @staticmethod
+    def _checkout(tmp_path: Path, kind: Literal["source", "project"], **kw) -> RuntimeProfile:
+        python = tmp_path / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.touch()
+        return _make_test_profile(tmp_path, kind=kind, **kw)
+
+    @staticmethod
+    def _probe(monkeypatch: pytest.MonkeyPatch, answer: set[str] | None) -> list[Path]:
+        from memtomem.cli import init_cmd
+
+        calls: list[Path] = []
+
+        def probe(py: Path) -> set[str] | None:
+            calls.append(py)
+            return answer
+
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", probe)
+        return calls
+
+    @staticmethod
+    def _wizard_has(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, module: str, *, importable: bool = True
+    ) -> None:
+        """Put a real package named ``module`` first on ``sys.path``: ``find_spec`` sees it,
+        and importing it works or raises ``ImportError``."""
+        pkg = tmp_path / "wizard-site" / module
+        pkg.mkdir(parents=True)
+        body = "" if importable else "raise ImportError('broken install')\n"
+        (pkg / "__init__.py").write_text(body, encoding="utf-8")
+        # ``setitem`` first so the teardown also drops the temp package when the real one
+        # was never imported; ``delitem`` alone records nothing for an absent key.
+        monkeypatch.setitem(sys.modules, module, None)
+        monkeypatch.delitem(sys.modules, module)
+        monkeypatch.syspath_prepend(str(pkg.parent))
+
+    def _onnx(self, state: dict) -> list[str]:
+        from memtomem.cli import init_cmd
+
+        lines = self._run_step(init_cmd._step_embedding, state, "2\n4\n")
+        assert state["provider"] == "onnx"
+        return lines
+
+    def _korean(self, state: dict) -> list[str]:
+        from memtomem.cli import init_cmd
+
+        lines = self._run_step(init_cmd._step_language, state, "2\n")
+        assert state["tokenizer"] == "kiwipiepy"
+        return lines
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_onnx_checkout_has_it_while_the_wizard_does_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "fastembed", None)
+        calls = self._probe(monkeypatch, {"fastembed"})
+        state = {"_profile": self._checkout(tmp_path, kind)}
+        lines = self._onnx(state)
+
+        assert self._WARN not in lines
+        assert self._SELECTED in lines
+        assert "onnx" not in state.get("_extras_warned_inline", set())
+        assert calls == [tmp_path / ".venv" / "bin" / "python"]
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_onnx_wizard_has_it_while_the_checkout_does_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        from memtomem.cli import init_cmd
+
+        self._wizard_has(tmp_path, monkeypatch, "fastembed")
+        calls = self._probe(monkeypatch, set())
+        state = {"_profile": self._checkout(tmp_path, kind)}
+        lines = self._onnx(state)
+
+        assert self._WARN in lines
+        assert f"  To enable it: {init_cmd._extra_install_hint(['onnx'], state)}" in lines
+        assert self._SELECTED not in lines
+        assert state["_extras_warned_inline"] == {"onnx"}
+        assert calls == [tmp_path / ".venv" / "bin" / "python"]
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_onnx_probe_failure_leaves_it_to_the_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "fastembed", None)
+        calls = self._probe(monkeypatch, None)
+        state = {"_profile": self._checkout(tmp_path, kind)}
+        lines = self._onnx(state)
+
+        assert self._WARN not in lines
+        assert self._SELECTED not in lines
+        assert "onnx" not in state.get("_extras_warned_inline", set())
+        assert calls == [tmp_path / ".venv" / "bin" / "python"]
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    @pytest.mark.parametrize(
+        ("wizard_has", "probe", "expected", "absent"),
+        [
+            (False, {"kiwipiepy"}, [_KIWI_OK], [_KIWI_MISSING]),
+            (True, set(), [_KIWI_MISSING], [_KIWI_OK]),
+            (False, None, [], [_KIWI_OK, _KIWI_MISSING]),
+        ],
+        ids=["checkout-has-it", "checkout-lacks-it", "probe-failed"],
+    )
+    def test_korean_reads_the_checkout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: str,
+        wizard_has: bool,
+        probe: set[str] | None,
+        expected: list[str],
+        absent: list[str],
+    ) -> None:
+        if wizard_has:
+            self._wizard_has(tmp_path, monkeypatch, "kiwipiepy")
+        else:
+            monkeypatch.setitem(sys.modules, "kiwipiepy", None)
+        calls = self._probe(monkeypatch, probe)
+        lines = self._korean({"_profile": self._checkout(tmp_path, kind)})
+
+        for line in expected:
+            assert line in lines
+        for line in absent:
+            assert line not in lines
+        assert calls == [tmp_path / ".venv" / "bin" / "python"]
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_rerun_after_back_drops_the_earlier_warning_mark(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        """A second pass through the step answers for itself: an unknown result must not
+        keep the first pass's mark, or the summary's own finding is filtered out."""
+        from memtomem.cli import init_cmd
+
+        answers: list[set[str] | None] = [set(), None, set()]
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: answers.pop(0))
+        state = {"_profile": self._checkout(tmp_path, kind)}
+
+        first = self._onnx(state)
+        assert self._WARN in first
+        assert state["_extras_warned_inline"] == {"onnx"}
+
+        second = self._onnx(state)
+        assert self._WARN not in second
+        assert "onnx" not in state.get("_extras_warned_inline", set())
+
+        missing, unchecked = init_cmd._check_extras(state)
+        assert unchecked is None
+        assert "onnx" in missing
+        assert answers == []
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_switching_provider_after_back_drops_the_onnx_mark(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        """Keyword-only on the second pass, then a fastembed reranker: the reranker still
+        needs ``onnx``, so the first pass's mark must not hide it from the summary."""
+        from memtomem.cli import init_cmd
+
+        monkeypatch.setattr(init_cmd, "_probe_workspace_extras", lambda py: set())
+        state = {"_profile": self._checkout(tmp_path, kind)}
+
+        assert self._WARN in self._onnx(state)
+        assert state["_extras_warned_inline"] == {"onnx"}
+
+        self._run_step(init_cmd._step_embedding, state, "1\n")
+        assert state["provider"] == "none"
+        assert "onnx" not in state.get("_extras_warned_inline", set())
+
+        state["rerank_enabled"] = True
+        state["rerank_model"] = "Xenova/ms-marco-MiniLM-L-6-v2"
+        missing, unchecked = init_cmd._check_extras(state)
+        assert unchecked is None
+        assert "onnx" in missing
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_env_error_says_nothing_inline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        import dataclasses
+
+        # The wizard lacks both, so the base check would print the missing lines.
+        monkeypatch.setitem(sys.modules, "fastembed", None)
+        monkeypatch.setitem(sys.modules, "kiwipiepy", None)
+        calls = self._probe(monkeypatch, {"fastembed", "kiwipiepy"})
+        profile = dataclasses.replace(
+            _make_test_profile(tmp_path, kind=kind), workspace_env_error="uv failed"
+        )
+        onnx_state = {"_profile": profile}
+        onnx_lines = self._onnx(onnx_state)
+        korean_lines = self._korean({"_profile": profile})
+
+        assert calls == []
+        assert self._WARN not in onnx_lines
+        assert self._SELECTED not in onnx_lines
+        assert "onnx" not in onnx_state.get("_extras_warned_inline", set())
+        assert self._KIWI_OK not in korean_lines
+        assert self._KIWI_MISSING not in korean_lines
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    @pytest.mark.parametrize("venv_dir", [False, True], ids=["no-venv", "venv-without-python"])
+    def test_checkout_without_an_interpreter_has_nothing_installed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, venv_dir: bool
+    ) -> None:
+        self._wizard_has(tmp_path, monkeypatch, "fastembed")
+        self._wizard_has(tmp_path, monkeypatch, "kiwipiepy")
+        calls = self._probe(monkeypatch, {"fastembed", "kiwipiepy"})
+        if venv_dir:
+            (tmp_path / ".venv").mkdir()
+        profile = _make_test_profile(tmp_path, kind=kind)
+        assert (profile.workspace_venv_path is not None) is venv_dir
+        onnx_state = {"_profile": profile}
+        onnx_lines = self._onnx(onnx_state)
+        korean_lines = self._korean({"_profile": profile})
+
+        assert calls == []
+        assert self._WARN in onnx_lines
+        assert onnx_state["_extras_warned_inline"] == {"onnx"}
+        assert self._KIWI_MISSING in korean_lines
+        assert self._KIWI_OK not in korean_lines
+
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    @pytest.mark.parametrize("importable", [False, True], ids=["import-fails", "imports"])
+    def test_wizard_running_in_the_checkout_imports_in_process(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, importable: bool
+    ) -> None:
+        # Found by ``find_spec`` either way; only the import tells the two apart. The probe
+        # answers the opposite, so neither case can pass by reaching it.
+        self._wizard_has(tmp_path, monkeypatch, "fastembed", importable=importable)
+        self._wizard_has(tmp_path, monkeypatch, "kiwipiepy", importable=importable)
+        calls = self._probe(monkeypatch, set() if importable else {"fastembed", "kiwipiepy"})
+        profile = self._checkout(tmp_path, kind, runtime_matches_workspace=True)
+        onnx_state = {"_profile": profile}
+        onnx_lines = self._onnx(onnx_state)
+        korean_lines = self._korean({"_profile": profile})
+
+        assert (self._WARN in onnx_lines) is not importable
+        assert (self._SELECTED in onnx_lines) is importable
+        assert ("onnx" in onnx_state.get("_extras_warned_inline", set())) is not importable
+        assert (self._KIWI_MISSING in korean_lines) is not importable
+        assert (self._KIWI_OK in korean_lines) is importable
+        assert calls == []
+
+
 class TestFindSpecUnification:
     """Issue #363 Phase 3 acceptance D — ``__import__`` vs ``find_spec``
     semantic unification across ``mm web`` and ``mm init``.
@@ -9177,6 +9447,128 @@ class TestPresetMcpFlagPreAnswer:
         out = capsys.readouterr().out
         # No header, no menu lines — the step is a no-op in this branch.
         assert out == ""
+
+
+class TestInteractiveMcpFlagPreAnswer:
+    """(#3515) ``--mcp`` decides the connect step in the interactive paths that take no
+    ``--preset``: the default picker, the picker's Advanced choice and ``--advanced``.
+
+    The picker branch applied ``--mcp`` only after its steps had run, so the connect
+    step asked and its answer was then overwritten; the two Advanced paths never applied
+    it. No test here answers the connect step: if it asks, stdin runs out at its prompt,
+    ``run_steps`` reports a cancellation and no config is written."""
+
+    @staticmethod
+    def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+        """Isolate HOME, cwd and the Kimi config directory, and record every command
+        ``init_cmd._run`` is given."""
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        # Pinned, not inherited: the Kimi writer prefers it over `~/.kimi-code`, and the
+        # tests assert that nothing was written there.
+        monkeypatch.setenv("KIMI_CODE_HOME", str(tmp_path / ".kimi-code"))
+        monkeypatch.setattr("memtomem.cli.init_cmd._isatty", lambda: True)
+        monkeypatch.setattr("memtomem.cli.init_cmd._claude_cli_found", lambda: True)
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": []},
+        )
+        calls: list[list[str]] = []
+        real_run = init_cmd._run
+
+        def recording_run(cmd: list[str], *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            calls.append(list(cmd))
+            if cmd[:3] == ["claude", "mcp", "add"]:
+                raise AssertionError(f"--mcp skip must not register: {cmd}")
+            return real_run(cmd, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("memtomem.cli.init_cmd._run", recording_run)
+        return calls
+
+    def test_picker_with_mcp_skip_does_not_ask(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        calls = self._setup(tmp_path, monkeypatch)
+        memory_dir = tmp_path / "memories"
+        # Picker 1 (Minimal), memory dir, create it — and nothing for the connect step.
+        result = CliRunner().invoke(init, ["--mcp", "skip"], input=f"1\n{memory_dir}\ny\n")
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        assert "Connect to AI Editor" not in out
+        assert "Wizard cancelled" not in out
+        assert "Setup complete" in out
+        assert "MCP config:" not in out
+        assert "Claude Code:" not in out
+        assert not [c for c in calls if c[:2] == ["claude", "mcp"]]
+        assert not (tmp_path / ".mcp.json").exists()
+        assert not (tmp_path / ".kimi-code" / "mcp.json").exists()
+
+    def test_picker_with_mcp_json_writes_it_without_asking(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        self._setup(tmp_path, monkeypatch)
+        memory_dir = tmp_path / "memories"
+        result = CliRunner().invoke(init, ["--mcp", "json"], input=f"1\n{memory_dir}\ny\n")
+        assert result.exit_code == 0, result.output
+
+        assert "Connect to AI Editor" not in result.output
+        assert "MCP config: wrote ./.mcp.json" in result.output
+        written = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+        assert "memtomem" in written["mcpServers"]
+
+    @pytest.mark.parametrize(
+        ("args", "picker"),
+        [
+            pytest.param(["--advanced", "--mcp", "skip"], [], id="advanced-flag"),
+            # The picker's last entry is Advanced: three presets, then [4].
+            pytest.param(["--mcp", "skip"], ["4"], id="picker-advanced"),
+        ],
+    )
+    def test_advanced_with_mcp_skip_does_not_ask(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        args: list[str],
+        picker: list[str],
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli.init_cmd import init
+
+        calls = self._setup(tmp_path, monkeypatch)
+        (tmp_path / ".claude").mkdir()
+        memory_dir = tmp_path / "memories"
+        # The answers of `test_advanced_flow_shows_numbers_1_through_10` without the
+        # connect step's "3": embedding 1, no reranker, memory dir + create, storage
+        # default, no auto-ns + default namespace, top_k default + no decay, english,
+        # no hooks.
+        answers = ["1", "n", str(memory_dir), "y", "", "n", "", "", "n", "1", "n", ""]
+        result = CliRunner().invoke(init, args, input="\n".join(picker + answers))
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+        if picker:
+            assert "    [4] Advanced — full 10-step wizard (all options)" in out
+        assert "1. Embedding Provider" in out
+        assert "Connect to AI Editor" not in out
+        assert "Wizard cancelled" not in out
+        assert "Setup complete" in out
+        # Skip writes no editor config at all: no Claude registration, no project
+        # `.mcp.json`, no Kimi file.
+        assert not [c for c in calls if c[:2] == ["claude", "mcp"]]
+        assert not (tmp_path / ".mcp.json").exists()
+        assert not (tmp_path / ".kimi-code" / "mcp.json").exists()
 
 
 class TestOllamaWindowsHangFix:

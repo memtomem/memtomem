@@ -157,7 +157,32 @@ class TransferRecoveryError(TransferCollisionError):
     actively mislead — nothing collided; a transaction was interrupted, and the
     remediation is to inspect the two paths named in the message, not to remove
     something at the destination.
+
+    For a surface that answers a remote caller (#3532), ``safe_message`` says
+    which side and tier is wedged without a host path, and ``entries`` holds the
+    paths the swap error carried (its ``filename`` and ``retained``) for a log
+    line. The swap's own sentence is in ``message`` only: it embeds paths in its
+    prose and, for a malformed marker, values read from that file. Both are
+    keyword-only with defaults, so the exception still rebuilds from ``args``;
+    a raise site that sets neither leaves ``safe_message`` ``None``.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        safe_message: str | None = None,
+        entries: tuple[Path, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.safe_message = safe_message
+        self.entries = entries
+
+
+def _swap_entries(exc: SwapRecoveryError) -> tuple[Path, ...]:
+    """The paths *exc* carries as data — its ``filename``, then ``retained`` — deduped."""
+    found = ([Path(exc.filename)] if exc.filename else []) + list(exc.retained)
+    return tuple(dict.fromkeys(found))
 
 
 TransferMode = Literal["move", "copy"]
@@ -1149,6 +1174,10 @@ def transfer_artifact(
     def _lock_remaining() -> float | None:
         return None if _txn_deadline is None else max(0.0, _txn_deadline - time.monotonic())
 
+    # Which prelude refused, for the public text below. Set out here because the
+    # locked body must START with the prelude (the C0 prelude guard), and kept to
+    # one handler because the interception guard inventories them by occurrence.
+    wedged = ("source", src_scope, name)
     with acquire_canonical_locks([(src_store, name), (dst_store, dst_name)], timeout=lock_timeout):
         # ADR-0030 §10: resolve any interrupted swap on BOTH roots before
         # anything reads them. Apply-only by construction — the dry-run path
@@ -1159,9 +1188,19 @@ def transfer_artifact(
         # to roll back.
         try:
             run_swap_prelude(src_store, name, kind=kind)
+            wedged = ("destination", to_scope, dst_name)
             run_swap_prelude(dst_store, dst_name, kind=kind)
         except SwapRecoveryError as exc:
-            raise TransferRecoveryError(swap_failure_text(exc)) from exc
+            side, tier, wedged_name = wedged
+            raise TransferRecoveryError(
+                swap_failure_text(exc),
+                safe_message=(
+                    f"an interrupted directory swap blocks this transfer: "
+                    f"{kind}/{wedged_name} in the {side} {tier} tier could not be "
+                    "recovered automatically. Inspect it by hand, then retry."
+                ),
+                entries=_swap_entries(exc),
+            ) from exc
 
         # The source must still satisfy the FULL discovery contract under the
         # lock, not merely exist. Discovery may have counted a live swap marker
