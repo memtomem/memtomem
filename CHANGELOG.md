@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The interactive `mm init` wizard's Local ONNX and Korean tokenizer steps report the extra for
+  the environment a source checkout or a project runs memtomem in (#3508).** Both steps imported
+  `fastembed` or `kiwipiepy` in `mm init`'s own interpreter. A global `mm` (for example a
+  `uv tool` install without the extras), run in a checkout whose environment already had
+  fastembed, printed `fastembed not installed.` and sent the user to sync something that was
+  already there. A `mm` that had fastembed, run in a checkout that lacked it, announced the
+  model download instead. The steps now ask that environment's interpreter, the one the
+  summary probes. An environment with no interpreter yet counts as missing. When the
+  environment cannot be checked, the step prints no status line. A wizard that already runs
+  in the checkout's own environment, and every other install, still imports the module
+  in-process. Going back from a Local ONNX choice that warned no longer keeps the summary from
+  reporting `onnx`, which a fastembed reranker still needs after switching provider.
+
 - **`mm init --mcp <mode>` no longer asks the Connect to AI Editor step in the interactive
   wizard and then discards the answer (#3515).** Without `--preset`, the picker path applied
   `--mcp` only after its steps had run, so the step asked and the flag then overwrote what was
