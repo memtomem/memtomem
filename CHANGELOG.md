@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The interactive `mm init` wizard's Local ONNX and Korean tokenizer steps report the extra for
+  the environment a source checkout or a project runs memtomem in (#3508).** Both steps imported
+  `fastembed` or `kiwipiepy` in `mm init`'s own interpreter. A global `mm` (for example a
+  `uv tool` install without the extras), run in a checkout whose environment already had
+  fastembed, printed `fastembed not installed.` and sent the user to sync something that was
+  already there. A `mm` that had fastembed, run in a checkout that lacked it, announced the
+  model download instead. The steps now ask that environment's interpreter, the one the
+  summary probes. An environment with no interpreter yet counts as missing. When the
+  environment cannot be checked, the step prints no status line. A wizard that already runs
+  in the checkout's own environment, and every other install, still imports the module
+  in-process. Going back from a Local ONNX choice that warned no longer keeps the summary from
+  reporting `onnx`, which a fastembed reranker still needs after switching provider.
+
 - **`mm init --mcp <mode>` no longer asks the Connect to AI Editor step in the interactive
   wizard and then discards the answer (#3515).** Without `--preset`, the picker path applied
   `--mcp` only after its steps had run, so the step asked and the flag then overwrote what was
@@ -45,6 +58,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   engine's text, which named the destination by its resolved absolute path; it now says which
   artifact and which tier collided (`destination already exists: agents 'foo' in the
   project_shared tier of the destination. …`). The CLI messages are unchanged.
+
+- **Five more web transfer responses no longer name a host path, wherever the project or
+  store sits (#3532).** In `POST /api/context/{kind}/{name}/transfer`: the 404 for a missing
+  `mcp-servers` source passed on the engine's text with the source's absolute path; it now
+  names the logical location (`… not found at the source project:
+  .memtomem/mcp-servers/<name>.json`), also when the store is linked out of the project. The
+  409 `swap_recovery_pending` and the 500 for an unexpected failure passed engine text through
+  a redaction that only shortened paths under the server's `$HOME`. The 409 now says which
+  side and tier is wedged (`… skills/foo in the destination project_shared tier could not be
+  recovered automatically …`) instead of the swap's sentence, which named the trees and, for
+  a malformed marker, values read from it; the 500 says only that the server log has the
+  details. The 409 `transfer_staging_busy` and `transfer_staging_replaced` passed the engine's
+  text, whose staging paths come last, and only the 200-character cut kept them off the wire;
+  a `$HOME` collapse inside the prose could move the cut past them. Both now send a fixed
+  remediation sentence. The server log now gets one warning line for each staging or swap
+  refusal, with the paths the engine's error carries; the line is secret-scanned and never
+  carries the swap's sentence. The CLI messages are unchanged.
 
 - **`mm init` checks for missing extras in the environment `uv run --directory <dir>` uses,
   which for a project at a uv workspace member is the workspace root's (#3514).** The MCP

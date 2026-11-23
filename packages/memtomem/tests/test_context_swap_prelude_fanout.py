@@ -397,6 +397,34 @@ class TestTransferApply:
         assert _residue(store) == before
         assert (p["dst"] / SKILL_MANIFEST).read_text(encoding="utf-8") == "candidate-a"
 
+    def test_recovery_error_carries_a_path_free_twin(
+        self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``message`` stays the swap's sentence; ``safe_message`` and ``entries`` are added (#3532)."""
+        import copy
+        import pickle
+
+        _isolate_home(monkeypatch, tmp_path / "home")
+        _row_4(store)
+
+        with pytest.raises(TransferRecoveryError) as exc_info:
+            self._transfer(project)
+
+        exc = exc_info.value
+        assert exc.message == swap_failure_text(exc.__cause__)
+        assert exc.safe_message == (
+            "an interrupted directory swap blocks this transfer: skills/skill in the "
+            "source project_shared tier could not be recovered automatically. Inspect it "
+            "by hand, then retry."
+        )
+        assert exc.entries[0] == store / "skill"
+        for clone in (copy.copy(exc), pickle.loads(pickle.dumps(exc))):
+            assert (clone.message, clone.safe_message, clone.entries) == (
+                exc.message,
+                exc.safe_message,
+                exc.entries,
+            )
+
     def test_destination_row_2_is_recovered_then_collides(
         self, project: Path, store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
