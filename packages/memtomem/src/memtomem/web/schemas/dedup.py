@@ -35,10 +35,12 @@ class DedupScanResponse(BaseModel):
     # Pairs left out because both members are read-only chunks of one source
     # file (#3418); not in ``candidates`` and not counted in ``total``.
     same_source_read_only_pairs: int = 0
-    # Pairs the scan kept before ``limit``. Above ``total``, the rest are not
-    # reached by ``next_after``: scan again from the same ``after`` with a
-    # higher ``limit``.
+    # Pairs the scan kept before ``offset`` and ``limit``. Above
+    # ``offset + total``, the rest are not reached by ``next_after``: scan
+    # again from the same ``after`` with a higher ``limit`` or ``offset``.
     pairs_found: int = 0
+    # The pairs of the pool skipped before ``candidates``.
+    offset: int = 0
     # The cursor this scan was given, as the chunk id it names.
     after: str | None = None
     # Scannable chunks after the last one scanned; 0 at the end of the store.
