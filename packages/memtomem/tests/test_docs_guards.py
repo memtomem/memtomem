@@ -3964,3 +3964,134 @@ class TestSharedDaemonGuideMatchesSource:
             ("main", None, None),
             (None, "main", 0.0),
         ]
+
+
+class TestExistingStoreIsNotReinitialized:
+    """A store set up only through ``config.d`` or ``MEMTOMEM_*`` has no ``config.json``,
+    so ``mm status`` calls it not configured, and the ``config.json`` that ``mm init``
+    writes replaces what the fragments set (#3517). Both quickstarts send that reader to
+    a preview and to the connected plugin's status check instead of to init.
+    ``test_cli_status_without_config_json.py`` pins the behaviour this advice relies on.
+    """
+
+    _LOCALES = {
+        _PLUGIN_QUICKSTART: {
+            "step": "## 2. Shared setup: initialize your user memory store once",
+            "json_branch": "In `~/.memtomem/config.json`",
+            "fragment_branch": "Only in `~/.memtomem/config.d/`",
+            "row": "| The store is reported as not initialized |",
+            "no_init": "run neither command",
+            "row_no_init": "do not initialize",
+            "row_fresh": "On a new store,",
+            "confirm": "the plugin's status check",
+            "confirm_what": "confirm that its database path is the one your settings name",
+            "unverifiable": "memory directories",
+            "checklist": "or an existing store's database path was confirmed",
+        },
+        _VIBE_GUIDE: {
+            "step": "## 2. 공통 준비: 사용자 기억 저장소를 한 번 초기화",
+            "json_branch": "예전 초기화가 쓴 `~/.memtomem/config.json`",
+            "fragment_branch": "`~/.memtomem/config.d/` fragment나 `MEMTOMEM_*` 환경 변수에만",
+            "row": "| 저장소가 초기화되지 않았다고 나옴 |",
+            "no_init": "두 명령 모두 실행하지 않습니다",
+            "row_no_init": "초기화하지 마세요",
+            "row_fresh": "새 저장소라면",
+            "confirm": "플러그인 status 확인",
+            "confirm_what": "database path가 설정에 적은 값인지 확인하세요",
+            "unverifiable": "기억 디렉터리가",
+            "checklist": "초기화했거나, 기존 저장소의 database path를 확인했다",
+        },
+    }
+
+    @staticmethod
+    def _preview() -> str:
+        version = _plugin_contract()["core"]["version"]
+        return f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm config show"
+
+    @pytest.mark.parametrize("path", list(_LOCALES), ids=lambda p: p.name)
+    def test_shared_setup_names_fragment_and_env_stores(self, path: Path) -> None:
+        words = self._LOCALES[path]
+        section = _heading_section(_read(path), words["step"])
+        flat = " ".join(section.split())
+        # The final check is the connected server's status. It may ask only for what that
+        # check shows: the status workflow reports the database path, and `mem_status`
+        # lists memory directories only up to a row limit, so a sentence asking the reader
+        # to confirm the memory directories there cannot be followed.
+        for phrase in (words["confirm"], words["confirm_what"]):
+            assert phrase in flat, f"{path.name} step 2 lost {phrase!r}"
+        preview_onward = flat[flat.index("mm config show") :]
+        assert words["unverifiable"] not in preview_onward, (
+            f"{path.name} asks the status check to confirm memory directories it does not show"
+        )
+        assert self._preview() in _fenced_commands(section), f"{path.name} lost the preview"
+        # The refusal has to sit in the fragment/variable branch, not anywhere in the step:
+        # moved to the config.json branch, it would leave fragment stores told nothing.
+        bullets = re.findall(r"^- (.*?)(?=^- |\n\n|\Z)", section, re.MULTILINE | re.DOTALL)
+        by_lead = {
+            lead: [" ".join(b.split()) for b in bullets if b.startswith(words[lead])]
+            for lead in ("json_branch", "fragment_branch")
+        }
+        assert [len(found) for found in by_lead.values()] == [1, 1], by_lead
+        fragment = by_lead["fragment_branch"][0]
+        for phrase in ("MEMTOMEM_", words["no_init"], "memtomem is not configured"):
+            assert phrase in fragment, f"{path.name} fragment branch lost {phrase!r}"
+        assert words["no_init"] not in by_lead["json_branch"][0]
+
+    @pytest.mark.parametrize("path", list(_LOCALES), ids=lambda p: p.name)
+    def test_troubleshooting_row_sends_existing_stores_away_from_init(self, path: Path) -> None:
+        words = self._LOCALES[path]
+        rows = [line for line in _read(path).splitlines() if line.startswith(words["row"])]
+        assert len(rows) == 1, f"{path.name}: {len(rows)} not-initialized rows"
+        # Split at the fresh-store marker: init may appear only after it, and the
+        # existing-store branch before it must carry the preview and the refusal.
+        assert rows[0].count(words["row_fresh"]) == 1, f"{path.name} lost the fresh-store branch"
+        existing, fresh = rows[0].split(words["row_fresh"])
+        for phrase in (
+            "config.d/",
+            "MEMTOMEM_",
+            words["row_no_init"],
+            "mm config show",
+            "(#2-",
+            words["confirm"],
+        ):
+            assert phrase in existing, f"{path.name} existing-store branch lost {phrase!r}"
+        assert "mm init" not in existing, f"{path.name} offers init to an existing store"
+        assert "mm init ... --mcp skip" in fresh, f"{path.name} lost the fresh-store init"
+
+    @pytest.mark.parametrize("path", list(_LOCALES), ids=lambda p: p.name)
+    def test_checklist_accepts_a_confirmed_existing_store(self, path: Path) -> None:
+        items = [
+            line
+            for line in _read(path).splitlines()
+            if line.startswith("- [ ] ") and "--mcp skip" in line
+        ]
+        assert len(items) == 1, f"{path.name}: {len(items)} store checklist items"
+        assert self._LOCALES[path]["checklist"] in items[0]
+
+
+class TestCoexistenceCheckTimingPerHost:
+    """The Codex and Antigravity checks compare manual entries with the installed plugin's
+    bundled server, so before installation they have nothing to compare; the Claude check
+    reads the current directory's registrations (#3517).
+    ``test_mcp_coexistence.py::test_check_before_plugin_install_has_no_bundled_server_to_compare``
+    pins the first half."""
+
+    @staticmethod
+    def _bullet(section: str, lead: str) -> str:
+        matches = re.findall(
+            rf"^- {re.escape(lead)}(.*?)(?=^- |\n\n|\Z)", section, re.MULTILINE | re.DOTALL
+        )
+        assert len(matches) == 1, f"{len(matches)} bullets start with {lead!r}"
+        return " ".join(matches[0].split())
+
+    def test_each_host_says_when_its_check_is_meaningful(self) -> None:
+        section = _heading_section(
+            _read(_GUIDES / "mcp-clients.md"), "## Keep manual MCP and plugin skills"
+        )
+        claude = self._bullet(section, "**Claude Code:**")
+        assert "from the project root" in claude
+        assert "repeat it after installing" in claude
+        hosts = self._bullet(section, "**Antigravity CLI and Codex CLI:**")
+        assert "after installing the plugin" in hosts
+        assert "before starting a new session or thread" in hosts
+        assert "only a manual entry named `memtomem`" in hosts
