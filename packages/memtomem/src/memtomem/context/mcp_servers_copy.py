@@ -77,6 +77,7 @@ import click
 
 from memtomem.context._names import validate_name
 from memtomem.context.mcp_servers import (
+    CANONICAL_MCP_SERVER_ROOT,
     PROJECT_MCP_CONFIG,
     McpServerParseError,
     _parse_project_mcp_text,
@@ -349,8 +350,13 @@ def copy_mcp_server(
             f"single-tier, so within one project there is nothing to copy to."
         )
     if not src_path.is_file():
+        # The public form names the logical location, never ``src_path``: the
+        # store root is resolved, so a store linked out of the project sits
+        # under no project root and cannot be made relative to one (#3532).
+        lead = f"mcp-servers/{name} not found at the source project"
         raise ArtifactNotFoundError(
-            f"mcp-servers/{name} not found at the source project: {src_path}"
+            f"{lead}: {src_path}",
+            safe_message=f"{lead}: {CANONICAL_MCP_SERVER_ROOT}/{name}.json",
         )
     if src_path.is_symlink():
         # A symlinked canonical breaks the scanned-bytes == promoted-bytes
