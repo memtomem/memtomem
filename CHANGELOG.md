@@ -7,6 +7,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm init` checks for missing extras in the environment `uv run --directory <dir>` uses,
+  which for a project at a uv workspace member is the workspace root's (#3514).** The MCP
+  command `mm init` writes for a source checkout or a project,
+  `uv run --directory <dir> memtomem-server`, runs in the environment uv picks for that
+  directory, but `mm init` probed `<dir>/.venv`. At a member without a `.venv` of its own it
+  said `Project .venv not found` in a workspace that was already synced; at a member with
+  one it checked an environment the server would not use. `mm init` now asks
+  `uv workspace dir --offline --directory <dir>` for the root (uv decides membership,
+  `exclude` included, and needs no lockfile) and uses `UV_PROJECT_ENVIRONMENT` or
+  `<root>/.venv`, as seen from the shell `mm init` runs in. When that cannot be told — uv not
+  on `PATH`, the command failing, or `UV_NO_PROJECT` / `UV_ISOLATED` set to a value uv reads
+  as true or refuses — or the environment's interpreter cannot be probed, the summary says
+  `Extras not checked` with the reason instead of checking `mm init`'s own interpreter, and
+  `mm init --non-interactive` refuses a configuration that needs `onnx` or `korean` before
+  writing anything. The probe no longer counts a same-named module in the current directory
+  as an installed extra; the server does not import from there. A
+  `.venv` symlink whose target the user cannot access no longer stops `mm init` or
+  `mm uninstall` with a `PermissionError` (Python 3.12 and 3.13), and `mm init` reports it
+  the same way rather than as an environment to sync (on 3.14 the check answered "absent").
+  When `mm uninstall` runs from that environment, its hint names the interpreter,
+  `uv pip uninstall --python <interpreter> memtomem`, and no longer suggests `rm -rf` of the
+  environment, which at a workspace root serves every member.
+
 - **The plugin quickstarts no longer tell a store configured only through `config.d/` or
   `MEMTOMEM_*` variables to run `mm init`, and the coexistence guide says when each host's
   check can see a duplicate (#3517).** `mm status` reports `memtomem is not configured`
@@ -30,8 +53,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `[project] dependencies`, the `dev` dependency group or `[tool.uv] dev-dependencies`.
   Any other monorepo is a project when `mm init` finds a `pyproject.toml` that depends on
   memtomem in the current directory or up to four levels above it (before, a directory with
-  `packages/` never counted), and otherwise a PyPI install. A project found at a workspace
-  member still probes only its own `.venv`, not the workspace root's. A `pyproject.toml`
+  `packages/` never counted), and otherwise a PyPI install. A `pyproject.toml`
   that is not valid UTF-8, or that is a symlink whose target the user cannot access, no
   longer stops `mm init` and `mm uninstall` with a `UnicodeDecodeError` or
   `PermissionError`, and one that is not a regular file (a FIFO would block) is not opened;

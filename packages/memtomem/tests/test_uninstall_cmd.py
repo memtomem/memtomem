@@ -589,7 +589,7 @@ class TestBinaryHintPerOrigin:
         [
             ("uv-tool", "uv tool uninstall memtomem"),
             ("uvx", "ephemeral"),
-            ("venv-relative", "uv pip uninstall memtomem"),
+            ("venv-relative", "uv pip uninstall --python python3 memtomem"),
             ("system", "pip uninstall memtomem"),
             ("unknown", "which mm"),
         ],
@@ -612,24 +612,58 @@ class TestBinaryHintPerOrigin:
         assert result.exit_code == 0, result.output
         assert expected_substring in result.output
 
+    def test_project_whose_environment_cannot_be_read_still_uninstalls(
+        self, home, monkeypatch, tmp_path
+    ):
+        """#3514 — through the real ``_runtime_profile``: a ``.venv`` whose
+        existence cannot be told (a symlink to a target the user cannot
+        access) used to raise ``PermissionError`` out of ``mm uninstall``.
+        It now prints the generic hint: the runtime's install is not known."""
+        import os
+
+        from memtomem.cli import init_cmd
+
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / "pyproject.toml").write_text(
+            "[project]\nname = 'proj'\ndependencies = ['memtomem']\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(project)
+        monkeypatch.setattr(init_cmd.sys, "executable", str(tmp_path / "elsewhere" / "python"))
+        monkeypatch.setattr(init_cmd.sys, "prefix", str(tmp_path / "elsewhere"))
+        real_stat = os.stat
+
+        def stat(path, *args, **kwargs):
+            if isinstance(path, (str, os.PathLike)) and Path(path) == project / ".venv":
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(init_cmd.os, "stat", stat)
+
+        result = CliRunner().invoke(cli, ["uninstall"])
+        assert result.exception is None, result.output
+        assert result.exit_code == 0, result.output
+        assert "which mm" in result.output
+
     def test_venv_hint_shell_quotes_a_whitespace_path(self, home, monkeypatch):
         """A workspace venv under a path with a space must reach the
-        ``rm -rf`` fallback hint quoted and behind ``--``, so the
-        suggested command targets the real dir instead of splitting on
-        the space (#1956 follow-up; same shape as the runtime-dir
-        hints). Expectation is computed from the same ``Path`` —
-        ``str(Path(...))`` uses ``\\`` on Windows, so a hard-coded POSIX
-        string would spuriously fail there."""
+        ``uv pip uninstall --python`` hint quoted, so the suggested command
+        targets the real interpreter instead of splitting on the space
+        (#1956 follow-up; same shape as the runtime-dir hints). Expectation
+        is computed from the same ``Path`` — ``str(Path(...))`` uses ``\\``
+        on Windows, so a hard-coded POSIX string would spuriously fail
+        there."""
         import shlex
 
         from memtomem.cli import init_cmd
         from memtomem.cli import uninstall_cmd
 
         venv = Path("My Project/.venv")
+        py = venv / "bin" / "python"
         fake_profile = init_cmd.RuntimeProfile(
             cwd_install_type="pypi",
             cwd_install_dir=None,
-            runtime_interpreter=Path("python3"),
+            runtime_interpreter=py,
             workspace_venv_path=venv,
             mm_binary_origin="venv-relative",
             runtime_matches_workspace=True,
@@ -638,14 +672,14 @@ class TestBinaryHintPerOrigin:
 
         result = CliRunner().invoke(cli, ["uninstall"])
         assert result.exit_code == 0, result.output
-        expected = f"rm -rf -- {shlex.quote(str(venv))}"
+        expected = f"uv pip uninstall --python {shlex.quote(str(py))} memtomem"
         assert expected in result.output
-        assert expected != f"rm -rf -- {venv}"  # the space forced quoting
+        assert expected != f"uv pip uninstall --python {py} memtomem"  # the space forced quoting
 
     def test_venv_hint_scrubs_control_chars_from_label_and_command(self, home, monkeypatch):
         """A venv path carrying an ESC byte must not reach the terminal
         raw — neither via the ``workspace venv (...)`` prose label nor
-        via the ``rm -rf`` hint (#1956 follow-up). The exact escaped form
+        via the ``uv pip uninstall --python`` hint (#1956 follow-up). The exact escaped form
         is platform-dependent (``str(Path(...))`` separator rewriting),
         so pin the wiring — the CLI must route the path through the
         producer's own quote/scrub helpers — plus the terminal-safety
@@ -655,10 +689,11 @@ class TestBinaryHintPerOrigin:
         from memtomem.cli import uninstall_cmd
 
         venv = Path("ws\x1bdir/.venv")
+        py = venv / "bin" / "python"
         fake_profile = init_cmd.RuntimeProfile(
             cwd_install_type="pypi",
             cwd_install_dir=None,
-            runtime_interpreter=Path("python3"),
+            runtime_interpreter=py,
             workspace_venv_path=venv,
             mm_binary_origin="venv-relative",
             runtime_matches_workspace=True,
@@ -667,8 +702,8 @@ class TestBinaryHintPerOrigin:
 
         result = CliRunner().invoke(cli, ["uninstall"])
         assert result.exit_code == 0, result.output
-        assert f"rm -rf -- {_hint_quote(str(venv))}" in result.output
-        assert "rm -rf -- $'" in result.output  # ANSI-C branch was taken
+        assert f"uv pip uninstall --python {_hint_quote(py)} memtomem" in result.output
+        assert "--python $'" in result.output  # ANSI-C branch was taken
         assert "\x1b" not in result.output
 
 
