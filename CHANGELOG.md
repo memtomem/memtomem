@@ -7,6 +7,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm init --mcp <mode>` no longer asks the Connect to AI Editor step in the interactive
+  wizard and then discards the answer (#3515).** Without `--preset`, the picker path applied
+  `--mcp` only after its steps had run, so the step asked and the flag then overwrote what was
+  picked; after picking Advanced, and with `--advanced`, `--mcp` was not applied at all and the
+  answer to the step was used instead. `--mcp` now decides that step in every interactive path,
+  as it already did with `--preset`: the step is not shown. The flags that override a preset's
+  fields (`--provider`, `--model`, `--tokenizer`, …) are still not applied in the Advanced paths.
+
 - **`mem_entity_scan` no longer replaces or clears a chunk's entities when the LLM call for it
   fails (#3383).** The scan took the regex fallback's result as the chunk's new extraction, so
   one `overwrite=True` scan while the provider was unreachable, timing out or refusing the key

@@ -1379,10 +1379,9 @@ def _step_settings(state: dict) -> None:
 
 
 def _step_mcp(state: dict) -> None:
-    # #449: ``--mcp`` pre-sets ``state["mcp_choice"]`` via ``_override_from_flags``
-    # in the ``--preset`` branch. Skip the prompt so the flag isn't silently
-    # discarded. The ``--non-interactive`` branch omits this step entirely; the picker
-    # branch applies overrides *after* ``run_steps`` so the key is absent here.
+    # #449/#3515: ``init`` pre-sets ``state["mcp_choice"]`` from ``--mcp`` before any
+    # branch runs its steps. Skip the prompt so the flag isn't silently discarded. The
+    # ``--non-interactive`` branch omits this step entirely.
     if "mcp_choice" in state:
         return
     step_header(state, "Connect to AI Editor")
@@ -3499,10 +3498,14 @@ def _override_from_flags(
     if api_key is not None:
         state["api_key"] = api_key
     if mcp_mode is not None:
-        state["mcp_choice"] = {"claude": 1, "json": 2, "skip": 3, "kimi": 4}.get(mcp_mode, 3)
+        state["mcp_choice"] = _MCP_MODE_CHOICES.get(mcp_mode, 3)
 
 
 # ── CLI entry point ───────────────────────────────────────────────────
+
+
+# ``--mcp`` value → the connect step's menu number (see ``_step_mcp``).
+_MCP_MODE_CHOICES: dict[str, int] = {"claude": 1, "json": 2, "skip": 3, "kimi": 4}
 
 
 _MODEL_DIMS: dict[str, int] = {
@@ -3718,6 +3721,11 @@ def init(
     # directories or settings. --mcp skip / kimi do not inspect Claude.
     if mcp_mode in ("claude", "json"):
         _preflight_mcp_choice(1 if mcp_mode == "claude" else 2)
+    # Before any branch runs its steps, so `_step_mcp` does not ask a question whose
+    # answer the flag would discard: the picker branch applies the preset-field flags
+    # only after its steps, and the Advanced paths do not apply them at all (#3515).
+    if mcp_mode is not None:
+        state["mcp_choice"] = _MCP_MODE_CHOICES[mcp_mode]
 
     advanced_steps = [
         _step_embedding,
@@ -3870,9 +3878,10 @@ def init(
         except _AdvancedSelected:
             run_steps(advanced_steps, state)
         else:
-            # CLI flag overrides apply only to the preset branch — advanced
-            # prompts for every field interactively, so there's no preset
-            # baseline to override there.
+            # The preset-field overrides apply only to the preset branch —
+            # advanced prompts for every field interactively, so there's no
+            # preset baseline to override there. `--mcp` is set before the
+            # steps run, in every branch.
             _override_from_flags(
                 state,
                 provider=provider,
