@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Fail-open Claude hook dispatcher for the optional automation plugin."""
+"""Fail-open Claude hook dispatcher for the optional automation plugin.
+
+The hooks launch it with whatever interpreter ``uv run --no-project`` finds first, so it is
+written for Python 3.8 and later: the ``automation dispatcher (Python 3.8 smoke)`` CI job runs
+every event through it on that version.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +74,7 @@ def _data_dir() -> Path:
 
 def _log(message: str) -> None:
     try:
-        stamp = datetime.now(UTC).isoformat(timespec="seconds")
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with (_data_dir() / "hook.log").open("a", encoding="utf-8") as handle:
             handle.write(f"{stamp} {message}\n")
     except OSError:
