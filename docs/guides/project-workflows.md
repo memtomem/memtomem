@@ -167,8 +167,10 @@ is never split out of a multi-commit listing. The first slice in which at least 
 of those reads can be used is the one it reviews; a slice whose unreviewed commits
 all fail to read is reported and passed over. It reviews at most one slice per run,
 records exactly the commits it read and reviewed, and reports
-the positions it checked, the ones it left unchecked, and any commit it could not
-read in full. Run it again to reach the next slice. Commits deeper than 100 are out
+the positions it checked, the ones it left unchecked, and any commit whose read it
+could not use. A read is used when the command succeeded, its result came back
+inline with no sign of truncation, and its first line is the SHA asked for; a host
+that clips output without saying so cannot be detected. Run it again to reach the next slice. Commits deeper than 100 are out
 of its reach. Coverage is kept per machine, so each machine backfills its own
 store.
 

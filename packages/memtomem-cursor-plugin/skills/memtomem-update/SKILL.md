@@ -179,22 +179,23 @@ memory text, or the request.
    `shas=<the slice's SHAs, in inventory order>` and no other argument. This check only reads.
    Accept its result only when the first line is `project_root: <root>` with `<root>` the live
    Git root (the identical path, except that on Windows `/` and `\` count as one separator and
-   letter case is ignored), the next lines are `reviewed: <R>` and `unreviewed: <M>` with `<R>`
-   plus `<M>` equal to the slice's size, and, when `<M>` is not zero, `unreviewed_shas:` is
-   followed by exactly `<M>` different SHAs, each of them in the slice. For any other result — a
-   first line that starts with `Error:`, a denied or interrupted call, or a result that breaks
-   these rules — stop before writing anything, report it unchanged, and name the slices already
-   passed. When `<M>` is zero, go on to the next slice. Otherwise `<unreviewed>` is those SHAs in
-   inventory order; go to step 4.
+   letter case is ignored), the next lines are `reviewed: <R>` and `unreviewed: <M>`, where
+   `<R>` and `<M>` are decimal integers that add up to the slice's size, and the rest of the
+   result is nothing when `<M>` is zero, and otherwise `unreviewed_shas:` followed by exactly
+   `<M>` different SHAs, each of them in the slice, and nothing after them. For any other
+   result — a first line that starts with `Error:`, a denied or interrupted call, or a result
+   that breaks these rules — stop before writing anything, report it unchanged, and name the
+   slices already passed. When `<M>` is zero, go on to the next slice. Otherwise `<unreviewed>`
+   is those SHAs in inventory order; go to step 4.
 4. Read each commit of `<unreviewed>` with the third command, with `<K>` that SHA's position in
-   the inventory. Use a read only when the command succeeded, its whole result arrived in the tool
-   output itself — not as a saved file, a preview, an excerpt, or text with an elided part — and
-   its first line is exactly that SHA. Everything after the first line is that commit's message:
-   the output holds one commit, so there is no boundary to look for. Report any other read as
-   `unread <sha>: <reason>` and leave that commit out. `<read-shas>` is the SHAs of
-   `<unreviewed>` whose read you used. If `<read-shas>` is empty, go back to step 3 with the next
-   slice. Otherwise this slice is the run's review slice: stop walking. A run reviews at most one
-   slice.
+   the inventory. Use a read only when the command succeeded, its result came back in the tool
+   output itself with no sign of truncation — not as a saved file, a preview, an excerpt, or
+   text with an elided part — and its first line is exactly that SHA. Everything after the first
+   line is that commit's message: the output holds one commit, so there is no boundary to look
+   for. Report any other read as `unread <sha>: <reason>` and leave that commit out.
+   `<read-shas>` is the SHAs of `<unreviewed>` whose read you used. If `<read-shas>` is empty, go
+   back to step 3 with the next slice. Otherwise this slice is the run's review slice: stop
+   walking. A run reviews at most one slice.
 5. If no slice had an unreviewed commit, report
    `backfill: the checks found no unreviewed commit in the latest <N>`. If slices had unreviewed
    commits but no read could be used, report `backfill: unreviewed commits remain, none readable`
@@ -289,8 +290,9 @@ skipped, and in `backfill` mode when the walk found no review slice. Otherwise, 
 `mem_add` call of this run has returned a result, call `mem_update_coverage` with
 `shas=<read-shas>`, `record=true`, and `run_id="<update-id>"`, even when no item was saved. In
 `incremental` and `full` mode, pass the same list the check received: the commits it reported as
-reviewed are already recorded, so passing them again changes nothing. In `backfill` mode, pass
-exactly the review slice's `<read-shas>` and never the whole slice: a slice SHA the check reported
+reviewed are already recorded: passing them again keeps a row that has not expired, and replaces
+a row past its 90-day retention with a fresh one, which the reply counts as `recorded`. In
+`backfill` mode, pass exactly the review slice's `<read-shas>` and never the whole slice: a slice SHA the check reported
 as reviewed may be a row past its 90-day retention, and recording it again would refresh it
 without a review. Record only after the last `mem_add`: if any `mem_add` call in this run failed,
 do not record, and report `coverage: not recorded, a write failed`; the next run reviews those

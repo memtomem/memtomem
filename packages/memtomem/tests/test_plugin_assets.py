@@ -1501,15 +1501,22 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         # A check reply is used only when it is for this root and its counts reconcile.
         "Accept its result only when the first line is `project_root: <root>` with `<root>` the "
         "live Git root",
-        "with `<R>` plus `<M>` equal to the slice's size",
-        "followed by exactly `<M>` different SHAs, each of them in the slice",
+        "where `<R>` and `<M>` are decimal integers that add up to the slice's size",
+        # A zero count with a SHA list after it contradicts itself; it must not read as a
+        # covered slice.
+        "the rest of the result is nothing when `<M>` is zero, and otherwise "
+        "`unreviewed_shas:` followed by exactly `<M>` different SHAs, each of them in the slice, "
+        "and nothing after them",
+        # Re-recording a reviewed SHA is not a no-op: the record prunes expired rows first.
+        "passing them again keeps a row that has not expired, and replaces a row past its 90-day "
+        "retention with a fresh one, which the reply counts as `recorded`",
         "a denied or interrupted call, or a result that breaks these rules — stop before writing "
         "anything, report it unchanged, and name the slices already passed",
         # One commit per read: nothing to split, and the first line must be the SHA asked for.
-        "Use a read only when the command succeeded, its whole result arrived in the tool output "
-        "itself",
-        "its whole result arrived in the tool output itself — not as a saved file, a preview, an "
-        "excerpt, or text with an elided part — and its first line is exactly that SHA",
+        # Only what the agent can observe: completeness itself cannot be proven from inside.
+        "Use a read only when the command succeeded, its result came back in the tool output "
+        "itself with no sign of truncation — not as a saved file, a preview, an excerpt, or text "
+        "with an elided part — and its first line is exactly that SHA",
         "the output holds one commit, so there is no boundary to look for",
         "`unread <sha>: <reason>`",
         "If `<read-shas>` is empty, go back to step 3 with the next slice",
@@ -1677,24 +1684,8 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
 
     asyncio.run(_verify_write_ns())
 
-    claude = (_ROOT / "packages/memtomem-claude-plugin/skills/update/SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    claude_frontmatter = claude.split("---", 2)[1]
-    allowed = yaml.safe_load(claude_frontmatter)["allowed-tools"]
-    shipped_bash = [name for name in allowed.split(", ") if name.startswith("Bash(")]
-    # Written out here, not derived from the contract, so a grant the renderer adds or widens
-    # fails this comparison instead of being shipped (#3579: the backfill reads are 100
-    # generated literals, one per inventory position, never a wildcard).
-    expected_bash = [
-        "Bash(git rev-parse:*)",
-        "Bash(git status:*)",
-        f"Bash({_UPDATE_GIT_LOG})",
-        f"Bash({_BACKFILL_COUNT})",
-        f"Bash({_BACKFILL_INVENTORY})",
-        *(f"Bash({_BACKFILL_READ.replace('<K>', str(k))})" for k in range(100)),
-    ]
-    assert shipped_bash == expected_bash
+    # The Claude skill's exact grants are pinned by
+    # test_every_claude_skill_ships_exactly_its_reviewed_tools.
     codex_root = _ROOT / "plugins/memtomem/skills/memtomem-update"
     kimi_root = _ROOT / "packages/memtomem-kimi-skills/skills/memtomem-update"
     for root in (codex_root, kimi_root):
@@ -2103,37 +2094,52 @@ def test_host_native_reads_select_this_repository_through_the_real_filter() -> N
     assert _selected(_HOST_NATIVE_PAIR) == {f"claude:{root_id}", f"claude-memory:{root_id}"}
 
 
-# The only wildcard grants any workflow may ship. Each was reviewed as a whole command family:
-# `git rev-parse` and `git status` take no option that writes a file or runs a program. Any
-# other grant must be an exact command, which Claude matches as written, with nothing appended.
-_ALLOWED_WILDCARD_GRANTS = frozenset({"Bash(git rev-parse:*)", "Bash(git status:*)"})
+# Every `Bash(...)` grant a Claude skill ships, written out by hand per workflow rather than
+# derived from the contract, so a grant the contract or the renderer adds, widens or splits
+# fails a comparison instead of being shipped. `git rev-parse` and `git status` are the only
+# wildcards: neither takes an option that writes a file or runs a program. Everything else is
+# an exact command, which Claude matches as written with nothing appended (#3579).
+_GIT_INSPECT_GRANTS = ["Bash(git rev-parse:*)", "Bash(git status:*)"]
+_CLAUDE_BASH_GRANTS: dict[str, list[str]] = {
+    "handoff": _GIT_INSPECT_GRANTS,
+    "brief": _GIT_INSPECT_GRANTS,
+    "update": [
+        *_GIT_INSPECT_GRANTS,
+        f"Bash({_UPDATE_GIT_LOG})",
+        f"Bash({_BACKFILL_COUNT})",
+        f"Bash({_BACKFILL_INVENTORY})",
+        *(f"Bash({_BACKFILL_READ.replace('<K>', str(k))})" for k in range(100)),
+    ],
+}
 
 
-def test_claude_host_tool_grants_are_exact_or_allowlisted_wildcards() -> None:
-    """Every ``Bash(...)`` grant a Claude skill ships is exact, or a listed wildcard.
+def _claude_allowed_tools(workflow_id: str) -> list[str]:
+    skill = _ROOT / "packages/memtomem-claude-plugin/skills" / workflow_id / "SKILL.md"
+    # `_frontmatter` ends at the first line that is exactly `---`: splitting on the substring
+    # would drop a `---suffix` appended to the last grant and compare the shorter list.
+    frontmatter = _frontmatter(skill.read_text(encoding="utf-8"))
+    assert isinstance(frontmatter, dict)
+    return frontmatter["allowed-tools"].split(", ")
 
-    A wildcard over a command that accepts ``--output=<path>``, an external diff driver or an
-    alias (``Bash(git:*)``, ``Bash(git log:*)``, ``Bash(git -C . log:*)``) lets a skill that
-    reads untrusted commit text run more than it was granted. Judging each wildcard by parsing
-    git's option grammar kept missing shapes (#3579: value-taking global options, a wildcard with
-    no subcommand, an option that swallows ``--end-of-options``), so a new wildcard instead has to
-    be added to ``_ALLOWED_WILDCARD_GRANTS`` on purpose, where review sees it. Checked on the
-    rendered grants, so a range the renderer expands is covered too.
+
+def test_every_claude_skill_ships_exactly_its_reviewed_tools() -> None:
+    """Each shipped Claude skill pre-approves exactly its MCP tools and its listed Bash grants.
+
+    A grant wider than it looks (``Bash(git:*)``, ``Bash(git log:*)``, ``Bash(git -C . log:*)``,
+    a bare ``Bash(git)``) lets a skill that reads untrusted commit text run more than it was
+    granted. Judging grants by a pattern or by parsing git's option grammar kept missing shapes
+    in review (#3579), so the whole `allowed-tools` list is compared instead: any added, widened,
+    split or dropped entry fails here, and only an edit to `_CLAUDE_BASH_GRANTS` lets it ship.
     """
-    renderer = _renderer()
-    shipped: set[str] = set()
-    for workflow in _contract()["workflows"]:
-        for grant in renderer.claude_host_grants(workflow):  # type: ignore[attr-defined]
-            assert grant.startswith("Bash(") and grant.endswith(")"), grant
-            shipped.add(grant)
-            if "*" in grant:
-                assert grant in _ALLOWED_WILDCARD_GRANTS, (
-                    f"workflow {workflow['id']!r} ships a wildcard grant that is not on the "
-                    f"reviewed list: {grant!r}"
-                )
-    # The list holds no stale entry, so a wildcard dropped from every workflow cannot come back
-    # unreviewed.
-    assert _ALLOWED_WILDCARD_GRANTS <= shipped, sorted(_ALLOWED_WILDCARD_GRANTS - shipped)
+    workflows = _contract()["workflows"]
+    assert set(_CLAUDE_BASH_GRANTS) <= {row["id"] for row in workflows}
+    for workflow in workflows:
+        expected = [
+            name
+            for tool in workflow["tools"]
+            for name in (f"mcp__plugin_memtomem_memtomem__{tool}", f"mcp__memtomem__{tool}")
+        ] + _CLAUDE_BASH_GRANTS.get(workflow["id"], [])
+        assert _claude_allowed_tools(workflow["id"]) == expected, workflow["id"]
 
 
 def test_core_version_is_single_sourced_across_automation_assets() -> None:
