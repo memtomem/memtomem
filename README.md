@@ -7,6 +7,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/memtomem/memtomem)](https://github.com/memtomem/memtomem/stargazers)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Status: beta](https://img.shields.io/badge/status-beta-orange)](#stability)
+[![memtomem/memtomem MCP server](https://glama.ai/mcp/servers/memtomem/memtomem/badges/score.svg)](https://glama.ai/mcp/servers/memtomem/memtomem)
 
 ## Install
 
