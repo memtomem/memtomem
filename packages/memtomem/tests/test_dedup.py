@@ -460,6 +460,47 @@ class TestStoredVectorsAndCoverage:
         assert storage.lookups == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("limit", [0, -1])
+    async def test_non_positive_limit_is_rejected(self, scanner_factory, limit):
+        # ``candidates[:limit]`` with 0 lists nothing and with -1 drops the
+        # last pair, both as a normal result (#3435).
+        scanner, storage = scanner_factory([_mk("same"), _mk("same")])
+
+        with pytest.raises(ValueError, match=f"limit must be at least 1, got {limit}"):
+            await scanner.scan_with_coverage(limit=limit)
+        assert (storage.cursors, storage.lookups) == ([], [])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("threshold", [-0.1, 1.5, float("nan")])
+    async def test_threshold_outside_zero_to_one_is_rejected(self, scanner_factory, threshold):
+        # NaN fails every ``r.score < threshold``, so it would turn off the
+        # near phase's score cutoff.
+        scanner, storage = scanner_factory([_mk("same"), _mk("same")])
+
+        with pytest.raises(ValueError, match="threshold must be between 0 and 1"):
+            await scanner.scan_with_coverage(threshold=threshold)
+        assert (storage.cursors, storage.lookups) == ([], [])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("threshold", [0.0, 1.0])
+    async def test_threshold_bounds_and_a_limit_above_500_are_accepted(
+        self, scanner_factory, threshold
+    ):
+        # The route's tests stand in for the scanner, so this is where a
+        # scanner check stricter than the route's bounds would show. The
+        # route takes a limit above 500: whether it should is #3433's.
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        older, newer = _mk("same", created_at=t0), _mk("same", created_at=t0 + timedelta(1))
+        scanner, _ = scanner_factory([older, newer])
+
+        candidates, coverage = await scanner.scan_with_coverage(threshold=threshold, limit=1001)
+
+        assert [(c.chunk_a.id, c.chunk_b.id, c.exact) for c in candidates] == [
+            (older.id, newer.id, True)
+        ]
+        assert coverage.pairs_found == 1
+
+    @pytest.mark.asyncio
     async def test_scan_returns_the_same_candidates(self, scanner_factory):
         t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
         chunks = [_mk("same", created_at=t0), _mk("same", created_at=t0 + timedelta(seconds=1))]

@@ -7,6 +7,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`GET /api/dedup/candidates` refuses a `limit` below 1 (#3435) and a `threshold` outside 0 to
+  1 (#3562).** The route passed both to the scanner unchecked, and the scanner cut its pair list
+  with a Python slice, so `limit=0` answered `200` with no pairs on a store that has them and a
+  negative `limit` dropped up to that many pairs from the end of the list. `threshold=NaN` turned
+  off the near phase's score cutoff, as `0.0` does. These are now a `422`, as `max_scan=0`
+  already was; `mem_dedup_scan` and the scheduled `dedup_scan` job already refused them. The
+  route still takes a `limit` above 500. `DedupScanner.scan_with_coverage` raises `ValueError`
+  for the same values before reading anything.
+
 - **`mm web` serves its OpenAPI schema at `/api/openapi.json` instead of `/openapi.json`
   (#3272). The new URL is covered by the Host and Origin checks that cover `/api/*`.** FastAPI
   served the schema at its default `/openapi.json`, outside the prefix the `mm web` guard
