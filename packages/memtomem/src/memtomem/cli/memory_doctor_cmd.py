@@ -90,7 +90,7 @@ Checks (per configured ``memory_dir``):
   line, #1774). Left unclassified rather than guessed at, so the line is
   reported for a human instead of being link-checked, counted as listed, or
   offered to ``--fix``.
-* **budget** — the index file exceeds its byte / line / per-line-char budget
+* **budget** — the index file exceeds its UTF-16-unit / line / per-line-char budget
   (the hot cache loaded into the agent's context each session).
 * **cold_candidate** — indexed files never accessed since indexing
   (``access_count`` sum 0 and ``last_accessed_at`` NULL). Informational.
@@ -144,9 +144,11 @@ if TYPE_CHECKING:
 # the curation process targets. These live here, not in
 # ``ProviderIndexConvention``, because Tier 1 is the only consumer; the
 # write-contract ADR promotes them to config when ``--fix`` needs to enforce
-# them. Per-line cap is measured in characters (not bytes) so CJK prose isn't
-# double-counted.
-_INDEX_MAX_BYTES = 24_400
+# them. The file total is measured in UTF-16 code units of the text trimmed the
+# way JavaScript ``trim()`` does — what Claude Code compares with its 25,000
+# cap — so CJK prose isn't double-counted as UTF-8 bytes (24,400 leaves a
+# 600-unit margin). The per-line cap is measured in characters.
+_INDEX_MAX_UNITS = 24_400
 _INDEX_MAX_LINES = 200
 _INDEX_MAX_LINE_CHARS = 200
 
@@ -762,32 +764,48 @@ def classify_link(target: str, *, root: Path, source_dir: Path) -> LinkClass:
 
 @dataclass(frozen=True)
 class BudgetMeasure:
-    byte_len: int
+    utf16_units: int
     line_count: int
     overlong_lines: tuple[int, ...]  # 1-based line numbers exceeding the char cap
 
     @property
     def over_budget(self) -> bool:
         return (
-            self.byte_len > _INDEX_MAX_BYTES
+            self.utf16_units > _INDEX_MAX_UNITS
             or self.line_count > _INDEX_MAX_LINES
             or bool(self.overlong_lines)
         )
 
 
+# ECMAScript WhiteSpace + LineTerminator — the characters ``String.prototype.trim``
+# removes. Python's bare ``str.strip()`` differs (it strips ``\x1c-\x1f`` and
+# ``\x85`` and keeps U+FEFF), which can flip the verdict at the threshold.
+_JS_TRIM_CHARS = "".join(
+    chr(cp)
+    for cp in (
+        *(0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0x1680),
+        *range(0x2000, 0x200B),  # U+2000..U+200A
+        *(0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF),
+    )
+)
+
+
 def measure_budget(text: str) -> BudgetMeasure:
     """Measure an index file against the hot-cache budget.
 
-    Bytes are UTF-8 encoded length; lines are counted from ``splitlines``;
-    per-line length is character count (``len``) so a CJK line isn't penalised
-    for its multi-byte encoding.
+    ``text`` is the file as decoded, with its newlines intact (Claude Code does
+    not fold CRLF before measuring). The total is the UTF-16 code-unit length of
+    the JS-trimmed text; lines are counted from ``splitlines``; per-line length
+    is character count (``len``) so a CJK line isn't penalised for its
+    multi-byte encoding.
     """
     lines = text.splitlines()
     overlong = tuple(
         i for i, line in enumerate(lines, start=1) if len(line) > _INDEX_MAX_LINE_CHARS
     )
+    trimmed = text.strip(_JS_TRIM_CHARS)
     return BudgetMeasure(
-        byte_len=len(text.encode("utf-8")),
+        utf16_units=len(trimmed.encode("utf-16-le", errors="surrogatepass")) // 2,
         line_count=len(lines),
         overlong_lines=overlong,
     )
@@ -1625,7 +1643,11 @@ def _analyze_index_file(
     the TOC file."""
     index_path = root / index_file_name
     try:
-        text = index_path.read_text(encoding="utf-8")
+        # Bytes, not ``read_text``: the budget must see the file the way Claude Code
+        # does, with CRLF intact. ``text`` below is the universal-newline view every
+        # other check has always used.
+        raw = index_path.read_bytes().decode("utf-8")
+        text = raw.replace("\r\n", "\n").replace("\r", "\n")
     except FileNotFoundError:
         report.findings.append(
             Finding(
@@ -1775,9 +1797,9 @@ def _analyze_index_file(
         )
 
     # budget — hot-cache size.
-    budget = measure_budget(text)
+    budget = measure_budget(raw)
     if budget.over_budget:
-        parts = [f"{budget.byte_len} bytes (cap {_INDEX_MAX_BYTES})"]
+        parts = [f"{budget.utf16_units} UTF-16 units (cap {_INDEX_MAX_UNITS})"]
         parts.append(f"{budget.line_count} lines (cap {_INDEX_MAX_LINES})")
         if budget.overlong_lines:
             shown = ", ".join(f"L{n}" for n in budget.overlong_lines[:_SAMPLE_LIMIT])

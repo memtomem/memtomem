@@ -27,6 +27,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   recording modes do. Plugins: `claude` 0.5.46, `codex` 0.3.44, `opencode` 0.3.42,
   `kimi` 0.2.32, `antigravity` 0.2.23.
 
+### Fixed
+
+- **`mm memory doctor` measures the `MEMORY.md` budget in UTF-16 code units, the unit Claude
+  Code caps it in (#3578).** The file total was UTF-8 bytes against 24,400, so a Korean,
+  Japanese or Chinese index warned well under the real 25,000-unit cap (about 70% of it on
+  one Korean-heavy index) and curators folded index lines they did not need to. The total is
+  now the UTF-16 length of the text trimmed as JavaScript `trim()` does, read with its
+  newlines intact (Claude Code does not fold CRLF before measuring); the 24,400 threshold, the 200-line cap and the per-line
+  character cap are unchanged. The `budget` finding reads `N UTF-16 units (cap 24400)`
+  instead of `N bytes (cap 24400)`.
+
 ## [0.7.14] — 2026-11-24
 
 A patch of fixes, most of them in `mm init` for source checkouts and uv workspaces: it checks
