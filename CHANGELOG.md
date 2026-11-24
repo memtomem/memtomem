@@ -5,6 +5,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.7.14] — 2026-11-24
+
+A patch of fixes, most of them in `mm init` for source checkouts and uv workspaces: it checks
+extras in the environment `uv run --directory` uses, calls a directory a source checkout only
+when it is a workspace that installs memtomem from a member, names the directory to sync, and
+lets `--mcp` decide the connect step in every interactive path (see Fixed). Also fixed:
+`mem_entity_scan` leaves a chunk's entities alone when its LLM call fails, the automation
+plugin's hooks start on Python 3.8, more web error responses stop naming host paths, the web
+OpenAPI schema moves under the Host-checked `/api/` prefix, and `mem_dedup_scan`'s output and
+`GET /api/dedup/candidates`'s inputs are checked. `mem_dedup_scan` gains `offset` (see Added),
+`mem_delete` removes a chunk whose source file is gone, and the `handoff` workflow aims its
+records at a size that splits into fewer chunks (see Changed).
+
+### Upgrading
+
+- **The plugins move their pin to 0.7.14 in the same release; a plugin from 0.7.13 that
+  starts the server and is not updated keeps launching 0.7.13.** This release delivers Claude
+  `0.5.45`, Codex `0.3.43`, `memtomem-automation` `0.3.28`, OpenCode `0.3.41`, Hermes
+  `0.1.29`, Antigravity `0.2.22`, OpenClaw `0.1.6` and Kimi `0.2.31`, a skills bundle that
+  starts no server (its Kimi Code MCP entry is covered below). Cursor keeps the version
+  `0.1.0`; its files in this release launch 0.7.14 and carry the same handoff skill change.
+  The Hermes memory provider stays `0.2.2`. The Hermes catalog entries install a pinned
+  commit, which today carries plugin `0.1.27` (its server launches 0.7.12) and provider
+  `0.2.2`, so `hermes plugins install` keeps installing those until the catalog moves its pin.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.28 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.14;
+  updating the plugins does not upgrade that CLI. For a `uv tool` install run
+  `mm upgrade --version 0.7.14`; otherwise upgrade memtomem in the environment that
+  supplies that `mm`. Confirm with `mm --version`, then start a new Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new pin.** The
+  plugin now launches `uvx --python 3.12 --from 'memtomem[onnx]==0.7.14' memtomem-server`. A
+  manual entry that launches anything else no longer matches the plugin's launch, so Claude
+  cannot deduplicate the two and may expose duplicate tools. Run `mm doctor --claude-mcp`
+  (with no `mm` on `PATH`, as a plugin-only install has none:
+  `uvx --python 3.12 --from "memtomem[all]==0.7.14" mm doctor --claude-mcp`) and follow the
+  Claude Code guide's "Already registered via `claude mcp add`?" note.
+- **Any other MCP entry that launches an exact release keeps serving that release: move its
+  pin to 0.7.14.** Updating a plugin or the `mm` CLI does not touch it. That covers an entry
+  copied from the guides, one `mm init --mcp` wrote while `mm` ran through `uvx`, a Kimi Code
+  `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section and an OpenCode `mcp.memtomem`
+  entry. Change the release it pins (`==0.7.13`, or an older one) to `==0.7.14` in place,
+  keep the rest of its launch as it is, and restart the client. Coming from 0.7.12 or older,
+  read 0.7.13's Upgrading notes as well.
+- **A script or client generator that fetched `mm web`'s OpenAPI schema from `/openapi.json`
+  needs `/api/openapi.json`.** The old URL now returns 404 (#3272, see Fixed).
+
 ### Added
 
 - **`mem_dedup_scan` lists a pool's duplicate pairs past the 500th (#3433).** The tool
@@ -24,7 +71,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
-- **`mem_delete(chunk_id=)` removes a chunk whose source file is missing from the index, as
+- **`mem_delete(chunk_id=)` removes an indexed chunk whose source file is missing from disk, as
   the web UI's chunk delete already did (#2842).** It used to refuse: `source_missing` when
   the file was gone, or "source directory has been removed" when its directory was. So an
   archived chunk under `indexing.retain_missing_dirs` could not be dropped through MCP at
@@ -33,14 +80,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `indexing.read_only_memory_dirs` is still refused. A path that exists but cannot be read,
   or holds something other than a regular file, is refused without deleting. A file removed
   after the delete checked it and before it read it still gets `source_missing`, and a retry
-  removes the row. `mem_edit` and `mem_dedup_remove` refuse a missing file as before.
+  removes the row. When the deleted chunk was the file's last one, the file's policy
+  consolidation summary goes with it unless that summary is held, as in the web delete.
+  `mem_edit` and `mem_dedup_remove` refuse a missing file as before.
 
 - **The `handoff` workflow aims a saved record at a size the E5 token budget can hold in one
   chunk (#3399).** A record could run to 1,200 characters, but a store indexing under
-  `multilingual-e5-small` splits any chunk over 384 tokens, so a record near that limit was
-  almost always split across rows that rank on their own in search and take separate slots
-  in brief's recall window. Of 399 stored
-  records, 270 of the 336 within 1,200 weighted characters had split. Save now aims for at
+  `multilingual-e5-small` with its default budget splits any chunk over 384 tokens, so a
+  record near that limit was almost always split across rows that rank on their own in search
+  and take separate slots in brief's recall window. Of 399 stored records, 270 of the 336
+  within 1,200 weighted characters had split. Save now aims for at
   most 850 characters for the whole record, fence lines included, with each Korean, Japanese,
   or Chinese character counted as two, and the per-field caps are lower: `objective` 80,
   `completed` 160, `changed_files` 120 with at most 8 paths, `validation` 90, `blockers` 60,
@@ -50,18 +99,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   verbatim path, symbol, command, GitHub reference or quote is kept whole or left out whole,
   except in `next_action`, where none is left out, so the next agent can act on it (one that
   does not fit its cap or one line stops Save). A record
-  that cannot meet
-  the caps and the 1,200-character maximum (counted plainly) that way is not saved: Save
-  stops and names the value in the way. One that meets them but stays over the target is
-  saved and reported with its weighted count. The 240-character root limit is unchanged.
+  that cannot meet the caps and the 1,200-character maximum (counted plainly) that way is not
+  saved: Save stops and names the value in the way. One that meets them but stays over the
+  target is saved and reported with its weighted count. The 240-character root limit is unchanged.
   In an experiment that applied the new caps to every stored record and then cut its prose
   from the end until it was at or below 850 (which can cut a verbatim string, so it
   measures token density, not compliant records), none exceeded 384 tokens (the largest was
   383); at or below 900, 15 did. The target is
   not a guarantee: a long root or many artifact paths can still split a record. Resume is
-  unchanged: it combines the rows it reads and rejects a torn or incomplete record. The delivery versions move with that text: Claude `0.5.45`, Codex `0.3.43`, OpenCode `0.3.41`, Kimi
-  `0.2.31`, Antigravity `0.2.22`. Cursor stays `0.1.0` while its first marketplace review is
-  open, but its rendered skill changes too.
+  unchanged: it combines the rows it reads and rejects a torn or incomplete record. The
+  delivery versions move with that text: Claude `0.5.45`, Codex `0.3.43`, OpenCode `0.3.41`,
+  Kimi `0.2.31`, Antigravity `0.2.22`. Cursor stays `0.1.0` while its first marketplace
+  review is open, but its rendered skill changes too.
 
 ### Fixed
 
@@ -122,6 +171,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   list. With the guard enforcing (the default), such a request now gets the same 403 as the
   other `/api/*` routes, and `/openapi.json` returns 404. The `/api/docs` page fetches the new
   URL; a client generator or script that fetched the schema by the old URL needs the new one.
+
+- **Saving a tokenizer change in the web settings says when the FTS rebuild fell back to
+  `unicode61` (#3405).** `PATCH /api/config` rebuilds the FTS index when `search.tokenizer`
+  changes. When `kiwipiepy` could not be imported, that rebuild used `unicode61` and still
+  succeeded, and only the server log said so. The response now carries `fts_rebuild`
+  (`tokenizer`, `rebuilt_rows`, `warning`) whenever the request ran a rebuild, and the settings
+  page shows `warning` as a toast. The warning is the text `POST /api/fts-rebuild` already
+  returned, and it is shown in English in either UI language.
+
+- **The namespace card's Delete button and its edit form's Cancel and Save buttons follow the
+  UI language (#2851).** They were written in English, so they stayed English in the Korean
+  UI. They now use the existing `common.delete`, `common.cancel` and `common.save` strings, and
+  switching the language with the edit form open relabels them without discarding the edit.
 
 - **The interactive `mm init` wizard's Local ONNX and Korean tokenizer steps report the extra for
   the environment a source checkout or a project runs memtomem in (#3508).** Both steps imported
@@ -311,11 +373,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   to start the session from the Git root where the project tier was registered. For creating
   the memory store it links step 2 of the plugin quickstart, which says when to skip that
   step and what to do when uv cannot get Python 3.12, instead of running `mm init` on the
-  first screen: on a machine that already has memtomem settings, a re-run replaces the
-  store's embedding provider, database path and memory directories. The Beta banner is now a
-  badge linking to Stability, which states the same commitment, now says experimental
-  features can change without an `Upgrading` note as well as without a window, and holds the
-  feedback links. memtomem is still beta.
+  first screen: on a machine that already has memtomem settings, a re-run writes a
+  `config.json` that replaces the store's embedding provider, database path and memory
+  directories, except for fields a `MEMTOMEM_*` variable sets, which still win. The Beta
+  banner is now a badge linking to Stability, which states the same commitment, now says
+  experimental features can change without an `Upgrading` note as well as without a window,
+  and holds the feedback links. memtomem is still beta.
 
 ## [0.7.13] — 2026-11-22
 
