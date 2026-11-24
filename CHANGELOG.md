@@ -7,6 +7,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm schedule add` and `mem_schedule_register` refuse a cron expression for a date that
+  never occurs (#3461).** Both checked only that croniter could parse the expression, so
+  `0 0 30 2 *` was stored and then skipped by the dispatcher on every tick. An expression of
+  five fields written with only digits, `* , - / ? # L W` and three-letter month and day names
+  is now refused when croniter finds no date for it:
+  `invalid cron expression: '0 0 30 2 *' matches no date croniter can find: …`. Any other
+  expression croniter parses — with a random `R` field, six or seven fields, or other
+  characters — is stored without that lookup, because a failed lookup there does not
+  show that no date exists; when the listing's own check finds no date for such a row,
+  `mm schedule list` marks it `cron check failed`. Schedules already stored are not changed.
+
 - **`GET /api/dedup/candidates` refuses a `limit` below 1 (#3435) and a `threshold` outside 0 to
   1 (#3562).** The route passed both to the scanner unchecked, and the scanner cut its pair list
   with a Python slice, so `limit=0` answered `200` with no pairs on a store that has them and a
