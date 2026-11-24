@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A namespace or scope glob containing a NUL character is matched in Python the way SQLite
+  matches it (#3281).** Once SQLite accepts a pattern (it checks the length of the whole bound
+  pattern first), its `LIKE` reads the pattern and the value only up to their first NUL;
+  the Python twin of the SQL filter compared the whole strings. Context-window expansion could
+  therefore drop a neighbour the search had admitted, and `GET /api/chunks/{id}/similar` with
+  `namespace=default*%00suffix` could return one neighbour fewer than asked. Both now cut at
+  the NUL, as SQLite does. A `scope` value containing a NUL is still refused rather than read
+  as the glob before it; when the value is otherwise well-formed, the message now names the
+  NUL (a comma list mixed with a glob still gets that syntax error).
+
 - **A stored path or chunk body can no longer add a line to `mem_dedup_scan`'s output (#3391).**
   The default rendering turned only line feeds in a member's preview into spaces and printed its
   source path as stored, so a carriage return, U+0085, U+2028 or another line break in the first
