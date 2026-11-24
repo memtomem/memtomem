@@ -598,8 +598,10 @@ def test_ci_groups_each_job_per_pull_request_and_no_other_events() -> None:
     # would add activities whose ref this key has not been checked against.
     assert set(workflow[True]) == {"push", "pull_request", "workflow_dispatch"}, workflow[True]
     assert set(workflow[True]["pull_request"]) == {"branches"}, workflow[True]["pull_request"]
+    # ``always()`` with or without ``${{ }}`` counts. So does one inside a larger
+    # condition, which may not run unconditionally; this fails, it never misses.
     always = {
-        job_id for job_id, job in workflow["jobs"].items() if job.get("if") == "${{ always() }}"
+        job_id for job_id, job in workflow["jobs"].items() if "always()" in str(job.get("if", ""))
     }
     assert always == _AGGREGATORS, always
     for job_id, job in workflow["jobs"].items():

@@ -36,8 +36,9 @@ env:
   MEMTOMEM_TEST_HOME_GUARD: strict
 
 # Each job except the four aggregators (test (<os>), security-gates) has its own
-# concurrency group per PR, so a PR's newer run cancels the matching job of its
-# older run, job by job. Every other event keys on its own run id, so no main
+# concurrency group per PR: a job arriving in its group cancels the matching job
+# already there, and a newer run queues its jobs without waiting for the
+# older run to finish. Every other event keys on its own run id, so no main
 # push or manual dispatch cancels, or displaces a pending, job.
 #
 # The groups are per job, not one for the workflow: a workflow-level group holds
