@@ -27,6 +27,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   recording modes do. Plugins: `claude` 0.5.46, `codex` 0.3.44, `opencode` 0.3.42,
   `kimi` 0.2.32, `antigravity` 0.2.23.
 
+### Fixed
+
+- **`search.system_namespace_prefixes` refuses a prefix containing a NUL character (#3554).**
+  SQLite's `LIKE` reads a bound pattern only up to its first NUL, so the default-search
+  exclusion compared such a prefix with the text before the NUL exactly, while its Python twin
+  `has_namespace_prefix` (behind `NamespaceFilter.matches`) compared the whole prefix: with
+  `"arc\u0000"` configured, SQL hid the namespace `arc` and `matches` admitted it. The
+  validator now rejects the entry, naming its index. When a `config.json` or `config.d` file
+  supplies such a prefix, a tolerant load ignores that file's whole `[search]` section and keeps
+  the lower layers' values, and a strict load fails; when
+  `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` itself holds one, building the config fails. (An
+  environment value for the field wins over the files, so a file's prefix list is then skipped
+  and its other `[search]` settings still apply.) Tab and DEL are still accepted: namespaces can
+  hold them, and SQL and Python agree on them.
+
 ## [0.7.14] — 2026-11-24
 
 A patch of fixes, most of them in `mm init` for source checkouts and uv workspaces: it checks
