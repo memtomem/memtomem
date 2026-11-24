@@ -308,6 +308,12 @@ class TestFilterMatchesSqlParity:
         "back\\slash",
         "back\\\\slash",
         "trailing\\",
+        # SQLite's ``LIKE`` reads a value only up to its first NUL; ``IN`` and
+        # ``=`` compare past it (#3281).
+        "default\x00zzz",
+        "def\x00zzz",
+        "\x00",
+        "",
     )
 
     NAMESPACE_FILTERS = (
@@ -330,6 +336,16 @@ class TestFilterMatchesSqlParity:
         NamespaceFilter(pattern="*a*b*"),
         NamespaceFilter(pattern="a***"),
         NamespaceFilter(pattern="*" * 8 + "z"),
+        # A NUL in the pattern: SQLite stops reading there, so whatever
+        # follows it never takes part in the match (#3281).
+        NamespaceFilter(pattern="default*\x00suffix"),
+        NamespaceFilter(pattern="def*\x00"),
+        NamespaceFilter(pattern="\x00x"),
+        NamespaceFilter(pattern="*\\\x00"),
+        # Plain patterns that meet the NUL-bearing values above.
+        NamespaceFilter(pattern="default"),
+        NamespaceFilter(pattern="*zzz"),
+        NamespaceFilter(namespaces=("default\x00zzz",)),
         NamespaceFilter(exclude_prefixes=("back\\",)),
         NamespaceFilter(exclude_prefixes=("archive:", "agent-runtime:")),
         NamespaceFilter(exclude_prefixes=("ARCHIVE:",)),
@@ -363,6 +379,7 @@ class TestFilterMatchesSqlParity:
             ScopeFilter(scopes=("project_shared", "project_local")),
             ScopeFilter(pattern="project_*"),
             ScopeFilter(pattern="PROJECT_*"),
+            ScopeFilter(pattern="user*\x00x"),
         ),
         ids=lambda f: repr(f),
     )
@@ -372,7 +389,7 @@ class TestFilterMatchesSqlParity:
         # No project context: the emitted fragment is the explicit clause
         # alone, which is the part ``matches()`` is responsible for.
         fragment, params = scope_context_sql(scope_filter, None)
-        for value in ("user", "project_shared", "project_local", "projectXshared"):
+        for value in ("user", "project_shared", "project_local", "projectXshared", "user\x00x"):
             assert scope_filter.matches(value) == self._sql_admits(
                 "scope", fragment, list(params), value
             ), f"{scope_filter!r} disagrees with SQL on {value!r}"
@@ -400,6 +417,26 @@ class TestFilterMatchesSqlParity:
         assert NamespaceFilter(pattern=pattern).matches("agent-runtime:planner") is False
 
         assert time.perf_counter() - start < 1.0
+
+    @pytest.mark.parametrize(
+        ("value", "namespace"),
+        [
+            ("default*", "default"),
+            ("default*\x00suffix", "default"),
+            ("def*\x00", "default"),
+        ],
+    )
+    def test_a_parsed_glob_ignores_what_follows_a_nul(self, value, namespace):
+        """The rows of #3281, through the parse a surface calls.
+
+        ``GET /api/chunks/{id}/similar`` asks ``matches`` whether the source
+        chunk passes the filter before deciding how many rows to request; a
+        ``False`` here that SQL contradicts returned one neighbour short.
+        """
+        ns_filter = NamespaceFilter.parse(value, system_prefixes=("archive:",))
+
+        assert ns_filter is not None
+        assert ns_filter.matches(namespace) is True
 
     def test_trailing_escape_matches_nothing(self):
         """SQLite has nothing to escape there and matches no row."""
