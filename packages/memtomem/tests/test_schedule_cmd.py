@@ -59,6 +59,16 @@ class TestScheduleAdd:
         assert "invalid cron" in result.output.lower()
         comp.storage.schedule_insert.assert_not_awaited()
 
+    def test_date_that_never_occurs_rejected(self, runner, monkeypatch):
+        comp = _mock_components()
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+        result = runner.invoke(
+            cli, ["schedule", "add", "--cron", "0 0 30 2 *", "--job", "compaction"]
+        )
+        assert result.exit_code != 0
+        assert "invalid cron expression: '0 0 30 2 *' matches no date" in result.output
+        comp.storage.schedule_insert.assert_not_awaited()
+
     def test_unknown_job_rejected(self, runner):
         # click.Choice rejects pre-bootstrap, so no monkeypatch needed.
         result = runner.invoke(
