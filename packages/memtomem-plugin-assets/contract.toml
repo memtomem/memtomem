@@ -8,14 +8,14 @@ mcp_extras = ["onnx"]
 extra_tools = ["mem_update_coverage"]
 
 [plugins]
-claude_version = "0.5.44"
-codex_version = "0.3.42"
+claude_version = "0.5.45"
+codex_version = "0.3.43"
 automation_version = "0.3.27"
-opencode_version = "0.3.40"
-kimi_version = "0.2.30"
+opencode_version = "0.3.41"
+kimi_version = "0.2.31"
 hermes_version = "0.1.28"
 hermes_memory_version = "0.2.2"
-antigravity_version = "0.2.21"
+antigravity_version = "0.2.22"
 cursor_version = "0.1.0"
 openclaw_version = "0.1.5"
 
@@ -179,13 +179,21 @@ claude_host_tools = [
   "Bash(git rev-parse:*)",
   "Bash(git status:*)",
   "Bash(git --no-pager --no-replace-objects log --no-ext-diff --no-show-signature --encoding=UTF-8 -n 10 --format=%H%n%B --)",
+  "Bash(git --no-pager --no-replace-objects rev-list --count HEAD --)",
+  "Bash(git --no-pager --no-replace-objects log --no-ext-diff --no-show-signature --encoding=UTF-8 -n 100 --format=%H --)",
+]
+# backfill reads one commit per call at inventory position <K>. A Claude rule without `*`
+# matches one exact command, so the renderer grants one literal per K in range(stop) rather
+# than a wildcard whose trailing argument could be `--output=` (#2935, #3579).
+claude_host_tool_ranges = [
+  { template = "Bash(git --no-pager --no-replace-objects log --no-ext-diff --no-show-signature --encoding=UTF-8 -n 1 --skip=<K> --format=%H%n%B --)", stop = 100 },
 ]
 # Needs a project root, which a user-scope host does not have.
 scopes = ["project", "bound"]
 effect = "write"
 implicit = false
-argument_hint = "[full|topic|f|t] [focus]"
-input_kind = "update mode (full or topic)"
+argument_hint = "[full|topic|backfill|f|t|b] [focus]"
+input_kind = "update mode (full, topic, or backfill)"
 # Without a mode, update runs its incremental mode instead of asking or refusing.
 input_optional = true
 input_optional_mode = "incremental"

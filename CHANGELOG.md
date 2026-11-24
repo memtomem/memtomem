@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`update` gains an opt-in `backfill` mode that reaches commits older than the latest ten
+  (#3579).** Every mode read only the latest ten commits, so when more than ten landed
+  between two runs, `incremental` never saw the excess. `backfill` (shorthand `b`, only as
+  the whole first word, so `topic backfill plan` stays a `topic` run) lists the latest 100
+  SHAs, asks `mem_update_coverage` ten at a time which no run has recorded, and reads a
+  slice's unreviewed commits one commit per call, so no message is split out of a
+  multi-commit listing. A read counts only when its first line is the SHA asked for and the
+  host delivered it inline in full; the first slice with a read that counts is the one
+  reviewed, and a slice none of whose reads count is reported and passed over. The mode
+  reviews at most one slice per run,
+  records exactly the commits it read and reviewed, and reports the positions it checked,
+  the ones left unchecked, and every commit it could not read; commits deeper than 100 stay
+  out of reach. A coverage reply for another project root, or one whose counts do not add
+  up, stops the run before it writes. The Claude skill pre-approves each read as an exact
+  command, one per position, not a wildcard. No server change: the plugins need memtomem
+  0.7.2 or later with `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`, as the other two
+  recording modes do. Plugins: `claude` 0.5.45, `codex` 0.3.43, `opencode` 0.3.41,
+  `kimi` 0.2.31, `antigravity` 0.2.22.
+
 ### Fixed
 
 - **A stored path or chunk body can no longer add a line to `mem_dedup_scan`'s output (#3391).**

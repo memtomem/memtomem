@@ -40,7 +40,7 @@ skills, and MCP server are reloaded.
 > `env = { MEMTOMEM_EXTRA_TOOLS = "mem_update_coverage" }`
 > (memtomem 0.7.2 or later): the plugin's bundled server sets it, and without it
 > `memtomem-update` stops before writing in its default incremental mode and
-> in `full`.
+> in `full` and `backfill`.
 
 ## Included skills
 

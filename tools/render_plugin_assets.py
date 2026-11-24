@@ -105,6 +105,27 @@ def _yaml_q(value: str) -> str:
     return _q(value)
 
 
+_RANGE_PLACEHOLDER = "<K>"
+
+
+def claude_host_grants(workflow: dict) -> list[str]:
+    """The workflow's Claude ``Bash(...)`` grants, with each range expanded to literals.
+
+    A range is ``{template, stop}``: the template holds ``<K>`` exactly once and yields one
+    grant per K in ``range(stop)``. Tests read this list, not the contract's raw fields, so a
+    guard sees every grant the Claude skill ships.
+    """
+    grants = list(workflow.get("claude_host_tools", []))
+    for spec in workflow.get("claude_host_tool_ranges", []):
+        template, stop = spec["template"], spec["stop"]
+        if template.count(_RANGE_PLACEHOLDER) != 1:
+            raise ValueError(f"range template must hold {_RANGE_PLACEHOLDER} once: {template!r}")
+        if not isinstance(stop, int) or isinstance(stop, bool) or stop < 1:
+            raise ValueError(f"range stop must be a positive integer: {stop!r}")
+        grants.extend(template.replace(_RANGE_PLACEHOLDER, str(k)) for k in range(stop))
+    return grants
+
+
 def _allowed_tools(workflow: dict) -> str:
     names: list[str] = []
     for tool in workflow["tools"]:
@@ -114,7 +135,7 @@ def _allowed_tools(workflow: dict) -> str:
                 f"mcp__memtomem__{tool}",
             ]
         )
-    names.extend(workflow.get("claude_host_tools", []))
+    names.extend(claude_host_grants(workflow))
     return ", ".join(names)
 
 

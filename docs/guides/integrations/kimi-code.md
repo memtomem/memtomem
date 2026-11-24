@@ -29,7 +29,7 @@ Python you have (`uv tool install --python 3.13 'memtomem[all]'`, with your
 version in place of `3.13`) and set
 `"command": "memtomem-server"` with no `args`. The `env` block exposes
 `mem_update_coverage`, which the `memtomem-update` skill needs for its
-default incremental mode and for `full`; without that setting the skill
+default incremental mode and for `full` and `backfill`; without that setting the skill
 stops before writing whenever a coverage call is due, while `topic` still
 works. `mm init` writes the same `MEMTOMEM_EXTRA_TOOLS` line in memtomem
 `0.7.3` and later (the entry below also states the default `core` tool mode, which
