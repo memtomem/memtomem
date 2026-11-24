@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm init` shows a checkout's directory with control characters escaped (#3512).** The
+  `Source directory:` / `Project directory:` lines, the source and project recoveries for a
+  missing extra (inline, in the summary's `[!] Missing extras` warning and in the
+  `--non-interactive` refusal's `Install first:`), the `.venv not found` lines, and the hooks
+  step's `Merged →` target and skipped or error reasons printed the path as it was. A newline in
+  a directory name split those lines, and an escape sequence would act on the terminal. They now
+  go through `scrub_text`, which escapes non-printable characters (as `\xNN` escapes of their
+  filesystem bytes) and leaves printable text, non-ASCII included, as it is. The MCP command
+  written to the config keeps the path unchanged.
+
 - **A namespace or scope glob containing a NUL character is matched in Python the way SQLite
   matches it (#3281).** Once SQLite accepts a pattern (it checks the length of the whole bound
   pattern first), its `LIKE` reads the pattern and the value only up to their first NUL;
