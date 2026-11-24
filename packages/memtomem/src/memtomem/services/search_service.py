@@ -122,8 +122,8 @@ def validate_scope_vocabulary(scope: str | None) -> str | None:
     Raises:
         InvalidScopeFilterError: the value mixes a comma list with a glob
             (raised by the parse this delegates to), an exact value or a
-            member of a comma list is not a scope tier, or a glob selects
-            no tier at all.
+            member of a comma list is not a scope tier, a glob selects
+            no tier at all, or the value contains a NUL character.
     """
     if scope is None:
         return None
@@ -135,6 +135,15 @@ def validate_scope_vocabulary(scope: str | None) -> str | None:
     # parse would answer ``project_*,user`` with "matches no scope tier",
     # which is true of the string and useless to the person who typed it.
     parsed = ScopeFilter.parse(scope)
+    # No tier contains a NUL. Asked as a glob, the check below would read
+    # ``project_*\x00x`` as ``project_*``, since ``matches`` stops where
+    # SQLite's ``LIKE`` stops; a NUL is never what the caller meant.
+    if "\x00" in scope:
+        raise InvalidScopeFilterError(
+            f"scope {scope!r} contains a NUL character, which no scope tier does. "
+            f"Use one or more of {', '.join(sorted(_SCOPE_TIERS))}, "
+            'or a glob ("project_*").'
+        )
     if parsed is not None and parsed.pattern:
         if not any(parsed.matches(tier) for tier in _SCOPE_TIERS):
             raise InvalidScopeFilterError(
