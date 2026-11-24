@@ -108,7 +108,7 @@ def _like_glob_matches(pattern: str, value: str) -> bool:
     ``_`` and turning ``*`` into ``%``, then compare with
     ``LIKE ? ESCAPE '\\'`` (:func:`memtomem.storage.sqlite_helpers.
     namespace_sql`, :func:`memtomem.storage.sqlite_scope._scopes_glob_clause`).
-    Three consequences of that contract are easy to get wrong in Python and
+    Four consequences of that contract are easy to get wrong in Python and
     are pinned by the parity tests:
 
     - A literal ``%`` the user typed is **not** escaped by the emitter, so it
@@ -117,11 +117,19 @@ def _like_glob_matches(pattern: str, value: str) -> bool:
       would also read ``?`` and ``[…]`` as wildcards. Never use ``fnmatch``.
     - SQLite's default ``LIKE`` folds case for **ASCII only**, so ``Ü`` does
       not match ``ü``.
+    - Once SQLite accepts a pattern, its ``LIKE`` reads both the pattern and
+      the value only up to their first NUL, so whatever follows one takes no
+      part in the match. Both are cut there before matching. (Accepting comes
+      first: SQLite checks the length of the whole bound pattern, the part
+      after a NUL included, and refuses one that is too long with an error.)
 
     A pattern ending in a lone escape character has nothing to escape and
     matches nothing in SQLite, so it returns ``False`` here rather than
-    falling back to a literal backslash.
+    falling back to a literal backslash. That holds for an escape right
+    before a NUL too, since the pattern ends there.
     """
+    pattern = pattern.split("\x00", 1)[0]
+    value = value.split("\x00", 1)[0]
     sql_pattern = _ascii_fold(pattern.replace("_", r"\_").replace("*", "%"))
 
     # Tokenized and matched with the two-pointer LIKE algorithm rather than

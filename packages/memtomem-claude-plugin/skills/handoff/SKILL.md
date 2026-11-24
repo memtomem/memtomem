@@ -59,8 +59,9 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
 1. Read `git rev-parse HEAD` and `git status --porcelain=v1 --branch`. Summarize the work from
    the live repository and the current conversation. Do not include credentials, patch bodies,
    complete transcripts, or raw command-output dumps. Keep file paths, code symbols, command
-   strings, and direct quotes of the user verbatim — never translate or paraphrase them — and
-   write the rest in the language this project's existing memories use.
+   strings, GitHub issue and pull request references, and direct quotes of the user
+   verbatim — never translate or paraphrase them — and write the rest in the language this
+   project's existing memories use.
 2. Generate one canonical lowercase UUID as the `handoff_id` — nothing else is a valid id, and
    resume rejects anything that is not one. Create a single compact record in this exact field
    order and pass it to `mem_add` **inside one fenced ```text block**, fence lines included.
@@ -70,25 +71,21 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    that all inherit the same tags, and a lookup can land on a fragment that is missing most
    fields. The fence does not keep the record in one chunk under an exact token budget
    (`indexing.hard_max_chunk_tokens`, 384 on the E5 profile): a record over that budget is
-   re-split, fence included, and the split prefers line boundaries. A full-size record, or a
-   shorter one with Korean text or a long root, can be stored as two or three rows that all
-   carry the same tags; resume reads the union of those rows. While every field line fits
-   the budget, each row starts at a field key or a fence line (a last row can hold only the
-   closing fence).
-   The complete record has a hard maximum of 1,200 characters: shorten values
-   until it fits, and never call `mem_add` with an oversized record. Apply these value caps:
-   `objective` 100 characters, `completed` 240, `changed_files` 180 and at most 10 paths,
-   `artifacts` 160 and at most 4 paths, `worktree_state` 80, `validation` 120, `blockers` 80,
-   and `next_action` 120.
+   re-split, fence included, and the split prefers line boundaries. A record over the size
+   target below, or one with a long root, can be stored as two or three rows that all carry
+   the same tags, each ranking on its own in search and taking its own slot in brief's
+   recall window; resume reads the union of those rows.
+   While every field line fits the budget, each row starts at a field key or a fence line (a
+   last row can hold only the closing fence).
 
    `artifacts` lists the absolute paths of outputs this work produced outside the repository,
    such as a plan file in a runtime's own session directory, or exactly `none`. Save always
    writes the field. Never truncate or shorten an artifact path: a cut path points at nothing,
    the same reason `project_root` is never cut. The 160 characters cover the whole value —
-   paths, the `, ` separators, and a `+<n> omitted` suffix. Add whole paths in order while the
-   value, including the suffix it would then need, still fits; leave out every path that does
-   not and count it in the suffix. When the record is over 1,200 characters, shorten other
-   fields, never a path.
+   paths, the `, ` separators, and a `+<n> omitted` suffix. Add whole paths in order, at most
+   4, while the value, including the suffix it would then need, still fits; leave out every
+   path that does not and count it in the suffix. When the record is over 1,200 characters,
+   shorten other fields, never a path.
    `project_root` is written in full — it is compared against the live Git root, so a
    truncated value would be worse than none. If the absolute root exceeds 240 characters,
    stop and report that instead of shortening it. Under the E5 profile's default budget, 240
@@ -104,6 +101,35 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    codes in bytewise order, then `; first=<first sorted path>` if it still fits within 80
    characters. Never restate paths already listed in `changed_files` beyond that first path.
 
+   Size the record last. The raw limits come first, counted in plain characters: the value
+   caps — `objective` 80 characters, `completed` 160, `changed_files` 120 and at most 8 paths,
+   `artifacts` 160 and at most 4 paths, `worktree_state` 80, `validation` 90, `blockers` 60,
+   and `next_action` 120 — and a hard maximum of 1,200 characters for the complete record;
+   never call `mem_add` with an oversized record. Then the size target: aim for at most 850
+   characters for the complete record, fence lines included, counting each Korean, Japanese,
+   or Chinese character as two. The characters that count as two are Hangul, hiragana,
+   katakana, and Han characters and CJK or fullwidth punctuation (such as `。`, `、`, `「`,
+   and `，`); every other character, including whitespace, counts as one. A store that indexes
+   with an exact token budget, such as 384 tokens under the `multilingual-e5-small` profile,
+   splits a record over that budget into rows; the target is a practical one for that
+   budget, not a guarantee.
+
+   Only two kinds of change fit a record to these limits: shortening the prose of
+   `objective`, `completed`, `validation`, `blockers`, and `next_action`, and moving whole
+   paths out of `changed_files` into its omitted count. Nothing else changes: not
+   `handoff_id`, the runtimes, `project_root`, `git_head`, `worktree_state`, or `artifacts`.
+   Inside the prose, a verbatim string from step 1 (a file path, code symbol, command string,
+   GitHub reference, or direct quote of the user) is kept whole or left out whole, never cut;
+   when leaving one out would leave a prose field saying nothing, say in words what the field
+   needs to convey instead. The one exception is `next_action`: no verbatim string in it is
+   ever left out, because the next agent acts on exactly those strings and Resume step 7 reads
+   its GitHub reference. Shorten the words around them, and when they still do not fit the
+   `next_action` cap, that is a raw limit this rule cannot meet. Every field keeps exactly one
+   line, and that is a raw limit too: a verbatim string in `next_action` that spans lines is
+   neither joined nor left out, so it stops Save the same way. If the raw limits
+   cannot be met this way, stop and report which value is in the way instead of calling
+   `mem_add`. If they are met but the record is still over the target, save it anyway.
+
    ```text
    handoff_id: <id>
    from_runtime: <runtime>
@@ -111,7 +137,7 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    project_root: <absolute-git-root>
    objective: <one-line objective>
    completed: <compact summary>
-   changed_files: <comma-separated paths, at most 10; include an omitted count if needed>
+   changed_files: <comma-separated paths, at most 8; include an omitted count if needed>
    artifacts: <none or comma-separated absolute paths outside the repository, at most 4>
    git_head: <full commit sha>
    worktree_state: <clean or compact porcelain summary>
@@ -137,7 +163,8 @@ they cannot, do not save: a fabricated checkpoint is worse than none — stop an
    result's `- Entry chunks:` line, unchanged. If the result has no such line, say that the
    server did not report it; do not substitute `- Chunks indexed:`, which counts the whole
    file. When the result is a refusal or an error instead, report it unchanged and add no
-   file or chunk count of your own. Surface any similar-memory or safety warning unchanged.
+   file or chunk count of your own. On a confirmed write of a record over the size target,
+   also report its weighted count. Surface any similar-memory or safety warning unchanged.
 
 ## Resume
 

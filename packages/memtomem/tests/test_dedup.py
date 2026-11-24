@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -892,7 +893,8 @@ class TestMcpScanCoverage:
                     "pairs_found": 501,
                 },
                 "Scanned all 3 scannable chunks; near-duplicate search probed 3; "
-                "limit=50 kept 50 of 501 pairs: one call lists at most 500.",
+                "limit=50 kept 50 of 501 pairs: one call lists at most 500; to see the next "
+                "ones, scan again from the same position with offset=50.",
                 id="limit-cut-more-pairs-than-any-limit",
             ),
             pytest.param(
@@ -989,16 +991,18 @@ class TestMcpScanCoverage:
     }
 
     @pytest.mark.asyncio
-    async def test_at_the_largest_limit_the_cut_names_no_remedy(self, monkeypatch):
+    async def test_at_the_largest_limit_the_cut_names_the_next_offset(self, monkeypatch):
         # 501 pairs cannot be asked for: the tool refuses a limit above 500.
-        # The line says so and stops; a smaller pool would report other pairs.
+        # The line names the offset that lists the rest of this pool, not a
+        # smaller pool, which can report other pairs.
         tool, _ = self._run(monkeypatch, [], {**self._WHOLE, "pairs_found": 501})
 
         out = await tool.mem_dedup_scan(limit=500, ctx=None)
 
         assert out.splitlines()[-1] == (
             "Scanned all 3 scannable chunks; near-duplicate search probed 3; "
-            "limit=500 kept 500 of 501 pairs: one call lists at most 500."
+            "limit=500 kept 500 of 501 pairs: one call lists at most 500; to see the next "
+            "ones, scan again from the same position with offset=500."
         )
         assert await tool.mem_dedup_scan(limit=501, ctx=None) == (
             "Error: limit must be between 1 and 500, got 501."
@@ -1022,7 +1026,7 @@ class TestMcpScanCoverage:
         await tool.mem_dedup_scan(after=typed, ctx=None)
 
         app.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
-            threshold=0.92, limit=50, max_scan=500, after=UUID(int=500)
+            threshold=0.92, limit=50, max_scan=500, after=UUID(int=500), offset=0
         )
 
     @pytest.mark.asyncio
@@ -1032,7 +1036,7 @@ class TestMcpScanCoverage:
         await tool.mem_dedup_scan(ctx=None)
 
         app.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
-            threshold=0.92, limit=50, max_scan=500, after=None
+            threshold=0.92, limit=50, max_scan=500, after=None, offset=0
         )
 
     @pytest.mark.asyncio
@@ -1305,6 +1309,308 @@ class TestCursorAndLimit:
 
         assert (first, second) == ([], [])
         assert [(c.chunk_a.id, c.chunk_b.id, c.exact) for c in together] == [(a.id, b.id, True)]
+
+
+def _rows(candidates):
+    return [(c.chunk_a.id, c.chunk_b.id, c.exact, c.score) for c in candidates]
+
+
+def _copies(n: int, *, first_id: int = 1) -> list[Chunk]:
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return [
+        _mk("one text", created_at=t0 + timedelta(seconds=i), id=UUID(int=first_id + i))
+        for i in range(n)
+    ]
+
+
+class TestPairOffset:
+    """``offset`` lists the pairs of one pool after the ones ``limit`` returned."""
+
+    @pytest.mark.asyncio
+    async def test_the_pair_past_the_largest_limit_is_listed_with_an_offset(self, scanner_factory):
+        # #3433: one pool of 502 copies holds 501 pairs, one more than a call
+        # may ask for, and no ``after`` or ``max_scan`` reaches the 501st.
+        same = _copies(502)
+        ids = [c.id for c in same]
+        scanner, _ = scanner_factory(same, dense_enabled=False)
+
+        whole, _ = await scanner.scan_with_coverage(limit=1000, max_scan=502)
+        cut, first = await scanner.scan_with_coverage(limit=500, max_scan=502)
+        rest, second = await scanner.scan_with_coverage(limit=500, max_scan=502, offset=500)
+
+        assert [(c.chunk_a.id, c.chunk_b.id) for c in rest] == [(ids[0], ids[501])]
+        assert _rows(cut) + _rows(rest) == _rows(whole)
+        assert (first.pairs_found, second.pairs_found) == (501, 501)
+
+    @pytest.mark.asyncio
+    async def test_pages_join_into_the_one_call_list_in_order(self, scanner_factory):
+        # Exact pairs, near pairs with one score and a near pair with another:
+        # the pages of every size, joined, are the list one call returns.
+        near = [_mk(f"near {i}") for i in range(4)]
+        sims = {
+            **_both_ways("near 0", "near 1", 0.95),
+            **_both_ways("near 0", "near 2", 0.95),
+            **_both_ways("near 2", "near 3", 0.97),
+        }
+        scanner, _ = scanner_factory([*_copies(4, first_id=100), *near], sims)
+        full, coverage = await scanner.scan_with_coverage(limit=100)
+        assert (coverage.pairs_found, sum(c.exact for c in full)) == (6, 3)
+
+        for limit in range(1, len(full) + 2):
+            joined: list = []
+            # Bounded: a page that never comes back empty fails, not hangs.
+            for _ in range(len(full) + 2):
+                page, page_coverage = await scanner.scan_with_coverage(
+                    limit=limit, offset=len(joined)
+                )
+                assert page_coverage.pairs_found == len(full)
+                if not page:
+                    break
+                joined += page
+            else:
+                pytest.fail(f"limit={limit}: no empty page after {len(full) + 2} pages")
+            assert _rows(joined) == _rows(full), limit
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("past", [0, 1, 5], ids=["at-the-count", "one-past", "far-past"])
+    async def test_an_offset_past_the_last_pair_returns_none(self, scanner_factory, past):
+        scanner, _ = scanner_factory(_copies(4), dense_enabled=False)
+
+        candidates, coverage = await scanner.scan_with_coverage(offset=3 + past)
+
+        assert (candidates, coverage.pairs_found) == ([], 3)
+
+    @pytest.mark.asyncio
+    async def test_a_negative_offset_is_rejected_before_the_pool_is_read(self, scanner_factory):
+        scanner, storage = scanner_factory(_copies(3))
+
+        with pytest.raises(ValueError, match=r"^offset must be at least 0, got -1$"):
+            await scanner.scan_with_coverage(offset=-1)
+        assert (storage.cursors, storage.lookups) == ([], [])
+
+    @pytest.mark.asyncio
+    async def test_limit_counts_from_the_offset(self, scanner_factory):
+        # ``limit`` applies to the pairs left after the offset, not to the
+        # list's start: ``[2:5]`` keeps three pairs where ``[2:3]`` keeps one.
+        scanner, _ = scanner_factory(_copies(11), dense_enabled=False)
+        full = _rows((await scanner.scan_with_coverage(limit=100))[0])
+        assert len(full) == 10
+
+        for offset in range(12):
+            for limit in range(1, 13):
+                got, _ = await scanner.scan_with_coverage(limit=limit, offset=offset)
+                assert _rows(got) == full[offset : offset + limit], (offset, limit)
+
+
+class TestMcpPairOffset:
+    """``mem_dedup_scan`` takes ``offset``, and its last line names the next one."""
+
+    _WHOLE = {
+        "pool": 3,
+        "eligible": 3,
+        "near_search_enabled": True,
+        "probed": 3,
+        "without_vector": 0,
+    }
+    _HEAD = "Scanned all 3 scannable chunks; near-duplicate search probed 3"
+
+    @staticmethod
+    def _run(monkeypatch, coverage, *, brief=False):
+        from memtomem.search.dedup import DedupCoverage
+        from memtomem.server.tools import dedup_decay
+
+        app = MagicMock()
+        app.config.maintenance.experimental_duplicate_brief = brief
+        app.dedup_scanner.scan_with_coverage = AsyncMock(
+            return_value=([], DedupCoverage(**coverage))
+        )
+        app.dedup_scanner.member_evidence = AsyncMock(return_value={})
+
+        async def _fake_app(_ctx):
+            return app
+
+        monkeypatch.setattr(dedup_decay, "_get_app_initialized", _fake_app)
+        return dedup_decay, app
+
+    @staticmethod
+    async def _mem_do(**params):
+        from memtomem.server import mcp  # noqa: F401  (registers the tools)
+        from memtomem.server.tools.meta import mem_do
+
+        return await mem_do(action="dedup_scan", params=params, ctx=None)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("offset", "limit", "found", "clause"),
+        [
+            pytest.param(
+                50,
+                50,
+                501,
+                "offset=50 kept pairs 51 to 100 of 501: to see the next ones, scan again "
+                "from the same position with offset=100",
+                id="middle-page",
+            ),
+            pytest.param(
+                10,
+                20,
+                57,
+                "offset=10 kept pairs 11 to 30 of 57: to see the next ones, scan again "
+                "from the same position with offset=30",
+                id="middle-page-of-a-pool-a-higher-limit-could-list",
+            ),
+            pytest.param(500, 50, 501, "offset=500 kept pairs 501 to 501 of 501", id="last-page"),
+            pytest.param(
+                450, 50, 500, "offset=450 kept pairs 451 to 500 of 500", id="ends-on-the-limit"
+            ),
+            pytest.param(10, 50, 57, "offset=10 kept pairs 11 to 57 of 57", id="room-to-spare"),
+            pytest.param(
+                501, 50, 501, "offset=501 is past the last pair (501 found)", id="at-the-count"
+            ),
+            pytest.param(
+                600, 50, 501, "offset=600 is past the last pair (501 found)", id="beyond-it"
+            ),
+            pytest.param(5, 50, 0, "offset=5 is past the last pair (0 found)", id="no-pairs"),
+        ],
+    )
+    async def test_the_last_line_says_which_pairs_this_page_holds(
+        self, monkeypatch, offset, limit, found, clause
+    ):
+        tool, _ = self._run(monkeypatch, {**self._WHOLE, "pairs_found": found})
+
+        out = await tool.mem_dedup_scan(offset=offset, limit=limit, ctx=None)
+
+        assert out.splitlines()[-1] == f"{self._HEAD}; {clause}."
+
+    @pytest.mark.asyncio
+    async def test_moving_after_on_says_to_leave_the_offset_behind(self, monkeypatch):
+        # The next pool's first pairs are at offset 0; a kept offset skips them.
+        coverage = {
+            **self._WHOLE,
+            "eligible": 900,
+            "pairs_found": 501,
+            "remaining": 897,
+            "next_after": UUID(int=3),
+        }
+        tool, _ = self._run(monkeypatch, coverage)
+
+        out = await tool.mem_dedup_scan(offset=500, ctx=None)
+
+        assert out.splitlines()[-1] == (
+            "Scanned 3 of 900 scannable chunks (the first 3 in chunk-id order); "
+            "near-duplicate search probed 3; offset=500 kept pairs 501 to 501 of 501; "
+            '897 remain: continue with after="00000000-0000-0000-0000-000000000003" '
+            "and no offset."
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("brief", [False, True], ids=["plain", "brief"])
+    async def test_a_page_past_the_last_pair_does_not_read_as_a_clean_pool(
+        self, monkeypatch, brief
+    ):
+        tool, app = self._run(monkeypatch, {**self._WHOLE, "pairs_found": 3}, brief=brief)
+
+        out = await tool.mem_dedup_scan(offset=3, ctx=None)
+
+        assert out.splitlines() == [
+            "No duplicate pairs at offset=3 (threshold=0.92).",
+            f"{self._HEAD}; offset=3 is past the last pair (3 found).",
+        ]
+        app.dedup_scanner.member_evidence.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_offset_into_a_pool_without_pairs_reads_as_no_duplicates(self, monkeypatch):
+        tool, _ = self._run(monkeypatch, self._WHOLE)
+
+        out = await tool.mem_dedup_scan(offset=3, ctx=None)
+
+        assert out.splitlines()[0] == "No duplicate chunks found (threshold=0.92)."
+
+    @pytest.mark.asyncio
+    async def test_the_offset_reaches_the_scanner(self, monkeypatch):
+        tool, app = self._run(monkeypatch, self._WHOLE)
+
+        await tool.mem_dedup_scan(offset=7, ctx=None)
+
+        app.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
+            threshold=0.92, limit=50, max_scan=500, after=None, offset=7
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad", [-1, 1.5, "5", None, True], ids=["negative", "float", "text", "null", "bool"]
+    )
+    async def test_an_offset_that_is_not_a_count_is_an_error_before_scanning(
+        self, monkeypatch, bad
+    ):
+        # ``mem_do`` hands raw values over: only booleans are checked there.
+        _, app = self._run(monkeypatch, self._WHOLE)
+
+        out = await self._mem_do(offset=bad)
+
+        assert out == f"Error: offset must be a whole number of at least 0, got {bad!r}."
+        app.dedup_scanner.scan_with_coverage.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_next_offset_is_a_number_when_limit_arrives_as_true(self, monkeypatch):
+        # The range check on ``limit`` accepts ``True`` through ``mem_do``;
+        # the offset the line names must still be one this tool accepts.
+        self._run(monkeypatch, {**self._WHOLE, "pairs_found": 501})
+
+        out = await self._mem_do(limit=True)
+
+        assert _NEXT_OFFSET.findall(out.splitlines()[-1]) == ["1"]
+
+    @pytest.mark.asyncio
+    async def test_following_the_named_offsets_lists_the_whole_pool_once(self, monkeypatch):
+        # A real scanner behind ``mem_do``: more pairs than any limit, a limit
+        # below 500 and a pool that is not the first, so the first page names
+        # an offset rather than a higher limit. The pairs printed over the
+        # pages, in order and with repeats kept, are the scanner's list.
+        from memtomem.server.tools import dedup_decay
+
+        filler = _mk("before the pool", id=UUID(int=1))
+        near = [_mk(f"near {i}", id=UUID(int=2000 + i)) for i in range(3)]
+        sims = {**_both_ways("near 0", "near 1", 0.95), **_both_ways("near 1", "near 2", 0.96)}
+        storage = _FakeStorage([filler, *_copies(503, first_id=10), *near], sims)
+        app = MagicMock()
+        app.config.maintenance.experimental_duplicate_brief = False
+        app.dedup_scanner = DedupScanner(storage)
+
+        async def _fake_app(_ctx):
+            return app
+
+        monkeypatch.setattr(dedup_decay, "_get_app_initialized", _fake_app)
+        full, coverage = await app.dedup_scanner.scan_with_coverage(
+            limit=10_000, max_scan=600, after=UUID(int=1)
+        )
+        assert coverage.pairs_found == 504
+
+        printed: list[tuple[str, str]] = []
+        offsets = [0]
+        # Bounded, and each named offset must move on: a footer that names the
+        # same offset again fails here instead of hanging.
+        for _ in range(5):
+            out = await self._mem_do(
+                limit=200, max_scan=600, after=str(UUID(int=1)), offset=offsets[-1]
+            )
+            # ``strict``: an A line without its B line is a malformed page.
+            printed += zip(_MEMBER_A.findall(out), _MEMBER_B.findall(out), strict=True)
+            named = _NEXT_OFFSET.findall(out.splitlines()[-1])
+            if not named:
+                break
+            assert int(named[0]) > offsets[-1]
+            offsets.append(int(named[0]))
+        else:
+            pytest.fail(f"still naming offsets after {offsets}")
+
+        assert offsets == [0, 200, 400]
+        assert printed == [(str(c.chunk_a.id), str(c.chunk_b.id)) for c in full]
+
+
+_NEXT_OFFSET = re.compile(r"scan again from the same position with offset=(\w+)")
+_MEMBER_A = re.compile(r"^  A \(([0-9a-f-]{36})\)", re.M)
+_MEMBER_B = re.compile(r"^  B \(([0-9a-f-]{36})\)", re.M)
 
 
 class TestMergeDryRun:

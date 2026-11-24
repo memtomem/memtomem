@@ -90,8 +90,8 @@ to run instead depends on where those settings live:
   directories.
 
 ```bash
-uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm init --preset minimal --non-interactive --mcp skip
-uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm status
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.14' mm init --preset minimal --non-interactive --mcp skip
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.14' mm status
 ```
 
 These commands and the plugin's own server launch pass `--python 3.12`, so
@@ -126,7 +126,7 @@ If your settings live only in `config.d/` fragments or `MEMTOMEM_*` variables,
 preview them instead:
 
 ```bash
-uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm config show
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.14' mm config show
 ```
 
 A warning it prints, some of them on stderr, means a fragment or setting was not
@@ -145,7 +145,7 @@ Open the terminal in **the root of the project you are onboarding**, and run
 this diagnostic from the same folder:
 
 ```bash
-uvx --python 3.12 --from "memtomem[all]==0.7.13" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.14" mm doctor --claude-mcp
 ```
 
 The plugin does not put `mm` on your PATH, so use the pinned command above.
@@ -225,7 +225,7 @@ You are connected when you see a real MCP tool call and the storage and
 database path match the ones you saw earlier. An install message, a list of
 tool names, or an internal error is not success. If there is an error, check
 the plugin's actual launch command and dependencies; the default server pin is
-`memtomem[onnx]==0.7.13`. Confirming the plugin is enabled and successfully
+`memtomem[onnx]==0.7.14`. Confirming the plugin is enabled and successfully
 reading data are separate steps.
 
 If you use Codex CLI, skip this section and follow Path B only.
@@ -332,7 +332,7 @@ specific test before every PR", needs its own store. Initialize it at the root
 of the actual Git repository:
 
 ```bash
-uvx --python 3.12 --from 'memtomem[onnx]==0.7.13' mm mem init --scope project_local
+uvx --python 3.12 --from 'memtomem[onnx]==0.7.14' mm mem init --scope project_local
 ```
 
 This creates and registers a local memory tier that is not committed to Git.

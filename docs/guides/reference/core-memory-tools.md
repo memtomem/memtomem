@@ -629,7 +629,8 @@ them with HTTP 409:
   safe whole-line rewrite. Edit the original file and re-index it.
 - `masked_projection_read_only` — an edit of a masked projection from a
   reviewed masking manifest. Edit the original source and re-index it. A
-  delete of such a chunk is refused as `source_read_only`.
+  delete of such a chunk is refused as `source_read_only` while its file is
+  on disk.
 - `source_excluded` — indexing now skips the file (an exclude pattern, a
   built-in rule, or a nested git worktree), so the edit would not reach the
   index.
@@ -642,11 +643,13 @@ them with HTTP 409:
 A chunk whose file has gone missing is held outside search (unless the file
 is under `indexing.retain_missing_dirs`, which keeps it searchable as an
 archive) but can still be reached by ID with `mem_read` and `mem_related`.
-`mem_edit` and `mem_delete(chunk_id=)` rewrite the file, so they refuse such a
-chunk and write nothing: `source_missing` when the file is gone, or a
-"source directory has been removed" error when its whole directory is.
-`mem_delete(source_file=)` still removes the index rows, and so does the
-Web UI's chunk delete. See
+`mem_edit` rewrites the file, so it refuses such a chunk and writes nothing:
+`source_missing` when the file is gone, or a "source directory has been
+removed" error when its whole directory is. `mem_delete(chunk_id=)` and the
+Web UI's chunk delete remove that one chunk from the index instead and leave
+the source file untouched; `mem_delete(source_file=)` removes all of the
+file's rows. A file under `indexing.read_only_memory_dirs` is still refused.
+See
 [Orphan cleanup](organization-maintenance.md#orphan-cleanup).
 
 > **Note**: After editing, the chunk gets a new UUID (the old one is replaced during re-indexing). If you need to reference it again, search for the updated content.
@@ -669,14 +672,16 @@ whether the deletion survives:
   discovery walk. Use them to clear stale rows, not to make a memory stay gone.
 - `chunk_id=` is the outlier: it removes the chunk's line range from the
   markdown file itself and re-indexes. The content is gone from disk, so
-  re-indexing has nothing to restore.
+  re-indexing has nothing to restore. When the file is already missing from
+  disk, it removes the chunk from the index instead and does not write the
+  file, as the Web UI's chunk delete does.
 
 All three forms take `confirm_project_shared=True` when the deletion would
 touch `project_shared` chunks — the same gate `mem_edit` takes above. The
 `source_file=` and `namespace=` forms are all-or-nothing: one `project_shared`
-chunk in the set requires the confirmation for the whole call. The
-`chunk_id=` form rewrites the file, so it is refused for the same reasons
-as `mem_edit`.
+chunk in the set requires the confirmation for the whole call. When the
+`chunk_id=` form rewrites the file, it is refused for the same reasons as
+`mem_edit`.
 
 `source_file=` names an indexed file by the path `mem_list` shows, or by a
 path relative to the first memory dir. It is matched to the stored path as
