@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import stat
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -281,11 +283,14 @@ async def _namespace_mix_refusal(
 
 @asynccontextmanager
 async def _locked_chunk(
-    app: AppContext, uid: UUID, chunk_id: str
+    app: AppContext, uid: UUID, chunk_id: str, *, rewrite_guard: bool = True
 ) -> AsyncIterator[tuple[Chunk | None, str | None, bool]]:
     """Yield ``(chunk, None, cross_process_held)`` with the source file's L1+L2
     locks held and the chunk re-fetched fresh under them, or
     ``(None, error_message, cross_process_held)``.
+
+    ``rewrite_guard=False`` leaves out :func:`_scope_loss_refusal`, for a caller
+    that may only remove the row and asks it itself before any rewrite.
 
     ``cross_process_held`` is ``False`` when the source's directory was gone and
     L2 degraded to its in-process layer (#2346). A caller that then writes bytes
@@ -382,7 +387,11 @@ async def _locked_chunk(
                         yield None, f"Error: chunk {chunk_id} not found.", cross_process_held
                         return
                     if AppContext.memory_file_lock_key(fresh.metadata.source_file) == key:
-                        refusal = await _scope_loss_refusal(app, fresh, chunk_id)
+                        refusal = (
+                            await _scope_loss_refusal(app, fresh, chunk_id)
+                            if rewrite_guard
+                            else None
+                        )
                         if refusal is not None:
                             yield None, refusal, cross_process_held
                             return
@@ -1809,6 +1818,124 @@ async def mem_edit(
         ) + _rewrite_notices("edit", stats, meta.source_file)
 
 
+def _gate_b_refusal(
+    meta: ChunkMetadata, chunk_id: str, confirm_project_shared: bool, *, surface: str
+) -> str | None:
+    """ADR-0011 Gate B for a chunk delete, and its consent audit when it passes."""
+    from memtomem import privacy
+
+    inferred_scope = meta.scope or "user"
+    if inferred_scope != "project_shared":
+        # An ordinary user-tier delete asked for no consent and must not be
+        # recorded as having given one.
+        return None
+    if not confirm_project_shared:
+        logger.info(
+            f"{surface} rejected project_shared chunk without confirmation",
+            extra={"chunk_id": chunk_id, "scope": inferred_scope},
+        )
+        return "Error: deleting scope='project_shared' chunks requires confirm_project_shared=True."
+    privacy.emit_project_shared_confirmation(
+        surface=surface,
+        mechanism="param",
+        action="delete",
+        audit_context={"chunk_id": chunk_id},
+    )
+    return None
+
+
+def _stat_unless_missing(path: Path) -> os.stat_result | None:
+    """``path``'s stat, or ``None`` when nothing is there; other failures raise."""
+    try:
+        return path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+async def _source_missing_for_delete(
+    chunk: Chunk, chunk_id: str, cross_process_held: bool
+) -> tuple[bool, str | None]:
+    """Whether a chunk delete may remove only the row: ``(missing, refusal)``.
+
+    The web route's policy (``web/routes/chunks.py`` ``delete_chunk``). A span
+    that took no cross-process lock had no directory to lock in, and is decided
+    on that, not on a stat: the file can come back after the acquire, and the
+    row-only delete then writes no bytes to it (#2346). Otherwise only confirmed
+    absence counts. A stat that fails another way, or finds something other
+    than a regular file, is refused: neither is an archive, and a FIFO there
+    would block the pre-image read.
+    """
+    if not cross_process_held:
+        return True, None
+    try:
+        found = await asyncio.to_thread(_stat_unless_missing, chunk.metadata.source_file)
+    except OSError:
+        logger.warning("Could not inspect the source of chunk %s", chunk_id, exc_info=True)
+        return False, (
+            f"Error: could not access chunk {chunk_id}'s source file; nothing was deleted. "
+            "Retry once it is accessible."
+        )
+    if found is None:
+        return True, None
+    if not stat.S_ISREG(found.st_mode):
+        return False, (
+            f"Error: chunk {chunk_id}'s source is not a regular file; nothing was deleted. "
+            "Repair or reindex the source and retry."
+        )
+    return False, None
+
+
+async def _delete_row_of_missing_source(
+    app: AppContext,
+    chunk: Chunk,
+    chunk_id: str,
+    confirm_project_shared: bool,
+    *,
+    surface: str,
+) -> str:
+    """Remove the row of a chunk whose source file is missing; the source is not written (#2842).
+
+    Runs under the source's locks. The checks that decide the delete read the
+    writer inside the delete's own transaction, so nothing commits between
+    them and the delete (#3202): a redaction hold placed or a re-scope made
+    since the locked fetch is judged here. The config-level read-only and
+    managed-source gates are asked again here too, as the rewrite asks them
+    again after its locks: ``_locked_chunk`` asked them before it waited, and
+    root reconciliation can change both meanwhile. The rewrite's own gates
+    (stored read-only flags, exclusion, the scope-loss guard) are left out, as
+    on the web route: they protect bytes and a re-index, and there is neither.
+    """
+    source_file = chunk.metadata.source_file
+    provenance_session_id = await capture_session_for_untracked_write(app)
+    async with _gated_delete_transaction(app):
+        fresh = await app.storage.get_chunk(chunk.id, exclude_withheld=True, read_writer=True)
+        # Resolved here, not before the wait: a project tier unregistered
+        # meanwhile puts the caller outside a project its row still names.
+        if fresh is None or not in_boundary(fresh, caller_boundary(app)):
+            return f"Error: chunk {chunk_id} not found."
+        if str(fresh.metadata.source_file) != str(source_file):
+            raise RetryableError(
+                f"chunk {chunk_id} moved to another source file while it was deleted; "
+                "nothing was deleted. Retry."
+            )
+        if app.index_engine.is_read_only_source(source_file):
+            return f"Error: {SOURCE_READ_ONLY_DETAIL}"
+        if not app.index_engine.is_managed_source(source_file, fresh.metadata):
+            return f"Error: {UNMANAGED_SOURCE_DETAIL}"
+        refusal = _gate_b_refusal(fresh.metadata, chunk_id, confirm_project_shared, surface=surface)
+        if refusal is not None:
+            return refusal
+        deleted = await app.storage.delete_chunks([chunk.id], finalize_emptied=True)
+    if not deleted:
+        return f"Error: chunk {chunk_id} not found."
+    app.search_pipeline.invalidate_cache()
+    await flag_untracked_write(app, provenance_session_id)
+    return (
+        f"Memory deleted from the index: chunk {chunk_id}\n"
+        f"- Source file {source_file} was missing and was left untouched"
+    )
+
+
 async def _delete_chunk(
     app: AppContext,
     uid: UUID,
@@ -1817,6 +1944,7 @@ async def _delete_chunk(
     *,
     surface: str = "mem_delete",
     precheck: Callable[[Chunk], Awaitable[str | None]] | None = None,
+    index_only_if_missing: bool = False,
 ) -> str:
     """Remove one chunk's lines from its file and re-index it: ``mem_delete``'s chunk branch.
 
@@ -1824,46 +1952,52 @@ async def _delete_chunk(
     pre-image read, on the fresh chunk; a string it returns is the refusal and
     nothing past it runs. ``mem_dedup_remove`` uses it to check the member it
     keeps. ``surface`` names the tool in the consent audit and its log line.
+
+    ``index_only_if_missing=True`` removes the chunk from the index without
+    writing the file when the source file is missing, as the web route's chunk
+    delete does (#2842); without it a missing source is refused. It does not
+    combine with ``precheck``, whose checks are about the file the rewrite
+    would change.
     """
-    from memtomem import privacy
     from memtomem.tools.memory_writer import remove_lines
 
+    assert precheck is None or not index_only_if_missing
     # Serialize the read → rewrite → re-index → rollback span on the
     # chunk's source file; re-fetch fresh under the lock (issue #1570).
-    async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err, cross_process_held):
+    async with _locked_chunk(app, uid, chunk_id, rewrite_guard=not index_only_if_missing) as (
+        chunk,
+        lock_err,
+        cross_process_held,
+    ):
         if lock_err:
             return lock_err
+        assert chunk is not None
+        if index_only_if_missing:
+            missing, refusal = await _source_missing_for_delete(chunk, chunk_id, cross_process_held)
+            if refusal is not None:
+                return refusal
+            if missing:
+                return await _delete_row_of_missing_source(
+                    app, chunk, chunk_id, confirm_project_shared, surface=surface
+                )
+            # The guard ``_locked_chunk`` left out for this caller, asked under
+            # the same locks on the same row, before anything below rewrites.
+            refusal = await _scope_loss_refusal(app, chunk, chunk_id)
+            if refusal is not None:
+                return refusal
         if not cross_process_held:
             # See ``mem_edit``: this branch removes the chunk's lines from
             # the file, so it may not run on a span that took no
             # cross-process lock (#2346).
             return _degraded_source_error(chunk_id)
-        assert chunk is not None
         meta = chunk.metadata
         if meta.source_read_only or meta.redaction_count:
             return f"Error: {SOURCE_READ_ONLY_DETAIL}"
         # Confirm gate on the fresh chunk: a migrate could have re-scoped
         # it while we waited for the lock (see mem_edit for the rationale).
-        inferred_scope = meta.scope or "user"
-        if inferred_scope == "project_shared" and not confirm_project_shared:
-            logger.info(
-                f"{surface} rejected project_shared chunk without confirmation",
-                extra={"chunk_id": chunk_id, "scope": inferred_scope},
-            )
-            return (
-                "Error: deleting scope='project_shared' chunks requires "
-                "confirm_project_shared=True."
-            )
-        # Mirrors the gate's scope predicate: falling through also covers
-        # an ordinary user-tier delete, which asked for no consent and
-        # must not be recorded as having given one.
-        if inferred_scope == "project_shared":
-            privacy.emit_project_shared_confirmation(
-                surface=surface,
-                mechanism="param",
-                action="delete",
-                audit_context={"chunk_id": chunk_id},
-            )
+        refusal = _gate_b_refusal(meta, chunk_id, confirm_project_shared, surface=surface)
+        if refusal is not None:
+            return refusal
         if precheck is not None:
             refusal = await precheck(chunk)
             if refusal is not None:
@@ -1906,7 +2040,9 @@ async def mem_delete(
     """Delete memory entries from the index (and optionally from the source file).
 
     When chunk_id is given, the specific chunk's line range is removed from
-    the markdown file and the file is re-indexed.
+    the markdown file and the file is re-indexed. If that file is missing
+    from disk, the chunk is removed from the index instead, as the Web UI's
+    chunk delete does; the source is not written.
     When source_file is given, all chunks from that file are removed from the
     index (the file itself is NOT deleted).
     When namespace is given, all chunks in that namespace are removed from the index.
@@ -1935,7 +2071,9 @@ async def mem_delete(
         except (ValueError, TypeError):
             return f"Error: invalid chunk ID format: {chunk_id}"
 
-        return await _delete_chunk(app, uid, chunk_id, confirm_project_shared)
+        return await _delete_chunk(
+            app, uid, chunk_id, confirm_project_shared, index_only_if_missing=True
+        )
 
     if source_file:
         # ``source_file`` usually names a stored key, as ``mem_list`` prints it

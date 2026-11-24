@@ -541,9 +541,10 @@ async def mem_dedup_remove(
 ) -> str:
     """Remove one member of a duplicate pair from its file, after checking both.
 
-    Removes remove_id's lines from its file and re-indexes it, as mem_delete does,
-    only when both members' files and rows still match what was last indexed, the
-    two are in different files, and neither file has another hard-linked name.
+    Removes remove_id's lines from its file and re-indexes it, as mem_delete does
+    for a file on disk, only when both members' files and rows still match what was
+    last indexed, the two are in different files, and neither file has another
+    hard-linked name. A member whose file is missing is refused.
     It does not judge whether the two say the same thing: read both first. A change
     to the kept file after the check is not seen.
 

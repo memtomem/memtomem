@@ -7,6 +7,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **`mem_delete(chunk_id=)` removes a chunk whose source file is missing from the index, as
+  the web UI's chunk delete already did (#2842).** It used to refuse: `source_missing` when
+  the file was gone, or "source directory has been removed" when its directory was. So an
+  archived chunk under `indexing.retain_missing_dirs` could not be dropped through MCP at
+  all. It now removes that one chunk's row and leaves the source file untouched; the other
+  chunks of the file stay. The `project_shared` confirmation still applies, and a file under
+  `indexing.read_only_memory_dirs` is still refused. A path that exists but cannot be read,
+  or holds something other than a regular file, is refused without deleting. A file removed
+  after the delete checked it and before it read it still gets `source_missing`, and a retry
+  removes the row. `mem_edit` and `mem_dedup_remove` refuse a missing file as before.
+
 - **The `handoff` workflow aims a saved record at a size the E5 token budget can hold in one
   chunk (#3399).** A record could run to 1,200 characters, but a store indexing under
   `multilingual-e5-small` splits any chunk over 384 tokens, so a record near that limit was
