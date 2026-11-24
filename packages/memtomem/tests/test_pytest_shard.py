@@ -540,3 +540,80 @@ def test_each_required_test_check_gates_only_its_own_os() -> None:
         assert result == f"${{{{ needs.{shard_job}.result }}}}", (check, result)
         # rstrip: a ``run: |`` block of the same command ends in a newline.
         assert gate["run"].rstrip("\n") == 'test "$SHARD_RESULT" = success', check
+
+
+def test_security_gates_runs_after_any_dependency_result() -> None:
+    """``security-gates`` is a required check standing in for five jobs that are not.
+
+    Without ``always()`` it is skipped when a dependency fails, and a skipped
+    required check counts as passing. ``!cancelled()`` is not enough either:
+    cancelling a PR's current run would skip it the same way (#3569).
+    """
+    [job] = [job for job in _ci_jobs().values() if job.get("name") == "security-gates"]
+    needs = ["test-js", "test-opencode-plugin", "vendored-assets", "python-deps", "bandit"]
+
+    assert job["needs"] == needs, job["needs"]
+    assert job["if"] == "${{ always() }}"
+    assert "continue-on-error" not in job
+    [gate] = job["steps"]
+    assert set(gate) == {"name", "env", "run"}, sorted(gate)
+    expected = {f"${{{{ needs.{need}.result }}}}" for need in needs}
+    assert set(gate["env"].values()) == expected, gate["env"]
+    # The whole script, so a loop that skips a result or a branch that exits 0
+    # cannot pass.
+    results = " ".join(f'"${name}"' for name in gate["env"])
+    assert gate["run"] == (
+        "set -euo pipefail\n"
+        f"for result in {results}; do\n"
+        '  if [ "$result" != "success" ]; then\n'
+        '    echo "security dependency did not succeed: $result" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        "done\n"
+    ), gate["run"]
+
+
+_AGGREGATORS = {"test-ubuntu", "test-macos", "test-windows", "security-gates"}
+
+
+def test_ci_groups_each_job_per_pull_request_and_no_other_events() -> None:
+    """Each non-aggregator job has its own group per PR; other events never share one.
+
+    A workflow-level group held a PR's newer run with no jobs until the older
+    run completed, and a cancelled run waits for its ``always()`` aggregators
+    to get runners (#3569), so the groups are per job. The aggregators have
+    none: they are the required checks and must run in every run. The job id
+    is literal in each key because ``github.job`` is not set when the group is
+    evaluated, so a copied block would merge two jobs' groups. A group shared by
+    every ``main`` push would drop a pending job when a newer one queues, even
+    without ``cancel-in-progress``, so other events key on ``github.run_id``;
+    ``github.ref`` is ``refs/pull/<n>/merge`` for each ``pull_request``
+    activity this workflow takes.
+    """
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8"))
+    key = "${{ github.event_name == 'pull_request' && github.ref || github.run_id }}"
+
+    assert "concurrency" not in workflow
+    # YAML 1.1 reads the ``on:`` key as the boolean True. A ``types:`` list
+    # would add activities whose ref this key has not been checked against.
+    assert set(workflow[True]) == {"push", "pull_request", "workflow_dispatch"}, workflow[True]
+    assert set(workflow[True]["pull_request"]) == {"branches"}, workflow[True]["pull_request"]
+    # ``always()`` with or without ``${{ }}`` counts. So does one inside a larger
+    # condition, which may not run unconditionally; this fails, it never misses.
+    always = {
+        job_id for job_id, job in workflow["jobs"].items() if "always()" in str(job.get("if", ""))
+    }
+    assert always == _AGGREGATORS, always
+    for job_id, job in workflow["jobs"].items():
+        if job_id in _AGGREGATORS:
+            assert "concurrency" not in job, job_id
+            continue
+        matrix = job.get("strategy", {}).get("matrix")
+        if matrix is not None:
+            # A second axis would give legs that share a shard one group.
+            assert set(matrix) == {"shard"}, (job_id, matrix)
+        shard = "${{ matrix.shard }}-" if matrix is not None else ""
+        assert job.get("concurrency") == {
+            "group": f"ci-{job_id}-{shard}{key}",
+            "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+        }, job_id
