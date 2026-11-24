@@ -26,16 +26,27 @@ _DEDUP_SCAN_TIMEOUT = 120  # seconds
 async def scan_duplicates(
     threshold: float = Query(0.92, ge=0.0, le=1.0),
     # No upper bound, unlike the tool and the scheduled job (500): this is the
-    # one surface that can list a pool holding more than 500 pairs.
+    # one surface that can return more than 500 pairs in one call.
     limit: int = Query(100, ge=1),
     max_scan: int = Query(500, ge=1),
     after: str | None = None,
+    offset: int = Query(0, ge=0),
     dedup_scanner=Depends(get_dedup_scanner),
 ) -> DedupScanResponse:
     """Scan for duplicate chunk candidates (dry-run, no mutations).
 
     ``after`` is a chunk id: the scan takes the chunks after it in chunk-id
     order. A response's ``next_after`` is the value that continues from it.
+
+    ``offset`` skips that many of the pool's pairs, so a pool with more pairs
+    than ``limit`` is listed by scanning it again with the same ``after``,
+    ``max_scan`` and ``threshold``. Go back to 0 when moving on with
+    ``next_after``. Two pages line up only when both scans produce the same
+    list: the exact pairs come first and depend on the pool alone, while which
+    near pairs the list holds depends on which of several equally distant
+    neighbours the vector search keeps at its cut, which it does not promise,
+    and a pair that enters or leaves shifts the positions after it.
+    ``pairs_found`` counts the pool's pairs.
     """
     try:
         cursor = parse_scan_cursor(after)
@@ -44,7 +55,7 @@ async def scan_duplicates(
     try:
         candidates, coverage = await asyncio.wait_for(
             dedup_scanner.scan_with_coverage(
-                threshold=threshold, limit=limit, max_scan=max_scan, after=cursor
+                threshold=threshold, limit=limit, max_scan=max_scan, after=cursor, offset=offset
             ),
             timeout=_DEDUP_SCAN_TIMEOUT,
         )
@@ -73,6 +84,7 @@ async def scan_duplicates(
         chunks_without_vector=coverage.without_vector,
         same_source_read_only_pairs=coverage.same_source_read_only,
         pairs_found=coverage.pairs_found,
+        offset=offset,
         after=None if coverage.after is None else str(coverage.after),
         remaining_chunks=coverage.remaining,
         next_after=None if coverage.next_after is None else str(coverage.next_after),

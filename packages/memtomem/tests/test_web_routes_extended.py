@@ -684,7 +684,7 @@ class TestDedup:
         assert (data["after"], data["next_after"]) == (None, None)
         assert (data["remaining_chunks"], data["pairs_found"]) == (0, 0)
         app.state.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
-            threshold=0.85, limit=50, max_scan=200, after=None
+            threshold=0.85, limit=50, max_scan=200, after=None, offset=0
         )
 
     @pytest.mark.parametrize(
@@ -721,8 +721,49 @@ class TestDedup:
         # ``total`` is what came back; ``pairs_found`` is what ``limit`` cut from.
         assert (data["total"], data["pairs_found"]) == (0, 57)
         app.state.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
-            threshold=0.92, limit=100, max_scan=500, after=cursor
+            threshold=0.92, limit=100, max_scan=500, after=cursor, offset=0
         )
+
+    async def test_dedup_scan_passes_the_pair_offset_and_echoes_it(self, app, client: AsyncClient):
+        app.state.dedup_scanner.scan_with_coverage = AsyncMock(
+            return_value=(
+                [],
+                DedupCoverage(
+                    pool=3,
+                    eligible=3,
+                    near_search_enabled=True,
+                    probed=3,
+                    without_vector=0,
+                    pairs_found=501,
+                ),
+            )
+        )
+
+        # Past the last of 501 pairs, so the scanner's empty page is what a
+        # real scan returns there.
+        resp = await client.get("/api/dedup/candidates", params={"offset": 501})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert (data["offset"], data["total"], data["pairs_found"]) == (501, 0, 501)
+        app.state.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
+            threshold=0.92, limit=100, max_scan=500, after=None, offset=501
+        )
+
+    async def test_dedup_scan_without_an_offset_echoes_zero(self, client: AsyncClient):
+        resp = await client.get("/api/dedup/candidates")
+
+        assert resp.status_code == 200
+        assert resp.json()["offset"] == 0
+
+    @pytest.mark.parametrize("offset", [-1, "x"], ids=["negative", "not-a-number"])
+    async def test_dedup_scan_rejects_an_offset_that_is_not_a_count(
+        self, app, client: AsyncClient, offset
+    ):
+        resp = await client.get("/api/dedup/candidates", params={"offset": offset})
+
+        assert resp.status_code == 422
+        app.state.dedup_scanner.scan_with_coverage.assert_not_awaited()
 
     @pytest.mark.parametrize("typed", ["not-an-id", "", "500"])
     async def test_dedup_scan_rejects_an_after_that_is_not_a_chunk_id(
@@ -756,7 +797,7 @@ class TestDedup:
         [
             ({"limit": 1}, {"threshold": 0.92, "limit": 1}),
             # No upper bound: the route is the one surface that can list a
-            # pool with more than 500 pairs, and #3433 decides whether it should.
+            # pool's pairs past the 500th in one call; ``offset`` pages them.
             ({"limit": 1001}, {"threshold": 0.92, "limit": 1001}),
             ({"threshold": 0.0}, {"threshold": 0.0, "limit": 100}),
             ({"threshold": 1.0}, {"threshold": 1.0, "limit": 100}),
@@ -768,7 +809,7 @@ class TestDedup:
 
         assert resp.status_code == 200
         app.state.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
-            **forwarded, max_scan=500, after=None
+            **forwarded, max_scan=500, after=None, offset=0
         )
 
     def test_dedup_scan_declares_no_upper_bound_on_limit(self, app):
