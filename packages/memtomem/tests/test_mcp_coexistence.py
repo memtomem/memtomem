@@ -34,6 +34,15 @@ def host(request, tmp_path, monkeypatch):
     set_home(monkeypatch, home)
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.chdir(project)
+    # Codex inspection checks whether files exist outside HOME and cwd. Point the managed-file
+    # probe into tmp_path, so /etc/codex on the host is never checked.
+    managed = (tmp_path / "etc-codex/requirements.toml", tmp_path / "etc-codex/config.toml")
+    monkeypatch.setattr(checks, "_MANAGED_CODEX_CONFIGS", managed)
+    # Stop the project-layer walk at tmp_path, so a .codex/config.toml above the pytest temp
+    # dir is never found. Codex only: agy's plugin check treats any .git above the plugin as
+    # a Git worktree.
+    if client == "codex":
+        (tmp_path / ".git").mkdir()
     root = home / (".codex" if client == "codex" else ".gemini/config")
     plugin = root / (
         "plugins/cache/memtomem/memtomem/0.1.0" if client == "codex" else "plugins/memtomem"
@@ -71,6 +80,7 @@ def host(request, tmp_path, monkeypatch):
         plugin=plugin,
         bundled=bundled,
         config=config,
+        managed=managed,
         rows=[row],
         error=None,
         calls=[],
@@ -314,6 +324,40 @@ def test_codex_project_layer_refuses_reconciliation(host):
     before = host.config.read_bytes()
     assert invoke(host, "--reconcile", "keep-plugin", "--apply").exit_code == 2
     assert host.config.read_bytes() == before
+
+
+def test_managed_codex_paths_are_the_system_layers():
+    # The host fixture redirects these; pin the real values it replaces.
+    assert checks._MANAGED_CODEX_CONFIGS == (
+        Path("/etc/codex/requirements.toml"),
+        Path("/etc/codex/config.toml"),
+    )
+
+
+@pytest.mark.parametrize("host", ["codex"], indirect=True)
+@pytest.mark.parametrize("which", [0, 1])
+def test_managed_codex_configuration_is_incomplete(host, which):
+    host.managed[which].parent.mkdir(exist_ok=True)
+    host.managed[which].write_text('model = "managed"\n')
+    managed = {"code": "incomplete", "message": "Managed Codex configuration needs review."}
+
+    result = invoke(host)
+    assert result.exit_code == 2, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "incomplete"
+    assert managed in payload["findings"]
+
+    before = {p: p.read_bytes() for p in [host.config, host.bundled]}
+    applied = invoke(host, "--reconcile", "keep-plugin", "--apply")
+    assert applied.exit_code == 2, applied.output
+    findings = json.loads(applied.output)["findings"]
+    assert managed in findings
+    assert {
+        "code": "reconcile_refused",
+        "message": "Reconciliation skipped: inspection is incomplete.",
+    } in findings
+    assert all(p.read_bytes() == raw for p, raw in before.items())
+    assert not [b for p in before for b in p.parent.glob(p.name + ".mm-*")]
 
 
 def test_replace_failure_keeps_original_and_backup(host, monkeypatch):
