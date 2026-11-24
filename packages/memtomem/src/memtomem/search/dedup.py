@@ -73,9 +73,10 @@ class DedupCandidate:
 class DedupCoverage:
     """What one scan actually looked at. Describes the selected pool only.
 
-    A scan reads at most ``max_scan`` chunks, so an empty candidate list means
-    "nothing in this pool", never "nothing in the store"; near-phase neighbours
-    can still come from outside the pool.
+    A scan reads at most ``max_scan`` chunks, so an empty candidate list never
+    means "nothing in the store"; near-phase neighbours can still come from
+    outside the pool. With an ``offset`` it does not mean "nothing in this
+    pool" either: ``pairs_found`` says how many pairs the pool has.
 
     The pool is the first ``max_scan`` visible chunks in ascending id order
     with an id above ``after`` (from the start without one). ``next_after``
@@ -95,10 +96,11 @@ class DedupCoverage:
     # Pairs left out because both members are read-only chunks of one source
     # (see ``same_source_read_only``). Counted once per pair, before ``limit``.
     same_source_read_only: int = 0
-    # Pairs the scan kept before ``limit`` cut the list. Above the number
-    # returned, the rest are not reachable by moving the cursor on: the same
-    # pool has to be scanned again with a higher ``limit``. A smaller
-    # ``max_scan`` selects another pool, whose exact phase reports other pairs.
+    # Pairs the scan kept before ``offset`` and ``limit`` cut the list. Above
+    # the number returned, the rest are not reachable by moving the cursor on:
+    # the same pool has to be scanned again with a higher ``limit`` or an
+    # ``offset``. A smaller ``max_scan`` selects another pool, whose exact phase
+    # can report other pairs.
     pairs_found: int = 0
     after: UUID | None = None  # the cursor this scan started after
     # Visible chunks above the pool's last id, in the snapshot the pool was
@@ -156,6 +158,7 @@ class DedupScanner:
         limit: int = 100,
         max_scan: int = 500,
         after: UUID | None = None,
+        offset: int = 0,
     ) -> tuple[list[DedupCandidate], DedupCoverage]:
         """Return duplicate candidate pairs and what the scan covered.
 
@@ -170,8 +173,19 @@ class DedupScanner:
         for 2 of 62 chunks that stored vectors found on a real E5 store).
         Results are sorted: exact duplicates first, then by score descending.
 
+        The first *offset* pairs of that list are skipped and *limit* applies
+        to the rest, so a pool with more pairs than one call returns is listed
+        by scanning it again with the next offset. Two such pages line up only
+        when both scans produce the same list. The exact pairs come first and
+        their order depends on the pool alone. The near pairs after them depend
+        on which neighbours the vector search keeps when several sit at an
+        equal distance at its cut, a choice it does not promise
+        (``dense_search``); a near pair that enters or leaves the list between
+        two scans shifts the positions of the pairs after it.
+
         Raises ``ValueError``, before anything is read, for a *max_scan* or
-        *limit* below 1 and for a *threshold* outside 0 to 1 (NaN included).
+        *limit* below 1, for an *offset* below 0, and for a *threshold* outside
+        0 to 1 (NaN included).
         """
         if max_scan < 1:
             raise ValueError(f"max_scan must be at least 1, got {max_scan}")
@@ -180,6 +194,8 @@ class DedupScanner:
         # is always false, so the near phase would skip no pair on score.
         if limit < 1:
             raise ValueError(f"limit must be at least 1, got {limit}")
+        if offset < 0:
+            raise ValueError(f"offset must be at least 0, got {offset}")
         if not 0.0 <= threshold <= 1.0:
             raise ValueError(f"threshold must be between 0 and 1, got {threshold}")
         selected = await self._select_pool(max_scan, after)
@@ -205,7 +221,7 @@ class DedupScanner:
         # Exact first, then by score descending
         candidates.sort(key=lambda c: (not c.exact, -c.score))
 
-        return candidates[:limit], replace(
+        return candidates[offset : offset + limit], replace(
             coverage,
             same_source_read_only=len(omitted),
             pairs_found=len(candidates),

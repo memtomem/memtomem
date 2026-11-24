@@ -602,6 +602,31 @@ class TestTheSwitch:
         assert out == f"No duplicate chunks found (threshold=0.92).\n{_FOOTER}"
         app.dedup_scanner.member_evidence.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_the_next_offset_counts_the_pairs_the_scan_selected(self, monkeypatch):
+        # The evidence read drops the second pair; the page still held two of
+        # the scan's pairs, so the next one starts after both, not after the
+        # one that was rendered.
+        kept, dropped = self._pair(), self._pair()
+        evidence = {
+            kept.chunk_a.id: (kept.chunk_a, _topology()),
+            kept.chunk_b.id: (kept.chunk_b, _topology()),
+        }
+        app = _stub_app(monkeypatch, [kept, dropped], brief=True, evidence=evidence)
+        app.dedup_scanner.scan_with_coverage.return_value = (
+            [kept, dropped],
+            replace(_COVERAGE, pairs_found=501),
+        )
+
+        out = await mem_dedup_scan(limit=2, offset=10, ctx=None)
+
+        assert out.splitlines()[-2:] == [
+            f"1 pair {_OMITTED}",
+            "Scanned all 2 scannable chunks; near-duplicate search probed 2; offset=10 kept "
+            "pairs 11 to 12 of 501: to see the next ones, scan again from the same position "
+            "with offset=12.",
+        ]
+
 
 class TestTheToolSurfaceDidNotMove:
     """The brief is behind a setting, not a parameter: it adds nothing a client is told."""
@@ -619,18 +644,20 @@ class TestTheToolSurfaceDidNotMove:
             "limit": "int = 50",
             "max_scan": "int = 500",
             "after": "str | None = None",
+            "offset": "int = 0",
         }
         assert info.param_docs == {
             "threshold": "Dense score 1/(1+L2) threshold (0-1, default 0.92)",
             "limit": "Maximum number of candidate pairs to return",
             "max_scan": "Maximum chunks to scan, taken in chunk-id order",
             "after": "Chunk id to scan after; the last scan's result names the next one",
+            "offset": _OFFSET_DOC,
         }
 
     def test_the_function_s_signature_and_docstring(self):
         assert str(inspect.signature(mem_dedup_scan)) == (
             "(threshold: 'float' = 0.92, limit: 'int' = 50, max_scan: 'int' = 500, "
-            "after: 'str | None' = None, ctx: 'CtxType' = None) -> 'str'"
+            "after: 'str | None' = None, offset: 'int' = 0, ctx: 'CtxType' = None) -> 'str'"
         )
         assert inspect.getdoc(mem_dedup_scan) == (
             "Scan for duplicate chunk candidates (dry-run, no mutations).\n\n"
@@ -638,8 +665,16 @@ class TestTheToolSurfaceDidNotMove:
             "    threshold: Dense score 1/(1+L2) threshold (0-1, default 0.92)\n"
             "    limit: Maximum number of candidate pairs to return\n"
             "    max_scan: Maximum chunks to scan, taken in chunk-id order\n"
-            "    after: Chunk id to scan after; the last scan's result names the next one"
+            "    after: Chunk id to scan after; the last scan's result names the next one\n"
+            "    offset: Pairs of the scanned pool to skip; a result names the next offset when it\n"
+            "        offers one. Pages line up only while every scan gives the same list"
         )
+
+
+_OFFSET_DOC = (
+    "Pairs of the scanned pool to skip; a result names the next offset when it offers one. "
+    "Pages line up only while every scan gives the same list"
+)
 
 
 # --------------------------------------------------------------------------- #

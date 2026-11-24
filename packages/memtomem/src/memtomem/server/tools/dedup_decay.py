@@ -47,6 +47,7 @@ async def mem_dedup_scan(
     limit: int = 50,
     max_scan: int = 500,
     after: str | None = None,
+    offset: int = 0,
     ctx: CtxType = None,
 ) -> str:
     """Scan for duplicate chunk candidates (dry-run, no mutations).
@@ -56,6 +57,8 @@ async def mem_dedup_scan(
         limit: Maximum number of candidate pairs to return
         max_scan: Maximum chunks to scan, taken in chunk-id order
         after: Chunk id to scan after; the last scan's result names the next one
+        offset: Pairs of the scanned pool to skip; a result names the next offset when it
+            offers one. Pages line up only while every scan gives the same list
     """
     if not 0.0 <= threshold <= 1.0:
         return f"Error: threshold must be between 0 and 1, got {threshold}."
@@ -63,6 +66,10 @@ async def mem_dedup_scan(
         return f"Error: limit must be between 1 and {_DEDUP_LIMIT_MAX}, got {limit}."
     if max_scan < 1:
         return f"Error: max_scan must be at least 1, got {max_scan}."
+    # ``mem_do`` hands raw values over and checks only booleans, so the type
+    # is checked here: a ``True`` or ``1.5`` would otherwise reach the slice.
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        return f"Error: offset must be a whole number of at least 0, got {offset!r}."
     try:
         cursor = parse_scan_cursor(after)
     except ValueError as exc:
@@ -72,14 +79,18 @@ async def mem_dedup_scan(
     if app.dedup_scanner is None:
         return "DedupScanner not initialized."
     candidates, coverage = await app.dedup_scanner.scan_with_coverage(
-        threshold=threshold, limit=limit, max_scan=max_scan, after=cursor
+        threshold=threshold, limit=limit, max_scan=max_scan, after=cursor, offset=offset
     )
-    footer = _dedup_coverage_line(coverage, limit)
+    footer = _dedup_coverage_line(coverage, limit, offset)
 
     if candidates and app.config.maintenance.experimental_duplicate_brief:
         evidence = await app.dedup_scanner.member_evidence(candidates)
         return _duplicate_brief(candidates, evidence, threshold, footer)
 
+    if not candidates and coverage.pairs_found:
+        # The pool has pairs and this page is past them: "no duplicates"
+        # would read as a clean pool.
+        return f"No duplicate pairs at offset={offset} (threshold={threshold}).\n{footer}"
     if not candidates:
         return f"No duplicate chunks found (threshold={threshold}).\n{footer}"
 
@@ -108,13 +119,13 @@ def _scan_member(label: str, chunk: Chunk) -> str:
     )
 
 
-def _dedup_coverage_line(coverage: DedupCoverage, limit: int | None = None) -> str:
+def _dedup_coverage_line(coverage: DedupCoverage, limit: int | None = None, offset: int = 0) -> str:
     """Say what the scan looked at, so an empty result is not read as a clean store.
 
     The first clause is about pool selection only: "all" means no scannable
     chunk was left out of the pool, not that every duplicate was looked for.
     The last clauses say how to see what this call did not show: the pairs
-    *limit* cut, then the chunks after the pool.
+    *offset* and *limit* left out, then the chunks after the pool.
     """
     if coverage.after is not None:
         # The rule, not what the subset is like: id order promises neither a
@@ -145,25 +156,49 @@ def _dedup_coverage_line(coverage: DedupCoverage, limit: int | None = None) -> s
             f"; left out {n} {noun} of read-only chunks from the same file "
             "(neither member can be removed)"
         )
-    if limit is not None and coverage.pairs_found > limit:
-        # What ``limit`` selected, not what is displayed: the brief can leave
-        # out further pairs when it renders, and says so on its own line.
-        # Moving the cursor on never reaches the pairs cut here. A higher
-        # ``limit`` over the same pool lists the same pairs and more of them,
-        # so it is named while it can list them all. A smaller ``max_scan``
-        # is not named: the exact phase pairs each copy with the oldest copy
-        # in its pool, so a smaller pool reports other pairs, not the cut ones.
-        line += f"; limit={limit} kept {limit} of {coverage.pairs_found} pairs: "
-        if coverage.pairs_found <= _DEDUP_LIMIT_MAX:
-            line += "to see the rest, scan again from the same position with a higher limit"
-        else:
-            line += f"one call lists at most {_DEDUP_LIMIT_MAX}"
+    if limit is not None:
+        line += _pair_page_clause(coverage.pairs_found, limit, offset)
     if coverage.next_after is not None:
         verb = "remains" if coverage.remaining == 1 else "remain"
         line += f'; {coverage.remaining} {verb}: continue with after="{coverage.next_after}"'
+        if offset:
+            # The next pool's pairs start at 0; a kept offset would skip them.
+            line += " and no offset"
     elif coverage.after is not None:
         line += "; reached the end of the store"
     return f"{line}."
+
+
+def _pair_page_clause(found: int, limit: int, offset: int) -> str:
+    """Which of the pool's *found* pairs this page holds, and how to see the next ones.
+
+    Counts what the scan selected, not what is displayed: the brief can leave
+    out further pairs when it renders, and says so on its own line. Moving the
+    cursor on never reaches the pairs left out here. A higher ``limit`` over
+    the same pool lists the same pairs and more of them, so it is named from
+    the start while it can list them all; otherwise the next ``offset`` is.
+    A smaller ``max_scan`` is never named: the exact phase pairs each copy with
+    the oldest copy in its pool, so a smaller pool can report other pairs.
+    """
+    # ``end`` is computed from ``offset``, an ``int``, so the offset named
+    # below is one this tool accepts even when ``limit`` arrived as ``True``.
+    shown = max(0, min(limit, found - offset))
+    end = offset + shown
+    if offset == 0:
+        if found <= limit:
+            return ""
+        clause = f"; limit={limit} kept {limit} of {found} pairs: "
+        if found <= _DEDUP_LIMIT_MAX:
+            return clause + "to see the rest, scan again from the same position with a higher limit"
+        clause += f"one call lists at most {_DEDUP_LIMIT_MAX}; "
+    elif shown == 0:
+        return f"; offset={offset} is past the last pair ({found} found)"
+    else:
+        clause = f"; offset={offset} kept pairs {offset + 1} to {end} of {found}"
+        if end == found:
+            return clause
+        clause += ": "
+    return clause + f"to see the next ones, scan again from the same position with offset={end}"
 
 
 #: Says what was compared: two members can still differ in what is not, such
