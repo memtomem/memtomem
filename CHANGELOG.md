@@ -47,8 +47,8 @@ records at a size that splits into fewer chunks (see Changed).
   copied from the guides, one `mm init --mcp` wrote while `mm` ran through `uvx`, a Kimi Code
   `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section and an OpenCode `mcp.memtomem`
   entry. Change the release it pins (`==0.7.13`, or an older one) to `==0.7.14` in place,
-  keep the rest of its launch as it is, and restart the client. Coming from 0.7.12 or older,
-  read 0.7.13's Upgrading notes as well.
+  keep the rest of its launch as it is, and restart the client. For an entry that pinned
+  0.7.12 or older, whatever release the CLI runs, read 0.7.13's Upgrading notes as well.
 - **A script or client generator that fetched `mm web`'s OpenAPI schema from `/openapi.json`
   needs `/api/openapi.json`.** The old URL now returns 404 (#3272, see Fixed).
 
