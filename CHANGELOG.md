@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A stored path or chunk body can no longer add a line to `mem_dedup_scan`'s output (#3391).**
+  The default rendering turned only line feeds in a member's preview into spaces and printed its
+  source path as stored, so a carriage return, U+0085, U+2028 or another line break in the first
+  80 characters of a chunk, or a line break in its path, started a line that read like one the
+  tool wrote, such as a `B (<id>): …` member line whose id `mem_dedup_merge` takes; a `"` in the
+  preview closed its quotes early. The preview is now quoted the way the duplicate brief quotes
+  it (`"`, `\` and every non-printable character escaped; a line feed still becomes a space), and
+  the path keeps its unquoted `path:line` shape with only its non-printable characters escaped.
+  Ordinary values print as before; a preview containing `"` or `\` now shows it escaped.
+
 - **`mm schedule add` and `mem_schedule_register` refuse a cron expression for a date that
   never occurs (#3461).** Both checked only that croniter could parse the expression, so
   `0 0 30 2 *` was stored and then skipped by the dispatcher on every tick. An expression of
