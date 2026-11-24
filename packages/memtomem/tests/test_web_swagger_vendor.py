@@ -84,18 +84,16 @@ async def test_swagger_vendor_asset_served_locally(asset: str, _ctype: str) -> N
 
 @pytest.mark.asyncio
 async def test_redoc_default_route_disabled() -> None:
-    """The FastAPI default ``/api/redoc`` page must stay disabled.
+    """The FastAPI default ``/redoc`` page must stay disabled.
 
     ReDoc duplicates Swagger UI's purpose and pulls
-    ``redoc.standalone.js`` from jsdelivr by default — leaving it on
-    would re-introduce the same offline / privacy footgun this PR set
-    out to fix. The 404 catch-all under ``/api/{path:path}`` is the
-    expected response.
+    ``redoc.standalone.js`` from jsDelivr by default. The API catch-all
+    returns 404 for ``/api/redoc`` even when the default page is enabled.
     """
     app = create_app()
     transport = ASGITransport(app=app, client=("127.0.0.1", 0))
     async with AsyncClient(transport=transport, base_url="http://testserver") as c:
-        resp = await c.get("/api/redoc")
+        resp = await c.get("/redoc", follow_redirects=False)
     assert resp.status_code == 404
 
 
