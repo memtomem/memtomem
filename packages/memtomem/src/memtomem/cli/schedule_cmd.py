@@ -12,8 +12,7 @@ from typing import Any
 
 import click
 
-from croniter import croniter  # type: ignore[import-untyped]
-
+from memtomem.scheduler.cron import new_cron_problem
 from memtomem.scheduler.jobs import (
     JOB_KINDS,
     run_job,
@@ -79,8 +78,9 @@ Examples:
 @click.option("--params", "params_json", default=None, help="JSON-encoded params dict")
 def schedule_add(cron_expr: str, job_kind: str, params_json: str | None) -> None:
     """Register a new schedule."""
-    if not croniter.is_valid(cron_expr):
-        raise click.ClickException(f"invalid cron expression: {cron_expr!r}")
+    cron_problem = new_cron_problem(cron_expr)
+    if cron_problem is not None:
+        raise click.ClickException(cron_problem)
     try:
         params = json.loads(params_json) if params_json else {}
     except json.JSONDecodeError as exc:

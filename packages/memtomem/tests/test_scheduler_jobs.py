@@ -398,3 +398,10 @@ class TestMcpScheduleRegister:
         assert out["reason"].startswith("invalid params: ")
         assert "unknown params" not in out["reason"]
         assert await components.storage.schedule_list_all() == []
+
+    @pytest.mark.asyncio
+    async def test_date_that_never_occurs_refused_and_not_stored(self, tools, components):
+        out = json.loads(await tools.mem_schedule_register("0 0 30 2 *", "compaction"))
+        assert out["ok"] is False
+        assert out["reason"].startswith("invalid cron expression: '0 0 30 2 *' matches no date")
+        assert await components.storage.schedule_list_all() == []

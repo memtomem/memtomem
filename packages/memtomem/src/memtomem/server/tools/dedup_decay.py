@@ -86,18 +86,26 @@ async def mem_dedup_scan(
     parts: list[str] = [f"Duplicate candidates: {len(candidates)} pairs (threshold={threshold}):\n"]
     for i, c in enumerate(candidates, 1):
         kind = "exact duplicate" if c.exact else f"score={c.score:.4f}"
-        meta_a = c.chunk_a.metadata
-        meta_b = c.chunk_b.metadata
-        preview_a = c.chunk_a.content[:80].replace("\n", " ")
-        preview_b = c.chunk_b.content[:80].replace("\n", " ")
         parts.append(
-            f"[{i}] {kind}\n"
-            f'  A ({c.chunk_a.id}): {meta_a.source_file}:{meta_a.start_line} — "{preview_a}"\n'
-            f'  B ({c.chunk_b.id}): {meta_b.source_file}:{meta_b.start_line} — "{preview_b}"'
+            f"[{i}] {kind}\n{_scan_member('A', c.chunk_a)}\n{_scan_member('B', c.chunk_b)}"
         )
 
     parts.append(footer)
     return "\n".join(parts)
+
+
+def _scan_member(label: str, chunk: Chunk) -> str:
+    """One member's line in the default rendering.
+
+    The body is quoted as the brief quotes it. The path keeps its unquoted
+    ``path:line`` shape for callers that read it, with only its non-printable
+    characters escaped: neither value can end the line or start another.
+    """
+    meta = chunk.metadata
+    preview = _quoted(chunk.content[:80].replace("\n", " "))
+    return (
+        f"  {label} ({chunk.id}): {_escaped(str(meta.source_file))}:{meta.start_line} — {preview}"
+    )
 
 
 def _dedup_coverage_line(coverage: DedupCoverage, limit: int | None = None) -> str:
@@ -283,15 +291,19 @@ def _quoted(text: str) -> str:
     ``str.isprintable`` is false for the line breaks ``splitlines`` honours
     beyond ``\\n`` (U+0085, U+2028) as well as for control characters.
     """
-    escaped = (
+    return f'"{_escaped(text, chr(34) + chr(92))}"'
+
+
+def _escaped(text: str, specials: str = "") -> str:
+    """*text* with every non-printable character, and each of *specials*, escaped."""
+    return "".join(
         "\\" + ch
-        if ch in '"\\'
+        if ch in specials
         else ch
         if ch.isprintable()
         else ch.encode("unicode_escape").decode("ascii")
         for ch in text
     )
-    return f'"{"".join(escaped)}"'
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)

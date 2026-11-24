@@ -35,8 +35,31 @@ env:
   # instead of blaming whichever test happened to be in flight (#2355).
   MEMTOMEM_TEST_HOME_GUARD: strict
 
+# Each job except the four aggregators (test (<os>), security-gates) has its own
+# concurrency group per PR: a job arriving in its group cancels the matching job
+# already there, and a newer run queues its jobs without waiting for the
+# older run to finish. Every other event keys on its own run id, so no main
+# push or manual dispatch cancels, or displaces a pending, job.
+#
+# The groups are per job, not one for the workflow: a workflow-level group holds
+# the newer run with no jobs at all until the older run has completed, and a
+# cancelled run is not complete until its `always()` aggregators have run, which
+# wait for runners like any job (#3569 measured a 21-minute stall). The job id is
+# written into each key because `github.job` is not set when the group is
+# evaluated.
+#
+# The aggregators have no group and stay `always()`: they are the required
+# checks, and a skipped required check counts as passing. In a superseded run
+# they fail once a dependency was cancelled, on that run's commit only.
+# Cancellation follows the order in which jobs reach their group, which GitHub
+# does not tie to run order: an older run's job arriving late, or a rerun of a
+# superseded run, can cancel the current run's job. The current run's required
+# checks then do not pass, and rerunning it recovers.
 jobs:
   lint:
+    concurrency:
+      group: ci-lint-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -57,6 +80,9 @@ jobs:
       - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests packages/langchain-memtomem/src packages/langchain-memtomem/tests packages/memtomem-hermes-memory/*.py tools examples/onboarding/slateharbor/*.py examples/workflows/*.py
 
   typecheck:
+    concurrency:
+      group: ci-typecheck-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -84,6 +110,9 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1]
+    concurrency:
+      group: ci-test-ubuntu-shard-${{ matrix.shard }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -123,6 +152,9 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1]
+    concurrency:
+      group: ci-test-macos-shard-${{ matrix.shard }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: macos-latest
     timeout-minutes: 35
     steps:
@@ -165,6 +197,9 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3]
+    concurrency:
+      group: ci-test-windows-shard-${{ matrix.shard }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: windows-latest
     # 35, matching the Linux and macOS shards, and a hang guard (#1642) that
     # still fires long before the 6-hour default. Three shards, not two
@@ -218,6 +253,9 @@ jobs:
 
   test-browser:
     name: browser (Playwright + Chromium)
+    concurrency:
+      group: ci-test-browser-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -241,6 +279,9 @@ jobs:
 
   test-golden-path:
     name: golden-path (ONNX)
+    concurrency:
+      group: ci-test-golden-path-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -297,6 +338,9 @@ jobs:
   retrieval-baselines-refresh:
     name: retrieval baselines (canonical refresh)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_retrieval_baselines }}
+    concurrency:
+      group: ci-retrieval-baselines-refresh-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -347,6 +391,9 @@ jobs:
 
   quality-gate:
     name: quality-gate (BM25 replay)
+    concurrency:
+      group: ci-quality-gate-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -395,6 +442,9 @@ jobs:
   test-llm-nightly:
     name: llm-nightly (optional)
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    concurrency:
+      group: ci-test-llm-nightly-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     continue-on-error: true
@@ -409,6 +459,9 @@ jobs:
       - run: uv run pytest -m "llm" --tb=short -q
 
   notebooks:
+    concurrency:
+      group: ci-notebooks-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -444,6 +497,9 @@ jobs:
 
   test-js:
     name: js-unit (vitest + jsdom)
+    concurrency:
+      group: ci-test-js-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -470,6 +526,9 @@ jobs:
 
   test-opencode-plugin:
     name: OpenCode plugin (build + unit + pack)
+    concurrency:
+      group: ci-test-opencode-plugin-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -494,6 +553,9 @@ jobs:
     # A syntax check cannot see a 3.12-only standard-library API; this runs one recall
     # turn through the provider under a real 3.11 against the fake Hermes modules.
     name: hermes-memory (Python 3.11 smoke)
+    concurrency:
+      group: ci-hermes-memory-py311-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -511,6 +573,9 @@ jobs:
     # Python 3.9. The dispatcher promises to start on 3.8 and later (its README says so); this
     # runs every hook event through it under a real 3.8 against a fake `mm`.
     name: automation dispatcher (Python 3.8 smoke)
+    concurrency:
+      group: ci-automation-dispatcher-py38-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -527,6 +592,9 @@ jobs:
     # bump that breaks an extra's install or import fails here, on the PR,
     # instead of at tag time when the release is already in flight (#2071).
     name: packaging-smoke (wheel + all extras)
+    concurrency:
+      group: ci-packaging-smoke-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -598,6 +666,9 @@ jobs:
 
   vendored-assets:
     name: vendored-assets (OSV blocking)
+    concurrency:
+      group: ci-vendored-assets-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -617,6 +688,9 @@ jobs:
 
   python-deps:
     name: python-deps (OSV blocking — Python + JavaScript)
+    concurrency:
+      group: ci-python-deps-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -671,6 +745,9 @@ jobs:
 
   bandit:
     name: bandit (security lint — blocking)
+    concurrency:
+      group: ci-bandit-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
