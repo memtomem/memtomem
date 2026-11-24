@@ -187,13 +187,16 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     if mode not in _VALID_WEB_MODES:
         raise ValueError(f"Invalid web mode {mode!r}; expected one of {sorted(_VALID_WEB_MODES)}")
 
-    # docs_url=None disables FastAPI's default ``/api/docs`` page so we can
-    # serve a Swagger UI built against the locally vendored
-    # ``swagger-ui-dist`` (web/static/vendor/swagger/) instead of the
-    # jsdelivr CDN. The redoc default is dropped entirely — it duplicates
+    # docs_url=None disables FastAPI's default ``/docs`` page so we can
+    # serve our own ``/api/docs`` Swagger UI, built against the locally
+    # vendored ``swagger-ui-dist`` (web/static/vendor/swagger/) instead of
+    # the jsdelivr CDN. The redoc default is dropped entirely — it duplicates
     # Swagger's purpose, also pulled from jsdelivr, and nothing in the SPA
     # links to it. Re-introduce it the same way as ``/api/docs`` if a
-    # consumer asks for it.
+    # consumer asks for it. The schema lives under ``/api/`` rather than at
+    # FastAPI's default ``/openapi.json`` because ``CSRFGuardMiddleware``
+    # checks Host and Origin only on that prefix; ``swagger-init.js``
+    # fetches it from the same URL.
     app = FastAPI(
         title="memtomem Web UI",
         description="Web UI for memtomem, long-term memory for AI coding agents",
@@ -201,6 +204,7 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
+        openapi_url="/api/openapi.json",
     )
     app.state.web_mode = mode
     app.state.startup_state = "not_started"
@@ -253,7 +257,7 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
         "<body>\n"
         '  <div id="swagger-ui"></div>\n'
         '  <script src="/vendor/swagger/swagger-ui-bundle.js?v=1"></script>\n'
-        '  <script src="/vendor/swagger/swagger-init.js?v=1"></script>\n'
+        '  <script src="/vendor/swagger/swagger-init.js?v=2"></script>\n'
         "</body>\n"
         "</html>\n"
     )

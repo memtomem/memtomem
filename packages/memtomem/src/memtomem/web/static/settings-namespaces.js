@@ -193,7 +193,8 @@ function _buildNsCard(ns, defaultNs) {
 
     const delBtn = document.createElement('button');
     delBtn.className = 'btn-danger btn-xs';
-    delBtn.textContent = 'Delete';
+    delBtn.dataset.i18n = 'common.delete';
+    delBtn.textContent = t('common.delete');
     delBtn.addEventListener('click', () => deleteNamespace(ns.namespace));
 
     actions.appendChild(renameBtn);
@@ -283,8 +284,8 @@ function editNamespaceMeta(ns, card) {
       <button class="btn-ghost btn-xs ns-edit-reset-color">Reset</button>
     </div>
     <div class="ns-edit-actions">
-      <button class="btn-ghost btn-xs ns-edit-cancel">Cancel</button>
-      <button class="btn-primary btn-xs ns-edit-save">Save</button>
+      <button class="btn-ghost btn-xs ns-edit-cancel" data-i18n="common.cancel">${t('common.cancel')}</button>
+      <button class="btn-primary btn-xs ns-edit-save" data-i18n="common.save">${t('common.save')}</button>
     </div>
   `;
 
