@@ -169,9 +169,19 @@ class DedupScanner:
         reproduce the stored ``retrieval_content`` vectors (it found candidates
         for 2 of 62 chunks that stored vectors found on a real E5 store).
         Results are sorted: exact duplicates first, then by score descending.
+
+        Raises ``ValueError``, before anything is read, for a *max_scan* or
+        *limit* below 1 and for a *threshold* outside 0 to 1 (NaN included).
         """
         if max_scan < 1:
             raise ValueError(f"max_scan must be at least 1, got {max_scan}")
+        # ``candidates[:limit]`` would list nothing for 0 and cut pairs from the
+        # end for a negative limit. With a NaN threshold ``score < threshold``
+        # is always false, so the near phase would skip no pair on score.
+        if limit < 1:
+            raise ValueError(f"limit must be at least 1, got {limit}")
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError(f"threshold must be between 0 and 1, got {threshold}")
         selected = await self._select_pool(max_scan, after)
         all_chunks, eligible = selected.chunks, selected.visible
         remaining = selected.above_cursor - len(all_chunks)

@@ -24,8 +24,10 @@ _DEDUP_SCAN_TIMEOUT = 120  # seconds
 
 @router.get("/candidates", response_model=DedupScanResponse)
 async def scan_duplicates(
-    threshold: float = 0.92,
-    limit: int = 100,
+    threshold: float = Query(0.92, ge=0.0, le=1.0),
+    # No upper bound, unlike the tool and the scheduled job (500): this is the
+    # one surface that can list a pool holding more than 500 pairs.
+    limit: int = Query(100, ge=1),
     max_scan: int = Query(500, ge=1),
     after: str | None = None,
     dedup_scanner=Depends(get_dedup_scanner),

@@ -10,11 +10,35 @@ runs in a fresh interpreter.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
+
+import memtomem
+from _subprocess_env import subprocess_env
+
+# Runs in the child after the module import. It exits non-zero, naming both
+# directories, unless the child's ``memtomem`` package directory is this
+# process's. Both sides resolve ``__init__.py`` first, as ``package_src_dir()``
+# does to pick the root it prepends, and ``samefile`` compares the directories
+# rather than their spelling.
+_SAME_PACKAGE_CHECK = """
+import os
+import sys
+from pathlib import Path
+
+import memtomem
+
+child = Path(memtomem.__file__).resolve().parent
+try:
+    same = os.path.samefile(child, sys.argv[1])
+except OSError as exc:
+    sys.exit(f"could not compare {child} with {sys.argv[1]}: {exc}")
+if not same:
+    sys.exit(f"child imported memtomem from {child}, parent from {sys.argv[1]}")
+"""
 
 SPLIT_MODULES = [
     "memtomem.cli.context_sync_cmd",
@@ -28,14 +52,17 @@ SPLIT_MODULES = [
 
 @pytest.mark.parametrize("module", SPLIT_MODULES)
 def test_split_module_imports_first_in_a_fresh_interpreter(module: str) -> None:
-    # Not ``-I``: isolated mode drops PYTHONPATH, and with it the source tree
-    # under test.
+    # Not ``-I``: isolated mode drops PYTHONPATH, which carries the source tree
+    # under test. ``-P`` stops ``-c`` from putting the working directory ahead
+    # of PYTHONPATH. ``subprocess_env()`` puts the source root of the
+    # ``memtomem`` this process imported first on PYTHONPATH.
+    parent = Path(memtomem.__file__).resolve().parent
     proc = subprocess.run(
-        [sys.executable, "-c", f"import {module}"],
+        [sys.executable, "-P", "-c", f"import {module}\n{_SAME_PACKAGE_CHECK}", str(parent)],
         capture_output=True,
         text=True,
         timeout=120,
-        env=os.environ.copy(),
+        env=subprocess_env(),
     )
     assert proc.returncode == 0, proc.stderr
 

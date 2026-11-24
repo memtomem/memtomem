@@ -285,3 +285,187 @@ def test_a_probe_outliving_its_event_loop_finishes_quietly(tmp_path, monkeypatch
 
     assert not threads[0].is_alive()
     assert raised == []
+
+
+class _Probes:
+    """A held probe whose paths in ``gates`` block until their event is set (#3263).
+
+    ``install`` notes every probe thread on the loop thread as it is created,
+    with its path: which paths were probed does not depend on when a worker
+    gets CPU time, and teardown can join them all. It reads neither what
+    ``_start_held_probe`` returns nor the stall set's type, so these tests run
+    unchanged against the code before the fix.
+    """
+
+    def __init__(self, *blocking: Path) -> None:
+        self.gates = {path: threading.Event() for path in blocking}
+        self.started: list[tuple[Path, threading.Thread]] = []
+        self._created: list[threading.Thread] = []
+
+    def __call__(self, path: Path) -> tuple[str, bool]:
+        gate = self.gates.get(path)
+        if gate is not None:
+            # No timeout: a blocked probe must stay blocked however slow the
+            # runner is. The fixture's teardown sets every gate.
+            gate.wait()
+        return "missing", False
+
+    def install(self, monkeypatch) -> None:
+        monkeypatch.setattr(watcher_mod, "_held_probe", self)
+        real_thread = threading.Thread
+        created = self._created
+
+        def recording_thread(*args, **kwargs):
+            thread = real_thread(*args, **kwargs)
+            if kwargs.get("name") == "memtomem-held-probe":
+                created.append(thread)
+            return thread
+
+        monkeypatch.setattr(watcher_mod.threading, "Thread", recording_thread)
+        start = watcher_mod._start_held_probe
+
+        def started(path: Path):
+            before = len(created)
+            result = start(path)
+            (thread,) = created[before:]
+            self.started.append((path, thread))
+            return result
+
+        monkeypatch.setattr(watcher_mod, "_start_held_probe", started)
+
+    @property
+    def paths(self) -> list[Path]:
+        return [path for path, _ in self.started]
+
+    def threads(self, path: Path) -> list[threading.Thread]:
+        return [thread for probed, thread in self.started if probed == path]
+
+    def release(self, path: Path) -> None:
+        self.gates[path].set()
+        for thread in self.threads(path):
+            thread.join(10)
+            assert not thread.is_alive()
+
+    def release_all(self) -> None:
+        for gate in self.gates.values():
+            gate.set()
+        for _, thread in self.started:
+            thread.join(10)
+        assert not [path for path, thread in self.started if thread.is_alive()]
+
+
+async def _until(condition, timeout: float = 10.0) -> bool:
+    """Poll ``condition``; the timeout only guards against a hang."""
+    for _ in range(int(timeout / 0.01)):
+        if condition():
+            return True
+        await asyncio.sleep(0.01)
+    return condition()
+
+
+_STALLED = "Held-source probes stalled"
+
+
+def _run_recheck(watcher: FileWatcher, body) -> None:
+    """Run the held recheck in a fresh ``asyncio.run`` while ``body`` drives it."""
+
+    async def main() -> None:
+        task = asyncio.create_task(watcher._recheck_held_loop())
+        try:
+            await body()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(main())
+
+
+def _stall_two_probes_on_a_closed_loop(watcher, store, probes, a, b, caplog) -> None:
+    """Leave the probes of ``a`` and ``b`` timed out on a loop that then closes."""
+    sentinel = a.parent / "sentinel.md"
+    store.held = [a, b, sentinel]
+
+    async def body() -> None:
+        assert await _until(lambda: _STALLED in caplog.text)
+        # The third path waits behind the two stalled probes.
+        assert probes.paths == [a, b]
+        assert len(watcher._stalled_probes) == 2
+
+    _run_recheck(watcher, body)
+    caplog.clear()
+
+
+@pytest.fixture
+def two_loops(tmp_path, monkeypatch):
+    monkeypatch.setattr(watcher_mod, "_HELD_PROBE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(watcher_mod, "_HELD_STALL_POLL_S", 0.05, raising=False)
+    a, b, c, d = (tmp_path / f"{name}.md" for name in "abcd")
+    watcher = _watcher(tmp_path, [])
+    store = watcher._engine._storage
+    probes = _Probes(a, b, c)
+    probes.install(monkeypatch)
+    try:
+        yield watcher, store, probes, (a, b, c, d)
+    finally:
+        probes.release_all()
+
+
+def test_probes_stranded_by_a_closed_loop_do_not_stall_the_next_loop(two_loops, caplog):
+    """A probe that timed out on a loop that closed is never settled; its finished
+    thread must not keep counting against the next loop's budget (#3263)."""
+    watcher, store, probes, (a, b, c, _) = two_loops
+    _stall_two_probes_on_a_closed_loop(watcher, store, probes, a, b, caplog)
+    probes.release(a)
+    probes.release(b)
+    probes.gates.pop(c)  # ``c`` answers at once on the new loop.
+    store.held = [c]
+
+    async def body() -> None:
+        # ``c`` was probed, and its answer settled it, so nothing is counted.
+        assert await _until(lambda: c in probes.paths and not watcher._stalled_probes), caplog.text
+
+    _run_recheck(watcher, body)
+    assert _STALLED not in caplog.text
+
+
+def test_a_probe_still_stalled_from_a_closed_loop_keeps_counting_until_it_ends(two_loops, caplog):
+    """A thread still blocked from the earlier loop holds its slot, so a new loop
+    does not pile probes behind a dead mount, and the slot frees when it ends."""
+    watcher, store, probes, (a, b, c, _) = two_loops
+    _stall_two_probes_on_a_closed_loop(watcher, store, probes, a, b, caplog)
+    probes.gates.pop(c)
+    store.held = [c]
+
+    async def body() -> None:
+        assert await _until(lambda: _STALLED in caplog.text)
+        assert c not in probes.paths
+        probes.release(a)
+        # ``c`` is probed and settles; ``b`` is still blocked and still counted.
+        assert await _until(
+            lambda: (
+                c in probes.paths and list(watcher._stalled_probes.values()) == probes.threads(b)
+            )
+        )
+        assert all(thread.is_alive() for thread in probes.threads(b))
+
+    _run_recheck(watcher, body)
+
+
+def test_a_stall_shared_with_an_earlier_loop_is_noticed_while_an_own_probe_waits(two_loops, caplog):
+    """One stalled thread from the closed loop and one probe of this loop: the wait
+    on this loop's probe must not hide the other thread's end for the full interval."""
+    watcher, store, probes, (a, b, c, d) = two_loops
+    _stall_two_probes_on_a_closed_loop(watcher, store, probes, a, b, caplog)
+    probes.release(a)
+    store.held = [c, d]
+
+    async def body() -> None:
+        assert await _until(lambda: _STALLED in caplog.text)
+        # ``b`` from the closed loop and ``c`` from this one fill the budget.
+        assert probes.paths[-1] == c
+        assert d not in probes.paths
+        probes.release(b)
+        assert await _until(lambda: d in probes.paths)
+        assert all(thread.is_alive() for thread in probes.threads(c))
+
+    _run_recheck(watcher, body)

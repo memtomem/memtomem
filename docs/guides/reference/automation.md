@@ -343,13 +343,22 @@ value:
 - `unchecked: …`: the check did not reach a verdict. That covers
   `CroniterBadDateError` ("failed to find
   next date"), which croniter raises both for a date that never occurs
-  (`0 0 30 2 *`, which `mm schedule add` accepts) and for one draw of its
-  random `R` field that the next draw may not repeat (`0 0 R(28-30) 2 *`
-  fails only on the draw that lands on the 30th). `mm schedule list` marks
-  such a row `cron check failed`. The message is the same for both causes,
-  so look at the row's `cron_expr`: one with no random field and a date that
-  never occurs is skipped on every tick like a blocked row; replace it the
-  same way.
+  (`0 0 30 2 *`) and for one draw of its random `R` field that the next draw
+  may not repeat (`0 0 R(28-30) 2 *` fails only on the draw that lands on the
+  30th). `mm schedule list` marks such a row `cron check failed`. The message
+  is the same for both causes, so look at the row's `cron_expr`: one with no
+  random field and a date that never occurs is skipped on every tick like a
+  blocked row; replace it the same way.
+
+  `mm schedule add` and `schedule_register` look for a date only when the
+  expression has five fields separated by ASCII whitespace and is written
+  with nothing but digits, `* , - / ? # L W` and three-letter month and day
+  names, and they refuse it when croniter finds none, such as `0 0 30 2 *`.
+  Any other expression the installed croniter parses is stored without that
+  lookup: one with a random `R` field, six or seven fields, or other
+  characters. (A hashed `H` field does not parse here: neither command
+  passes the hash id croniter requires for it.) A row added that way, or
+  added before the check, can still show `cron check failed` in the listing.
 
 To replace a blocked schedule, add the corrected one first, written with ASCII
 digits and spaces and for a date that exists, with the same `--job` and the

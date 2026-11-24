@@ -648,6 +648,14 @@ class TestDedup:
         assert data["total"] == 0
         assert data["candidates"] == []
 
+    @pytest.mark.parametrize("limit", [0, -1])
+    async def test_dedup_scan_rejects_non_positive_limit(self, app, client: AsyncClient, limit):
+        resp = await client.get("/api/dedup/candidates", params={"limit": limit})
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"][0]["loc"] == ["query", "limit"]
+        app.state.dedup_scanner.scan_with_coverage.assert_not_awaited()
+
     async def test_dedup_scan_reports_what_it_covered(self, app, client: AsyncClient):
         # ``scanned_chunks`` used to echo the requested ``max_scan``; it is the
         # pool the scan actually selected, which a small store keeps below it.
@@ -725,6 +733,52 @@ class TestDedup:
         assert resp.status_code == 422
         assert resp.json()["detail"] == f"after must be a chunk id, got {typed!r}"
         app.state.dedup_scanner.scan_with_coverage.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "threshold",
+        [-0.1, 1.5, "NaN", "inf"],
+        ids=["threshold-neg", "threshold-above-1", "nan", "inf"],
+    )
+    async def test_dedup_scan_rejects_a_threshold_outside_0_to_1(
+        self, app, client: AsyncClient, threshold
+    ):
+        # The tool and the scheduled job refuse these values; the route passed
+        # them to the scanner unchecked and answered 200 (#3562).
+        resp = await client.get("/api/dedup/candidates", params={"threshold": threshold})
+
+        assert resp.status_code == 422
+        (error,) = resp.json()["detail"]
+        assert error["loc"] == ["query", "threshold"]
+        app.state.dedup_scanner.scan_with_coverage.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("params", "forwarded"),
+        [
+            ({"limit": 1}, {"threshold": 0.92, "limit": 1}),
+            # No upper bound: the route is the one surface that can list a
+            # pool with more than 500 pairs, and #3433 decides whether it should.
+            ({"limit": 1001}, {"threshold": 0.92, "limit": 1001}),
+            ({"threshold": 0.0}, {"threshold": 0.0, "limit": 100}),
+            ({"threshold": 1.0}, {"threshold": 1.0, "limit": 100}),
+        ],
+        ids=["limit-1", "limit-1001", "threshold-0", "threshold-1"],
+    )
+    async def test_dedup_scan_takes_the_bounds(self, app, client: AsyncClient, params, forwarded):
+        resp = await client.get("/api/dedup/candidates", params=params)
+
+        assert resp.status_code == 200
+        app.state.dedup_scanner.scan_with_coverage.assert_awaited_once_with(
+            **forwarded, max_scan=500, after=None
+        )
+
+    def test_dedup_scan_declares_no_upper_bound_on_limit(self, app):
+        # Forwarding 1001 above would still pass under a higher cap; the
+        # declared schema says there is none.
+        (operation,) = app.openapi()["paths"]["/api/dedup/candidates"].values()
+        schemas = {p["name"]: p["schema"] for p in operation["parameters"]}
+        assert schemas["limit"].get("minimum") == 1
+        assert {"maximum", "exclusiveMaximum"}.isdisjoint(schemas["limit"])
+        assert (schemas["threshold"]["minimum"], schemas["threshold"]["maximum"]) == (0.0, 1.0)
 
     async def test_dedup_scan_walks_a_real_store_with_next_after(
         self, app, client: AsyncClient, bm25_only_components
