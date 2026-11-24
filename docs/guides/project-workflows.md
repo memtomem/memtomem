@@ -34,7 +34,7 @@ behaviour is the same everywhere and only the invocation differs.
 
 This guide describes the workflows as shipped with memtomem `0.7.13` and these
 plugin versions:
-`claude` 0.5.44 · `codex` 0.3.42 · `opencode` 0.3.40 · `kimi` 0.2.30 · `antigravity` 0.2.21 · `cursor` 0.1.0.
+`claude` 0.5.45 · `codex` 0.3.43 · `opencode` 0.3.41 · `kimi` 0.2.31 · `antigravity` 0.2.22 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).
@@ -68,8 +68,19 @@ the invocation, as in `s to codex-cli` or `r <handoff-id>`. The target runtime i
 **Save** records work that actually happened, so it refuses to run when there
 is nothing observed to record and reports `insufficient_input: work context`
 instead of inventing a checkpoint. It reads the live `git rev-parse HEAD` and
-`git status --porcelain=v1 --branch`, then writes one record of at most 1,200
-characters with these fields, in this order:
+`git status --porcelain=v1 --branch`, then writes one record with these fields,
+in this order. The whole record, fence lines included, aims for at most 850 characters,
+with each Korean, Japanese, or Chinese character counted as two, and never more than
+1,200 characters, counted plainly. The target is meant to keep the record in one chunk on a store
+indexing with an exact token ceiling (384 tokens under `multilingual-e5-small`); it is
+not a guarantee. To fit, Save shortens only prose and moves whole paths out of
+`changed_files` into its omitted count. The ids, the root, the commit, the worktree
+summary and the artifact paths are never changed, and a path, symbol, command, GitHub
+reference or quote in the prose is kept whole or left out whole, except in `next_action`,
+where none is left out. A record that cannot meet the field caps
+and the 1,200 maximum that way is not saved; Save stops and names the value in the
+way. A record that meets them but stays over the size target is saved and reported
+with its weighted count.
 
 ```text
 handoff_id, from_runtime, to_runtime, project_root, objective, completed,

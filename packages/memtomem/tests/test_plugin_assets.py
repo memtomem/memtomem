@@ -894,6 +894,63 @@ _HANDOFF_SAVE_REPORT = (
     "When the result is a refusal or an error instead, report it unchanged and add no file "
     "or chunk count of your own.",
 )
+_HANDOFF_SIZE_TARGET = (
+    # A record near the 1,200-character maximum almost always split across rows under the
+    # E5 budget (#3399): of 399 stored records, 270 of the 336 at or under 1,200 weighted did.
+    # With their prose cut from the end to 850 weighted, none passed 384 tokens; at 900, 15
+    # did (a truncation experiment: it measures token density at that size).
+    "Then the size target: aim for at most 850 characters for the complete record, fence "
+    "lines included, counting each Korean, Japanese, or Chinese character as two.",
+    # The weight names its scripts, as `update`'s does.
+    "The characters that count as two are Hangul, hiragana, katakana, and Han characters "
+    "and CJK or fullwidth punctuation",
+    "every other character, including whitespace, counts as one",
+    "the target is a practical one for that budget, not a guarantee",
+    "each ranking on its own in search and taking its own slot in brief's recall window",
+    # One rule for what may give way. The identity and comparison fields are checked
+    # against the live repository, `artifacts` already obeys its own limits, and a cut path
+    # or command points at nothing.
+    "Only two kinds of change fit a record to these limits: shortening the prose of "
+    "`objective`, `completed`, `validation`, `blockers`, and `next_action`, and moving whole "
+    "paths out of `changed_files` into its omitted count.",
+    "Nothing else changes: not `handoff_id`, the runtimes, `project_root`, `git_head`, "
+    "`worktree_state`, or `artifacts`.",
+    "Inside the prose, a verbatim string from step 1",
+    "is kept whole or left out whole, never cut",
+    # Leaving a long command out whole must not empty a required summary: Resume would
+    # accept the empty line, and the record would carry no work.
+    "when leaving one out would leave a prose field saying nothing, say in words what the "
+    "field needs to convey instead",
+    # Leaving out what `next_action` acts on leaves words the next agent cannot act on, and
+    # Resume step 7 reads its GitHub reference (#3565 review). The exception covers every
+    # verbatim kind step 1 names rather than a list of its own: a listed subset left out the
+    # full URL Resume accepts and code symbols.
+    "The one exception is `next_action`: no verbatim string in it is ever left out,",
+    "when they still do not fit the `next_action` cap, that is a raw limit this rule cannot meet",
+    # A multi-line command in `next_action` can be neither left out nor joined, so the
+    # one-line rule must be a limit the refusal names (#3565 review).
+    "Every field keeps exactly one line, and that is a raw limit too: a verbatim string in "
+    "`next_action` that spans lines is neither joined nor left out, so it stops Save the "
+    "same way.",
+    # The refusal comes before the fallback, so "save it anyway" never covers a record
+    # that breaks a raw limit.
+    "If the raw limits cannot be met this way, stop and report which value is in the way "
+    "instead of calling `mem_add`. If they are met but the record is still over the target, "
+    "save it anyway.",
+    # `artifacts` takes its 4-path cap while it is built, not after (#3399 review).
+    "Add whole paths in order, at most 4, while the value, including the suffix it would "
+    "then need, still fits",
+)
+# Matched inside the confirmed-write report (step 4) only: the count is reported only for a
+# confirmed write, and a refusal adds nothing (#3443).
+_HANDOFF_SIZE_REPORT = (
+    "On a confirmed write of a record over the size target, also report its weighted count."
+)
+_HANDOFF_SAVE_STEP_4 = re.compile(
+    r"4\. When `(?:memtomem_)?mem_add` confirms the write, (.*?)(?:## Resume|$)"
+)
+
+
 # The condition itself, which the markers above start after: OpenCode names the tool
 # `memtomem_mem_add`, so the tool name is matched, not quoted.
 _HANDOFF_SAVE_CONDITION = re.compile(
@@ -933,7 +990,11 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         'tag_filter="handoff-to-<current-runtime>,handoff-to-any"',
         'tag_filter="handoff-id-<handoff-id>"',
         "`opencode`, `antigravity-cli`, `cursor`, and `any`",
-        "Keep file paths, code symbols, command strings, and direct quotes of the user verbatim",
+        # GitHub references are verbatim too: Resume step 7 reads `next_action`'s, and
+        # step 2's `next_action` exception protects only what this list names (#3565 review).
+        "Keep file paths, code symbols, command strings, GitHub issue and pull request "
+        "references, and direct quotes of the user verbatim",
+        "(a file path, code symbol, command string, GitHub reference, or direct quote of the user)",
         "write the rest in the language this project's existing memories use",
         "inside one fenced ```text block",
         "The fence is load-bearing",
@@ -991,8 +1052,12 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         "recompute the deterministic `worktree_state` summary",
         "hard maximum of 1,200 characters",
         "never call `mem_add` with an oversized record",
-        "`completed` 240",
-        "at most 10 paths",
+        # The value caps leave room under the size target (#3399).
+        "`objective` 80 characters, `completed` 160, `changed_files` 120 and at most 8 paths, "
+        "`artifacts` 160 and at most 4 paths, `worktree_state` 80, `validation` 90, "
+        "`blockers` 60, and `next_action` 120",
+        "changed_files: <comma-separated paths, at most 8; include an omitted count if needed>",
+        *_HANDOFF_SIZE_TARGET,
         "does not capture the whole conversation",
         "coordinate concurrent agents",
         # Save refuses on missing evidence, not on execution mode: a subagent
@@ -1070,6 +1135,35 @@ def test_handoff_workflow_pins_sequential_project_local_contract() -> None:
         assert marker in flat, marker
     assert _HANDOFF_SAVE_CONDITION.search(flat)
     assert "indexed chunk count" not in flat
+    # The caps a near-cap record split under (#3399): each one is gone, not merely joined
+    # by a new number elsewhere in the text.
+    for old_cap in (
+        "`objective` 100 characters",
+        "`completed` 240",
+        "`changed_files` 180",
+        "at most 10 paths",
+        "at most 10;",
+        "`validation` 120",
+        "`blockers` 80",
+        "`next_action` 90",
+        "A full-size record, or a shorter one with Korean text",
+    ):
+        assert old_cap not in flat, old_cap
+    # The order the sizing runs in: both derivations, then the raw maximum, then the target.
+    save = flat.split("## Save", 1)[1].split("## Resume", 1)[0]
+    order = [
+        save.index("`artifacts` lists the absolute paths"),
+        save.index("Derive `worktree_state` deterministically"),
+        save.index("Size the record last"),
+        save.index("hard maximum of 1,200 characters"),
+        save.index("Then the size target"),
+    ]
+    assert order == sorted(order), order
+    assert "If the absolute root exceeds 240 characters, stop and report that" in save
+    report = _HANDOFF_SAVE_STEP_4.search(flat)
+    assert report is not None
+    assert _HANDOFF_SIZE_REPORT in report.group(1)
+    assert flat.count(_HANDOFF_SIZE_REPORT) == 1
     # The designs #2930's plan review rejected: a fetch's effect depends on refspec,
     # prune and fetch.all config; ancestry lazily fetches in a partial clone;
     # ``--get`` returns the last of several merge values; ``--abbrev-ref`` can name
@@ -1146,6 +1240,33 @@ def test_handoff_save_reports_a_refusal_in_every_delivery() -> None:
         for marker in _HANDOFF_SAVE_REPORT:
             assert marker in flat, (label, marker)
         assert _HANDOFF_SAVE_CONDITION.search(flat), label
+
+
+def test_handoff_save_sizes_the_record_in_every_delivery() -> None:
+    """Every host's `handoff` carries the same size target and weight (#3399).
+
+    Markers that quote a tool name are left to the source test: OpenCode renames it.
+    """
+    for label, text in _handoff_deliveries().items():
+        flat = _flat(text)
+        for marker in _HANDOFF_SIZE_TARGET:
+            if "mem_add" not in marker:
+                assert marker in flat, (label, marker)
+        report = _HANDOFF_SAVE_STEP_4.search(flat)
+        assert report is not None, label
+        assert _HANDOFF_SIZE_REPORT in report.group(1), label
+        assert flat.count(_HANDOFF_SIZE_REPORT) == 1, label
+
+
+def _handoff_size_target() -> tuple[str, str]:
+    """The target and the CJK weight the handoff workflow states, as written there."""
+    found = re.findall(
+        r"aim for at most ([\d,]+) characters for the complete record, fence lines included, "
+        r"counting each Korean, Japanese, or Chinese character as (\w+)\.",
+        _flat(_project_body("handoff")),
+    )
+    assert len(found) == 1, found
+    return found[0]
 
 
 # The tool the query goes to: OpenCode names it `memtomem_mem_recall`, so it is matched.
@@ -2147,6 +2268,7 @@ def test_automation_failure_log_does_not_store_prompt(
 
 _PROJECT_WORKFLOWS_GUIDE = _ROOT / "docs/guides/project-workflows.md"
 _CROSS_RUNTIME_HANDOFF_GUIDE = _ROOT / "docs/guides/integrations/cross-runtime-handoff.md"
+_KO_HANDOFF_GUIDE = _ROOT / "docs/guides/integrations/user-controlled-handoff-ko.md"
 
 
 def _named_operations(flat: str) -> set[str]:
@@ -2287,6 +2409,32 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
         f"character counted as {limits[2]}," in flat_guide
     ), limits.groups()
 
+    # handoff's size target (#3399): the guides state the number and weight the workflow
+    # sets, the raw maximum that still binds, and the count a confirmed save reports.
+    target, weight = _handoff_size_target()
+    assert (
+        f"aims for at most {target} characters, with each Korean, Japanese, or Chinese "
+        f"character counted as {weight}," in flat_guide
+    ), (target, weight)
+    assert "and never more than 1,200 characters" in flat_guide
+    assert "The whole record, fence lines included, aims for at most" in flat_guide
+    assert "(384 tokens under `multilingual-e5-small`); it is not a guarantee." in flat_guide
+    # The guide's keep-or-omit rule carries the workflow's exception for `next_action`.
+    assert (
+        "a path, symbol, command, GitHub reference or quote in the prose is kept whole or left "
+        "out whole, except in `next_action`, where none is left out." in flat_guide
+    )
+    # The refusal before the fallback, as in the workflow: "saved anyway" covers only a
+    # record that meets the raw limits.
+    refusal = flat_guide.index(
+        "A record that cannot meet the field caps and the 1,200 maximum that way is not saved"
+    )
+    fallback = flat_guide.index(
+        "A record that meets them but stays over the size target is saved and reported with "
+        "its weighted count."
+    )
+    assert refusal < fallback
+
     # Chunk counts: the guides name the value both workflows report, not the file-wide count.
     assert "the written file, and the value of the result's `Entry chunks` line" in flat_guide
     assert (
@@ -2300,6 +2448,25 @@ def test_project_workflows_guide_matches_the_workflow_contract() -> None:
         handoff_guide
     )
     assert "Each save that `mem_add` confirms must report its `handoff_id`" in handoff_guide
+    assert (
+        f"and, for a record over the {target}-character size target, its weighted count with "
+        f"each Korean, Japanese, or Chinese character counted as {weight}" in handoff_guide
+    )
+    # The Korean guide: the same target, weight and maximum, and its save checklist names
+    # the value Save reports instead of a generic indexed-chunk count.
+    ko_guide = " ".join(_KO_HANDOFF_GUIDE.read_text(encoding="utf-8").split())
+    ko_weight = {"two": "2자", "one": "1자"}[weight]
+    assert (
+        f"한국어·일본어·중국어 문자는 {ko_weight}로 세어 {target}자 이내를 목표로 하며, "
+        "최대 1,200자(가중 없이 셈)를 넘지 않습니다" in ko_guide
+    ), (target, weight)
+    assert "레코드는 펜스 줄을 포함한 전체를 기준으로," in ko_guide
+    assert "한 chunk에 들어가도록 하기 위한 목표이며 보장은 아닙니다" in ko_guide
+    assert "필드 한도와 1,200자를 지키면 목표를 넘더라도 저장하고" in ko_guide
+    assert "지킬 수 없으면 저장하지 않고 걸리는 값을 알립니다" in ko_guide
+    assert "- `mem_add` 결과에 나온 `Entry chunks` 값" in ko_guide
+    assert "- 크기 목표를 넘은 레코드라면 그 가중 글자 수" in ko_guide
+    assert "인덱싱된 chunk 수" not in ko_guide
     assert (
         "A save that `mem_add` refuses, or that ends in an error, must report that result "
         "unchanged, with no file or chunk count added." in handoff_guide

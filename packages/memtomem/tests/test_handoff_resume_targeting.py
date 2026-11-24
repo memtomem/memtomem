@@ -30,7 +30,9 @@ selection is decidable from one bounded page.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import UUID
 
@@ -609,22 +611,34 @@ def _fenced_record(**values: str) -> str:
 
 
 def _capped_korean_record() -> str:
-    """Every capped field filled to its cap with Korean text, except ``completed``.
+    """Every prose field filled to its cap with Korean text, every other value compliant.
 
-    With ``artifacts`` filled too, the caps add up to more than the record's
-    1,200-character ceiling, so the workflow shortens another field and never a
-    path. ``completed`` gives up the difference here.
+    Every value is within its cap, yet with Korean counted as two the record is
+    far over the size target (#3399): the caps bound each field, the target the
+    whole record, and a record over it is saved anyway.
     """
     return _fenced_record(
-        objective=_korean(100),
-        completed=_korean(90),
-        changed_files=", ".join(f"src/pkg/모듈_{i}.py" for i in range(10)),
+        objective=_korean(80),
+        completed=_korean(160),
+        changed_files=", ".join(f"src/pkg/모듈_{i}.py" for i in range(6)) + ", +2 omitted",
         artifacts=", ".join(f"/Users/x/.gemini/tmp/세션/계획_{i}.md" for i in range(4)),
-        worktree_state=_korean(80),
-        validation=_korean(120),
-        blockers=_korean(80),
+        worktree_state="8 dirty:  M=5 ??=3; first=src/pkg/모듈_0.py",
+        validation=_korean(90),
+        blockers=_korean(60),
         next_action=_korean(120),
     )
+
+
+_RAW_CAPS = {
+    "objective": 80,
+    "completed": 160,
+    "changed_files": 120,
+    "artifacts": 160,
+    "worktree_state": 80,
+    "validation": 90,
+    "blockers": 60,
+    "next_action": 120,
+}
 
 
 def _e5_rows(tmp_path, record: str, config):
@@ -695,6 +709,11 @@ def test_e5_token_budget_splits_a_capped_record_between_field_lines(tmp_path, e5
     config, budget = e5_budget
     record = _capped_korean_record()
     assert len(record) <= 1200, "fixture left the workflow's 1,200-character ceiling"
+    fields = _parse_fields([record])
+    for key, cap in _RAW_CAPS.items():
+        assert len(fields[key]) <= cap, key
+    target, weight = _size_target()
+    assert _weighted(record, weight) > target, "fixture no longer over the size target"
 
     rows = _e5_rows(tmp_path, record, config)
 
@@ -713,7 +732,9 @@ def test_e5_token_budget_splits_a_capped_record_between_field_lines(tmp_path, e5
 def test_a_last_row_can_hold_only_the_closing_fence(tmp_path, e5_budget):
     """A record just over the budget leaves the closing fence alone in a row.
 
-    That row is legitimate, so the count must accept it.
+    That row is legitimate, so the count must accept it. The values are over the
+    caps Save applies since #3399: this is a record saved before them, which
+    resume still has to read.
     """
     config, budget = e5_budget
     record = _fenced_record(objective=_korean(100), completed=_korean(240), validation=_korean(95))
@@ -750,13 +771,14 @@ def test_capped_ordinary_lines_fit_the_e5_line_budget(value, e5_budget):
 def test_normalization_expanding_line_is_torn_and_detectable(tmp_path, e5_budget):
     """The case that makes resume's torn-record check apply to every record.
 
-    U+FDFA normalizes to 18 characters before tokenizing, so 240 of them cost
+    U+FDFA normalizes to 18 characters before tokenizing, so 160 of them cost
     far more than the budget although the record is within every cap. The
     line is torn mid-value. Nothing is lost, but the union now holds lines
     that are no field line, which is what resume's count catches.
     """
     config, budget = e5_budget
-    value = "\ufdfa" * 240
+    value = "\ufdfa" * 160
+    assert len(value) <= _RAW_CAPS["completed"]
     record = _fenced_record(completed=value)
     assert len(record) <= 1200
     assert budget.count(f"completed: {value}") > config.hard_max_chunk_tokens
@@ -818,6 +840,118 @@ def test_fields_no_cap_shortens_fill_most_of_the_e5_budget(e5_budget):
     cost = budget.count(_fenced_record(project_root=root))
 
     assert 340 < cost <= config.hard_max_chunk_tokens
+
+
+# --- The size target (#3399) -------------------------------------------------
+#
+# Save aims a record at a weighted size the E5 budget holds in one row.
+# ``test_plugin_assets`` pins the workflow's wording; the fixtures below are
+# whole records a Save could write, sized to that target by hand.
+
+_WORKFLOW = (
+    Path(__file__).resolve().parents[3] / "packages/memtomem-plugin-assets/workflows/handoff.md"
+)
+_WEIGHTS = {"one": 1, "two": 2}
+# The fixtures use only ASCII and Hangul syllables, plus, in the classifier test, the
+# punctuation the workflow names. Checking just those keeps this helper exact for what it
+# measures; it is not a full implementation of the workflow's character classes.
+_HANGUL_SYLLABLES = (0xAC00, 0xD7A3)
+_NAMED_PUNCTUATION = frozenset("。、「，")
+
+
+def _size_target() -> tuple[int, int]:
+    """The target and the CJK weight, as the workflow states them."""
+    flat = " ".join(_WORKFLOW.read_text(encoding="utf-8").split())
+    found = re.findall(
+        r"aim for at most ([\d,]+) characters for the complete record, fence lines included, "
+        r"counting each Korean, Japanese, or Chinese character as (\w+)\.",
+        flat,
+    )
+    assert len(found) == 1, found
+    return int(found[0][0].replace(",", "")), _WEIGHTS[found[0][1]]
+
+
+def _is_doubled(ch: str) -> bool:
+    low, high = _HANGUL_SYLLABLES
+    return low <= ord(ch) <= high or ch in _NAMED_PUNCTUATION
+
+
+def _weighted(text: str, weight: int) -> int:
+    for ch in text:
+        assert ord(ch) < 128 or _is_doubled(ch), f"unclassified character {ch!r}"
+    return sum(weight if _is_doubled(ch) else 1 for ch in text)
+
+
+def test_the_classifier_counts_what_the_fixtures_use() -> None:
+    assert _weighted("ab 1", 2) == 4
+    assert _weighted("한글", 2) == 4
+    assert _weighted("。、「，", 2) == 8
+    assert _weighted("handoff 크기", 2) == 12
+
+
+# Whole records of the kind real ones carry: ids, a hex sha, paths, a scratchpad
+# artifact, a derived worktree summary, and short complete prose with its commands
+# kept whole. Each weighs exactly 850.
+_NEVER_SHORTENED = {
+    "project_root": "/Users/dev/Work/agent-harness/memtomem",
+    "changed_files": (
+        "packages/memtomem-plugin-assets/workflows/handoff.md, "
+        "packages/memtomem/tests/test_plugin_assets.py, +6 omitted"
+    ),
+    "artifacts": (
+        "/private/tmp/claude-501/-Users-dev-Work-agent-harness-memtomem/"
+        "5002da3c-36c4-45fb-8831-46970c1d74af/scratchpad/plan.md"
+    ),
+    "git_head": "ca0fa40c9b6e2d1f7a3c58e4b0d92f61a7c3e5d8",
+    "worktree_state": "3 dirty:  M=2 ??=1; first=packages/memtomem/tests/test_plugin_assets.py",
+}
+_PROSE = {
+    "english": {
+        "objective": "Size handoff records for the E5 budget (#3399)",
+        "completed": (
+            "Lowered the handoff caps, added an 850 target with CJK counted as two, and "
+            "re-rendered six deliveries"
+        ),
+        "validation": "`ruff check` clean; full suite 24,827 passed",
+        "blockers": "none",
+        "next_action": "Run `/safe-push`, then open the PR.",
+    },
+    "korean": {
+        "objective": "E5 예산에 맞춘 handoff 크기 조정(#3399)",
+        "completed": (
+            "handoff cap 을 낮추고 한중일 문자를 2자로 세는 850 목표를 넣었으며, "
+            "가이드 세 곳과 변경 기록도 함께 고침"
+        ),
+        "validation": "`ruff check` 통과, 전체 스위트 24,827 통과",
+        "blockers": "없음",
+        "next_action": "`/safe-push` 실행 후 PR 을 열고 검사 확인",
+    },
+}
+
+
+@pytest.mark.parametrize("language", ["english", "korean"])
+def test_a_record_at_the_size_target_stays_one_e5_row(language, tmp_path, e5_budget):
+    """A whole record of exactly the target size is one row under the E5 budget.
+
+    The fixtures cost more than 0.40 tokens per weighted character, inside the
+    range of stored records, so the result is not carried by light padding.
+    """
+    config, budget = e5_budget
+    target, weight = _size_target()
+    record = _fenced_record(**_NEVER_SHORTENED, **_PROSE[language])
+    assert _weighted(record, weight) == target, "the fixture no longer weighs the target"
+    assert len(record) <= 1200
+    fields = _parse_fields([record])
+    for key, cap in _RAW_CAPS.items():
+        assert len(fields[key]) <= cap, key
+    tokens = budget.count(record)
+
+    rows = _e5_rows(tmp_path, record, config)
+
+    assert tokens <= config.hard_max_chunk_tokens
+    assert len(rows) == 1
+    assert _parse_fields([rows[0].content]) == fields
+    assert tokens / target > 0.40, "the fixture is no longer dense; re-pick its values"
 
 
 def test_a_bare_field_name_without_a_colon_is_not_a_field_line() -> None:
