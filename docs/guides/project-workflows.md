@@ -34,7 +34,7 @@ behaviour is the same everywhere and only the invocation differs.
 
 This guide describes the workflows as shipped with memtomem `0.7.14` and these
 plugin versions:
-`claude` 0.5.45 · `codex` 0.3.43 · `opencode` 0.3.41 · `kimi` 0.2.31 · `antigravity` 0.2.22 · `cursor` 0.1.0.
+`claude` 0.5.46 · `codex` 0.3.44 · `opencode` 0.3.42 · `kimi` 0.2.32 · `antigravity` 0.2.23 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).
@@ -152,20 +152,38 @@ nothing.
 
 ## update
 
-`update` reviews the current session's outcomes and the latest ten commits,
-then saves only durable learnings. It has three modes:
+`update` reviews the current session's outcomes and recent commits, then saves
+only durable learnings. It has four modes:
 
 | mode | commits reviewed | records them as reviewed |
 |---|---|---|
 | `incremental` (the default) | those of the latest 10 that no earlier run recorded | yes |
 | `full` | all of the latest 10 | yes |
 | `topic` | the latest 10, filtered to the focus | no |
+| `backfill` | the readable unreviewed commits of the newest 10-commit slice, within the latest 100, that has one | yes |
 
-A request that names neither `full` nor `topic` runs `incremental` mode without
-asking; `f` and `t` are shorthands when they are the whole first word. `topic`
-needs a focus after the mode word. The window is the latest ten commits in every
-mode, and it is bounded, not a cursor: older commits are not reviewed. Session
-outcomes are reviewed in every mode.
+A request that names none of `full`, `topic` or `backfill` runs `incremental`
+mode without asking; `f` and `t` are shorthands when they are the whole first
+word. `topic` needs a focus after the mode word. `backfill` (shorthand `b`) is
+selected only as the whole first word, so `topic backfill plan` is a `topic` run.
+The window is the latest ten commits in every mode but `backfill`, and it is
+bounded, not a cursor: older commits are not reviewed. Session outcomes are
+reviewed in every mode.
+
+**Backfill.** When more than ten commits land between two runs, `incremental`
+never sees the excess. `backfill` reaches back to the latest 100: it lists their
+SHAs, asks the coverage tool slice by slice (ten at a time) which ones no run has
+recorded, and reads a slice's unreviewed commits one commit at a time, so a message
+is never split out of a multi-commit listing. The first slice in which at least one
+of those reads can be used is the one it reviews; a slice whose unreviewed commits
+all fail to read is reported and passed over. It reviews at most one slice per run,
+records exactly the commits it read and reviewed, and reports
+the positions it checked, the ones it left unchecked, and any commit whose read it
+could not use. A read is used when the command succeeded, its result came back
+inline with no sign of truncation, and its first line is the SHA asked for; a host
+that clips output without saying so cannot be detected. Run it again to reach the next slice. Commits deeper than 100 are out
+of its reach. Coverage is kept per machine, so each machine backfills its own
+store.
 
 Saved items are of three kinds: `decision` (architectural choices and their
 rationale), `bugfix` (non-obvious root causes and how they were resolved), and
@@ -189,7 +207,12 @@ read commits an earlier run already reviewed, and again after the last `mem_add`
 has returned, to record this run, even when it saved nothing. If any write
 failed, nothing is recorded and the next run reviews those commits again. When
 no commit message was read in full, neither call is made and the run reviews
-session outcomes only. memtomem `0.7.2` and later have the tool, exposed
+session outcomes only. In `backfill` mode the checks come first and use the
+listed SHAs, before any message is read, one call per slice it walks; the record
+call passes only the commits of the review slice that were read and reviewed,
+and is not made when the walk finds no review slice. A `backfill` check reply that
+names another project root, or whose counts do not add up, stops the run before
+it writes. memtomem `0.7.2` and later have the tool, exposed
 through `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`. The plugins' bundled server
 configurations set that variable, and so does every registration `mm init --mcp`
 writes; a server entry written by hand, or by an earlier `mm init`, has to add

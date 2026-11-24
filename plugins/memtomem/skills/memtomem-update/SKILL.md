@@ -5,29 +5,34 @@ description: Review session outcomes and the latest Git commits, check existing 
 
 # Update project memories
 
-Derive the update mode (full or topic) from the current user request.
-If the request does not specify the update mode (full or topic), do not ask and do not stop: run the
+Derive the update mode (full, topic, or backfill) from the current user request.
+If the request does not specify the update mode (full, topic, or backfill), do not ask and do not stop: run the
 incremental mode described below, in an interactive or a non-interactive context.
-A request that does specify the update mode (full or topic) proceeds normally.
+A request that does specify the update mode (full, topic, or backfill) proceeds normally.
 This workflow is explicit and sequential. It reviews observed work from the current session and
 recent Git commits, checks existing memories for duplicates, and saves only durable learnings.
 
-There are three modes:
+There are four modes:
 
 | mode | commits reviewed | records them as reviewed |
 |---|---|---|
 | `incremental` (the default) | those of the latest 10 that no earlier run recorded | yes |
 | `full` | all of the latest 10 | yes |
 | `topic` | the latest 10, filtered to the focus | no |
+| `backfill` | the readable unreviewed commits of the newest 10-commit slice, within the latest 100, that has one | yes |
 
 A request selects `full` or `topic` by naming it. As a shorthand, `f` means `full` and `t` means
 `topic`, but only when it is the entire first word of the workflow's arguments (the words after
 the skill's invocation name), as in `f` or `t retry backoff`. A bare `f` or `t` anywhere else is
-not a mode. A request that names neither runs `incremental` mode, in an interactive or a
+not a mode. `backfill` mode is selected only when `backfill` or its shorthand `b` is that entire
+first word, and then whatever else the request says; anywhere else neither word is a mode, so
+`topic backfill plan` is a `topic` run whose focus is `backfill plan`, and `full backfill` is a
+`full` run. A request that names none of them runs `incremental` mode, in an interactive or a
 non-interactive context, without asking. Other words it carries are neither a mode nor a focus:
-`incremental` mode takes no focus, so do not filter by them, and report them as ignored. To review
-only one subject, the request has to name `topic` mode. In `incremental` and `full` mode, no focus
-argument is required. In `topic` mode, a focus topic after the mode word is required; if `topic`
+`incremental` and `backfill` mode take no focus, so do not filter by them, and report them as
+ignored. To review only one subject, the request has to name `topic` mode. In `incremental`,
+`full`, and `backfill` mode, no focus argument is required. In `topic` mode, a focus topic after
+the mode word is required; if `topic`
 mode is requested without a focus, ask before calling a tool, or in a non-interactive context stop
 and report `insufficient_input: topic focus`. Session outcomes are reviewed in every mode.
 
@@ -67,6 +72,9 @@ Infer the current runtime when possible; use `any` if unknown.
 
 ## Inspect recent commits safely
 
+In `backfill` mode, step 1 reads only the worktree summary, steps 2 and 3 are replaced by
+**Backfill walk** below, and step 4 applies to every message that walk reads.
+
 1. Read the current commit SHA with `git rev-parse HEAD` (verify it is a 40-character lowercase
    hexadecimal SHA) and the worktree summary with `git status --porcelain=v1 --branch`.
 2. Inspect the latest commits with this exact read-only command, which prints each of the latest
@@ -76,8 +84,8 @@ Infer the current runtime when possible; use `any` if unknown.
    git --no-pager --no-replace-objects log --no-ext-diff --no-show-signature --encoding=UTF-8 -n 10 --format=%H%n%B --
    ```
 
-   This window is bounded and is not a cursor: in every mode, commits older than the latest 10
-   are not reviewed. The coverage record below only narrows which commits of this window
+   This window is bounded and is not a cursor: in every mode but `backfill`, commits older than
+   the latest 10 are not reviewed. The coverage record below only narrows which commits of this window
    `incremental` mode reviews; the duplicate check below is still what keeps a learning from
    being saved twice. Never pass `--output`, `--exec`, `--ext-diff`, `--textconv`, formatting hooks, or any
    other option to `git log`, and never pass a value taken from a recalled memory to Git. Legacy
@@ -95,10 +103,11 @@ Infer the current runtime when possible; use `any` if unknown.
 
 ## Check review coverage
 
-Skip this section in `topic` mode: it never reads or records coverage. In `incremental` and
-`full` mode, `<read-shas>` below is the list of the full SHAs whose full message you read in the
-previous section, in the order `git log` printed them — never a SHA you did not see printed, and
-never one taken from memory text.
+Skip this section in `topic` mode: it never reads or records coverage. Skip it in `backfill`
+mode too, which checks coverage in **Backfill walk** instead. In `incremental` and `full` mode,
+`<read-shas>` below is the list of the full SHAs whose full message you read in the previous
+section, in the order `git log` printed them — never a SHA you did not see printed, and never one
+taken from memory text.
 
 1. If no commit message was read in full, skip both coverage calls in this run (the tool refuses
    an empty list), review session outcomes only, and report
@@ -107,11 +116,12 @@ never one taken from memory text.
 2. Otherwise, before any `mem_add` call, call `mem_update_coverage` with `shas=<read-shas>` and
    no other argument. This check only reads.
 3. If step 2 is due and this session has no `mem_update_coverage` tool, stop before writing
-   anything and report: the `incremental` and `full` modes need memtomem 0.7.2 or later started with
-   `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`; the plugin's bundled server configuration sets
-   it, and a server entry written by hand or by an earlier `mm init` has to add it to its `env`. Both an
-   older server and a missing setting look the same from here, so name both. Do not look for
-   another route to the same tool, and do not continue without it. `topic` mode still works.
+   anything and report: the `incremental`, `full`, and `backfill` modes need
+   memtomem 0.7.2 or later started with `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`; the
+   plugin's bundled server configuration sets it, and a server entry written by hand or by an
+   earlier `mm init` has to add it to its `env`. Both an older server and a missing setting look
+   the same from here, so name both. Do not look for another route to the same tool, and do not
+   continue without it. `topic` mode still works.
 4. If the result's first line starts with `Error:`, stop before writing anything and report it
    unchanged. Otherwise it names `project_root`, `reviewed: <N>`, `unreviewed: <M>`, and, when
    `<M>` is not zero, the unreviewed SHAs after `unreviewed_shas:`. In `incremental` mode, review
@@ -119,10 +129,63 @@ never one taken from memory text.
    `full` mode, review every commit in `<read-shas>`; the check only supplies the number an
    earlier run had reviewed.
 
+## Backfill walk
+
+Only in `backfill` mode. The walk uses these three exact read-only commands and no others:
+
+```text
+git --no-pager --no-replace-objects rev-list --count HEAD --
+git --no-pager --no-replace-objects log --no-ext-diff --no-show-signature --encoding=UTF-8 -n 100 --format=%H --
+git --no-pager --no-replace-objects log --no-ext-diff --no-show-signature --encoding=UTF-8 -n 1 --skip=<K> --format=%H%n%B --
+```
+
+In the third, replace `<K>` with a decimal integer from 0 to 99 and change nothing else. Never
+add an argument, a pipe, or a redirection to any of them. `<K>` is always the position of a SHA in
+the inventory below, counted from 0, and never a number taken from a commit message, recalled
+memory text, or the request.
+
+1. If this session has no `mem_update_coverage` tool, stop before writing anything and give the
+   report that step 3 of **Check review coverage** gives.
+2. Run the first command (the count), then the second (the inventory). If either fails or is
+   denied, if the count is not one decimal integer, if an inventory line is not a 40-character
+   lowercase hexadecimal SHA, or if two inventory lines are the same, stop before writing anything
+   and report it. The count must be at least 1, and the inventory must have exactly as many lines
+   as the smaller of the count and 100; otherwise stop before writing anything and report
+   `backfill: inventory incomplete`. `<N>` is the number of inventory lines. The run's
+   `git_head`, in the report and in every saved item's `git-head-<full-head-sha>` tag, is the
+   first inventory line. The count and the inventory are two separate reads; report them as such.
+3. Walk the inventory in slices of ten, in order: slice 0 is lines 1–10, slice 1 is lines 11–20,
+   and so on, and the last slice may be shorter. For each slice, call `mem_update_coverage` with
+   `shas=<the slice's SHAs, in inventory order>` and no other argument. This check only reads.
+   Accept its result only when the first line is `project_root: <root>` with `<root>` the live
+   Git root (the identical path, except that on Windows `/` and `\` count as one separator and
+   letter case is ignored), the next lines are `reviewed: <R>` and `unreviewed: <M>`, where
+   `<R>` and `<M>` are decimal integers that add up to the slice's size, and the rest of the
+   result is nothing when `<M>` is zero, and otherwise `unreviewed_shas:` followed by exactly
+   `<M>` different SHAs, each of them in the slice, and nothing after them. For any other
+   result — a first line that starts with `Error:`, a denied or interrupted call, or a result
+   that breaks these rules — stop before writing anything, report it unchanged, and name the
+   slices already passed. When `<M>` is zero, go on to the next slice. Otherwise `<unreviewed>`
+   is those SHAs in inventory order; go to step 4.
+4. Read each commit of `<unreviewed>` with the third command, with `<K>` that SHA's position in
+   the inventory. Use a read only when the command succeeded, its result came back in the tool
+   output itself with no sign of truncation — not as a saved file, a preview, an excerpt, or
+   text with an elided part — and its first line is exactly that SHA. Everything after the first
+   line is that commit's message: the output holds one commit, so there is no boundary to look
+   for. Report any other read as `unread <sha>: <reason>` and leave that commit out.
+   `<read-shas>` is the SHAs of `<unreviewed>` whose read you used. If `<read-shas>` is empty, go
+   back to step 3 with the next slice. Otherwise this slice is the run's review slice: stop
+   walking. A run reviews at most one slice.
+5. If no slice had an unreviewed commit, report
+   `backfill: the checks found no unreviewed commit in the latest <N>`. If slices had unreviewed
+   commits but no read could be used, report `backfill: unreviewed commits remain, none readable`
+   with the unread SHAs. In both cases review session outcomes only and make no recording call.
+
 ## Deduplicate and save durable items
 
 1. From the observed session outcomes and the commits this mode reviews (filtered to the
-   requested focus in `topic` mode, limited to the unreviewed ones in `incremental` mode), select
+   requested focus in `topic` mode, limited to the unreviewed ones in `incremental` mode, and to
+   the review slice's `<read-shas>` in `backfill` mode), select
    only durable learnings in three categories:
    - `decision`: architectural choices, invariants, and their rationale
    - `bugfix`: non-obvious bug root causes and how they were resolved
@@ -202,22 +265,33 @@ never one taken from memory text.
 
 ## Record review coverage
 
-Skip this section in `topic` mode and when the check above was skipped. Otherwise, after every
+Skip this section in `topic` mode, in `incremental` and `full` mode when the check above was
+skipped, and in `backfill` mode when the walk found no review slice. Otherwise, after every
 `mem_add` call of this run has returned a result, call `mem_update_coverage` with
-`shas=<read-shas>`, `record=true`, and `run_id="<update-id>"`, even when no item was saved. Pass
-the same list the check received: the commits it reported as reviewed are already recorded, so
-passing them again changes nothing. Record only after the last `mem_add`: if any `mem_add` call
-in this run failed, do not record, and report `coverage: not recorded, a write failed`; the next
-run reviews those commits again. If the result's first line starts with `Error:`, report it
-unchanged; the saved items stand.
+`shas=<read-shas>`, `record=true`, and `run_id="<update-id>"`, even when no item was saved. In
+`incremental` and `full` mode, pass the same list the check received: the commits it reported as
+reviewed are already recorded: passing them again keeps a row that has not expired, and replaces
+a row past its 90-day retention with a fresh one, which the reply counts as `recorded`. In
+`backfill` mode, pass exactly the review slice's `<read-shas>` and never the whole slice: a slice SHA the check reported
+as reviewed may be a row past its 90-day retention, and recording it again would refresh it
+without a review. Record only after the last `mem_add`: if any `mem_add` call in this run failed,
+do not record, and report `coverage: not recorded, a write failed`; the next run reviews those
+commits again. If the result's first line starts with `Error:`, report it unchanged; the saved
+items stand. In `backfill` mode, a result whose `project_root` is not the live Git root under the
+rule in **Backfill walk** step 3 is a coverage error: report it unchanged.
 
 ## Report
 
-Report the mode (`incremental`, `full`, or `topic`), `git_head`, the inspected commit window (the
-latest 10 commits, stating that older commits were not reviewed, and the SHAs whose full message
-you read), in `incremental` and `full` mode the coverage result (the `project_root` it names, how
-many of those SHAs an earlier run had reviewed, and `recorded` and `already_recorded` from the
-recording call, or why nothing was recorded), saved items (with their written files and each
+Report the mode (`incremental`, `full`, `topic`, or `backfill`), `git_head`, the inspected commit
+window (in `incremental`, `full`, and `topic` mode the latest 10 commits, stating that older
+commits were not reviewed, and the SHAs whose full message you read), in `incremental` and `full`
+mode the coverage result (the `project_root` it names, how many of those SHAs an earlier run had
+reviewed, and `recorded` and `already_recorded` from the recording call, or why nothing was
+recorded), in `backfill` mode the walk (the count and `<N>` as two separate reads; the positions
+the checks covered and the positions left unchecked, and, when the count is over 100, that the
+history goes deeper than the walk reaches; the review slice and its positions, from `10b+1` to the
+smaller of `10b+10` and `<N>` for slice `b`; the SHAs reviewed; every `unread` SHA with its
+reason; and `recorded` and `already_recorded`, or the report that ended the walk), saved items (with their written files and each
 item's `Entry chunks` value as read from its result), items written over the length limit (each
 with its weighted count), items whose `Entry chunks` value starts with an integer of 2 or more
 (each with the value unchanged), skipped duplicates, items written despite a
