@@ -12,7 +12,7 @@
 
 window.addEventListener("load", function () {
   window.ui = SwaggerUIBundle({
-    url: "/openapi.json",
+    url: "/api/openapi.json",
     dom_id: "#swagger-ui",
     layout: "BaseLayout",
     deepLinking: true,

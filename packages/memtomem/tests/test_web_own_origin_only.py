@@ -152,7 +152,7 @@ _PREFLIGHT = {
         pytest.param("/api/add", "http://127.0.0.1:8080", 405, id="api-own-origin"),
         pytest.param("/api/add", "http://localhost:3000", 403, id="api-other-loopback"),
         pytest.param("/api/add", "https://evil.example", 403, id="api-foreign"),
-        pytest.param("/openapi.json", "http://localhost:3000", 405, id="outside-api"),
+        pytest.param("/favicon.ico", "http://localhost:3000", 405, id="outside-api"),
     ],
 )
 def test_a_preflight_is_not_answered(app: FastAPI, path: str, origin: str, status: int) -> None:

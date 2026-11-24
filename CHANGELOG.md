@@ -18,7 +18,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   after the delete checked it and before it read it still gets `source_missing`, and a retry
   removes the row. `mem_edit` and `mem_dedup_remove` refuse a missing file as before.
 
+- **The `handoff` workflow aims a saved record at a size the E5 token budget can hold in one
+  chunk (#3399).** A record could run to 1,200 characters, but a store indexing under
+  `multilingual-e5-small` splits any chunk over 384 tokens, so a record near that limit was
+  almost always split across rows that rank on their own in search and take separate slots
+  in brief's recall window. Of 399 stored
+  records, 270 of the 336 within 1,200 weighted characters had split. Save now aims for at
+  most 850 characters for the whole record, fence lines included, with each Korean, Japanese,
+  or Chinese character counted as two, and the per-field caps are lower: `objective` 80,
+  `completed` 160, `changed_files` 120 with at most 8 paths, `validation` 90, `blockers` 60,
+  and `artifacts` now takes its 4-path limit while its paths are added. `next_action` keeps
+  its 120. Only prose gives way, and whole `changed_files` paths move into its omitted count:
+  ids, the root, the commit, `worktree_state` and `artifacts` are never changed, and a
+  verbatim path, symbol, command, GitHub reference or quote is kept whole or left out whole,
+  except in `next_action`, where none is left out, so the next agent can act on it (one that
+  does not fit its cap or one line stops Save). A record
+  that cannot meet
+  the caps and the 1,200-character maximum (counted plainly) that way is not saved: Save
+  stops and names the value in the way. One that meets them but stays over the target is
+  saved and reported with its weighted count. The 240-character root limit is unchanged.
+  In an experiment that applied the new caps to every stored record and then cut its prose
+  from the end until it was at or below 850 (which can cut a verbatim string, so it
+  measures token density, not compliant records), none exceeded 384 tokens (the largest was
+  383); at or below 900, 15 did. The target is
+  not a guarantee: a long root or many artifact paths can still split a record. Resume is
+  unchanged: it combines the rows it reads and rejects a torn or incomplete record. The delivery versions move with that text: Claude `0.5.45`, Codex `0.3.43`, OpenCode `0.3.41`, Kimi
+  `0.2.31`, Antigravity `0.2.22`. Cursor stays `0.1.0` while its first marketplace review is
+  open, but its rendered skill changes too.
+
 ### Fixed
+
+- **`mm init` shows a checkout's directory with control characters escaped (#3512).** The
+  `Source directory:` / `Project directory:` lines, the source and project recoveries for a
+  missing extra (inline, in the summary's `[!] Missing extras` warning and in the
+  `--non-interactive` refusal's `Install first:`), the `.venv not found` lines, and the hooks
+  step's `Merged →` target and skipped or error reasons printed the path as it was. A newline in
+  a directory name split those lines, and an escape sequence would act on the terminal. They now
+  go through `scrub_text`, which escapes non-printable characters (as `\xNN` escapes of their
+  filesystem bytes) and leaves printable text, non-ASCII included, as it is. The MCP command
+  written to the config keeps the path unchanged.
+
+- **A namespace or scope glob containing a NUL character is matched in Python the way SQLite
+  matches it (#3281).** Once SQLite accepts a pattern (it checks the length of the whole bound
+  pattern first), its `LIKE` reads the pattern and the value only up to their first NUL;
+  the Python twin of the SQL filter compared the whole strings. Context-window expansion could
+  therefore drop a neighbour the search had admitted, and `GET /api/chunks/{id}/similar` with
+  `namespace=default*%00suffix` could return one neighbour fewer than asked. Both now cut at
+  the NUL, as SQLite does. A `scope` value containing a NUL is still refused rather than read
+  as the glob before it; when the value is otherwise well-formed, the message now names the
+  NUL (a comma list mixed with a glob still gets that syntax error).
+
+- **A stored path or chunk body can no longer add a line to `mem_dedup_scan`'s output (#3391).**
+  The default rendering turned only line feeds in a member's preview into spaces and printed its
+  source path as stored, so a carriage return, U+0085, U+2028 or another line break in the first
+  80 characters of a chunk, or a line break in its path, started a line that read like one the
+  tool wrote, such as a `B (<id>): …` member line whose id `mem_dedup_merge` takes; a `"` in the
+  preview closed its quotes early. The preview is now quoted the way the duplicate brief quotes
+  it (`"`, `\` and every non-printable character escaped; a line feed still becomes a space), and
+  the path keeps its unquoted `path:line` shape with only its non-printable characters escaped.
+  Ordinary values print as before; a preview containing `"` or `\` now shows it escaped.
+
+- **`mm schedule add` and `mem_schedule_register` refuse a cron expression for a date that
+  never occurs (#3461).** Both checked only that croniter could parse the expression, so
+  `0 0 30 2 *` was stored and then skipped by the dispatcher on every tick. An expression of
+  five fields written with only digits, `* , - / ? # L W` and three-letter month and day names
+  is now refused when croniter finds no date for it:
+  `invalid cron expression: '0 0 30 2 *' matches no date croniter can find: …`. Any other
+  expression croniter parses — with a random `R` field, six or seven fields, or other
+  characters — is stored without that lookup, because a failed lookup there does not
+  show that no date exists; when the listing's own check finds no date for such a row,
+  `mm schedule list` marks it `cron check failed`. Schedules already stored are not changed.
+
+- **`GET /api/dedup/candidates` refuses a `limit` below 1 (#3435) and a `threshold` outside 0 to
+  1 (#3562).** The route passed both to the scanner unchecked, and the scanner cut its pair list
+  with a Python slice, so `limit=0` answered `200` with no pairs on a store that has them and a
+  negative `limit` dropped up to that many pairs from the end of the list. `threshold=NaN` turned
+  off the near phase's score cutoff, as `0.0` does. These are now a `422`, as `max_scan=0`
+  already was; `mem_dedup_scan` and the scheduled `dedup_scan` job already refused them. The
+  route still takes a `limit` above 500. `DedupScanner.scan_with_coverage` raises `ValueError`
+  for the same values before reading anything.
+
+- **`mm web` serves its OpenAPI schema at `/api/openapi.json` instead of `/openapi.json`
+  (#3272). The new URL is covered by the Host and Origin checks that cover `/api/*`.** FastAPI
+  served the schema at its default `/openapi.json`, outside the prefix the `mm web` guard
+  checks, so it answered a request whose `Host` was a rebound hostname with the full route
+  list. With the guard enforcing (the default), such a request now gets the same 403 as the
+  other `/api/*` routes, and `/openapi.json` returns 404. The `/api/docs` page fetches the new
+  URL; a client generator or script that fetched the schema by the old URL needs the new one.
 
 - **The interactive `mm init` wizard's Local ONNX and Korean tokenizer steps report the extra for
   the environment a source checkout or a project runs memtomem in (#3508).** Both steps imported

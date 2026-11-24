@@ -110,7 +110,12 @@ def _cron_error(cron_expr: str, created_at: str, last_run_at: str | None) -> str
     comes both from a date that never occurs (``0 0 30 2 *``) and from one
     draw of croniter's random ``R`` field that the next draw may not repeat
     (``0 0 R(28-30) 2 *`` fails only on the 30th), and croniter offers no
-    public way to tell the two apart.
+    public way to tell the two apart. Adding a schedule refuses an expression
+    that ``scheduler/cron.py:_is_deterministic`` admits and that finds no date
+    (``new_cron_problem``), so such a row is one that check does not probe (a
+    random field, six or seven fields, or a character outside its allowlist),
+    one with no slot within croniter's search horizon, or one stored before
+    the check existed.
     """
     column, stored = _schedule_base(created_at, last_run_at)
     try:
@@ -137,8 +142,8 @@ class ScheduleMixin:
     ) -> str:
         """Insert a new schedule and return its id.
 
-        ``cron_expr`` must be a valid 5-field cron expression (validated
-        by callers via ``croniter.is_valid`` before reaching here);
+        ``cron_expr`` must be a valid cron expression (validated by
+        callers via ``scheduler.cron.new_cron_problem`` before reaching here);
         ``job_kind`` must be a registered ``JOB_KINDS`` key (validated
         by callers).
         """
