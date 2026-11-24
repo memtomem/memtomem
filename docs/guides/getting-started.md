@@ -77,8 +77,8 @@ Python. An offline uv cannot download one either: with the packages already
 cached, a launch still stops that way unless a Python 3.12 was installed
 beforehand. Install a Python 3.12 first (`uv python install 3.12` downloads one
 under `"manual"`, not under `"never"`), or change `3.12` in the install command
-to the Python you have (tested:
-`uv tool install --python 3.13 'memtomem[all]==0.7.13'`).
+to the Python you have (for example:
+`uv tool install --python 3.13 'memtomem[all]==0.7.14'`).
 
 The Quickstart installs the `all` extra so every documented path is available.
 For the smallest installation, omit `[all]`: it searches by keyword (BM25)
@@ -300,7 +300,7 @@ which the plugins' `update` workflow needs outside `topic` mode (see
 
 This reuses the persistent `memtomem[all]` environment installed above. For a
 one-off setup without a persistent install, use `uvx --python 3.12 --isolated
---from "memtomem[all]==0.7.13" memtomem-server`; like the install, it needs a
+--from "memtomem[all]==0.7.14" memtomem-server`; like the install, it needs a
 Python 3.12 that uv can find or download ([Prerequisites](#prerequisites)).
 Claude Code users can instead
 install the [memtomem plugin](integrations/claude-code.md#mcp-server-setup),
