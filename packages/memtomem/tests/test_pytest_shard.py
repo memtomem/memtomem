@@ -559,13 +559,22 @@ def test_security_gates_runs_after_any_dependency_result() -> None:
     assert set(gate) == {"name", "env", "run"}, sorted(gate)
     expected = {f"${{{{ needs.{need}.result }}}}" for need in needs}
     assert set(gate["env"].values()) == expected, gate["env"]
-    [loop] = [line for line in gate["run"].splitlines() if line.startswith("for result in")]
-    assert loop.split(";")[0].split()[3:] == [f'"${name}"' for name in gate["env"]], loop
-    assert 'if [ "$result" != "success" ]; then' in gate["run"]
+    # The whole script, so a loop that skips a result or a branch that exits 0
+    # cannot pass.
+    results = " ".join(f'"${name}"' for name in gate["env"])
+    assert gate["run"] == (
+        "set -euo pipefail\n"
+        f"for result in {results}; do\n"
+        '  if [ "$result" != "success" ]; then\n'
+        '    echo "security dependency did not succeed: $result" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        "done\n"
+    ), gate["run"]
 
 
-def test_ci_cancels_only_a_pull_requests_superseded_runs() -> None:
-    """A PR push cancels that PR's older run; no other event cancels anything.
+def test_ci_concurrency_groups_a_pull_requests_runs_and_no_other_events() -> None:
+    """Runs for one PR share a group and cancel each other; other events never do.
 
     A group shared by every ``main`` push would also drop a pending run when a
     newer one queues, even without ``cancel-in-progress``, so those events key
