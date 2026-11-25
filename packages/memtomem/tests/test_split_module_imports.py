@@ -41,6 +41,14 @@ if not same:
     sys.exit(f"child imported memtomem from {child}, parent from {sys.argv[1]}")
 """
 
+
+def _parent_package_dir() -> Path:
+    # The parent's side of the check, kept apart from ``package_src_dir()`` so a
+    # wrong root there cannot also pass here. Not resolved, for the same reason
+    # as the child side.
+    return Path(memtomem.__file__).parent
+
+
 SPLIT_MODULES = [
     "memtomem.cli.context_sync_cmd",
     "memtomem.cli.context_install_cmd",
@@ -57,7 +65,7 @@ def test_split_module_imports_first_in_a_fresh_interpreter(module: str) -> None:
     # under test. ``-P`` stops ``-c`` from putting the working directory ahead
     # of PYTHONPATH. ``subprocess_env()`` puts the source root of the
     # ``memtomem`` this process imported first on PYTHONPATH.
-    parent = Path(memtomem.__file__).parent
+    parent = _parent_package_dir()
     proc = subprocess.run(
         [sys.executable, "-P", "-c", f"import {module}\n{_SAME_PACKAGE_CHECK}", str(parent)],
         capture_output=True,
@@ -69,16 +77,16 @@ def test_split_module_imports_first_in_a_fresh_interpreter(module: str) -> None:
 
 
 @pytest.mark.requires_symlinks
-@pytest.mark.parametrize(
-    ("argv_tree", "same"), [("a", False), ("b", True)], ids=["linked-tree", "own-tree"]
-)
+@pytest.mark.parametrize("own_tree", [False, True], ids=["linked-tree", "own-tree"])
 def test_same_package_check_tells_a_linked_initializer_apart(
-    tmp_path: Path, argv_tree: str, same: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, own_tree: bool
 ) -> None:
     # ``b/memtomem/__init__.py`` links into ``a``, so following it makes a child
     # that imported ``b`` look like ``a`` (#3574). The child imports a stand-in
     # package from ``b``; ``-I -S`` keeps inherited PYTHONPATH, ``.pth`` files and
-    # ``sitecustomize`` from supplying another ``memtomem``.
+    # ``sitecustomize`` from supplying another ``memtomem``. In the own-tree case
+    # the parent side comes from ``_parent_package_dir()`` with this process's
+    # ``memtomem`` placed in ``b`` too, so both sides of the check are exercised.
     (tmp_path / "a" / "memtomem").mkdir(parents=True)
     (tmp_path / "a" / "memtomem" / "__init__.py").write_text("")
     (tmp_path / "b" / "memtomem").mkdir(parents=True)
@@ -89,6 +97,11 @@ def test_same_package_check_tells_a_linked_initializer_apart(
     except (OSError, NotImplementedError):
         # The marker probes the system temp directory, not ``--basetemp``.
         pytest.skip("symlink creation is not permitted under tmp_path")
+    if own_tree:
+        monkeypatch.setattr(memtomem, "__file__", str(tmp_path / "b" / "memtomem" / "__init__.py"))
+        parent = _parent_package_dir()
+    else:
+        parent = tmp_path / "a" / "memtomem"
     code = "import sys\nsys.path.insert(0, sys.argv.pop(2))\n" + _SAME_PACKAGE_CHECK
     proc = subprocess.run(
         [
@@ -97,14 +110,14 @@ def test_same_package_check_tells_a_linked_initializer_apart(
             "-S",
             "-c",
             code,
-            str(tmp_path / argv_tree / "memtomem"),
+            str(parent),
             str(tmp_path / "b"),
         ],
         capture_output=True,
         text=True,
         timeout=60,
     )
-    if same:
+    if own_tree:
         assert proc.returncode == 0, proc.stderr
     else:
         assert proc.returncode != 0
