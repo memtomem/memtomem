@@ -17,6 +17,7 @@ covers what the WEB surface adds (ADR-0023 §10):
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -1076,10 +1077,23 @@ async def test_unknown_destination_scope_404(client, cwd_root: Path) -> None:
     assert "unknown project_scope_id" in detail["message"]
 
 
+def _no_store_message(scope_id: str) -> str:
+    return (
+        f"destination project {scope_id!r} has no .memtomem/ store. Initialize it first: "
+        "run `mm context init` in that project's directory."
+    )
+
+
 @pytest.mark.asyncio
-async def test_destination_without_store_409(client, cwd_root: Path, tmp_path: Path) -> None:
+async def test_destination_without_store_409(client, cwd_root: Path) -> None:
+    """The 409 names the destination by its scope id, not its path (#2489).
+
+    The destination sits under the sandbox ``$HOME`` with a space in its name:
+    the old text put the absolute path in the prose and, unquoted, in a ``cd``
+    hint that broke on the space.
+    """
     _write_agent(_shared_agents(cwd_root), "foo")
-    bare = _other_project(tmp_path, "bare", store=False)
+    bare = _other_project(Path.home(), "bare project", store=False)
     scope_b = await _register(client, bare)
 
     resp = await client.post(
@@ -1094,7 +1108,8 @@ async def test_destination_without_store_409(client, cwd_root: Path, tmp_path: P
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "no_memtomem_store"
-    assert "mm context init" in detail["message"]
+    assert detail["message"] == _no_store_message(scope_b)
+    _assert_path_free(resp.json(), bare, cwd_root)
 
 
 @pytest.mark.asyncio
@@ -1644,14 +1659,19 @@ async def test_mcp_paused_destination_409(client, cwd_root: Path, tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_mcp_no_store_destination_409(client, cwd_root: Path, tmp_path: Path) -> None:
+    """Outside ``$HOME``, with a space and (POSIX) a control character in the name (#2489)."""
     _write_mcp_server(cwd_root)
-    other = _other_project(tmp_path, store=False)
+    name = "proj b" if sys.platform == "win32" else "proj b\x1b[31m"
+    other = _other_project(tmp_path, name, store=False)
     scope_b = await _register(client, other)
 
     resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "no_memtomem_store"
+    assert detail["message"] == _no_store_message(scope_b)
+    _assert_path_free(resp.json(), other, cwd_root)
+    assert not any("\x1b" in s for s in _strings(resp.json()))
 
 
 # ── 400 validation arm: engine refusals that name a path (#3543) ─────────
