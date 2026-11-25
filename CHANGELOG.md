@@ -29,6 +29,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The web UI's Host, Origin and CSRF token checks apply when `create_app()` is mounted under a
+  path prefix (#3550).** The guard decided whether a request was an `/api/*` call from the
+  request path, which keeps a mount's prefix, so under `Mount("/mm", app=create_app())` every
+  `/api/*` route was served without the checks: `GET /mm/api/session` with a hostile `Host`
+  answered 200. The guard now also judges the path the router matches, so every route a mounted
+  app serves under `/api/` gets the checks; every request the guard gated before is still
+  gated, which under a mount whose own prefix starts with `/api/` includes the app's non-API
+  paths. `mm web` serves the app at the root and was not affected. The `web.csrf.observe` log
+  line still records the request path.
+
 - **A context transfer `move` refuses before it moves anything when the source has no file
   identity it can read (#3545).** On a filesystem that reports `st_ino == 0` (reproduced by
   simulating one in tests) the move would rename the source into staging, then refuse to
