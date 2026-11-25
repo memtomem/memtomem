@@ -22,7 +22,7 @@ import httpx
 import pytest
 from playwright.sync_api import expect
 
-import memtomem
+from _subprocess_env import subprocess_env
 
 pytestmark = pytest.mark.browser
 
@@ -61,14 +61,11 @@ def frontmatter_dev_server() -> Iterator[str]:
     first on ``PYTHONPATH``, as ``test_xss_search_render.py`` does.
     """
     with tempfile.TemporaryDirectory(prefix="memtomem-fm-") as home:
-        env = os.environ.copy()
-        env["HOME"] = home
-        env["USERPROFILE"] = home
-        env["TMPDIR"] = str(Path(home) / "tmp")
-        env["MEMTOMEM_WEB__CSRF_ENFORCE"] = "0"
-        package_root = str(Path(memtomem.__file__).resolve().parents[1])
-        env["PYTHONPATH"] = os.pathsep.join(
-            [package_root, *filter(None, [os.environ.get("PYTHONPATH")])]
+        env = subprocess_env(
+            HOME=home,
+            USERPROFILE=home,
+            TMPDIR=str(Path(home) / "tmp"),
+            MEMTOMEM_WEB__CSRF_ENFORCE="0",
         )
         (Path(home) / "tmp").mkdir(parents=True, exist_ok=True)
         os.chmod(Path(home) / "tmp", 0o700)
