@@ -33,7 +33,11 @@ Invariants:
   depend on the HTTP method. A rebound origin must not be able to read
   ``GET /api/export`` or harvest the token from ``GET /api/session``. The
   middleware short-circuits only on non-``/api/*`` paths (SPA bootstrap,
-  static assets). ``OPTIONS`` is checked like any other method.
+  static assets). "``/api/*``" means a request whose router-relative path
+  (the app's own, with any mount prefix stripped) or whose request path
+  starts with ``/api/``: the first is what the router serves, the second
+  keeps gating everything the guard gated before it read the first (#3550).
+  ``OPTIONS`` is checked like any other method.
 * The ``X-Memtomem-CSRF`` token is required for every unsafe method
   (``POST``/``PUT``/``PATCH``/``DELETE``) on ``/api/*``, including the
   bootstrap path itself. Safe methods never carry a token; ``GET
@@ -48,6 +52,7 @@ import logging
 import secrets
 from urllib.parse import urlsplit
 
+from starlette._utils import get_route_path
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -169,12 +174,26 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next) -> Response:
+        # Judge the path the router matches as well as ``request.url.path``: under a ``Mount`` (or a
+        # server ``root_path``) the latter keeps the prefix, so on it alone an ``/api/*`` request
+        # under a prefix such as ``/mm`` read as a non-API path and skipped the gate (#3550).
+        # ``get_route_path`` is the function Starlette's and FastAPI's routers call, so every
+        # request the router serves as ``/api/*`` is gated. The request path is still consulted
+        # (below), so the guard may also gate a path the router does not serve as API — under a
+        # mount whose own prefix starts with ``/api/``, say — which fails closed.
+        route_path = get_route_path(request.scope)
+        # The log keeps ``request.url.path``: the route path is the server's
+        # percent-DECODED path, and a ``%0d%0a`` in it would split the record.
         path = request.url.path
         method = request.method.upper()
 
         # Only ``/api/*`` is gated. Non-API paths (SPA bootstrap, static
-        # assets) fall through untouched.
-        if not path.startswith("/api/"):
+        # assets) fall through untouched. Either spelling starting with
+        # ``/api/`` gates: the route path catches a mounted app, and the parsed
+        # request path keeps gating what it always gated — ``urlsplit`` drops a
+        # CR, LF or tab, so ``/ap%0ai/x`` reads as ``/api/x`` there while the
+        # decoded route path does not. Widening is free; narrowing is not.
+        if not (route_path.startswith("/api/") or path.startswith("/api/")):
             return await call_next(request)
 
         # Host / Origin are the DNS-rebinding boundary: validate them on
