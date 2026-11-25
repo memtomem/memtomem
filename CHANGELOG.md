@@ -37,6 +37,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   newlines intact (Claude Code does not fold CRLF before measuring); the 24,400 threshold, the 200-line cap and the per-line
   character cap are unchanged. The `budget` finding reads `N UTF-16 units (cap 24400)`
   instead of `N bytes (cap 24400)`.
+- **`mm index --reassign-namespaces` names a move out of a system namespace spelled in another
+  ASCII case (#3590).** The report matched `search.system_namespace_prefixes` case-sensitively,
+  while a default search folds ASCII case when it hides those namespaces. A move from
+  `Archive:x` to `default` exposed its rows without the warning, and a move from an agent
+  scope into `ARCHIVE:y` was reported as exposing rows that stay hidden. The report now uses
+  the same prefix check as search.
 
 ## [0.7.14] — 2026-11-24
 
