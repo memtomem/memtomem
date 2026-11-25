@@ -29,6 +29,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A context transfer `move` refuses before it moves anything when the source has no file
+  identity it can read (#3545).** On a filesystem that reports `st_ino == 0` (reproduced by
+  simulating one in tests) the move would rename the source into staging, then refuse to
+  promote the entry it could not vouch for, and the web route would answer a 500
+  partial-commit error saying that entry "was replaced out of band", which nothing had done.
+  The move now reads the source's identity first: a zero inode or a permission error refuses
+  with nothing renamed (web: the same 409 `transfer_staging_replaced` a copy gives; CLI: the
+  same refusal), and an absent source is still reported by the rename. If a rollback later
+  meets an entry whose identity was never captured, its partial-commit text says the entry
+  could not be verified and names it as the place to inspect, instead of calling it replaced.
 - **A write refuses a namespace containing a NUL character (#3589).** SQLite's `LIKE` reads
   a value only up to its first NUL, so a chunk stored under `arc\x00z` was matched by the
   default-search exclusion and by namespace globs as if it were `arc`, while the Python

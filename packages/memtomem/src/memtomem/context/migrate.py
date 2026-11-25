@@ -917,18 +917,23 @@ StagingIdentity = tuple[int, int]
 
 
 class StagingIdentityLostError(OSError):
-    """The staging pathname no longer names the object we claimed (#2314).
+    """This transfer cannot establish that an entry is the object it claimed (#2314).
 
-    Raised only by :meth:`StagingClaim.assert_still_ours`, immediately before
-    an operation that would CONSUME the entry (promote, rename-back, hard-link
-    promote). It means the pathname was re-pointed at something we did not
-    create, so consuming it would move a stranger's bytes into a canonical
-    name — bytes Gate A never scanned.
+    Raised by :meth:`StagingClaim.assert_still_ours`, immediately before an
+    operation that would CONSUME the entry (promote, rename-back, hard-link
+    promote). Either the pathname was re-pointed at something we did not
+    create — so consuming it would move a stranger's bytes into a canonical
+    name, bytes Gate A never scanned — or the entry's identity could not be
+    established at all, which the check cannot tell apart from that.
+
+    Also raised by :func:`_refuse_an_unverifiable_source` before a move renames
+    anything, when the source has no identity to carry into staging (#3545).
+    Nothing was consumed then.
 
     A separate class from :class:`TransferStagingBusyError` because the
-    remediation differs: a busy name is retried with a fresh suffix, while a
-    lost identity is an unexplained mutation of a private path and stops the
-    operation.
+    remediation differs: a busy name is retried with a fresh suffix, while an
+    entry whose ownership cannot be established — replaced, or unverifiable on
+    this filesystem — stops the operation.
     """
 
 
@@ -1084,7 +1089,8 @@ def _staging_identity(path: Path) -> StagingIdentity | None:
         # fix the wrong thing.
         logger.warning("could not read the identity of staging %s: %s", path, exc)
         return None
-    if info.st_ino == 0:
+    identity = _identity_of(info)
+    if identity is None:
         logger.warning(
             "filesystem holding %s does not report file identity (st_ino is 0), "
             "so this transfer cannot prove a staging entry is still its own; it "
@@ -1093,7 +1099,55 @@ def _staging_identity(path: Path) -> StagingIdentity | None:
             path,
         )
         return None
+    return identity
+
+
+def _identity_of(info: os.stat_result) -> StagingIdentity | None:
+    """``(st_dev, st_ino)`` of an ``lstat`` result, or ``None`` for a zero inode.
+
+    The one place the zero-inode rule lives (see :func:`_staging_identity` for
+    why zero is not an identity), so the move's source preflight and every
+    staging probe cannot come to disagree about what counts as one.
+    """
+    if info.st_ino == 0:
+        return None
     return (info.st_dev, info.st_ino)
+
+
+def _refuse_an_unverifiable_source(src: Path) -> None:
+    """Refuse a move whose source has no identity this process can read (#3545).
+
+    One ``lstat``, answered four ways. Absent: nothing to refuse — the move's
+    own rename reports it as it always has. Unreadable for permission: refused,
+    because ``os.path.lexists`` would have called that "absent" and waved the
+    move through. A zero inode: refused, the filesystem cannot answer. Any
+    other ``OSError`` propagates as raised: nothing has been renamed yet, so
+    it is a refusal as it stands.
+
+    ``lstat``, as :func:`_staging_identity` uses: a source that is a symlink is
+    moved as the link, so the link is what needs an identity.
+
+    No log line of its own: the exception carries the whole diagnosis, and each
+    surface already reports it — the web route through its secret-scanned,
+    control-escaped refusal line, the CLI as its error. A second, raw record
+    of the same path here would bypass that scrubbing.
+    """
+    try:
+        info = src.lstat()
+    except FileNotFoundError:
+        return
+    except PermissionError as exc:
+        raise StagingIdentityLostError(
+            "transfer source cannot be verified: its file identity could not be "
+            "read, so nothing was moved. Fix access to the source, then retry. "
+            f"Refused: move the source into staging. Source: {src}"
+        ) from exc
+    if _identity_of(info) is None:
+        raise StagingIdentityLostError(
+            "transfer source cannot be verified: this filesystem does not report "
+            "file identity, so nothing was moved. Transfer on a filesystem that "
+            f"reports it, then retry. Refused: move the source into staging. Source: {src}"
+        )
 
 
 def _remove_staging_entry(staging: Path) -> None:
@@ -1688,7 +1742,14 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
     a failure after the holding rename renames it back, and preserves it
     loudly if that is refused, so the source bytes always exist somewhere this
     function names.
+
+    **The source's identity is asked for first (#3545).** On both paths the
+    entry a failure has to be rolled back from is the source's own inode after
+    a rename, so a source with no readable identity leaves a rollback that
+    cannot vouch for anything — a refusal found after the rename is a partial
+    commit. :func:`_refuse_an_unverifiable_source` refuses before either rename.
     """
+    _refuse_an_unverifiable_source(src)
     dst_parent.mkdir(parents=True, exist_ok=True)
     try:
         staging = _claim_transfer_staging(
@@ -1734,11 +1795,28 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
             # to make a failure tidy.
             outcome = _restore_source(holding, src, allow_cross_parent=False)
             if outcome is RestoreOutcome.IDENTITY_LOST:
-                # The parked source is not where we parked it any more, and
-                # the canonical name is empty: the artifact is unaccounted
-                # for. Replacing the in-flight failure with that fact is the
-                # honest report — whatever made the stage fail matters less
-                # than an artifact nobody can name (#2314).
+                # The entry at the holding path cannot be shown to be the
+                # source we parked, and the canonical name is empty: the
+                # artifact is unaccounted for. Replacing the in-flight failure
+                # with that fact is the honest report — whatever made the stage
+                # fail matters less than an artifact nobody can name (#2314).
+                # Which of the two ways ownership failed decides the wording.
+                if holding.identity is None:
+                    # Nothing was observed replacing it: its identity was never
+                    # captured, so it could not be proved ours (#3545). Name it
+                    # as the place to look, without claiming what is in it.
+                    raise MigratePartialError(
+                        f"transfer left {src.name} unaccounted for: the move parked "
+                        f"the source, and the entry at the holding path could not "
+                        f"be verified as this transfer's (its file identity was "
+                        f"not available), so nothing was put back. Do NOT retry. "
+                        f"Inspect the entry at the holding path; if it holds the "
+                        f"artifact, reconcile anything now at the canonical path "
+                        f"and restore it there by hand. Holding path: "
+                        f"{holding.path}. Canonical path: {src}.",
+                        src_path=src,
+                        dst_path=dst_parent,
+                    )
                 raise MigratePartialError(
                     f"transfer left {src.name} unaccounted for: the move parked "
                     f"the source and that entry was replaced out of band, so it "

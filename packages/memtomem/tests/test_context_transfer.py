@@ -2484,3 +2484,89 @@ def test_exdev_writer_at_the_source_path_survives_cross_project(two_projects, mo
     assert (src_dir / "agent.md").read_text(encoding="utf-8") == racer_body
     assert not list(src_dir.parent.glob(".migrate-foo-*.tmp"))
     assert not list(dst_root.glob(".migrate-foo-*.tmp"))
+
+
+class TestAMoveWithoutFileIdentity:
+    """#3545: a move on a filesystem that reports no file identity.
+
+    It used to consume the source, refuse to promote the entry it could not
+    vouch for, and then report that entry as "replaced out of band" in a
+    partial-commit error. Now the move refuses before it renames anything.
+    """
+
+    @staticmethod
+    def _zero_every_inode(monkeypatch) -> None:
+        real_lstat = Path.lstat
+
+        class _Zeroed:
+            def __init__(self, info):
+                self._info = info
+
+            def __getattr__(self, name):
+                return getattr(self._info, name)
+
+            st_ino = 0
+
+        monkeypatch.setattr(Path, "lstat", lambda self, *a, **k: _Zeroed(real_lstat(self, *a, **k)))
+
+    @staticmethod
+    def _move(two_projects):
+        return transfer_artifact(
+            "agents",
+            "foo",
+            src_project_root=two_projects["a"],
+            from_scope="project_shared",
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode="move",
+            apply_=True,
+        )
+
+    def test_the_move_is_refused_before_the_source_is_consumed(self, two_projects, monkeypatch):
+        from memtomem.context.migrate import StagingIdentityLostError
+
+        manifest = _write_canonical(
+            two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+        )
+        src_root = manifest.parent.parent
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        self._zero_every_inode(monkeypatch)
+
+        with pytest.raises(StagingIdentityLostError, match="does not report file identity"):
+            self._move(two_projects)
+
+        assert manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+        assert not list(src_root.glob(".migrate-*"))
+        assert not (dst_root / "foo").exists()
+        assert not dst_root.exists() or not list(dst_root.glob(".migrate-*"))
+
+    def test_an_unverifiable_staging_entry_is_not_called_replaced(self, two_projects, monkeypatch):
+        """The anomaly path: the source reads fine, the staging capture does not.
+
+        The rollback still cannot vouch for the entry holding the bytes, so the
+        transfer is a partial commit — but nothing replaced that entry, and the
+        bytes are at the path the message names.
+        """
+        import memtomem.context.migrate as migrate_mod
+
+        _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        real_identity = migrate_mod._staging_identity
+
+        def identity(path):
+            if path.parent == dst_root and path.name.startswith(".migrate-"):
+                return None
+            return real_identity(path)
+
+        monkeypatch.setattr(migrate_mod, "_staging_identity", identity)
+
+        with pytest.raises(MigratePartialError) as exc_info:
+            self._move(two_projects)
+
+        message = str(exc_info.value)
+        assert "replaced out of band" not in message
+        assert "could not be verified" in message
+        staged = list(dst_root.glob(".migrate-*"))
+        assert len(staged) == 1
+        assert str(staged[0]) in message
+        assert (staged[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN

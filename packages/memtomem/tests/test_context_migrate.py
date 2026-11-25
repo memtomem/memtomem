@@ -5147,3 +5147,193 @@ def test_copy_mode_still_sweeps_its_own_partial_fill(tmp_path, monkeypatch, shap
     assert list(dst_parent.iterdir()) == []
     body = (src / "agent.md") if shape == "dir" else src
     assert body.read_text(encoding="utf-8") == "source"
+
+
+def _zero_inodes(monkeypatch, *, only=None) -> None:
+    """Make ``Path.lstat`` answer ``st_ino == 0``, as an identity-less FS does.
+
+    *only*, when given, limits it to the paths it accepts; otherwise every
+    entry reports zero, which is the filesystem #3545 describes.
+    """
+    real_lstat = Path.lstat
+
+    class _Zeroed:
+        def __init__(self, info):
+            self._info = info
+
+        def __getattr__(self, name):
+            return getattr(self._info, name)
+
+        st_ino = 0
+
+    def lstat(self, *args, **kwargs):
+        info = real_lstat(self, *args, **kwargs)
+        return _Zeroed(info) if only is None or only(self) else info
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+
+
+class TestAMoveAsksForTheSourceIdentityFirst:
+    """#3545: a move refuses before it consumes a source it could not vouch for.
+
+    On both move paths the entry a rollback would have to verify is the
+    source's own inode after a rename — staging on one filesystem, the holding
+    entry across two. If the source has no readable identity, neither will
+    that entry, and a refusal discovered after the rename is a partial commit.
+    So the question is asked of the source, before either rename.
+    """
+
+    @staticmethod
+    def _spy_renames(monkeypatch) -> list[tuple[Path, Path]]:
+        import memtomem.context.migrate as migrate_mod
+
+        calls: list[tuple[Path, Path]] = []
+        real = migrate_mod.rename_no_replace
+
+        def spy(src, dst, **kwargs):
+            calls.append((Path(src), Path(dst)))
+            return real(src, dst, **kwargs)
+
+        monkeypatch.setattr(migrate_mod, "rename_no_replace", spy)
+        return calls
+
+    def test_a_source_without_file_identity_is_refused_unmoved(self, tmp_path, monkeypatch):
+        from memtomem.context.migrate import StagingIdentityLostError, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        renames = self._spy_renames(monkeypatch)
+        _zero_inodes(monkeypatch)
+
+        with pytest.raises(StagingIdentityLostError, match="does not report file identity"):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert renames == [], "the source was renamed before the refusal"
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+        assert list(dst_parent.iterdir()) == []
+        assert sorted(p.name for p in src.parent.iterdir()) == ["reviewer"]
+
+    def test_an_unreadable_source_identity_is_refused_unmoved(self, tmp_path, monkeypatch):
+        """``os.path.lexists`` would answer False here and wave the move through."""
+        from memtomem.context.migrate import StagingIdentityLostError, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        renames = self._spy_renames(monkeypatch)
+        real_lstat = Path.lstat
+        probes: list[Path] = []
+
+        def lstat(self, *args, **kwargs):
+            if self == src:
+                probes.append(self)
+                raise PermissionError(errno.EACCES, "Permission denied", str(self))
+            return real_lstat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+
+        with pytest.raises(StagingIdentityLostError, match="could not be read"):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert len(probes) == 1, "the source is probed once, not re-read"
+        assert renames == []
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+        assert list(dst_parent.iterdir()) == []
+
+    def test_any_other_probe_failure_propagates_before_any_rename(self, tmp_path, monkeypatch):
+        """Only a permission error is translated; the rest is raised as it came."""
+        from memtomem.context.migrate import StagingIdentityLostError, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        renames = self._spy_renames(monkeypatch)
+        real_lstat = Path.lstat
+        boom = OSError(errno.EIO, "I/O error", "probe")
+
+        def lstat(self, *args, **kwargs):
+            if self == src:
+                raise boom
+            return real_lstat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+
+        with pytest.raises(OSError) as exc_info:
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert exc_info.value is boom
+        assert not isinstance(exc_info.value, StagingIdentityLostError)
+        assert renames == []
+        assert (src / "agent.md").read_text(encoding="utf-8") == "source"
+
+    def test_a_missing_source_is_left_to_the_rename(self, tmp_path, monkeypatch):
+        """Absence is the rename's to report, in its own vocabulary, as before.
+
+        The spy is what makes this about the rename: a preflight that let its
+        own ``FileNotFoundError`` escape would raise the same type without one.
+        """
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = tmp_path / "src" / "reviewer"
+        src.parent.mkdir()
+        renames = self._spy_renames(monkeypatch)
+
+        with pytest.raises(FileNotFoundError):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert [r[0] for r in renames] == [src], renames
+
+    @pytest.mark.requires_symlinks
+    def test_a_dangling_link_source_is_judged_by_its_own_inode(self, tmp_path):
+        """The rename moves the link, so the link is what has to have an identity."""
+        from memtomem.context.migrate import _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = tmp_path / "src" / "reviewer.md"
+        src.parent.mkdir()
+        src.symlink_to(tmp_path / "no-such-target")
+
+        staged = _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert staged.holding is None
+        assert staged.staging.path.is_symlink()
+        assert not os.path.lexists(src)
+
+    def test_an_unverifiable_holding_entry_is_not_called_replaced(self, tmp_path, monkeypatch):
+        """EXDEV: a holding entry with no captured identity was not replaced by anyone.
+
+        The source's own identity reads fine here, so the preflight passes;
+        only the parked entry's capture comes back empty (the anomaly the
+        ``StagingClaim`` docstring names). The unwind cannot put it back, and
+        the partial-commit text has to say what is actually known.
+        """
+        import memtomem.context.migrate as migrate_mod
+        from memtomem.context.migrate import MigratePartialError, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = _src_tree(tmp_path)
+        _exdev_always(monkeypatch)
+        real_identity = migrate_mod._staging_identity
+
+        def identity(path):
+            if path.parent == src.parent and path.name.startswith(".migrate-"):
+                return None
+            return real_identity(path)
+
+        monkeypatch.setattr(migrate_mod, "_staging_identity", identity)
+
+        with pytest.raises(MigratePartialError) as exc_info:
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        message = str(exc_info.value)
+        assert "replaced out of band" not in message
+        assert "could not be verified" in message
+        parked = [p for p in src.parent.iterdir() if p.name.startswith(".migrate-")]
+        assert len(parked) == 1
+        assert str(parked[0]) in message
+        assert (parked[0] / "agent.md").read_text(encoding="utf-8") == "source"

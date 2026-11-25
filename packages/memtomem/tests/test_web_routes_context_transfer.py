@@ -545,8 +545,8 @@ async def test_unverifiable_staging_409_carries_the_filesystem_remedy(
     scope_b = await _register(client, other)
     monkeypatch.setattr(migrate_mod, "_staging_identity", lambda _path: None)
 
-    # A copy: a move consumes the source first, and its later refusal is the
-    # partial-commit 500, which keeps its paths on purpose.
+    # A copy refuses at the promote; the move twin below refuses earlier, at
+    # the source, because a move that renamed first could not roll back (#3545).
     with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
         resp = await client.post(
             "/api/context/agents/foo/transfer", json={**_move_body(scope_b), "mode": "copy"}
@@ -560,6 +560,57 @@ async def test_unverifiable_staging_409_carries_the_filesystem_remedy(
     records = [r.getMessage() for r in _transfer_records(caplog)]
     assert len(records) == 1, records
     assert "transfer staging cannot be verified" in records[0]
+
+
+@pytest.mark.asyncio
+async def test_a_move_without_file_identity_is_refused_before_it_consumes_the_source(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """The move twin of the cell above answers the same 409, with nothing moved (#3545).
+
+    Every entry under both projects reports ``st_ino == 0``, the filesystem the
+    issue describes. The move used to rename the source into staging, refuse
+    to promote it, and answer a partial-commit 500 that blamed a replacement
+    nobody made.
+    """
+    source = _write_agent(_shared_agents(cwd_root), "foo")
+    before = source.read_bytes()
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    roots = (cwd_root.resolve(), other.resolve())
+    real_lstat = Path.lstat
+
+    class _Zeroed:
+        def __init__(self, info):
+            self._info = info
+
+        def __getattr__(self, name):
+            return getattr(self._info, name)
+
+        st_ino = 0
+
+    def lstat(self, *args, **kwargs):
+        info = real_lstat(self, *args, **kwargs)
+        return _Zeroed(info) if any(self.is_relative_to(r) for r in roots) else info
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post("/api/context/agents/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "transfer_staging_replaced"
+    assert detail["message"] == _REPLACED_MESSAGE
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert len(records) == 1, records
+    assert "does not report file identity" in records[0]
+    assert source.read_bytes() == before
+    dst_store = _shared_agents(other)
+    assert not (dst_store / "foo.md").exists() and not (dst_store / "foo").exists()
+    for store in (_shared_agents(cwd_root), dst_store):
+        assert not store.exists() or not list(store.glob(".migrate-*")), store
 
 
 @pytest.mark.asyncio
