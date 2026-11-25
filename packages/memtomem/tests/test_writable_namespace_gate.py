@@ -10,7 +10,8 @@ raised after the markdown append would leave an unindexed entry behind.
 
 The gate is deliberately narrower than ``validate_namespace``: namespace rules
 store names such as ``claude:-Users-...`` that the strict gate refuses, and a
-write into a namespace the store already uses has to keep working.
+write into a namespace the store already uses has to keep working, unless the
+name contains a NUL (#3589): SQLite's ``LIKE`` would compare it only up to the NUL.
 """
 
 from __future__ import annotations
@@ -30,7 +31,17 @@ from memtomem.constants import (
 )
 from memtomem.tools.bundle_format import BundleValidationError
 
-REFUSED = ["a,b", "x*y", "!system", "x*y,z", " ", "\t", "agent-runtime:foo:bar"]
+REFUSED = [
+    "a,b",
+    "x*y",
+    "!system",
+    "x*y,z",
+    " ",
+    "\t",
+    "agent-runtime:foo:bar",
+    "arc\x00z",
+    "\x00",
+]
 REFUSED_MORE = ["agent-runtime:-x", "agent-runtime", 123, ["a"]]
 ACCEPTED = [
     "claude:-Users-x",
@@ -42,6 +53,8 @@ ACCEPTED = [
     "agent-runtime:planner",
     "Agent-Runtime:x",
     "agent/id",
+    "arc\tz",
+    "a\x7fz",
 ]
 LEGACY = "claude:-Users-pdstudio-proj"
 
@@ -80,6 +93,22 @@ class TestHelper:
     def test_message_says_how_a_reader_would_read_it(self, value, reading):
         with pytest.raises(InvalidNameError, match=reading):
             validate_writable_namespace(value)
+
+    @pytest.mark.parametrize(
+        "value, seen",
+        [("arc\x00z", "'arc'"), ("agent-runtime:a\x00b", "'agent-runtime:a'"), ("\x00", "''")],
+    )
+    def test_nul_message_names_what_sql_would_compare(self, value, seen):
+        """SQLite's LIKE reads a value only up to its first NUL (#3589), so a
+        stored ``arc\\x00z`` matches a filter as ``arc`` while Python prefix
+        checks see the whole string. The refusal names the cut-off text, and an
+        ``agent-runtime:`` name gets the same message as any other."""
+        with pytest.raises(InvalidNameError) as excinfo:
+            validate_writable_namespace(value)
+        message = str(excinfo.value)
+        assert "NUL character" in message
+        assert "SQLite's LIKE" in message
+        assert f"as {seen}" in message
 
 
 # ---------------------------------------------------------------------------
