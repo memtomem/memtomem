@@ -346,6 +346,16 @@ class SearchConfig(ConfigModel):
                 f"system_namespace_prefixes has {len(v)} entries; cap is 10. "
                 "Did you accidentally generate prefixes dynamically?"
             )
+        # SQLite's LIKE reads a bound pattern only up to its first NUL, so the
+        # SQL exclusion would compare with the part before it exactly while
+        # ``has_namespace_prefix`` compares the whole prefix (#3554).
+        for index, prefix in enumerate(v):
+            if "\x00" in prefix:
+                raise ValueError(
+                    f"system_namespace_prefixes[{index}] = {prefix!r} contains a NUL "
+                    "character; SQLite reads a LIKE pattern only up to its first NUL, "
+                    "so this prefix would not hide what it names"
+                )
         return v
 
 

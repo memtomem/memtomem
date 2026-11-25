@@ -564,9 +564,11 @@ Fusion). The variables below tune each retriever and the fusion.
 | `MEMTOMEM_SEARCH__RRF_WEIGHTS` | `[1.0, 1.0]` | RRF weights for `[BM25, Dense]` — adjust to favor one retriever |
 | `MEMTOMEM_SEARCH__TOKENIZER` | `unicode61` | FTS tokenizer (`unicode61` or `kiwipiepy`) |
 | `MEMTOMEM_SEARCH__CACHE_TTL` | `30.0` | Search result cache TTL in seconds |
-| `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` | `["archive:", "agent-runtime:"]` | Namespace prefixes excluded from default search (max 10) |
+| `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` | `["archive:", "agent-runtime:"]` | Namespace prefixes excluded from default search (max 10; no NUL character) |
 
 Chunks in system namespaces (e.g. `archive:*` and the per-agent `agent-runtime:*` buckets) are hidden from `namespace=None` searches but remain retrievable with an explicit namespace argument. `namespace="!system"` applies the same exclusion explicitly, so it also overrides an active session or agent namespace on `mem_search` and `mem_recall`. Set to `[]` to make all namespaces searchable by default.
+
+A prefix containing a NUL character is rejected, because SQLite reads a `LIKE` pattern only up to its first NUL. When `config.json` or a `config.d` fragment supplies such a prefix, a tolerant load ignores that file's whole `[search]` section, so the values from the layers below it apply (a strict load fails, and so does `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` holding one; when that variable is set, the files' prefix lists are skipped instead); see [External edits while the Web UI is running](#external-edits-while-the-web-ui-is-running) for how each surface reports the rejected section.
 
 ## Query Expansion
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 import memtomem
 from _subprocess_env import package_src_dir, subprocess_env
 
@@ -13,7 +15,7 @@ def test_package_src_dir_points_to_valid_source_root():
     src = package_src_dir()
     assert src.is_dir()
     assert (src / "memtomem" / "__init__.py").is_file()
-    assert src == Path(memtomem.__file__).resolve().parents[1]
+    assert src == Path(memtomem.__file__).parent.parent.resolve()
 
 
 def test_subprocess_env_default_has_package_src_first():
@@ -78,3 +80,48 @@ def test_subprocess_env_does_not_mutate_base():
     base_copy = dict(base)
     subprocess_env(base=base, extra_paths=["/extra"], VAR="2")
     assert base == base_copy
+
+
+def _link(link: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except (OSError, NotImplementedError):
+        # The marker probes the system temp directory, not ``--basetemp``.
+        pytest.skip("symlink creation is not permitted under tmp_path")
+
+
+def _file_linked_initializer(root: Path) -> None:
+    # ``b/memtomem`` is a real directory; only its ``__init__.py`` links into ``a``.
+    (root / "a" / "memtomem").mkdir(parents=True)
+    (root / "a" / "memtomem" / "__init__.py").write_text("")
+    (root / "b" / "memtomem").mkdir(parents=True)
+    _link(root / "b" / "memtomem" / "__init__.py", root / "a" / "memtomem" / "__init__.py")
+
+
+def _directory_linked_package(root: Path) -> None:
+    # ``b/memtomem`` links to a directory that is not named ``memtomem``.
+    (root / "a" / "vendor-copy").mkdir(parents=True)
+    (root / "a" / "vendor-copy" / "__init__.py").write_text("")
+    (root / "b").mkdir()
+    _link(root / "b" / "memtomem", root / "a" / "vendor-copy", directory=True)
+
+
+@pytest.mark.requires_symlinks
+@pytest.mark.parametrize(
+    "layout",
+    [_file_linked_initializer, _directory_linked_package],
+    ids=["file-linked-initializer", "directory-linked-package"],
+)
+def test_package_src_dir_is_the_directory_memtomem_was_imported_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout
+) -> None:
+    # Following a link below the import root lands in ``a``, where a child either
+    # imports another tree's submodules or finds no ``memtomem`` at all (#3574).
+    layout(tmp_path)
+    monkeypatch.setattr(memtomem, "__file__", str(tmp_path / "b" / "memtomem" / "__init__.py"))
+
+    src = package_src_dir()
+    assert os.path.samefile(src, tmp_path / "b"), src
+    assert not os.path.samefile(src, tmp_path / "a"), src
+    first = subprocess_env(base={})["PYTHONPATH"].split(os.pathsep)[0]
+    assert os.path.samefile(first, tmp_path / "b"), first
