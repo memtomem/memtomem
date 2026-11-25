@@ -57,6 +57,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   under a NUL namespace are not migrated. A saved archive, promotion or consolidation policy
   whose destination contains a NUL now refuses to run until its destination is changed.
 
+- **The web transfer route's 400 `validation` stops naming host paths (#3543).** In
+  `POST /api/context/{kind}/{name}/transfer`, an engine refusal that no other arm caught went
+  out with the engine's text, and several of those texts named absolute paths: an artifact
+  found in more than one scope listed each copy's path; a transfer whose source and
+  destination resolve to one store named that store, the user tier's included; and an
+  `mcp-servers` copy whose source is a symlink, cannot be read, or is not valid UTF-8 named
+  the source file. Each now names the scopes or the logical location instead (`agents/foo
+  exists in multiple scopes: project_shared, project_local. Set from_scope to one of these
+  scopes.`, `mcp-servers/pg: the source .memtomem/mcp-servers/pg.json is a symlink;` …). The
+  other 400 texts name no path and keep their wording; like the 404's, every 400 message from
+  this arm now passes the secret scan, so a message carrying a secret-shaped value (an artifact
+  name shaped like an AWS key ID, say) goes out as `<redacted: secret-shape>`. The CLI
+  messages are unchanged.
+
 - **`mm memory doctor` measures the `MEMORY.md` budget in UTF-16 code units, the unit Claude
   Code caps it in (#3578).** The file total was UTF-8 bytes against 24,400, so a Korean,
   Japanese or Chinese index warned well under the real 25,000-unit cap (about 70% of it on

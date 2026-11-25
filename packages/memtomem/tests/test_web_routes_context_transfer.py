@@ -1601,3 +1601,231 @@ async def test_mcp_no_store_destination_409(client, cwd_root: Path, tmp_path: Pa
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "no_memtomem_store"
+
+
+# ── 400 validation arm: engine refusals that name a path (#3543) ─────────
+
+
+_REFUSED_FALLBACK = "the transfer request was refused; the server log has the details."
+
+
+def _assert_validation(resp, message: str, *leaky: Path) -> None:
+    assert resp.status_code == 400, resp.text
+    _assert_path_free(resp.json(), *leaky)
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "validation"
+    assert detail["message"] == message
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_source_400_is_path_free(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_agent(Path.home() / ".memtomem" / "agents", "foo")
+    _write_agent(_shared_agents(cwd_root), "foo")
+    _write_agent(_local_agents(cwd_root), "foo")
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={"mode": "copy", "to_target_scope": "user", "allow_host_writes": True},
+    )
+    _assert_validation(
+        resp,
+        "agents/foo exists in multiple scopes: user, project_shared, project_local. "
+        "Set from_scope to one of these scopes.",
+        tmp_path,
+        cwd_root,
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_to_user_400_is_path_free(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_agent(Path.home() / ".memtomem" / "agents", "foo")
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "from_scope": "user",
+            "to_target_scope": "user",
+            "allow_host_writes": True,
+        },
+    )
+    _assert_validation(
+        resp,
+        "agents/foo is already in the global user tier; choose a project tier as the destination.",
+        tmp_path,
+        cwd_root,
+    )
+
+
+_SAME_STORE = (
+    "the source ({src}) and destination ({dst}) resolve to the same canonical store; "
+    "choose a destination backed by a different store."
+)
+
+
+@pytest.mark.asyncio
+async def test_same_store_400_is_path_free(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_agent(_shared_agents(cwd_root), "foo")
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "from_scope": "project_shared",
+            "to_target_scope": "project_shared",
+            "confirm_project_shared": True,
+        },
+    )
+    _assert_validation(
+        resp,
+        _SAME_STORE.format(src="project_shared", dst="project_shared"),
+        tmp_path,
+        cwd_root,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_symlinks
+async def test_linked_tiers_same_store_400_is_path_free(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """``canonical_artifact_dir`` resolves links, so two tiers can share one store."""
+    _write_agent(_shared_agents(cwd_root), "foo")
+    _local_agents(cwd_root).symlink_to(_shared_agents(cwd_root), target_is_directory=True)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "from_scope": "project_local",
+            "to_target_scope": "project_shared",
+            "confirm_project_shared": True,
+        },
+    )
+    _assert_validation(
+        resp,
+        _SAME_STORE.format(src="project_local", dst="project_shared"),
+        tmp_path,
+        cwd_root,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_symlinks
+async def test_mcp_symlinked_source_400_is_path_free(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    real = _write_mcp_server(tmp_path / "real")
+    store = cwd_root / ".memtomem" / "mcp-servers"
+    store.mkdir(parents=True)
+    (store / "pg.json").symlink_to(real)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    _assert_validation(
+        resp,
+        "mcp-servers/pg: the source .memtomem/mcp-servers/pg.json is a symlink; mcp-servers "
+        "copy refuses symlinked canonicals — the destination must be a regular git-tracked "
+        "file. Replace the symlink with a regular file holding the definition, then re-run "
+        "the copy.",
+        tmp_path,
+        cwd_root,
+        other,
+        real,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_unreadable_source_400_is_path_free(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _write_mcp_server(cwd_root).resolve()
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    fired: list[Path] = []
+    real_read_bytes = Path.read_bytes
+
+    def _read_bytes(self: Path) -> bytes:
+        if self == src:
+            fired.append(self)
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert fired, "the read hook never matched the canonical source"
+    _assert_validation(
+        resp,
+        "cannot read the source .memtomem/mcp-servers/pg.json; check that it exists and "
+        "that the server can read it.",
+        tmp_path,
+        cwd_root,
+        other,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_non_utf8_source_400_is_path_free(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_mcp_server(cwd_root).write_bytes(b'{"command": "\xff"}\n')
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    _assert_validation(
+        resp,
+        "the source .memtomem/mcp-servers/pg.json is not valid UTF-8; fix the source "
+        "definition before copying.",
+        tmp_path,
+        cwd_root,
+        other,
+    )
+
+
+@pytest.mark.asyncio
+async def test_path_naming_refusal_without_safe_message_falls_back(
+    client,
+    cwd_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A raise site that leaves ``safe_message`` unset still answers path-free,
+    and the engine's text goes to the one log line the fallback promises."""
+    from memtomem.context.migrate import PathNamingClickException
+    from memtomem.web.routes import context_transfer as route
+
+    engine_text = f"refused: {cwd_root / '.memtomem'} is wrong"
+
+    def _refuse(*_a: object, **_k: object) -> None:
+        raise PathNamingClickException(engine_text)
+
+    monkeypatch.setattr(route, "copy_mcp_server", _refuse)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post(
+            "/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b)
+        )
+    _assert_validation(resp, _REFUSED_FALLBACK, tmp_path, cwd_root, other)
+    assert [r.getMessage() for r in _transfer_records(caplog)] == [
+        f"transfer mcp-servers/pg refused (validation): {engine_text}"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_validation_400_passes_the_secret_scan(client, cwd_root: Path) -> None:
+    """Every 400 text from the final arm is scanned, path-naming or not (#3543)."""
+    name = "AKIA" + "1234567890ABCDEF"  # assembled at runtime: a synthetic AWS key ID
+    _write_agent(_shared_agents(cwd_root), name)
+
+    resp = await client.post(
+        f"/api/context/agents/{name}/transfer",
+        json={"mode": "move", "from_scope": "project_shared", "to_target_scope": "project_shared"},
+    )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "validation"
+    assert detail["message"] == "<redacted: secret-shape>"

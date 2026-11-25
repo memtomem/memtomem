@@ -153,13 +153,30 @@ class ArtifactNotFoundError(click.ClickException):
     ``except ClickException`` / ``str(exc)`` consumer (CLI verbs, MCP
     actions, the ``migrate_scope`` wrapper contract) is untouched.
     Raised only by the :func:`_detect_source_scope` not-found branches;
-    the multi-scope ambiguity raise stays a plain ``ClickException``
-    (the artifact exists — the selector is what's wrong).
+    the multi-scope ambiguity raise is a :class:`PathNamingClickException`
+    instead (the artifact exists — the selector is what's wrong).
 
     ``safe_message`` is the same statement without a host path, for a surface
     that answers a remote caller (#3532). ``None`` when ``message`` already
     names no path. Keyword-only with a default, so ``type(exc)(*exc.args)`` —
     what ``copy`` and ``pickle`` do — still rebuilds the exception.
+    """
+
+    def __init__(self, message: str, *, safe_message: str | None = None) -> None:
+        super().__init__(message)
+        self.safe_message = safe_message
+
+
+class PathNamingClickException(click.ClickException):
+    """An engine refusal whose CLI text names a host path (#3543).
+
+    ``message`` is the text the CLI prints, unchanged. ``safe_message`` says
+    the same thing with the path replaced by request vocabulary or the logical
+    location, for a surface that answers a remote caller: the web transfer
+    route sends it from its 400 arm instead of ``message``. Every raise site
+    passes one; it defaults to ``None`` only so that ``type(exc)(*exc.args)``
+    — what ``copy`` and ``pickle`` do — still rebuilds the exception, and the
+    route has a path-free fallback for that case.
     """
 
     def __init__(self, message: str, *, safe_message: str | None = None) -> None:
@@ -2227,9 +2244,14 @@ def _detect_source_scope(
         )
     if len(candidates) > 1:
         listed = ", ".join(f"{s} ({p})" for s, p, _ in candidates)
-        raise click.ClickException(
+        scopes = ", ".join(s for s, _, _ in candidates)
+        raise PathNamingClickException(
             f"{kind}/{name} exists in multiple scopes: {listed}. "
-            f"Pass --from <scope> to disambiguate."
+            f"Pass --from <scope> to disambiguate.",
+            safe_message=(
+                f"{kind}/{name} exists in multiple scopes: {scopes}. "
+                "Set from_scope to one of these scopes."
+            ),
         )
     return candidates[0]
 
