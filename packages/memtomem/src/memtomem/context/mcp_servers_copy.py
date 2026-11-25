@@ -73,8 +73,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-import click
-
 from memtomem.context._names import validate_name
 from memtomem.context.mcp_servers import (
     CANONICAL_MCP_SERVER_ROOT,
@@ -86,6 +84,7 @@ from memtomem.context.mcp_servers import (
 )
 from memtomem.context.migrate import (
     ArtifactNotFoundError,
+    PathNamingClickException,
     StagingClaim,
     _acquire_pair_lock,
     _discard_claimed_staging,
@@ -231,6 +230,33 @@ def _gate_a_hint(src_path: Path) -> str:
     )
 
 
+_SYMLINK_REMEDY = (
+    "mcp-servers copy refuses symlinked canonicals — the destination must be a regular "
+    "git-tracked file. Replace the symlink with a regular file holding the definition, then "
+    "re-run the copy."
+)
+
+
+def _symlink_refusal(src_path: Path, name: str) -> PathNamingClickException:
+    return PathNamingClickException(
+        f"{src_path} is a symlink; {_SYMLINK_REMEDY}",
+        safe_message=(
+            f"mcp-servers/{name}: the source {CANONICAL_MCP_SERVER_ROOT}/{name}.json is a "
+            f"symlink; {_SYMLINK_REMEDY}"
+        ),
+    )
+
+
+def _not_utf8_refusal(src_path: Path, name: str) -> PathNamingClickException:
+    remedy = "fix the source definition before copying."
+    return PathNamingClickException(
+        f"{src_path} is not valid UTF-8; {remedy}",
+        safe_message=(
+            f"the source {CANONICAL_MCP_SERVER_ROOT}/{name}.json is not valid UTF-8; {remedy}"
+        ),
+    )
+
+
 def _parse_definition_text(text: str, *, name: str, src_path: Path) -> None:
     """Validate *text* as a stdio MCP server definition (refusal detail in docstring).
 
@@ -344,10 +370,13 @@ def copy_mcp_server(
     dst_path = canonical_mcp_server_path(dst_root, name)
 
     if src_root == dst_root:
-        raise click.ClickException(
-            f"source and destination are the same project ({src_root}); "
-            f"mcp-servers copy is cross-project only — the canonical is "
-            f"single-tier, so within one project there is nothing to copy to."
+        remedy = (
+            "mcp-servers copy is cross-project only — the canonical is "
+            "single-tier, so within one project there is nothing to copy to."
+        )
+        raise PathNamingClickException(
+            f"source and destination are the same project ({src_root}); {remedy}",
+            safe_message=f"source and destination are the same project; {remedy}",
         )
     if not src_path.is_file():
         # The public form names the logical location, never ``src_path``: the
@@ -365,12 +394,7 @@ def copy_mcp_server(
         # into the destination's git-tracked tree — Codex review blocker).
         # The engine preserves links by contract; this adapter refuses
         # them. Loud refusal over silently materializing the target.
-        raise click.ClickException(
-            f"{src_path} is a symlink; mcp-servers copy refuses symlinked "
-            f"canonicals — the destination must be a regular git-tracked "
-            f"file. Replace the symlink with a regular file holding the "
-            f"definition, then re-run the copy."
-        )
+        raise _symlink_refusal(src_path, name)
 
     # Early parse signal for dry-run and fast pre-flight failure. The
     # authoritative validation runs on the STAGED bytes inside the lock —
@@ -378,11 +402,17 @@ def copy_mcp_server(
     try:
         src_text = src_path.read_bytes().decode("utf-8")
     except OSError as exc:
-        raise click.ClickException(f"cannot read {src_path}: {exc}") from exc
-    except UnicodeDecodeError as exc:
-        raise click.ClickException(
-            f"{src_path} is not valid UTF-8; fix the source definition before copying."
+        # No OS text in the public form: ``str(exc)`` repeats the filename, and
+        # ``strerror`` varies by platform and locale.
+        raise PathNamingClickException(
+            f"cannot read {src_path}: {exc}",
+            safe_message=(
+                f"cannot read the source {CANONICAL_MCP_SERVER_ROOT}/{name}.json; check "
+                "that it exists and that the server can read it."
+            ),
         ) from exc
+    except UnicodeDecodeError as exc:
+        raise _not_utf8_refusal(src_path, name) from exc
     _parse_definition_text(src_text, name=name, src_path=src_path)
 
     # Pre-flight conflict check (re-checked inside the lock; the promote
@@ -436,13 +466,7 @@ def copy_mcp_server(
                 # file — reads would follow the link and the hard-link
                 # promote would alias its target — so refuse here, same
                 # wording as the pre-flight gate.
-                raise click.ClickException(
-                    f"{src_path} is a symlink; mcp-servers copy refuses "
-                    f"symlinked canonicals — the destination must be a "
-                    f"regular git-tracked file. Replace the symlink with a "
-                    f"regular file holding the definition, then re-run the "
-                    f"copy."
-                )
+                raise _symlink_refusal(src_path, name)
             # One read feeds both gates: the scan and the parse cover the
             # exact bytes about to be promoted (scan_text_content's
             # scan→write TOCTOU contract). Scan first — fail-closed on
@@ -470,9 +494,7 @@ def copy_mcp_server(
             try:
                 staged_text = staged_bytes.decode("utf-8")
             except UnicodeDecodeError as exc:
-                raise click.ClickException(
-                    f"{src_path} is not valid UTF-8; fix the source definition before copying."
-                ) from exc
+                raise _not_utf8_refusal(src_path, name) from exc
             _parse_definition_text(staged_text, name=name, src_path=src_path)
             _promote_no_clobber(claimed, dst_path)
         except BaseException:
