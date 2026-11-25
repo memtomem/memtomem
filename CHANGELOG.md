@@ -29,6 +29,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A `mem_update_coverage` check reports a commit whose record is older than 90 days as
+  unreviewed (#3581).** The check matched rows by project and SHA with no age limit, so a row
+  past its 90-day retention still read as reviewed until a record call pruned it. Because
+  `incremental` and `full` record the whole list the check received, that record then
+  re-inserted the expired row with a fresh timestamp although the run had not reviewed the
+  commit. The check now applies the same cutoff as the prune, so an expired commit is
+  reviewed again.
+
 - **A write refuses a namespace containing a NUL character (#3589).** SQLite's `LIKE` reads
   a value only up to its first NUL, so a chunk stored under `arc\x00z` was matched by the
   default-search exclusion and by namespace globs as if it were `arc`, while the Python
