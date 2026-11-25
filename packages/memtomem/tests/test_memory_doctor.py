@@ -861,10 +861,48 @@ class TestBudget:
         assert m.over_budget
         assert m.line_count == 250
 
-    def test_byte_count_over_cap(self):
-        m = measure_budget("x" * 25_000)
+    def test_unit_count_over_cap(self):
+        # Short lines, so the file total — not the 200-char per-line cap — trips it.
+        m = measure_budget("\n".join(["x" * 199] * 125))
+        assert m.overlong_lines == ()
+        assert m.line_count == 125
+        assert m.utf16_units == 125 * 199 + 124
         assert m.over_budget
-        assert m.byte_len == 25_000
+
+    def test_cjk_index_is_counted_in_utf16_units_not_utf8_bytes(self):
+        # #3578: Claude Code caps MEMORY.md at 25,000 UTF-16 code units, so a Hangul
+        # syllable is 1 unit (3 UTF-8 bytes). 19,999 units / 59,799 bytes is well
+        # inside the cap and must not warn.
+        text = "\n".join(["가" * 199] * 100)
+        assert len(text.encode("utf-8")) == 59_799
+        m = measure_budget(text)
+        assert m.utf16_units == 100 * 199 + 99
+        assert not m.over_budget
+
+    def test_non_bmp_characters_count_two_units(self):
+        # 60 lines x 200 emoji + 1 line x 170 emoji, 60 separators = exactly 24,400.
+        lines = ["😀" * 200] * 60 + ["😀" * 170]
+        at_cap = measure_budget("\n".join(lines))
+        assert at_cap.overlong_lines == ()
+        assert at_cap.utf16_units == 2 * (60 * 200 + 170) + 60 == 24_400
+        assert not at_cap.over_budget  # strict ``>``
+        over = measure_budget("\n".join(lines[:-1] + ["😀" * 171]))
+        assert over.utf16_units == 24_402
+        assert over.over_budget
+
+    def test_total_is_measured_on_the_trimmed_text(self):
+        assert measure_budget("  x\n\n").utf16_units == 1
+
+    def test_trim_set_is_javascript_not_python(self):
+        # Claude Code trims with JS ``String.prototype.trim``: U+FEFF goes, U+0085
+        # stays; Python's bare ``strip()`` does the opposite on both.
+        feff, nel, nbsp, ideographic, ls = (chr(c) for c in (0xFEFF, 0x85, 0xA0, 0x3000, 0x2028))
+        assert measure_budget(f"{feff}x{feff}").utf16_units == 1
+        assert measure_budget(f"x{nel}").utf16_units == 2
+        assert measure_budget(f"{ls}x{ideographic}{nbsp}").utf16_units == 1
+
+    def test_lone_surrogate_does_not_raise(self):
+        assert measure_budget("a\ud800").utf16_units == 2
 
     def test_overlong_line_measured_in_chars_not_bytes(self):
         # 150 CJK chars = 450 UTF-8 bytes but only 150 characters, so it must
@@ -2838,14 +2876,14 @@ class TestCli:
         self._patch_loader(monkeypatch, config)
         index = (mem_dir / "MEMORY.md").resolve()
 
-        real_read_text = Path.read_text
+        real_read_bytes = Path.read_bytes
 
-        def deny_index(self, *args, **kwargs):
+        def deny_index(self):
             if self.resolve() == index:
                 raise PermissionError(13, "Permission denied")
-            return real_read_text(self, *args, **kwargs)
+            return real_read_bytes(self)
 
-        monkeypatch.setattr(Path, "read_text", deny_index)
+        monkeypatch.setattr(Path, "read_bytes", deny_index)
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
 
@@ -2866,20 +2904,66 @@ class TestCli:
         self._patch_loader(monkeypatch, config)
         index = (mem_dir / "MEMORY.md").resolve()
 
-        real_read_text = Path.read_text
+        real_read_bytes = Path.read_bytes
 
-        def deny_index(self, *args, **kwargs):
+        def deny_index(self):
             if self.resolve() == index:
                 raise OSError()
-            return real_read_text(self, *args, **kwargs)
+            return real_read_bytes(self)
 
-        monkeypatch.setattr(Path, "read_text", deny_index)
+        monkeypatch.setattr(Path, "read_bytes", deny_index)
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
 
         assert result.exit_code == 0
         finding = self._index_missing_finding(json.loads(result.output))
         assert finding["summary"] == "could not read MEMORY.md: OSError"
+
+    def _budget_finding(self, payload):
+        dir_entry = next(d for d in payload["dirs"] if d["category"] == "claude-memory")
+        return next((f for f in dir_entry["findings"] if f["check"] == "budget"), None)
+
+    def test_total_only_budget_warning_reports_utf16_units(self, doctor_env, monkeypatch):
+        # #3578: the unit is no longer bytes; a total-only warning has no overlong lines.
+        config, mem_dir = doctor_env
+        self._patch_loader(monkeypatch, config)
+        (mem_dir / "MEMORY.md").write_bytes(("\n".join(["x" * 199] * 125) + "\n").encode("utf-8"))
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+
+        assert result.exit_code == 0  # warn is advisory
+        finding = self._budget_finding(json.loads(result.output))
+        assert finding is not None
+        assert finding["severity"] == "warn"
+        assert "24999 UTF-16 units (cap 24400)" in finding["summary"]
+        assert "bytes (cap" not in finding["summary"]
+        assert finding["items"] == []
+        assert finding["count"] == 0
+
+    def test_cjk_index_over_utf8_cap_but_under_unit_cap_does_not_warn(
+        self, doctor_env, monkeypatch
+    ):
+        config, mem_dir = doctor_env
+        self._patch_loader(monkeypatch, config)
+        (mem_dir / "MEMORY.md").write_bytes(("\n".join(["가" * 199] * 100) + "\n").encode("utf-8"))
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+
+        assert self._budget_finding(json.loads(result.output)) is None
+
+    def test_crlf_index_is_measured_with_its_carriage_returns(self, doctor_env, monkeypatch):
+        # Claude Code reads the file with ``readFileSync(..., "utf-8")`` — no newline
+        # folding — so 122 lines x 199 chars joined by CRLF is 24,520 units there. A
+        # universal-newline read would see 24,399 and stay silent.
+        config, mem_dir = doctor_env
+        self._patch_loader(monkeypatch, config)
+        (mem_dir / "MEMORY.md").write_bytes("\r\n".join(["x" * 199] * 122).encode("utf-8"))
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+
+        finding = self._budget_finding(json.loads(result.output))
+        assert finding is not None
+        assert "24520 UTF-16 units (cap 24400)" in finding["summary"]
 
 
 # ── Docs-as-tests parity ────────────────────────────────────────────
@@ -3089,8 +3173,8 @@ class TestDocsParity:
     def test_budget_caps_match_documented_numbers(self):
         import memtomem.cli.memory_doctor_cmd as mod
 
-        # Quoted in the checks table: "24,400 bytes / 200 lines / 200 chars".
-        assert mod._INDEX_MAX_BYTES == 24_400
+        # Quoted in the checks table: "24,400 UTF-16 code units / 200 lines / 200 chars".
+        assert mod._INDEX_MAX_UNITS == 24_400
         assert mod._INDEX_MAX_LINES == 200
         assert mod._INDEX_MAX_LINE_CHARS == 200
 

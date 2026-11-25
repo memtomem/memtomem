@@ -29,6 +29,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm memory doctor` measures the `MEMORY.md` budget in UTF-16 code units, the unit Claude
+  Code caps it in (#3578).** The file total was UTF-8 bytes against 24,400, so a Korean,
+  Japanese or Chinese index warned well under the real 25,000-unit cap (about 70% of it on
+  one Korean-heavy index) and curators folded index lines they did not need to. The total is
+  now the UTF-16 length of the text trimmed as JavaScript `trim()` does, read with its
+  newlines intact (Claude Code does not fold CRLF before measuring); the 24,400 threshold, the 200-line cap and the per-line
+  character cap are unchanged. The `budget` finding reads `N UTF-16 units (cap 24400)`
+  instead of `N bytes (cap 24400)`.
+
 - **`search.system_namespace_prefixes` refuses a prefix containing a NUL character (#3554).**
   SQLite's `LIKE` reads a bound pattern only up to its first NUL, so the default-search
   exclusion compared such a prefix with the text before the NUL exactly, while its Python twin

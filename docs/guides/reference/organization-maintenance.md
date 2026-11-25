@@ -496,7 +496,7 @@ mm memory doctor --fix --apply   # remove them from the index file
       - user_role.md
   ✗ 1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted (review with `mm gc orphan-sources`, then use `--apply` after confirming deletion)
       - /Users/you/.claude/projects/-Users-you-Work-myproj/memory/old_notes.md
-  ! MEMORY.md over budget: 25600 bytes (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)
+  ! MEMORY.md over budget: 25600 UTF-16 units (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)
       - L8
       - L40
 
@@ -524,7 +524,7 @@ Each dir header line reads `{category} · [index={index_file} ·] indexed {db_co
 | `db_extra` | warn | A DB source exists on disk but falls outside the current indexable set (unsupported extension or excluded path). | Usually expected. If the path is now excluded, `mm purge --matching-excluded --apply` reclaims it; unsupported-extension residue has no targeted fix yet. |
 | `index_orphan` | warn | An indexable file on disk is not listed in the index file (`MEMORY.md`). | Add a pointer line, or leave it — the TOC is curated. |
 | `ambiguous_index_line` | warn | The line names something the doctor won't resolve on a guess: a link target that isn't a plain relative path — one carrying a query (`live.md?view=1`), a percent-escape (`live%2Emd`), a scheme (`urn:live.md`) or a space (`<x y.md>`) — link syntax left unclosed (`- [B](b.md`), or a *contested wikilink label*: a genuine `[[memo]](note)` and an escaped same-name pointer (`[\[memo\]](file.md)`) share the line, both decode to the label `[memo]`, and the doctor cannot tell which occurrence is the wikilink, so neither is trusted. Such links are neither link-checked nor counted as listed, so the file one may have meant can also surface as an `index_orphan`. Ordinary filenames needing markdown escaping (`notes_(v2).md`, `notes_\(v2.md`, `notes_&amp;v2.md`) are *not* flagged — they are read as Markdown and resolve normally. | Rewrite the target as a plain relative filename; for a contested wikilink label, rename the wholly bracketed label if the link is meant as a pointer (un-escaping it makes the occurrence a wikilink instead). Reported as warn, not error. `--fix` will not touch such a line: an unreadable link is never *provably* dead, so a line holding only these is not a `--fix` candidate at all, and one sitting beside a genuinely dead link makes that line a [skip](#fixing-broken-links) — the rest of the file is still fixed. |
-| `budget` | warn | The index file exceeds its hot-cache budget: 24,400 bytes / 200 lines / 200 chars per line. | Trim the index file. |
+| `budget` | warn | The index file exceeds its hot-cache budget: 24,400 UTF-16 code units (Claude Code's own unit, not bytes) / 200 lines / 200 chars per line. | Trim the index file. |
 | `index_missing` | warn | The provider's index file (e.g. `MEMORY.md`) is absent or unreadable. | Create it, or ignore if the dir has no TOC convention. |
 | `dangling_wikilink` | info | A `[[name]]` on an index line naming no `name.md` inside the memory root, or one outside it (`[[name\|alias]]` resolves on `name`). Each item names its class, as `broken_link` does: `missing_target` — a *forward reference* (a memory worth writing later, which the [memory conventions](#dangling-wikilinks) allow) or a stale link to a deleted memo, which the doctor can't tell apart; `outside_root` — a name that escapes the root, and may well exist there. Never fails a run, and `--fix` never acts on it. | `missing_target`: write the memo, fix the name, or leave it as a deliberate forward reference. `outside_root`: correct the name by hand — nothing follows a wikilink, so an escape is a naming slip rather than the hazard it is for a pointer. |
 | `cold_candidate` | info | An indexed file never accessed since indexing (`access_count` 0, `last_accessed_at` unset). | Advisory — a future decay/curation candidate. |
@@ -574,7 +574,7 @@ The exit code is `0` when clean or when only advisory (warn/info) findings exist
           "check": "budget",
           "severity": "warn",
           "count": 2,
-          "summary": "MEMORY.md over budget: 25600 bytes (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)",
+          "summary": "MEMORY.md over budget: 25600 UTF-16 units (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)",
           "items": ["L8", "L40"]
         }
       ]
