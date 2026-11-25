@@ -4102,3 +4102,70 @@ class TestCoexistenceCheckTimingPerHost:
         assert "after installing the plugin" in hosts
         assert "before starting a new session or thread" in hosts
         assert "only a manual entry named `memtomem`" in hosts
+
+
+class TestExternalEditsGuideStatesTheOutcomePerLayer:
+    """A rejected section is not handled alike by every layer the Web UI re-reads (#3591).
+
+    ``GET /api/config`` re-reads strictly for ``config.json`` and tolerantly for
+    ``config.d`` fragments, so the guide must not file it with the loads that
+    tolerate a rejected section, and must give each layer its own outcome.
+    ``test_web_config_load_diagnostics.py`` measures both outcomes; this pins the
+    wording that states them. Every lookup asserts it found its target first, so
+    a deleted bullet fails instead of passing the content checks vacuously.
+    """
+
+    _HEADING = "### External edits while the Web UI is running"
+
+    @classmethod
+    def _section(cls) -> str:
+        return _heading_section(_read(_CONFIGURATION_GUIDE), cls._HEADING)
+
+    @staticmethod
+    def _sub_bullet(section: str, lead: str) -> str:
+        # The lead may wrap anywhere a space is, so it is matched on the raw text
+        # with ``\s+`` between its words and only then collapsed.
+        lead_pattern = r"\s+".join(re.escape(word) for word in lead.split())
+        matches = re.findall(
+            rf"^[ \t]+- {lead_pattern}(.*?)(?=^\s*- |\n\n|\Z)", section, re.MULTILINE | re.DOTALL
+        )
+        assert len(matches) == 1, f"{len(matches)} sub-bullets start with {lead!r}"
+        return " ".join(matches[0].split())
+
+    def test_get_api_config_is_not_filed_with_the_tolerant_loads(self) -> None:
+        bullets = re.findall(
+            r"^- (Other loads \(.*?)(?=^- |\n\n|\Z)", self._section(), re.MULTILINE | re.DOTALL
+        )
+        assert len(bullets) == 1, f"{len(bullets)} bullets start with 'Other loads ('"
+        bullet = _unwrapped(bullets[0])
+        match = re.match(r"Other loads \(([^)]*)\)", bullet)
+        assert match, "the guide lost its 'Other loads (...)' list"
+        assert "GET /api/config" not in match.group(1)
+        # The parenthetical alone survives a reversed claim about what those loads do.
+        assert "keep running on the values the section would have replaced" in bullet
+        assert "report the rejected section and its reason" in bullet
+
+    def test_a_config_json_section_fails_the_reread(self) -> None:
+        bullet = self._sub_bullet(self._section(), "**`config.json`**")
+        assert "the re-read fails" in bullet
+        assert "returns the section and the reason as `config_reload_error`" in bullet
+        assert "saves are refused (HTTP 409)" in bullet
+        assert "`config_load_warnings`" not in bullet
+
+    def test_a_fragment_section_is_skipped_when_the_reread_otherwise_succeeds(self) -> None:
+        bullet = self._sub_bullet(self._section(), "**`config.d` fragment**")
+        # The claim is conditional: a fragment edit also re-reads a still-invalid
+        # ``config.json``, and the loader is fatal for a read-only protection request.
+        # Each outcome is pinned as the clause that states it, so a bullet that keeps
+        # the field names but reverses what they report fails.
+        assert "When the re-read otherwise succeeds" in bullet
+        assert "lists the section and the reason in `config_load_warnings`" in bullet
+        clause = "the rejection by itself leaves `config_reload_error` empty and saves not refused"
+        assert clause in bullet
+        assert "so one that is still invalid has the outcome of the `config.json` item" in bullet
+        # The exception's own outcome, not just the link that names it.
+        assert "describes, which is fatal in a fragment too" in bullet
+        link = re.search(r"\(#([^)]+)\)", bullet)
+        assert link, "the fragment bullet lost its link to the read_only_memory_dirs exception"
+        assert link.group(1) in _anchors(_read(_CONFIGURATION_GUIDE))
+        assert "read_only_memory_dirs" in link.group(1)
