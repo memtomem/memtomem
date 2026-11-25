@@ -288,12 +288,10 @@ Skip this section in `topic` mode, in `incremental` and `full` mode when the che
 skipped, and in `backfill` mode when the walk found no review slice. Otherwise, after every
 `mem_add` call of this run has returned a result, call `mem_update_coverage` with
 `shas=<read-shas>`, `record=true`, and `run_id="<update-id>"`, even when no item was saved. In
-`incremental` and `full` mode, pass the same list the check received: the commits it reported as
-reviewed are already recorded: passing them again keeps a row that has not expired, and replaces
-a row past its 90-day retention with a fresh one, which the reply counts as `recorded`. In
-`backfill` mode, pass exactly the review slice's `<read-shas>` and never the whole slice: a slice SHA the check reported
-as reviewed may be a row past its 90-day retention, and recording it again would refresh it
-without a review. Record only after the last `mem_add`: if any `mem_add` call in this run failed,
+`incremental` and `full` mode, pass the same list the check received. In `backfill` mode, pass
+exactly the review slice's `<read-shas>` and never the whole slice, so the record covers only
+commits whose full messages this run read. Record only after the last `mem_add`: if any `mem_add`
+call in this run failed,
 do not record, and report `coverage: not recorded, a write failed`; the next run reviews those
 commits again. If the result's first line starts with `Error:`, report it unchanged; the saved
 items stand. In `backfill` mode, a result whose `project_root` is not the live Git root under the

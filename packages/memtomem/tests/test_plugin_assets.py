@@ -1628,9 +1628,7 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         "the rest of the result is nothing when `<M>` is zero, and otherwise "
         "`unreviewed_shas:` followed by exactly `<M>` different SHAs, each of them in the slice, "
         "and nothing after them",
-        # Re-recording a reviewed SHA is not a no-op: the record prunes expired rows first.
-        "passing them again keeps a row that has not expired, and replaces a row past its 90-day "
-        "retention with a fresh one, which the reply counts as `recorded`",
+        "In `incremental` and `full` mode, pass the same list the check received",
         "a denied or interrupted call, or a result that breaks these rules — stop before writing "
         "anything, report it unchanged, and name the slices already passed",
         # One commit per read: nothing to split, and the first line must be the SHA asked for.
@@ -1646,10 +1644,10 @@ def test_update_workflow_pins_bounded_window_and_idempotency_contract() -> None:
         "`backfill: unreviewed commits remain, none readable`",
         "In both cases review session outcomes only and make no recording call",
         "and to the review slice's `<read-shas>` in `backfill` mode",
-        # Record only what was reviewed: an expired row reads as reviewed to a check.
+        # Backfill records only commits whose full messages the run read.
         "in `backfill` mode when the walk found no review slice",
         "In `backfill` mode, pass exactly the review slice's `<read-shas>` and never the whole "
-        "slice",
+        "slice, so the record covers only commits whose full messages this run read",
         "a result whose `project_root` is not the live Git root under the rule in "
         "**Backfill walk** step 3 is a coverage error",
         "the positions the checks covered and the positions left unchecked",
