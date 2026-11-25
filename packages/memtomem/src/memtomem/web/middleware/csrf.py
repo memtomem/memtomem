@@ -176,8 +176,8 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         # Judge the path the router matches as well as ``request.url.path``:
         # under a ``Mount`` (or a server ``root_path``) the latter keeps the
-        # prefix, so on it alone every ``/api/*`` request read as a non-API path
-        # and skipped the gate (#3550). ``get_route_path`` is the function
+        # prefix, so on it alone an ``/api/*`` request under a prefix such as
+        # ``/mm`` read as a non-API path and skipped the gate (#3550). ``get_route_path`` is the function
         # Starlette's and FastAPI's routers call, so every request the router
         # serves as ``/api/*`` is gated. The request path is still consulted
         # (below), so the guard may also gate a path the router does not serve

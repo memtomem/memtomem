@@ -685,9 +685,7 @@ class TestAMountedAppIsGuardedLikeARootOne:
         assert len(events) == 1, events
         assert events[0]["path"] == "/api/session"
 
-    def test_an_unsafe_method_needs_the_token_under_the_mount(
-        self, monkeypatch, caplog_csrf
-    ) -> None:
+    def test_an_unsafe_method_needs_the_token_under_the_mount(self, monkeypatch) -> None:
         """A real route, so a pass is the handler's answer and not the catch-all's 404."""
         client, inner = self._mounted(monkeypatch)
 
