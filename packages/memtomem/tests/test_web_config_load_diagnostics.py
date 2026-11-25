@@ -139,6 +139,50 @@ class TestRejectedSectionOnReRead:
         assert data["mmr"]["enabled"] is True
 
 
+class TestRejectedFragmentOnReRead:
+    """The ``config.d`` half of the per-layer outcome the guide states (#3591).
+
+    A rejected ``config.json`` section fails the re-read (the class above). A
+    fragment's does not: ``build_fresh_config`` reads fragments tolerantly, so
+    the reload goes through and the section becomes a load warning.
+    """
+
+    async def test_a_rejected_fragment_section_is_a_warning_and_saves_still_land(
+        self, home: Path, app, client: AsyncClient
+    ) -> None:
+        _write_config(home, {"mmr": {"enabled": False}})
+        app.state.config = _hot_reload._build_fresh_config()
+        app.state.config_signature = _hot_reload.current_signature()
+        before = (await client.get("/api/config")).json()
+        assert before["search"]["default_top_k"] != 17
+
+        # A valid sibling section in the same fragment is what shows the reload
+        # went through: a no-op reload would leave ``default_top_k`` untouched
+        # and report no warning.
+        fragment = home / ".memtomem" / "config.d" / "10-embedding.json"
+        fragment.parent.mkdir(parents=True, exist_ok=True)
+        fragment.write_text(json.dumps({**STALE_E5, "search": {"default_top_k": 17}}), "utf-8")
+
+        data = (await client.get("/api/config")).json()
+
+        assert data["config_reload_error"] is None
+        assert data["search"]["default_top_k"] == 17
+        (warning,) = data["config_load_warnings"]
+        assert warning["section"] == "embedding"
+        assert warning["path"].endswith("10-embedding.json")
+        assert "dimension=384" in warning["error"]
+        # The rejected section's values are not applied: the embedding block is
+        # what it was before the fragment existed.
+        assert data["embedding"] == before["embedding"]
+
+        resp = await client.patch("/api/config?persist=true", json={"search": {"default_top_k": 7}})
+        assert resp.status_code == 200, resp.text
+        # A 200 can also mean "every field rejected, nothing written", so read
+        # the file the save was supposed to change.
+        saved = json.loads((home / ".memtomem" / "config.json").read_text(encoding="utf-8"))
+        assert saved["search"]["default_top_k"] == 7
+
+
 class TestLoadWarningsOnTheRunningConfig:
     async def test_get_config_reports_the_rejected_layer(
         self, home: Path, app, client: AsyncClient

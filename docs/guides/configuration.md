@@ -146,14 +146,26 @@ The Web UI server re-reads `config.json` and `config.d/*.json` on every
   (HTTP 409) until the file is fixed. Run `mm init --fresh` or edit
   the file by hand to recover.
 - A section that parses but fails its cross-field validation, such as a
-  stale `"dimension": 1024` left under an E5 model, is treated the same way
-  by the Web UI: the running config stays, the banner names the section and
-  the reason, and saves are refused until it is fixed. Other loads (MCP
-  startup, `mm status`, `mem_status`, `mm config show` on stderr, and
-  `GET /api/config`) keep running on the values the section would have
-  replaced and report the rejected section and its reason; `mem_status`
-  lists it as a `config_section_rejected` warning. An out-of-range value or
-  an unknown field is still skipped quietly in both cases.
+  stale `"dimension": 1024` left under an E5 model, is handled per layer when
+  the Web UI re-reads:
+  - **`config.json`**: the re-read fails like a truncated file. The running
+    config stays, `GET /api/config` returns the section and the reason as
+    `config_reload_error` (the red banner), and saves are refused (HTTP 409)
+    until it is fixed.
+  - **`config.d` fragment**: the section is skipped. When the re-read
+    otherwise succeeds, the reload goes through on the values the section
+    would have replaced, `GET /api/config` lists the section and the reason
+    in `config_load_warnings`, and the rejection by itself leaves
+    `config_reload_error` empty and saves not refused. A fragment edit also
+    re-reads `config.json`, so one that is still invalid has the outcome of
+    the `config.json` item. So does a rejected section that
+    [`read_only_memory_dirs`](#read_only_memory_dirs--index-it-never-write-it)
+    describes, which is fatal in a fragment too.
+- Other loads (MCP startup, `mm status`, `mem_status` and `mm config show` on
+  stderr) keep running on the values the section would have replaced and
+  report the rejected section and its reason; `mem_status` lists it as a
+  `config_section_rejected` warning. An out-of-range value or an unknown
+  field is still skipped quietly in the Web UI and in those other loads.
 
 Change detection is a cheap `os.stat` on `config.json` plus every
 fragment in `config.d/`, so GET latency is effectively unchanged. No
