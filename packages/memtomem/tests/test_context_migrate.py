@@ -5303,6 +5303,30 @@ class TestAMoveAsksForTheSourceIdentityFirst:
         assert staged.staging.path.is_symlink()
         assert not os.path.lexists(src)
 
+    @pytest.mark.requires_symlinks
+    def test_a_dangling_link_without_its_own_identity_is_refused(self, tmp_path, monkeypatch):
+        """The probe reads the link, not its target.
+
+        Only the link reports a zero inode. A ``stat`` would follow it to the
+        missing target and defer to the rename, which would then move it.
+        """
+        from memtomem.context.migrate import StagingIdentityLostError, _stage_move
+
+        dst_parent = tmp_path / "dest"
+        dst_parent.mkdir()
+        src = tmp_path / "src" / "reviewer.md"
+        src.parent.mkdir()
+        src.symlink_to(tmp_path / "no-such-target")
+        renames = self._spy_renames(monkeypatch)
+        _zero_inodes(monkeypatch, only=lambda p: p == src)
+
+        with pytest.raises(StagingIdentityLostError, match="does not report file identity"):
+            _stage_move(src, dst_parent, name_hint="reviewer")
+
+        assert renames == [], "the link was renamed before the refusal"
+        assert src.is_symlink()
+        assert list(dst_parent.iterdir()) == []
+
     def test_an_unverifiable_holding_entry_is_not_called_replaced(self, tmp_path, monkeypatch):
         """EXDEV: a holding entry with no captured identity was not replaced by anyone.
 
