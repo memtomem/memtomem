@@ -29,6 +29,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A write refuses a namespace containing a NUL character (#3589).** SQLite's `LIKE` reads
+  a value only up to its first NUL, so a chunk stored under `arc\x00z` was matched by the
+  default-search exclusion and by namespace globs as if it were `arc`, while the Python
+  prefix checks compared the whole string. The `namespace` argument of `mem_add`,
+  `mem_batch_add`, `mem_fetch`, `mem_index`, the importers, the web add and index routes,
+  `mm index --namespace` and the Python adapter, and a new `namespace.default_namespace`,
+  now refuse such a name with `invalid namespace`, the same narrowing #3554 applied to
+  `search.system_namespace_prefixes`; tab and DEL are still accepted. Rows already stored
+  under a NUL namespace are not migrated. A saved archive, promotion or consolidation policy
+  whose destination contains a NUL now refuses to run until its destination is changed.
+
 - **`mm memory doctor` measures the `MEMORY.md` budget in UTF-16 code units, the unit Claude
   Code caps it in (#3578).** The file total was UTF-8 bytes against 24,400, so a Korean,
   Japanese or Chinese index warned well under the real 25,000-unit cap (about 70% of it on
