@@ -270,7 +270,7 @@ def validate_writable_namespace(value: object) -> str:
     on purpose. Namespace rules produce shapes the strict gate refuses (a
     ``claude:-Users-…`` segment with a leading dash, from a Claude Code
     project directory name), and a write into a namespace a store already
-    uses has to keep working unless that name contains a NUL. What a write
+    uses has to keep working unless that name is one refused below. What a write
     must not do is store a name the read side cannot address by that exact
     name, or one its filters would read as some other name, so the reader
     decides:
