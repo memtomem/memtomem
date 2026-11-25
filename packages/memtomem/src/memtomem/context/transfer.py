@@ -1409,16 +1409,38 @@ def transfer_artifact(
                     )
                     cleanup_staging = outcome is RestoreOutcome.RESTORED
                     if outcome is RestoreOutcome.IDENTITY_LOST:
-                        # The entry holding the pre-move bytes was replaced out
-                        # of band, and the stage consumed the source by an
-                        # atomic rename on BOTH paths — so the artifact is not
-                        # where the user left it, and it is not anywhere we can
-                        # name. That is a PARTIAL transfer, the state
+                        # The entry the source was renamed into cannot be shown
+                        # to be ours — replaced out of band, or never verifiable
+                        # — and the stage consumed the source by an atomic
+                        # rename on BOTH paths, so the artifact is not where the
+                        # user left it, and it is not anywhere we can vouch
+                        # for. That is a PARTIAL transfer, the state
                         # ``MigratePartialError`` exists for and the one every
                         # surface renders with its recovery text intact rather
                         # than as a retryable conflict. Asked as an OUTCOME of
                         # the restore rather than as a check before it, so the
                         # answer cannot go stale between the two (#2314).
+                        if restore_from.identity is None:
+                            # Never captured, so never proved ours — but not
+                            # seen replaced either (#3545). The move's source
+                            # preflight makes this an anomaly (a failed lstat
+                            # right after our own claim); the text names the
+                            # entry as the place to look, not as a stranger's.
+                            raise MigratePartialError(
+                                f"transfer left {kind}/{name} unaccounted for: "
+                                f"the move renamed the source into a transfer "
+                                f"entry, and the entry now at that path could "
+                                f"not be verified as this transfer's (its file "
+                                f"identity was not available), so it was "
+                                f"neither promoted nor rolled back. Do NOT "
+                                f"retry. Inspect that entry; if it holds the "
+                                f"artifact, reconcile anything now at the "
+                                f"canonical path and restore it there by hand. "
+                                f"Entry: {restore_from.path}. Canonical path: "
+                                f"{src_path}.",
+                                src_path=src_path,
+                                dst_path=dst_path,
+                            ) from exc
                         raise MigratePartialError(
                             f"transfer left {kind}/{name} unaccounted for: the "
                             f"move consumed the source and the entry holding "

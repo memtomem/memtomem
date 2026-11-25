@@ -646,14 +646,15 @@ async def transfer_context_artifact(
             },
         ) from exc
     except StagingIdentityLostError as exc:
-        # The staging entry this transfer created was replaced out of band
-        # (#2314): nothing was promoted, nothing was removed. Conflict for the
-        # same reason as the busy arm above — nothing is broken, something is
-        # in the way and a human has to look at it — with its own reason code,
-        # because the remediation differs: a busy name is retried, a replaced
-        # entry has to be understood first. The route's own sentence on the
-        # wire and the engine's in the log, like its sibling and for the same
-        # reasons.
+        # The transfer refused because an identity it needed could not be
+        # confirmed; the cases are spelled out where it is raised
+        # (``StagingClaim`` and the move's source preflight in
+        # ``context/migrate.py``). Conflict for the same reason as the busy arm
+        # above — nothing is broken, something is in the way and a human has to
+        # look at it — with its own reason code, because the remediation differs:
+        # a busy name is retried, this has to be understood first. The route's own
+        # sentence on the wire and the engine's in the log, like its sibling and
+        # for the same reasons.
         _log_refusal(kind, name, "transfer_staging_replaced", str(exc))
         raise HTTPException(
             status_code=409,
