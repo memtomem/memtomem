@@ -31,6 +31,7 @@ from memtomem.context.settings import CANONICAL_SETTINGS_FILE
 from memtomem.web.app import create_app
 
 from .helpers import set_home
+from .test_web_routes_context_transfer import _no_store_message
 
 SECRET = "api_key=AKIA1234567890ABCDEF"
 
@@ -194,9 +195,9 @@ async def test_paused_destination_409_for_private_tier_too(client, tmp_path) -> 
 async def test_destination_without_store_409(client, home, cwd_root) -> None:
     """The 409 names the destination by its scope id, not its path (#2489).
 
-    Under the sandbox ``$HOME``, with a space in the name. The wording is the
-    transfer route's, character for character — the two copies are pinned to
-    the same literal so they cannot drift apart.
+    Under the sandbox ``$HOME``, with a space in the name. The expected text
+    is the transfer route test's own helper, so a change to either route's
+    wording fails one of the two files unless both routes change together.
     """
     other = _other_project(home, "proj b", store=False)
     scope_id = await _register(client, other)
@@ -204,10 +205,7 @@ async def test_destination_without_store_409(client, home, cwd_root) -> None:
     assert resp.status_code == 409
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "no_memtomem_store"
-    assert detail["message"] == (
-        f"destination project {scope_id!r} has no .memtomem/ store. Initialize it first: "
-        "run `mm context init` in that project's directory."
-    )
+    assert detail["message"] == _no_store_message(scope_id)
     _assert_path_free(resp.json(), other, cwd_root)
 
 
