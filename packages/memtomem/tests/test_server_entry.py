@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import memtomem
+from _subprocess_env import subprocess_env
 
 HEAVY = ("memtomem.server", "mcp")
 
@@ -33,10 +34,14 @@ print(json.dumps({
 }))
 """ % (HEAVY,)
 
-# The ``memtomem`` this test process imported: the child must import the same
-# one, whatever its cwd. A relative ``PYTHONPATH`` would otherwise resolve
-# against the child's cwd and silently test another checkout.
-_SOURCE_ROOT = str(Path(memtomem.__file__).resolve().parents[1])
+
+def _package_dir() -> Path:
+    # The parent's side of the provenance checks, kept apart from
+    # ``package_src_dir()`` so a wrong child root cannot also pass here. Not
+    # resolved: an ``__init__.py`` that links into another checkout would make
+    # that checkout's directory look like this one, though its submodules
+    # differ (#3574). ``samefile`` compares directories, not their spelling.
+    return Path(memtomem.__file__).parent
 
 
 def _run(code: str, tmp_path: Path, *, as_file: bool = True, dotenv: bool = False) -> dict:
@@ -49,16 +54,15 @@ def _run(code: str, tmp_path: Path, *, as_file: bool = True, dotenv: bool = Fals
     """
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    env = {
-        **os.environ,
-        "HOME": str(home),
-        "USERPROFILE": str(home),
-        "MEMTOMEM_STORAGE__SQLITE_PATH": str(tmp_path / "store.db"),
-        "PYTHONPATH": os.pathsep.join(
-            [_SOURCE_ROOT, *filter(None, os.environ.get("PYTHONPATH", "").split(os.pathsep))]
-        ),
-        "PYTHON_DOTENV_DISABLED": "1",
-    }
+    # ``subprocess_env()`` puts the absolute source root of the ``memtomem`` this
+    # process imported first on PYTHONPATH; the provenance check below verifies
+    # which package the child actually loaded.
+    env = subprocess_env(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        MEMTOMEM_STORAGE__SQLITE_PATH=str(tmp_path / "store.db"),
+        PYTHON_DOTENV_DISABLED="1",
+    )
     if dotenv:
         env.pop("PYTHON_DOTENV_DISABLED")
     body = textwrap.dedent(code) + _REPORT
@@ -74,7 +78,8 @@ def _run(code: str, tmp_path: Path, *, as_file: bool = True, dotenv: bool = Fals
     assert done.returncode == 0, done.stderr
     lines = [json.loads(line) for line in done.stdout.splitlines() if line.startswith("{")]
     report = lines[-1]
-    assert Path(report["origin"]).resolve() == Path(memtomem.__file__).resolve()
+    child, parent = Path(report["origin"]).parent, _package_dir()
+    assert os.path.samefile(child, parent), f"child imported {child}, parent {parent}"
     return {k: v for line in lines for k, v in line.items()}
 
 
@@ -180,7 +185,8 @@ print(json.dumps({"start": seen[0] if seen else None}))
 def test_dotenv_search_starts_at_the_package_when_run_from_a_file(tmp_path: Path) -> None:
     """The installed package, not the cwd: the frame python-dotenv inspects is ``_dotenv``."""
     result = _run(_DOTENV_START, tmp_path, dotenv=True)
-    assert Path(result["start"]) == Path(memtomem.__file__).resolve().parent
+    # python-dotenv starts from ``_dotenv.py``'s directory without resolving it.
+    assert os.path.samefile(result["start"], _package_dir()), result["start"]
 
 
 def test_dotenv_search_keeps_python_dotenv_cwd_fallback(tmp_path: Path) -> None:
