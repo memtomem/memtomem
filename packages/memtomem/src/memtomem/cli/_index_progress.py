@@ -49,6 +49,7 @@ from typing import Any, Literal
 import click
 
 from memtomem.constants import default_system_prefixes
+from memtomem.models import has_namespace_prefix
 
 #: Matches the redaction-block message ``IndexEngine`` synthesizes for a file
 #: the privacy gate refused — ``f"{path.name}: redaction_blocked (hits=N,
@@ -522,7 +523,10 @@ def print_namespace_advisory(
         )
 
     def _is_system(namespace: object) -> bool:
-        return any(str(namespace).startswith(prefix) for prefix in system_namespace_prefixes)
+        # The shared rule, not a re-derivation: it folds ASCII case as the SQL
+        # exclusion does, so ``Archive:x`` counts as the system scope a default
+        # search hides it as.
+        return has_namespace_prefix(str(namespace), system_namespace_prefixes)
 
     # Only a system → non-system transition exposes anything: a move from one
     # system scope to another (``agent-runtime:a`` → ``archive:x``) stays

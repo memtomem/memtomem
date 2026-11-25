@@ -629,6 +629,49 @@ class TestReassignNamespacesFlag:
         assert "agent-runtime:planner → default: 5 file(s)" in out
         assert "archive:old → default: 2 file(s)" in out
 
+    @pytest.mark.parametrize(
+        ("source", "dest", "exposed"),
+        [
+            ("Archive:x", "default", True),
+            ("agent-runtime:planner", "ARCHIVE:y", False),
+        ],
+    )
+    def test_system_prefix_match_folds_ascii_case(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        source: str,
+        dest: str,
+        exposed: bool,
+    ) -> None:
+        """A default search hides ``Archive:x`` as system-scoped, since the SQL
+        exclusion's ``LIKE`` folds ASCII case (#3590). A move out of a
+        differently cased system namespace exposes rows, and a move into one
+        does not, as for the lower-case spelling."""
+        target = tmp_path / "memories"
+        target.mkdir()
+        (target / "a.md").write_text("# memo\n", encoding="utf-8")
+
+        event = _make_complete_event(total_files=1, indexed=1)
+        event["namespaces_reassigned"] = 1
+        event["namespace_moves"] = [{"from": source, "to": dest, "files": 1}]
+        _install_fake_engine(monkeypatch, events=[event])
+
+        asyncio.run(
+            _index(
+                str(target),
+                recursive=True,
+                force=False,
+                namespace=None,
+                reassign_namespaces=True,
+            )
+        )
+
+        out = capsys.readouterr().out
+        assert f"{source} → {dest}: 1 file(s)" in out
+        assert ("now visible to a default search" in out) is exposed
+
 
 class TestIndexBarLengthFromDiscovery:
     """Issue #743: progress-bar length comes from the engine's ``discovery``
