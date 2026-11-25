@@ -39,6 +39,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   same refusal), and an absent source is still reported by the rename. If a rollback later
   meets an entry whose identity was never captured, its partial-commit text says the entry
   could not be verified and names it as the place to inspect, instead of calling it replaced.
+
+- **A `mem_update_coverage` check reports a commit whose record is older than 90 days as
+  unreviewed (#3581).** The check matched rows by project and SHA with no age limit, so a row
+  past its 90-day retention still read as reviewed until a record call pruned it. Because
+  `incremental` and `full` record the whole list the check received, that record then
+  re-inserted the expired row with a fresh timestamp although the run had not reviewed the
+  commit. The check now applies the same cutoff as the prune, so an expired commit is
+  reviewed again.
+
 - **A write refuses a namespace containing a NUL character (#3589).** SQLite's `LIKE` reads
   a value only up to its first NUL, so a chunk stored under `arc\x00z` was matched by the
   default-search exclusion and by namespace globs as if it were `arc`, while the Python
@@ -49,6 +58,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `search.system_namespace_prefixes`; tab and DEL are still accepted. Rows already stored
   under a NUL namespace are not migrated. A saved archive, promotion or consolidation policy
   whose destination contains a NUL now refuses to run until its destination is changed.
+
+- **The web transfer route's 400 `validation` stops naming host paths (#3543).** In
+  `POST /api/context/{kind}/{name}/transfer`, an engine refusal that no other arm caught went
+  out with the engine's text, and several of those texts named absolute paths: an artifact
+  found in more than one scope listed each copy's path; a transfer whose source and
+  destination resolve to one store named that store, the user tier's included; and an
+  `mcp-servers` copy whose source is a symlink, cannot be read, or is not valid UTF-8 named
+  the source file. Each now names the scopes or the logical location instead (`agents/foo
+  exists in multiple scopes: project_shared, project_local. Set from_scope to one of these
+  scopes.`, `mcp-servers/pg: the source .memtomem/mcp-servers/pg.json is a symlink;` …). The
+  other 400 texts name no path and keep their wording; like the 404's, every 400 message from
+  this arm now passes the secret scan, so a message carrying a secret-shaped value (an artifact
+  name shaped like an AWS key ID, say) goes out as `<redacted: secret-shape>`. The CLI
+  messages are unchanged.
 
 - **`mm memory doctor` measures the `MEMORY.md` budget in UTF-16 code units, the unit Claude
   Code caps it in (#3578).** The file total was UTF-8 bytes against 24,400, so a Korean,

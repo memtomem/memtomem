@@ -67,6 +67,7 @@ from memtomem.context.migrate import (
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
     MigratePartialError,
+    PathNamingClickException,
     StagingIdentityLostError,
     TransferStagingBusyError,
 )
@@ -348,6 +349,8 @@ _STAGING_REPLACED_MESSAGE = (
     "then retry; if the filesystem is the cause, stage on one that reports it. The server "
     "log has the details."
 )
+#: The 400 for a path-naming engine refusal that carries no ``safe_message`` (#3543).
+_REFUSED_MESSAGE = "the transfer request was refused; the server log has the details."
 
 
 def _log_refusal(kind: str, name: str, reason_code: str, text: str) -> None:
@@ -678,8 +681,20 @@ async def transfer_context_artifact(
         raise _error(400, "validation", str(exc)) from exc
     except click.ClickException as exc:
         # Engine-validated combinations (same store, rename outside copy,
-        # multi-`name:` manifest, …) — bad request input, engine wording.
-        raise _error(400, "validation", exc.message) from exc
+        # multi-`name:` manifest, …) — bad request input. A refusal whose
+        # engine text names a host path carries the same statement without it
+        # (#3543); the other texts name none and go out as written. A
+        # path-naming raise that left ``safe_message`` unset gets a fixed
+        # sentence, and its text goes to the log line only.
+        if isinstance(exc, PathNamingClickException):
+            if exc.safe_message is not None:
+                message = exc.safe_message
+            else:
+                _log_refusal(kind, name, "validation", exc.message)
+                message = _REFUSED_MESSAGE
+        else:
+            message = exc.message
+        raise _error(400, "validation", _scan_secrets(message)) from exc
     except Exception as exc:  # pragma: no cover - classified catch-all
         # An unknown exception has no structure to build a path-free sentence
         # from, so the caller gets the classification and a pointer (#3532).

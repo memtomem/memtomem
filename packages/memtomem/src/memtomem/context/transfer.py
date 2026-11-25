@@ -100,6 +100,7 @@ from memtomem.context.migrate import (
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
     MigratePartialError,
+    PathNamingClickException,
     RestoreOutcome,
     StagingClaim,
     StagingIdentityLostError,
@@ -1038,15 +1039,25 @@ def transfer_artifact(
             # relies on this literal staying byte-identical.
             raise click.ClickException(f"{kind}/{name} is already at scope='{to_scope}' (no-op).")
         if src_scope == "user" and to_scope == "user":
-            raise click.ClickException(
+            raise PathNamingClickException(
                 f"user tier is global — {kind}/{name} already lives in the shared user "
                 f"store ({src_store}); cross-project user→user transfer has nothing to "
-                f"move or copy."
+                f"move or copy.",
+                safe_message=(
+                    f"{kind}/{name} is already in the global user tier; choose a project "
+                    "tier as the destination."
+                ),
             )
-        raise click.ClickException(
+        # Not necessarily the same (project, tier): the stores are resolved, so
+        # two tiers whose directories are linked together land here too.
+        raise PathNamingClickException(
             f"source and destination resolve to the same canonical store ({src_store}); "
             f"same-(project, tier) transfer is not supported (a rename/duplicate verb is "
-            f"out of scope for ADR-0023)."
+            f"out of scope for ADR-0023).",
+            safe_message=(
+                f"the source ({src_scope}) and destination ({to_scope}) resolve to the same "
+                "canonical store; choose a destination backed by a different store."
+            ),
         )
 
     dst_name = new_name if new_name is not None else name

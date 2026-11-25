@@ -5361,3 +5361,31 @@ class TestAMoveAsksForTheSourceIdentityFirst:
         assert len(parked) == 1
         assert str(parked[0]) in message
         assert (parked[0] / "agent.md").read_text(encoding="utf-8") == "source"
+
+
+def test_migrate_scope_ambiguity_keeps_its_cli_text(scope_layout) -> None:
+    """``str(exc)`` through the ``migrate_scope`` wrapper is the pre-#3543 text, byte for byte;
+    the path-free form rides alongside for the web route."""
+    from memtomem.context.migrate import PathNamingClickException, migrate_scope
+
+    body = "---\nname: foo\ndescription: d\n---\n\nbody\n"
+    shared = _write_canonical_dir(scope_layout, "agents", "project_shared", "foo", body)
+    local = _write_canonical_dir(scope_layout, "agents", "project_local", "foo", body)
+
+    with pytest.raises(PathNamingClickException) as exc_info:
+        migrate_scope(
+            "agents",
+            "foo",
+            from_scope=None,
+            to_scope="user",
+            project_root=scope_layout["project_root"],
+            apply_=False,
+        )
+    assert str(exc_info.value) == (
+        f"agents/foo exists in multiple scopes: project_shared ({shared.parent.resolve()}), "
+        f"project_local ({local.parent.resolve()}). Pass --from <scope> to disambiguate."
+    )
+    assert exc_info.value.safe_message == (
+        "agents/foo exists in multiple scopes: project_shared, project_local. "
+        "Set from_scope to one of these scopes."
+    )

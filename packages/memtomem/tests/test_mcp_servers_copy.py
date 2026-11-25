@@ -29,7 +29,11 @@ from memtomem.context.mcp_servers_copy import (
     _promote_no_clobber,
     copy_mcp_server,
 )
-from memtomem.context.migrate import ArtifactNotFoundError, StagingClaim
+from memtomem.context.migrate import (
+    ArtifactNotFoundError,
+    PathNamingClickException,
+    StagingClaim,
+)
 from memtomem.context.privacy_scan import PrivacyBlockedError
 from memtomem.context.projects import compute_scope_id
 from memtomem.context.transfer import TransferCollisionError, TransferResult
@@ -165,7 +169,7 @@ def test_collision_pre_flight_hard_fails(roots) -> None:
 
 def test_same_project_refused(roots) -> None:
     _seed_server(roots["a"])
-    with pytest.raises(click.ClickException) as exc_info:
+    with pytest.raises(PathNamingClickException) as exc_info:
         copy_mcp_server(
             "pg",
             src_project_root=roots["a"],
@@ -176,6 +180,12 @@ def test_same_project_refused(roots) -> None:
         f"source and destination are the same project ({roots['a']}); "
         f"mcp-servers copy is cross-project only — the canonical is "
         f"single-tier, so within one project there is nothing to copy to."
+    )
+    # The web route pre-checks this case, but resolves the roots separately (#3543).
+    assert exc_info.value.safe_message == (
+        "source and destination are the same project; "
+        "mcp-servers copy is cross-project only — the canonical is "
+        "single-tier, so within one project there is nothing to copy to."
     )
 
 
@@ -255,6 +265,7 @@ def test_symlinked_source_refused_pre_flight(roots, tmp_path: Path) -> None:
     assert not _dst_path(roots).exists()
 
 
+@pytest.mark.requires_symlinks
 def test_staging_turned_symlink_refused_in_lock(roots, monkeypatch: pytest.MonkeyPatch) -> None:
     """A source that becomes a symlink between pre-flight and staging is
     caught by the in-lock regular-file guard; staging is cleaned and the
@@ -275,11 +286,68 @@ def test_staging_turned_symlink_refused_in_lock(roots, monkeypatch: pytest.Monke
         return StagingClaim.capture(claimed.path)
 
     monkeypatch.setattr(mod, "_stage_copy", symlinking_stage)
-    with pytest.raises(click.ClickException, match="refuses symlinked canonicals"):
+    with pytest.raises(PathNamingClickException) as exc_info:
         _copy(roots, apply_=True)
+    src = roots["a"] / ".memtomem" / "mcp-servers" / "pg.json"
+    assert exc_info.value.message == f"{src} is a symlink; {_SYMLINK_REMEDY}"
+    assert exc_info.value.safe_message == (
+        f"mcp-servers/pg: the source .memtomem/mcp-servers/pg.json is a symlink; {_SYMLINK_REMEDY}"
+    )
     dst = _dst_path(roots)
     assert not dst.exists()
     assert not list(dst.parent.glob(".migrate-*"))
+
+
+#: The CLI text's remediation for a symlinked canonical, unchanged by #3543.
+_SYMLINK_REMEDY = (
+    "mcp-servers copy refuses symlinked canonicals — the destination must be a regular "
+    "git-tracked file. Replace the symlink with a regular file holding the definition, then "
+    "re-run the copy."
+)
+_NOT_UTF8_REMEDY = "fix the source definition before copying."
+
+
+def test_staging_turned_non_utf8_refused_in_lock(roots, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The in-lock decode of the staged bytes carries the path-free form too (#3543)."""
+    src = _seed_server(roots["a"])
+    real_read_bytes = Path.read_bytes
+    fired: list[Path] = []
+
+    def staged_read(self: Path) -> bytes:
+        if self.name.startswith(".migrate-"):
+            fired.append(self)
+            return b'{"command": "\xff"}\n'
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", staged_read)
+    with pytest.raises(PathNamingClickException) as exc_info:
+        _copy(roots, apply_=True)
+    assert fired, "the staging read hook never fired"
+    assert exc_info.value.message == f"{src} is not valid UTF-8; {_NOT_UTF8_REMEDY}"
+    assert exc_info.value.safe_message == (
+        f"the source .memtomem/mcp-servers/pg.json is not valid UTF-8; {_NOT_UTF8_REMEDY}"
+    )
+    assert not _dst_path(roots).exists()
+
+
+def test_unreadable_source_keeps_cli_text(roots, monkeypatch: pytest.MonkeyPatch) -> None:
+    src = _seed_server(roots["a"])
+    err = PermissionError(13, "Permission denied", str(src))
+    real_read_bytes = Path.read_bytes
+
+    def failing_read(self: Path) -> bytes:
+        if self == src:
+            raise err
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", failing_read)
+    with pytest.raises(PathNamingClickException) as exc_info:
+        _copy(roots, apply_=False)
+    assert exc_info.value.message == f"cannot read {src}: {err}"
+    assert exc_info.value.safe_message == (
+        "cannot read the source .memtomem/mcp-servers/pg.json; check that it exists and that "
+        "the server can read it."
+    )
 
 
 # ── Gate A (issue acceptance 1) ──────────────────────────────────────

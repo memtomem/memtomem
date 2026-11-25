@@ -22,9 +22,11 @@ the engine:
 from __future__ import annotations
 
 import contextlib
+import copy
 import errno
 import hashlib
 import os
+import pickle
 import shlex
 import shutil
 from pathlib import Path
@@ -40,8 +42,9 @@ from memtomem.context._atomic import (
 )
 from memtomem.context.dirty import is_asset_dirty
 from memtomem.context.lockfile import Lockfile, digests_from_entry, utcnow_iso8601_z
-from memtomem.context.migrate import MigratePartialError
+from memtomem.context.migrate import MigratePartialError, PathNamingClickException
 from memtomem.context.privacy_scan import PrivacyBlockedError
+from memtomem.context.scope_resolver import canonical_artifact_dir
 from memtomem.context.transfer import _carry_provenance, _ProvenancePlan, transfer_artifact
 
 from helpers import BUDGET_TOLERANCE_S
@@ -779,7 +782,7 @@ def test_rename_rejected_in_move_mode(two_projects):
 
 def test_reject_same_root_same_scope_copy(two_projects):
     _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
-    with pytest.raises(click.ClickException, match="same canonical store"):
+    with pytest.raises(PathNamingClickException) as exc_info:
         transfer_artifact(
             "agents",
             "foo",
@@ -790,6 +793,16 @@ def test_reject_same_root_same_scope_copy(two_projects):
             mode="copy",
             apply_=True,
         )
+    store = canonical_artifact_dir("agents", "project_shared", two_projects["a"])
+    assert exc_info.value.message == (
+        f"source and destination resolve to the same canonical store ({store}); "
+        "same-(project, tier) transfer is not supported (a rename/duplicate verb is "
+        "out of scope for ADR-0023)."
+    )
+    assert exc_info.value.safe_message == (
+        "the source (project_shared) and destination (project_shared) resolve to the same "
+        "canonical store; choose a destination backed by a different store."
+    )
 
 
 def test_reject_same_root_same_scope_move_keeps_noop_literal(two_projects):
@@ -812,7 +825,7 @@ def test_reject_same_root_same_scope_move_keeps_noop_literal(two_projects):
 def test_reject_cross_project_user_to_user(two_projects):
     """User tier is global — cross-project user→user resolves to one store."""
     _write_canonical(two_projects, "agents", "user", "a", "foo", _AGENT_BODY_CLEAN)
-    with pytest.raises(click.ClickException, match="user tier is global"):
+    with pytest.raises(PathNamingClickException) as exc_info:
         transfer_artifact(
             "agents",
             "foo",
@@ -823,6 +836,50 @@ def test_reject_cross_project_user_to_user(two_projects):
             mode="copy",
             apply_=True,
         )
+    store = canonical_artifact_dir("agents", "user", None)
+    assert exc_info.value.message == (
+        f"user tier is global — agents/foo already lives in the shared user store ({store}); "
+        "cross-project user→user transfer has nothing to move or copy."
+    )
+    assert exc_info.value.safe_message == (
+        "agents/foo is already in the global user tier; choose a project tier as the destination."
+    )
+
+
+def test_ambiguous_source_keeps_cli_text_and_carries_scopes(two_projects):
+    """Discovery's ambiguity refusal: CLI text unchanged, public form path-free (#3543)."""
+    shared = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    local = _write_canonical(two_projects, "agents", "project_local", "a", "foo", _AGENT_BODY_CLEAN)
+    with pytest.raises(PathNamingClickException) as exc_info:
+        transfer_artifact(
+            "agents",
+            "foo",
+            src_project_root=two_projects["a"],
+            from_scope=None,
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode="copy",
+            apply_=False,
+        )
+    assert exc_info.value.message == (
+        f"agents/foo exists in multiple scopes: project_shared ({shared.parent.resolve()}), "
+        f"project_local ({local.parent.resolve()}). Pass --from <scope> to disambiguate."
+    )
+    assert exc_info.value.safe_message == (
+        "agents/foo exists in multiple scopes: project_shared, project_local. "
+        "Set from_scope to one of these scopes."
+    )
+
+
+def test_path_naming_refusal_survives_copy_and_pickle():
+    """``safe_message`` is keyword-only with a default, so ``type(exc)(*exc.args)`` rebuilds."""
+    exc = PathNamingClickException("cli text /abs/path", safe_message="public text")
+    for clone in (copy.copy(exc), pickle.loads(pickle.dumps(exc))):
+        assert type(clone) is PathNamingClickException
+        assert clone.message == "cli text /abs/path"
+        assert clone.safe_message == "public text"
 
 
 def test_project_scope_requires_root(two_projects):

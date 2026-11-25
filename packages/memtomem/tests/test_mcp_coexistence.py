@@ -38,11 +38,24 @@ def host(request, tmp_path, monkeypatch):
     # probe into tmp_path, so /etc/codex on the host is never checked.
     managed = (tmp_path / "etc-codex/requirements.toml", tmp_path / "etc-codex/config.toml")
     monkeypatch.setattr(checks, "_MANAGED_CODEX_CONFIGS", managed)
-    # Stop the project-layer walk at tmp_path, so a .codex/config.toml above the pytest temp
-    # dir is never found. Codex only: agy's plugin check treats any .git above the plugin as
-    # a Git worktree.
     if client == "codex":
+        # Stop the project-layer walk at tmp_path, so a .codex/config.toml above the pytest temp
+        # dir is never found.
         (tmp_path / ".git").mkdir()
+    else:
+        # A .git marker cannot bound agy's walk, because a .git above the plugin is what its
+        # check refuses. Hide the .git probes strictly above home instead, so a pytest temp dir
+        # inside a checkout is not read as a Git worktree. A .git at or below home stays
+        # visible: test_agy_installed_plugin_in_git_worktree_is_not_edited creates one there.
+        ceiling = home.resolve()
+        real_exists = Path.exists
+
+        def exists(self, *args, **kwargs):
+            if self.name == ".git" and self.parent in ceiling.parents:
+                return False
+            return real_exists(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", exists)
     root = home / (".codex" if client == "codex" else ".gemini/config")
     plugin = root / (
         "plugins/cache/memtomem/memtomem/0.1.0" if client == "codex" else "plugins/memtomem"
@@ -565,6 +578,15 @@ def test_agy_installed_plugin_in_git_worktree_is_not_edited(host, location, mark
     assert "Git worktree" in result.output
     assert host.bundled.read_bytes() == before
     assert not list(host.plugin.glob("*.mm-*"))
+
+
+@pytest.mark.parametrize("host", ["agy"], indirect=True)
+def test_agy_ignores_git_marker_above_the_plugin_sandbox(host, tmp_path):
+    (tmp_path / ".git").mkdir()
+    result = invoke(host, "--reconcile", "keep-manual", "--apply")
+    assert "Git worktree" not in result.output
+    assert result.exit_code == 0, result.output
+    assert json.loads(host.bundled.read_bytes())["mcpServers"] == {}
 
 
 def test_omitted_manifest_name_uses_agy_directory_only(host):
