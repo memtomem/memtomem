@@ -191,14 +191,24 @@ async def test_paused_destination_409_for_private_tier_too(client, tmp_path) -> 
 
 
 @pytest.mark.asyncio
-async def test_destination_without_store_409(client, tmp_path) -> None:
-    other = _other_project(tmp_path, store=False)
+async def test_destination_without_store_409(client, home, cwd_root) -> None:
+    """The 409 names the destination by its scope id, not its path (#2489).
+
+    Under the sandbox ``$HOME``, with a space in the name. The wording is the
+    transfer route's, character for character — the two copies are pinned to
+    the same literal so they cannot drift apart.
+    """
+    other = _other_project(home, "proj b", store=False)
     scope_id = await _register(client, other)
     resp = await client.post(COPY_URL, json=_body(scope_id))
     assert resp.status_code == 409
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "no_memtomem_store"
-    assert "mm context init" in detail["message"]
+    assert detail["message"] == (
+        f"destination project {scope_id!r} has no .memtomem/ store. Initialize it first: "
+        "run `mm context init` in that project's directory."
+    )
+    _assert_path_free(resp.json(), other, cwd_root)
 
 
 # ── selector errors ──────────────────────────────────────────────────

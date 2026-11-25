@@ -1413,14 +1413,17 @@ async def copy_hook_to_project(
     # have no project-side leg (N/A here).
     _reject_ineligible_destination(dst_scope_rec, "project_shared")
     if not (dst_root / ".memtomem").is_dir():
+        # Named by scope id, not by root (#2489) — same text as the transfer
+        # route's ``no_memtomem_store``.
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "no_memtomem_store",
                 "message": (
-                    f"destination project has no .memtomem/ store: {dst_root}. "
-                    f"Initialize it first: cd {dst_root} && mm context init"
+                    f"destination project {body.to_project_scope_id!r} has no .memtomem/ "
+                    "store. Initialize it first: run `mm context init` in that project's "
+                    "directory."
                 ),
                 "project_scope_id": body.to_project_scope_id,
             },

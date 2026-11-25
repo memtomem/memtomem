@@ -485,14 +485,23 @@ async def transfer_context_artifact(
         # a memtomem project — don't seed a half-initialized store into an
         # arbitrary registered directory. Within-project transfers keep
         # migrate's implicit-store behavior.
+        #
+        # Named by the scope id the caller sent, not by its root (#2489): the
+        # root is a host path, and a ``cd <root>`` hint is not pasteable once
+        # the path is taken out of it. Same text as the settings-copy route.
+        target = (
+            f"destination project {body.to_project_scope_id!r}"
+            if body.to_project_scope_id is not None
+            else "the destination project"
+        )
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "no_memtomem_store",
                 "message": (
-                    f"destination project has no .memtomem/ store: {dst_root}. "
-                    f"Initialize it first: cd {dst_root} && mm context init"
+                    f"{target} has no .memtomem/ store. Initialize it first: "
+                    "run `mm context init` in that project's directory."
                 ),
                 "project_scope_id": body.to_project_scope_id,
             },
