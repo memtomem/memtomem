@@ -29,6 +29,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The web UI's Host, Origin and CSRF token checks apply when `create_app()` is mounted under a
+  path prefix (#3550).** The guard decided whether a request was an `/api/*` call from the
+  request path, which keeps a mount's prefix, so under `Mount("/mm", app=create_app())` every
+  `/api/*` route was served without the checks: `GET /mm/api/session` with a hostile `Host`
+  answered 200. The guard now also judges the path the router matches, so every route a mounted
+  app serves under `/api/` gets the checks; every request the guard gated before is still
+  gated, which under a mount whose own prefix starts with `/api/` includes the app's non-API
+  paths. `mm web` serves the app at the root and was not affected. The `web.csrf.observe` log
+  line still records the request path.
 - **A `mem_update_coverage` check reports a commit whose record is older than 90 days as
   unreviewed (#3581).** The check matched rows by project and SHA with no age limit, so a row
   past its 90-day retention still read as reviewed until a record call pruned it. Because

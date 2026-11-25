@@ -617,3 +617,131 @@ class TestOwnOrigin:
             "headers": headers,
         }
         assert _own_origin(Request(scope)) == expected
+
+
+class TestAMountedAppIsGuardedLikeARootOne:
+    """#3550: the guard judges the path the router matches, wherever the app is mounted.
+
+    Under ``Mount("/mm", app=create_app())`` the request's ``path`` keeps the
+    mount prefix while ``root_path`` is ``/mm``. The router strips the prefix
+    and serves ``/api/*``; a guard that read ``request.url.path`` saw
+    ``/mm/api/...``, decided it was not an API path and let every request
+    through unchecked.
+    """
+
+    _LOOPBACK = {"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080"}
+
+    @staticmethod
+    def _mounted(monkeypatch: pytest.MonkeyPatch):
+        from starlette.applications import Starlette
+        from starlette.routing import Mount
+
+        from memtomem.web.app import create_app
+        from memtomem.web.deps import get_embedder, get_storage
+
+        class _Storage:
+            async def get_stats(self):
+                return {}
+
+        class _Embedder:
+            async def embed_texts(self, texts):
+                return [[0.0] for _ in texts]
+
+        monkeypatch.delenv("MEMTOMEM_WEB__CSRF_ENFORCE", raising=False)
+        inner = create_app(lifespan=None, mode="prod")
+        assert inner.state.csrf_enforce is True
+        inner.dependency_overrides[get_storage] = lambda: _Storage()
+        inner.dependency_overrides[get_embedder] = lambda: _Embedder()
+        return TestClient(Starlette(routes=[Mount("/mm", app=inner)])), inner
+
+    def test_a_hostile_host_is_refused_under_the_mount(self, monkeypatch, caplog_csrf) -> None:
+        client, _ = self._mounted(monkeypatch)
+
+        res = client.get("/mm/api/session", headers={"Host": "evil.example"})
+
+        assert res.status_code == 403, res.text
+        events = _parse_observe(caplog_csrf.records)
+        assert len(events) == 1, events
+        assert events[0]["path"] == "/mm/api/session", "the record keeps the mount prefix"
+        assert events[0]["host_ok"] == "False"
+        assert events[0]["would_block"] == "True"
+
+    def test_a_root_request_the_old_guard_gated_is_still_gated(
+        self, monkeypatch, caplog_csrf
+    ) -> None:
+        """Judging the route path must not narrow what a root-served app gates.
+
+        ``/ap%0ai/session`` parses to ``/api/session`` (``urlsplit`` drops the
+        LF) and was gated before this change; its decoded route path does not
+        start with ``/api/``. The guard gates when either spelling does.
+        """
+        _, inner = self._mounted(monkeypatch)
+        client = TestClient(inner)
+
+        res = client.get("/ap%0ai/session", headers={"Host": "evil.example"})
+
+        assert res.status_code == 403, res.text
+        events = _parse_observe(caplog_csrf.records)
+        assert len(events) == 1, events
+        assert events[0]["path"] == "/api/session"
+
+    def test_an_unsafe_method_needs_the_token_under_the_mount(
+        self, monkeypatch, caplog_csrf
+    ) -> None:
+        """A real route, so a pass is the handler's answer and not the catch-all's 404."""
+        client, inner = self._mounted(monkeypatch)
+
+        refused = client.post("/mm/api/health", headers=self._LOOPBACK)
+        accepted = client.post(
+            "/mm/api/health",
+            headers={**self._LOOPBACK, "X-Memtomem-CSRF": inner.state.csrf_token},
+        )
+
+        assert refused.status_code == 403, refused.text
+        assert refused.json()["code"] == "csrf_token_mismatch"
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json() == {
+            "status": "ok",
+            "checks": {"storage": "ok", "embedding": "ok"},
+        }
+
+    def test_a_loopback_read_still_passes_under_the_mount(self, monkeypatch) -> None:
+        client, inner = self._mounted(monkeypatch)
+
+        res = client.get("/mm/api/session", headers=self._LOOPBACK)
+
+        assert res.status_code == 200, res.text
+        assert res.json()["csrf"] == inner.state.csrf_token
+
+    def test_a_non_api_path_under_the_mount_is_not_gated(self, monkeypatch, caplog_csrf) -> None:
+        """The inner app's own favicon route answers, so the request reached it."""
+        client, _ = self._mounted(monkeypatch)
+
+        res = client.get("/mm/favicon.ico", headers={"Host": "evil.example"})
+
+        assert res.status_code == 200, res.text
+        assert res.headers["content-type"].startswith("image/svg+xml")
+        assert not [r for r in caplog_csrf.records if "web.csrf.observe" in r.getMessage()]
+
+    def test_the_log_keeps_the_request_path_on_one_line(self, monkeypatch, caplog_csrf) -> None:
+        """The record carries ``request.url.path``, not the decoded route path.
+
+        A server decodes ``%0d%0a`` into the scope's ``path`` before routing;
+        writing that path into the record would let a request add a forged
+        line to the audit log. The app is served at the root here: an outer
+        ``Mount`` does not match a path holding a newline, so the request would
+        never reach the guard, while at the root the middleware runs before
+        routing and the decoded path is the one it judges.
+        """
+        _, inner = self._mounted(monkeypatch)
+        client = TestClient(inner)
+
+        res = client.get("/api/x%0d%0aforged%09line", headers={"Host": "evil.example"})
+
+        assert res.status_code == 403, res.text
+        messages = [
+            r.getMessage() for r in caplog_csrf.records if "web.csrf.observe" in r.getMessage()
+        ]
+        assert len(messages) == 1, messages
+        assert not any(c in messages[0] for c in "\r\n\t"), repr(messages[0])
+        assert _parse_observe(caplog_csrf.records)[0]["path"].startswith("/api/x")
