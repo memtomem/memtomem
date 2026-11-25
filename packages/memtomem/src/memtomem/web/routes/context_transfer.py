@@ -643,10 +643,11 @@ async def transfer_context_artifact(
             },
         ) from exc
     except StagingIdentityLostError as exc:
-        # Either the staging entry this transfer created was replaced out of
-        # band (#2314), or the source has no file identity and the move was
-        # refused before it renamed anything (#3545). Either way nothing was
-        # promoted and nothing was removed. Conflict for the
+        # Either the staging entry's ownership could not be verified before use
+        # (it was replaced out of band, #2314, or its identity was never
+        # captured), or the source's identity could not be established before
+        # the first rename (a zero inode or a permission error, #3545). Either
+        # way nothing was promoted and nothing was removed. Conflict for the
         # same reason as the busy arm above — nothing is broken, something is
         # in the way and a human has to look at it — with its own reason code,
         # because the remediation differs: a busy name is retried, a replaced
