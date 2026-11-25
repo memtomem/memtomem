@@ -39,7 +39,7 @@ resolved project root `chunks.project_root` carries. `mem_update_coverage`
 (`storage/mixins/update_coverage.py`, `server/tools/update_coverage.py`):
 
 - `record=false` returns, in the order given, the SHAs the caller passed that
-  have no row.
+  have no row or have a row older than 90 days.
 - `record=true` prunes rows older than 90 days, then `INSERT OR IGNORE`s each
   SHA with the run's UUID. Prune-before-insert matters: the other order would
   let a re-review of an expired SHA hit the ignore branch and then delete the
@@ -56,12 +56,10 @@ the unreviewed commits of a slice one commit per read, reviewing the first slice
 in which at least one such read can be used.
 A check only reads, so passing an unread SHA to it can mark nothing. A record
 still passes only SHAs whose full message was read, and `backfill` records
-exactly the commits it read and reviewed, never the whole slice. That matters
-because a check counts a row past its 90-day retention as reviewed until a
-record call prunes it: recording a slice SHA the check called reviewed would
-refresh an expired row without a review (the same holds for the window
-`incremental` and `full` record, #3581). Every reasoning step below that
-depends on "neither can pass a SHA it did not read" is about the record call.
+exactly the commits it read and reviewed, never the whole slice. With #3581,
+a check treats a row older than 90 days as unreviewed even before a record call
+prunes it. Every reasoning step below that depends on "neither can pass a SHA
+it did not read" is about the record call.
 
 Why a set answers every requirement in #2918: a first run marks exactly what it
 saw and implies nothing older; a `topic` run simply does not record; a commit

@@ -139,6 +139,23 @@ async def test_projects_do_not_share_coverage(
 
 
 @pytest.mark.asyncio
+async def test_an_expired_row_is_reported_as_unreviewed(project) -> None:
+    app, ctx, root = project
+    expired, recent = SHAS[:2]
+    await mem_update_coverage(shas=[expired, recent], record=True, run_id=RUN, ctx=ctx)
+    stale = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat(timespec="seconds")
+    db = app.storage._get_db()
+    db.execute(
+        "UPDATE update_review_coverage SET reviewed_at = ? WHERE project_root = ? AND sha = ?",
+        (stale, str(root), expired),
+    )
+    db.commit()
+
+    out = await mem_update_coverage(shas=[expired, recent], record=False, ctx=ctx)
+    assert _unreviewed(out) == [expired]
+
+
+@pytest.mark.asyncio
 async def test_an_expired_row_is_covered_again_after_a_re_record(project) -> None:
     """Prune runs before the insert: re-recording an expired SHA must leave it covered."""
     app, ctx, root = project
