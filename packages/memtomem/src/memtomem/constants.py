@@ -270,12 +270,18 @@ def validate_writable_namespace(value: object) -> str:
     on purpose. Namespace rules produce shapes the strict gate refuses (a
     ``claude:-Users-…`` segment with a leading dash, from a Claude Code
     project directory name), and a write into a namespace a store already
-    uses has to keep working. What a write must not do is store a name the
-    read side cannot address by that exact name, so the reader decides:
+    uses has to keep working unless that name is one refused below. What a
+    write must not do is store a name the read side cannot address by that
+    exact name, so the reader decides:
 
     * not a string, empty, or only whitespace: refused. Readers treat an
       empty namespace as "no filter", and the indexer would store it as an
       explicit one.
+    * contains a NUL character: refused (#3589). SQLite's ``LIKE`` reads a
+      value only up to its first NUL, so the default-search exclusion and
+      namespace globs would compare ``arc\\x00z`` as ``arc`` while the Python
+      prefix checks compare the whole string. Tab and DEL compare the same on
+      both sides and stay accepted.
     * first ``:`` segment is ``agent-runtime``: the strict
       :func:`validate_namespace`, so a write cannot store an agent-runtime
       name the agent-id contract refuses (``agent-runtime:foo:bar``, #496).
@@ -294,6 +300,12 @@ def validate_writable_namespace(value: object) -> str:
         raise InvalidNameError(f"{prefix}: expected str, got {type(value).__name__}")
     if not value.strip():
         raise InvalidNameError(f"{prefix} {value!r}: empty")
+    if "\x00" in value:
+        raise InvalidNameError(
+            f"{prefix} {value!r}: contains a NUL character. SQLite's LIKE reads a value "
+            f"only up to its first NUL, so the default-search exclusion and namespace globs "
+            f"would compare this name as {value.split(chr(0), 1)[0]!r}."
+        )
     if value.split(":", 1)[0] == AGENT_NAMESPACE_PREFIX.rstrip(":"):
         return validate_namespace(value)
     try:

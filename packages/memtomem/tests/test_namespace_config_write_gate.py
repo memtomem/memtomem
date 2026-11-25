@@ -34,7 +34,7 @@ from memtomem.server.tools import status_config
 
 from .helpers import isolate_config_paths, set_home
 
-REFUSED_DEFAULTS = ["x*y", "a,b", "!system", "  ", "agent-runtime:foo:bar"]
+REFUSED_DEFAULTS = ["x*y", "a,b", "!system", "  ", "agent-runtime:foo:bar", "a\x00b"]
 ACCEPTED_DEFAULTS = ["default", "team", "claude:-Users-x", "agent-runtime:planner"]
 REFUSED_TEMPLATES = ["a,b", "{parent},x", "!system", "x*{parent}", "agent-runtime:{parent}:y"]
 ACCEPTED_TEMPLATES = ["{parent}", "claude:{parent}", "agent-runtime:{parent}", "docs"]
