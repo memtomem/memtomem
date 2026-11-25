@@ -2457,6 +2457,135 @@ class TestSystemNamespacePrefixFilter:
         with pytest.raises(ValueError, match="cap is 10"):
             SearchConfig(system_namespace_prefixes=too_many)
 
+    @pytest.mark.parametrize(
+        ("prefixes", "index"),
+        [(["arc\x00"], 0), (["archive:", "secret:", "x\x00y"], 2)],
+    )
+    def test_config_validator_rejects_a_nul_in_a_prefix(self, prefixes, index):
+        """SQLite's LIKE stops reading a pattern at its first NUL, so the SQL
+        exclusion and has_namespace_prefix would disagree on such a prefix."""
+        from pydantic import ValidationError
+
+        from memtomem.config import SearchConfig
+
+        with pytest.raises(ValidationError) as caught:
+            SearchConfig(system_namespace_prefixes=prefixes)
+        message = caught.value.errors()[0]["msg"]
+        assert f"system_namespace_prefixes[{index}] = {prefixes[index]!r}" in message
+        assert "NUL" in message
+
+    @pytest.mark.parametrize(
+        "prefixes",
+        [None, ["archive:"], ["team:x_%"], ["arc\t"], ["a\x7f"], []],
+    )
+    def test_config_validator_accepts_prefixes_without_nul(self, prefixes):
+        """Only NUL is refused: a tab or DEL namespace can be stored through a
+        chunk write, and SQL and Python agree on a prefix holding one."""
+        from memtomem.config import SearchConfig
+        from memtomem.constants import default_system_prefixes
+
+        if prefixes is None:
+            config = SearchConfig()
+            assert config.system_namespace_prefixes == list(default_system_prefixes())
+        else:
+            config = SearchConfig(system_namespace_prefixes=prefixes)
+            assert config.system_namespace_prefixes == prefixes
+
+    @pytest.fixture
+    def config_home(self, tmp_path, monkeypatch):
+        from helpers import isolate_config_paths, set_home
+
+        set_home(monkeypatch, tmp_path)
+        return isolate_config_paths(monkeypatch, tmp_path / ".memtomem")
+
+    @staticmethod
+    def _write_fragment(config_home, search: dict) -> None:
+        directory = config_home / "config.d"
+        directory.mkdir(exist_ok=True)
+        (directory / "10-search.json").write_text(json.dumps({"search": search}))
+
+    def test_config_json_nul_prefix_ignores_that_files_search_section(self, config_home):
+        """The tolerant config.json load keeps its existing contract: the file's
+        whole [search] section is dropped, a valid fragment below it survives."""
+        from memtomem import config as cfg_mod
+
+        self._write_fragment(config_home, {"system_namespace_prefixes": ["team:"]})
+        (config_home / "config.json").write_text(
+            json.dumps(
+                {
+                    "search": {
+                        "system_namespace_prefixes": ["archive:", "secret:", "arc\x00"],
+                        "default_top_k": 7,
+                    }
+                }
+            )
+        )
+        config = cfg_mod.Mem2MemConfig()
+        cfg_mod.load_config_d(config)
+        below = list(config.search.system_namespace_prefixes)
+        assert "team:" in below
+
+        cfg_mod.load_config_overrides(config, migrate=False)
+
+        assert config.search.system_namespace_prefixes == below
+        assert "secret:" not in config.search.system_namespace_prefixes
+        assert config.search.default_top_k == cfg_mod.SearchConfig().default_top_k
+        rejected = [d for d in config.load_diagnostics if d.layer == "config.json"]
+        assert [d.section for d in rejected] == ["search"]
+        assert "NUL" in rejected[0].error
+
+    def test_config_json_nul_prefix_raises_on_a_strict_load(self, config_home):
+        from memtomem import config as cfg_mod
+        from memtomem.errors import ConfigError
+
+        (config_home / "config.json").write_text(
+            json.dumps({"search": {"system_namespace_prefixes": ["arc\x00"]}})
+        )
+        with pytest.raises(ConfigError, match="NUL"):
+            cfg_mod.load_config_overrides(cfg_mod.Mem2MemConfig(), migrate=False, strict=True)
+
+    def test_config_d_nul_prefix_ignores_that_fragments_search_section(self, config_home):
+        """The rejected fragment falls back to the earlier fragment's values, not to
+        the factory defaults."""
+        from memtomem import config as cfg_mod
+
+        directory = config_home / "config.d"
+        directory.mkdir()
+        (directory / "05-earlier.json").write_text(
+            json.dumps({"search": {"system_namespace_prefixes": ["team:"], "default_top_k": 9}})
+        )
+        self._write_fragment(
+            config_home, {"system_namespace_prefixes": ["arc\x00"], "default_top_k": 7}
+        )
+        config = cfg_mod.Mem2MemConfig()
+        defaults = list(config.search.system_namespace_prefixes)
+        assert cfg_mod.SearchConfig().default_top_k != 9
+
+        cfg_mod.load_config_d(config)
+
+        assert config.search.system_namespace_prefixes == [*defaults, "team:"]
+        assert config.search.default_top_k == 9
+        rejected = [d for d in config.load_diagnostics if d.layer == "config.d"]
+        assert [d.section for d in rejected] == ["search"]
+        assert "NUL" in rejected[0].error
+
+    def test_config_d_nul_prefix_raises_on_a_strict_load(self, config_home):
+        from memtomem import config as cfg_mod
+        from memtomem.errors import ConfigFragmentError
+
+        self._write_fragment(config_home, {"system_namespace_prefixes": ["arc\x00"]})
+        with pytest.raises(ConfigFragmentError, match="NUL"):
+            cfg_mod.load_config_d(cfg_mod.Mem2MemConfig(), strict=True)
+
+    def test_env_nul_prefix_fails_config_construction(self, monkeypatch):
+        from pydantic import ValidationError
+
+        from memtomem.config import Mem2MemConfig
+
+        monkeypatch.setenv("MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES", '["arc\\u0000"]')
+        with pytest.raises(ValidationError, match="NUL"):
+            Mem2MemConfig()
+
     @pytest.mark.ollama
     async def test_default_search_excludes_archive_summary(self, components, memory_dir):
         """End-to-end: an archive:summary chunk is NOT returned by a
