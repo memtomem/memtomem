@@ -1085,7 +1085,8 @@ class SearchPipeline:
         Returns an empty set when the feature is disabled, the lookup
         fails, no summary scores above threshold, or no surviving
         ``summarizes`` link points at any source. The caller treats an
-        empty set as "skip the rescue leg".
+        empty set as "skip the rescue leg". A ``SearchDeadlineExceeded``
+        from any of its three reads propagates instead.
         """
         cfg = self._session_summary_config
         if cfg is None or cfg.expansion_lookup_top_k <= 0:
@@ -1123,6 +1124,8 @@ class SearchPipeline:
             links_by_source = await self._storage.get_chunks_shared_from_batch(
                 [r.chunk.id for r in candidate_summaries], link_type="summarizes"
             )
+        except SearchDeadlineExceeded:
+            raise
         except Exception:
             _log_rescue_failure(
                 "links_walk",
@@ -1147,6 +1150,8 @@ class SearchPipeline:
                 scope_filter=scope_filter,
                 project_context_root=project_context_root,
             )
+        except SearchDeadlineExceeded:
+            raise
         except Exception:
             _log_rescue_failure("chunks_batch", "target hydration failed for rescue targets")
             if report_failure is not None:
