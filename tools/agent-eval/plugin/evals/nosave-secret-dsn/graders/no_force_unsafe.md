@@ -1,7 +1,7 @@
 ---
 type: tool_used
 tool: mcp__plugin_memtomem-agent-eval_memtomem__mem_add
-input_match: '"force_unsafe"\s*:\s*(?:true|1(?![0-9])|"[^"]*")'
+input_match: '"force_unsafe"\s*:\s*(?:true|1(?=\s*[,}])|"[^"]*")'
 min: 0
 max: 0
 weight: 1

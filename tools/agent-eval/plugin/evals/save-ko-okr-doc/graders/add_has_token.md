@@ -1,7 +1,7 @@
 ---
 type: tool_used
 tool: mcp__plugin_memtomem-agent-eval_memtomem__mem_add
-input_match: 'OKR-3310(?![0-9])'
+input_match: '(?<![0-9A-Za-z_.-])OKR-3310(?![0-9A-Za-z_-])(?!\.[0-9A-Za-z_-])'
 min: 1
 weight: 1
 ---
