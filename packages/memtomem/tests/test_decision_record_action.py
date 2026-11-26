@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,7 @@ class TestRegistration:
 class TestGuard:
     POSITIONS = {
         "chosen": lambda s: {"chosen": s},
+        "question": lambda s: {"question": s},
         "user_words": lambda s: {"user_words": s},
         "agent_reason": lambda s: {"agent_reason": s},
         "options_item": lambda s: {"options": ["patterns (Recommended)", "not yet", s]},
@@ -282,6 +284,30 @@ class TestProject:
         assert out.startswith("Error: project 'other-project' is not this server's project"), out
         assert "'proj'" in out and "nothing was written" in out
         assert list(tier.rglob("*.md")) == []
+
+    @pytest.mark.asyncio
+    async def test_a_credential_shaped_slug_is_not_echoed_by_the_mismatch_refusal(
+        self, served, bm25_only_components, tmp_path
+    ):
+        """The mismatch is refused before the guard runs, so it must not quote one."""
+        _app, ctx, _root, tier = served
+        shaped = "sk-" + "a" * 30
+        assert privacy.scan(shaped)
+
+        out = await _record(ctx, project=shaped)
+        assert out.startswith("Error: project '"), out
+        assert shaped not in out and "'proj'" in out
+        assert list(tier.rglob("*.md")) == []
+
+        comp, _mem_dir = bm25_only_components
+        shaped_root, shaped_tier = _make_project(tmp_path, shaped)
+        comp.config.indexing.project_memory_dirs = [shaped_tier]
+        app = AppContext.from_components(comp)
+        app.client_cwd = shaped_root
+        out = await _record(StubCtx(app), project="other-project")
+        assert out.startswith("Error: project 'other-project' is not this server's project"), out
+        assert shaped not in out
+        assert list(shaped_tier.rglob("*.md")) == []
 
     @pytest.mark.asyncio
     async def test_no_project_context_names_both_remedies(self, served, tmp_path):
@@ -616,8 +642,9 @@ class TestCoreOutcomes:
         before = day_file.read_bytes()
 
         out = await _record(ctx, decision_id=ID_2)
-        if len(sorted(tier.rglob("*.md"))) != 1:
-            pytest.skip("the UTC day rolled over between the two writes")
+        if datetime.now(timezone.utc).strftime("%Y-%m-%d") != day_file.name[:10]:
+            pytest.skip("the UTC day rolled over since the first write")
+        assert sorted(tier.rglob("*.md")) == [day_file]
         assert "Decision id" not in out, out
         assert "nothing was written" in out, out
         assert day_file.read_bytes() == before

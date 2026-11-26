@@ -52,8 +52,8 @@ async def mem_decision_record(
 
     ``options``, ``recommended``, ``chosen`` and ``user_words`` are stored
     exactly as given. A changed decision is a new record with a new
-    ``decision_id``; a repeated ``decision_id`` replays the first result for
-    24 hours and writes nothing.
+    ``decision_id``. For 24 hours a repeated ``decision_id`` writes nothing
+    and replays the first call's result once that call has completed.
 
     Args:
         decision_id: Lowercase UUID the caller generates for this decision.
@@ -61,7 +61,8 @@ async def mem_decision_record(
         recorded_by: Runtime label of the calling agent (e.g. claude-code).
         question: One line, at most 120 characters, on what was being decided.
         options: The labels offered, each verbatim; at least two, all different.
-        chosen: The label the user picked, or the user's own answer, verbatim.
+        chosen: The label the user picked, or the user's own answer, verbatim;
+            not empty and not whitespace only.
         recommended: The recommended label, exactly as in options, if one was.
         recommended_by: Runtime label of the recommending agent (default: recorded_by).
         agent_reason: The agent's reason for the recommendation, at most 240 characters.
@@ -114,9 +115,16 @@ async def mem_decision_record(
         )
     server_slug = project_slug(root.name)
     if server_slug != record.project:
-        named = f"'{server_slug}'" if server_slug is not None else "a root with no usable slug"
+        # Named so the caller can correct the call, but this runs before the
+        # guard: a slug shaped like a credential is replaced, not echoed.
+        given = privacy.sanitize_audit_value(record.project)
+        named = (
+            f"'{privacy.sanitize_audit_value(server_slug)}'"
+            if server_slug is not None
+            else "a root with no usable slug"
+        )
         return (
-            f"Error: project '{record.project}' is not this server's project ({named}); "
+            f"Error: project '{given}' is not this server's project ({named}); "
             "nothing was written. Pass this project's slug, or record the decision from a "
             "server running in the other project."
         )
