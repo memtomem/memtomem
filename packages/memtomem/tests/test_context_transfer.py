@@ -2907,3 +2907,56 @@ def test_an_empty_staging_set_with_an_occupied_source_is_not_called_unrecoverabl
     assert manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
     assert not any("nothing left to recover" in m for m in messages), messages
     assert any("no transfer staging copy of them was found" in m for m in messages), messages
+
+
+def test_a_source_restored_by_hand_during_the_rename_back_is_not_called_unrecoverable(
+    two_projects, monkeypatch, caplog
+):
+    """#3608: the survivor summary reads the source AFTER the rename-back, not before it.
+
+    The source was seen absent before the rename-back, then a writer put the
+    staging entry back by hand while that rename was failing. Judged by the
+    earlier probe, the summary said "nothing left to recover" with the
+    artifact at its canonical path.
+    """
+    import logging as _logging
+
+    import memtomem.context.migrate as migrate_mod
+    import memtomem.context.transfer as transfer_mod
+
+    manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    src_dir = manifest.parent
+    real_rename = migrate_mod.rename_no_replace
+
+    def rename(a, b, **kwargs):
+        if Path(b) == src_dir:
+            # The rename-back: a writer restores the entry by hand first.
+            Path(a).rename(src_dir)
+            raise OSError(errno.EIO, "injected rename-back failure", str(a))
+        return real_rename(a, b, **kwargs)
+
+    def promote_fails(claim, dst):
+        raise OSError(errno.EIO, "injected promote failure")
+
+    monkeypatch.setattr(migrate_mod, "rename_no_replace", rename)
+    monkeypatch.setattr(transfer_mod, "_promote_move", promote_fails)
+    caplog.set_level(_logging.ERROR)
+
+    with pytest.raises(OSError, match="injected promote failure"):
+        transfer_artifact(
+            "agents",
+            "foo",
+            src_project_root=two_projects["a"],
+            from_scope="project_shared",
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode="move",
+            apply_=True,
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert not any("nothing left to recover" in m for m in messages), messages
+    assert any("no transfer staging copy of them was found" in m for m in messages), messages

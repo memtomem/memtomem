@@ -1558,7 +1558,12 @@ def transfer_artifact(
                     # from that probe: the EXDEV path keeps a second copy at
                     # the destination on purpose (#2313), and the holding entry
                     # it names may itself be what went missing (#2327).
-                    _log_rollback_survivors(src_path, restore_from, claimed, at_src=at_src)
+                    # The source is probed again here rather than reusing
+                    # ``at_src``: that answer predates the rename-back, and a
+                    # writer can have put the bytes home meanwhile (#3608).
+                    _log_rollback_survivors(
+                        src_path, restore_from, claimed, at_src=_probe(src_path)[0]
+                    )
                     if isinstance(exc, StagingIdentityLostError):
                         # The refusal reads "this step was refused… then retry",
                         # and every surface maps it to a retryable conflict.
