@@ -159,12 +159,16 @@ def _subprocess_runtime_dir(env: dict[str, str]) -> Path:
 def _spawn_server(env: dict[str, str]) -> subprocess.Popen:
     """Start ``memtomem-server`` as a subprocess that keeps its stdin
     open — without that, the MCP stdio loop sees EOF immediately and
-    exits via the normal path, defeating any SIGTERM / lifecycle check."""
+    exits via the normal path, defeating any SIGTERM / lifecycle check.
+
+    The server loads the ``.env`` nearest its own source file, so the
+    checkout under test could supply ``MEMTOMEM_*`` settings the test never
+    set; ``PYTHON_DOTENV_DISABLED`` keeps the child to *env*."""
     return subprocess.Popen(
         # ``-P``: ``-m`` puts the working directory ahead of PYTHONPATH,
         # which ``subprocess_env()`` starts with this run's source root.
         [sys.executable, "-P", "-m", "memtomem.server"],
-        env=env,
+        env={**env, "PYTHON_DOTENV_DISABLED": "1"},
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1226,6 +1230,8 @@ def test_unregisterable_presence_directory_warns_but_still_starts(tmp_path: Path
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
     runtime = _subprocess_runtime_dir(env)
+    # Before the spawn: it pins the child's store path, not only the name.
+    pid_file = runtime / _pin_store_pid_name(env, home)
     runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -1236,7 +1242,7 @@ def test_unregisterable_presence_directory_warns_but_still_starts(tmp_path: Path
 
     proc = _spawn_server(env)
     try:
-        _wait_for_pid_file(proc, runtime / _pin_store_pid_name(env, home))
+        _wait_for_pid_file(proc, pid_file)
         assert proc.poll() is None, "a coordination failure must not stop the server"
         assert list(elsewhere.iterdir()) == [], "and must not write through the link"
         stderr = _kill_and_read_stderr(proc)

@@ -101,6 +101,9 @@ def _tools_under_mode(
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
+    # No ``.env`` from the checkout under test: it could set ``MEMTOMEM_*``
+    # values this probe does not isolate.
+    env["PYTHON_DOTENV_DISABLED"] = "1"
     env["MEMTOMEM_TOOL_MODE"] = mode
     env.pop("MEMTOMEM_EXTRA_TOOLS", None)
     if extra_tools is not None:
