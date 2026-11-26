@@ -28,6 +28,8 @@ coverage.json
 !plugins/memtomem/.mcp.json
 # The OpenClaw bundle's MCP server declaration
 !packages/memtomem-openclaw-bundle/.mcp.json
+# The agent-eval plugin's MCP server declaration (eval only, tools/agent-eval/README.md)
+!tools/agent-eval/plugin/.mcp.json
 
 # Claude Code
 .claude/
