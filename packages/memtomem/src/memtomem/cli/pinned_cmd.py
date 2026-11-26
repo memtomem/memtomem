@@ -23,7 +23,25 @@ _AGENT_ID_OPTION = click.option(
 )
 
 
-@click.group("pinned")
+# See the note on ``SEARCH_EPILOG`` in ``cli/search.py`` for why ``\b`` is
+# load-bearing here.
+PINNED_EPILOG = """\
+set takes exactly one of --content or --file. -a NAME stores a block for one
+agent; list and compose with -a draw on that agent's blocks and the general
+ones, and on a shared id the agent's block wins.
+
+Examples:
+
+\b
+  mm pinned set style --content "Prefer uv over pip."
+  mm pinned set review-rules --file review.md --priority 10
+  mm pinned set release --content "Freeze on Fridays." -a planner
+  mm pinned list -a planner
+  mm pinned compose "release checklist" -a planner --top-k 5
+"""
+
+
+@click.group("pinned", epilog=PINNED_EPILOG)
 def pinned() -> None:
     """Manage durable context included before retrieved memories."""
 
