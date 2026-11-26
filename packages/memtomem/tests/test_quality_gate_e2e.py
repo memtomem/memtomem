@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from _subprocess_env import subprocess_env
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DRIVER = _REPO_ROOT / "tools" / "quality-gate" / "run_gate.py"
 _ASSETS_SRC = _REPO_ROOT / "tools" / "quality-gate"
@@ -114,7 +116,7 @@ def _mm_available() -> bool:
 
 
 def _run_driver(args: list[str], extra_env: dict[str, str] | None = None):
-    env = os.environ.copy()
+    env = subprocess_env()
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
