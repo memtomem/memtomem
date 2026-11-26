@@ -23,7 +23,7 @@ from memtomem.server.tools._provenance import (
     render_event_content,
 )
 
-# The seven chunk-creating write surfaces. ``mem_edit`` / ``mem_delete``
+# The eight chunk-creating write surfaces. ``mem_edit`` / ``mem_delete``
 # are deliberately absent — see the module docstring of ``_provenance``.
 EVENT_TYPES = (
     "add",
@@ -33,6 +33,7 @@ EVENT_TYPES = (
     "agent_share",
     "candidate_review",
     "consolidate_apply",
+    "decision_record",
 )
 
 
@@ -490,6 +491,7 @@ class TestMemAddCoreCallSiteLabels:
             "agent_share",
             "candidate_review",
             "consolidate_apply",
+            "decision_record",
             "reflect_save",
             "scratch_promote",
         }
