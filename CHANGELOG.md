@@ -36,13 +36,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   A landed in B, indexed as B's and invisible from A. The tier directory, and the `.memtomem`
   holding it, are now judged with the predicate the indexer already uses to leave such a
   tier out: a link, a junction or an entry that cannot be inspected is refused before
-  anything is written, and the message names only the relative entry. This covers MCP
-  `mem_add` and `mem_batch_add` (including a relative `file=` with a project scope), `mm
-  add`, web `POST /api/add`, `mm context memory-migrate`'s destination, `mm mem init`
-  (before its `.gitignore` block and registration) and the LangGraph store's derived root
-  (before it loads configuration). Not covered: a target the caller spells itself through
-  the link (an absolute `file=`, a relative `file=` with `..`), and links below a regular
-  tier.
+  anything is written to the tier, and the message names only the relative entry. This
+  covers MCP `mem_add` and `mem_batch_add` (including a relative `file=` with a project
+  scope), `mm add`, web `POST /api/add`, `mm context memory-migrate`'s destination, `mm mem
+  init` (before its `.gitignore` block and registration) and the LangGraph store's derived
+  root (before it loads configuration). Not covered: a target the caller spells itself
+  through the link (an absolute `file=`, a relative `file=` with `..`), and links below a
+  regular tier.
 
 - **The web transfer route's Gate A 422 stops naming the offending file (#3605).** The
   privacy block answered with the engine's CLI text, which names the offending file by its
