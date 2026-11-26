@@ -147,8 +147,8 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **94 MCP tools**. The table below is a curated selection
-grouped by task; all 94 are listed in
+memtomem provides **95 MCP tools**. The table below is a curated selection
+grouped by task; all 95 are listed in
 [Available MCP Tools](mcp-clients.md#available-mcp-tools).
 
 | Category | Tools | What they do |

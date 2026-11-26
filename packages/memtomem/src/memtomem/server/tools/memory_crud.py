@@ -855,13 +855,15 @@ def _validate_path(
             )
         from memtomem.memory_scope import (
             MemoryScopeError,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
         )
 
         try:
             # ``user_base`` is unused for project tiers — don't index a
-            # possibly-empty ``memory_dirs`` here (#1768).
-            base = resolve_memory_scope_dir(scope, project_root)
+            # possibly-empty ``memory_dirs`` here (#1768). A linked tier is
+            # refused: its target may be another project's registered tier,
+            # which the root check below would accept (#3623).
+            base = resolve_project_tier_write_dir(scope, project_root)
         except MemoryScopeError as exc:
             return None, f"Error: {exc}"
         target = (base / raw).resolve()
@@ -901,6 +903,7 @@ async def _mem_add_core(
     file_name: str | None = None,
     new_file_only: bool = False,
     on_appended: Callable[[str], None] | None = None,
+    ledger_tool: str = "mem_add",
 ) -> tuple[str, "IndexingStats | None"]:
     """Core logic for ``mem_add`` — also usable from internal callers that
     need the ``IndexingStats`` (e.g. ``mem_consolidate_apply`` linking new
@@ -961,6 +964,10 @@ async def _mem_add_core(
     ``stats.appended_chunk_ids`` names the chunks this entry became (#3292),
     while ``stats.new_chunk_ids`` describes the whole file's re-index.
 
+    ``ledger_tool`` is the tool name ``idempotency_key`` is recorded under.
+    The ledger is keyed by ``(tool, key)``, so a caller whose keys must not
+    replay, or be replayed by, an ordinary ``mem_add`` key names its own.
+
     Returns:
         Tuple of ``(user_facing_message, stats)``. ``stats`` is ``None``
         for early error returns (empty content, oversized content,
@@ -989,7 +996,7 @@ async def _mem_add_core(
     # the redaction gates (avoids double-counting privacy outcomes). The
     # authoritative re-check happens under the file lock below.
     if idempotency_key is not None:
-        stored = await app.storage.idempotency_get("mem_add", idempotency_key)
+        stored = await app.storage.idempotency_get(ledger_tool, idempotency_key)
         if stored is not None:
             return (stored + _REPLAY_MARKER, None)
 
@@ -1158,7 +1165,7 @@ async def _mem_add_core(
             is_project_tier_registered,
             project_tier_registration_error,
             require_user_base,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
             resolve_scope_target,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
@@ -1180,7 +1187,9 @@ async def _mem_add_core(
             if project_root_override is not None:
                 project_root = project_root_override
             try:
-                base = resolve_memory_scope_dir(effective_scope, project_root)
+                # A linked tier is refused before the registration check,
+                # which would accept another project's tier it leads to (#3623).
+                base = resolve_project_tier_write_dir(effective_scope, project_root)
             except MemoryScopeError as exc:
                 return (f"Error: {exc}", None)
             # ADR-0011: refuse if the resolved tier directory is not
@@ -1327,7 +1336,7 @@ async def _mem_add_core(
                     # one caller wins the write, the rest replay or get "in progress".
                     if idempotency_key is not None:
                         state, stored = await app.storage.idempotency_claim(
-                            "mem_add", idempotency_key
+                            ledger_tool, idempotency_key
                         )
                         if state == "completed":
                             assert stored is not None  # completed rows always carry a result
@@ -1351,12 +1360,12 @@ async def _mem_add_core(
                         # The path stopped holding the judged file before the open:
                         # nothing was written. A refusal, so ``stats is None``.
                         if idempotency_key is not None:
-                            await _release_idempotency_claim(app, "mem_add", idempotency_key)
+                            await _release_idempotency_claim(app, ledger_tool, idempotency_key)
                         refusal = await _changed_append_refusal(app, target, judged, op="mem_add")
                         return (refusal, None)
                     except Exception:
                         if idempotency_key is not None:
-                            await _release_idempotency_claim(app, "mem_add", idempotency_key)
+                            await _release_idempotency_claim(app, ledger_tool, idempotency_key)
                         raise
                     if on_appended is not None:
                         on_appended(appended.text)
@@ -1429,7 +1438,7 @@ async def _mem_add_core(
                     if idempotency_key is not None:
                         try:
                             await app.storage.idempotency_complete(
-                                "mem_add", idempotency_key, result
+                                ledger_tool, idempotency_key, result
                             )
                         except Exception:
                             logger.warning(
@@ -2522,7 +2531,7 @@ async def mem_batch_add(
             is_project_tier_registered,
             project_tier_registration_error,
             require_user_base,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
             resolve_scope_target,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
@@ -2537,7 +2546,8 @@ async def mem_batch_add(
         else:
             project_root = _resolve_project_context_root(app)
             try:
-                base = resolve_memory_scope_dir(effective_scope, project_root)
+                # A linked tier is refused, as in ``_mem_add_core`` (#3623).
+                base = resolve_project_tier_write_dir(effective_scope, project_root)
             except MemoryScopeError as exc:
                 return f"Error: {exc}"
             # ADR-0011 PR-D round 6: refuse if the resolved tier dir is

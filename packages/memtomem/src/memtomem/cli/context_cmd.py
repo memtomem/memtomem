@@ -2386,6 +2386,7 @@ async def _memory_migrate_run(
         project_tier_registration_error,
         require_user_base,
         resolve_memory_scope_dir,
+        resolve_project_tier_write_dir,
     )
 
     # Routed emit: when capture buffers are provided (MCP path) the
@@ -2443,7 +2444,8 @@ async def _memory_migrate_run(
         # literal: ``--apply`` moves files, and the "index nothing" state
         # must not move them into or out of a directory the active config
         # disabled (#1768). Project-to-project migrations resolve
-        # independently of the user tier.
+        # independently of the user tier. ``to_dir`` is where ``--apply``
+        # moves the note, so a linked target tier is refused (#3623).
         try:
             if "user" in (from_scope, to_scope):
                 user_base = require_user_base(
@@ -2451,10 +2453,10 @@ async def _memory_migrate_run(
                     comp.config.indexing.project_memory_dirs,
                 )
                 from_dir = resolve_memory_scope_dir(from_scope, project_root, user_base=user_base)
-                to_dir = resolve_memory_scope_dir(to_scope, project_root, user_base=user_base)
+                to_dir = resolve_project_tier_write_dir(to_scope, project_root, user_base=user_base)
             else:
                 from_dir = resolve_memory_scope_dir(from_scope, project_root)
-                to_dir = resolve_memory_scope_dir(to_scope, project_root)
+                to_dir = resolve_project_tier_write_dir(to_scope, project_root)
         except (MemoryScopeError, ConfigError) as exc:
             raise click.ClickException(str(exc)) from exc
 

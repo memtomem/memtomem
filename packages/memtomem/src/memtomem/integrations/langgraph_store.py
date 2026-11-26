@@ -46,7 +46,11 @@ from memtomem.context._atomic import (
 )
 from memtomem.embedding.base import EmbeddingProvider
 from memtomem.embedding.factory import create_embedder
-from memtomem.memory_scope import require_user_base, resolve_memory_scope_dir
+from memtomem.memory_scope import (
+    require_user_base,
+    resolve_memory_scope_dir,
+    resolve_project_tier_write_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -385,12 +389,18 @@ class MemtomemBaseStore(BaseStore):
                 audit_context={"scope_inferred_from_root": scope != effective_scope},
             )
         if root is None:
+            project = Path(project_root).expanduser().resolve() if project_root else None
+            if scope != "user":
+                # This store mkdirs and writes under the tier, so a linked
+                # tier is refused (#3623) — before the configuration loads
+                # below, whose migration would otherwise rewrite
+                # ~/.memtomem/config.json for a store that then raises.
+                base = resolve_project_tier_write_dir(scope, project)
             # Unchanged from before #2321: the derived-root branch loads the
             # real configuration into ``config`` (migration included), and an
             # explicit-root store keeps seeing defaults here.
             load_config_d(config)
             load_config_overrides(config)
-            project = Path(project_root).expanduser().resolve() if project_root else None
             if scope == "user":
                 # Raises ConfigError on empty ``memory_dirs`` — this store
                 # mkdirs its root, so it needs a real write target (#1768) —
@@ -404,8 +414,6 @@ class MemtomemBaseStore(BaseStore):
                         config.indexing.memory_dirs, config.indexing.project_memory_dirs
                     ),
                 )
-            else:
-                base = resolve_memory_scope_dir(scope, project)
             root = base / "langgraph-store"
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)

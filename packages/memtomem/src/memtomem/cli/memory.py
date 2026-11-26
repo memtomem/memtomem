@@ -17,7 +17,7 @@ from memtomem.memory_scope import (
     NS_RETARGET_ATTEMPTS,
     NS_RETARGET_EXHAUSTED_ERROR,
     MemoryScopeError,
-    resolve_memory_scope_dir as _resolve_memory_scope_dir_core,
+    resolve_project_tier_write_dir as _resolve_memory_scope_dir_core,
 )
 
 
@@ -32,7 +32,8 @@ def _resolve_memory_scope_dir(
     """ADR-0011 scope → directory, surfaced as ``ClickException`` for the CLI.
 
     ``user_base`` is only meaningful for ``scope="user"``; project tiers
-    resolve from ``project_root`` alone (#1768).
+    resolve from ``project_root`` alone (#1768). The directory is the one
+    ``mm add`` writes into, so a linked project tier is refused (#3623).
     """
     try:
         if user_base is None:

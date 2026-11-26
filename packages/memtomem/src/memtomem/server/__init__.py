@@ -180,6 +180,7 @@ from memtomem.server.tools.project_bind import mem_project_bind
 from memtomem.server.tools.update_coverage import mem_update_coverage
 from memtomem.server.tools.scratch import mem_scratch_set, mem_scratch_get, mem_scratch_promote
 from memtomem.server.tools.procedure import mem_procedure_save, mem_procedure_list
+from memtomem.server.tools.decision_record import mem_decision_record
 from memtomem.server.tools.pinned import (
     mem_context_compose,
     mem_pinned_delete,
