@@ -104,6 +104,81 @@ def test_a_wikilink_that_resolves_to_a_closer():
     assert entry_open_fence("```\nx\n```[[x]]") == "```"
 
 
+# ── wikilink resolution, linear in the text ──────────────────────────────
+
+
+def _spec(text: str) -> str:
+    """What ``resolve_wikilinks`` must return: the grammar it implements, run as a regex."""
+    from memtomem.chunking.markdown import _WIKILINK_RE
+
+    return _WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "no links",
+        "[[a]] and [[b|c]]",
+        "[[[a]]",  # the target may hold a ``[``
+        "[[a|b|c]]",  # the alias may hold a ``|``
+        "[[]] [[|a]] [[a|]]",  # an empty target or alias is not a link
+        "[[a]b]] [[a\nb]] [[a|b\n]]",  # nor one crossing ``]`` or a newline
+        "[[a| ]]",  # an alias of one space is kept
+        "[[a][[b]]",
+        "x[[" * 50 + "[[ok]]",
+    ],
+)
+def test_resolve_wikilinks_matches_the_grammar(text):
+    from memtomem.chunking.markdown import resolve_wikilinks
+
+    assert resolve_wikilinks(text) == _spec(text)
+
+
+def test_resolve_wikilinks_matches_the_grammar_on_random_text():
+    import random
+
+    from memtomem.chunking.markdown import resolve_wikilinks
+
+    tokens = ["[", "]", "|", "\n", "a", " ", "[[", "]]", "|]]", "b|c"]
+    rng = random.Random(3618)
+    for _ in range(20000):
+        text = "".join(rng.choice(tokens) for _ in range(rng.randint(0, 24)))
+        assert resolve_wikilinks(text) == _spec(text), repr(text)
+
+
+def test_resolve_wikilinks_end_searches_read_at_most_twice_the_text(monkeypatch):
+    """A line of unmatched openers made the regex rescan the rest of the line
+    from each one. Counted, not timed: the characters the target and alias end
+    searches read stay within twice the text, however many openers there are,
+    and the backtracking regex is not used. Only those searches are counted."""
+    from memtomem.chunking import markdown
+
+    read = [0]
+
+    class Counting:
+        def __init__(self, pattern):
+            self._pattern = pattern
+
+        def search(self, text, pos):
+            m = self._pattern.search(text, pos)
+            read[0] += (m.start() if m else len(text)) - pos
+            return m
+
+    class NotRun:
+        def __getattr__(self, name):
+            raise AssertionError(f"the backtracking regex was used ({name})")
+
+    for name in ("_WIKILINK_TARGET_END", "_WIKILINK_ALIAS_END"):
+        monkeypatch.setattr(markdown, name, Counting(getattr(markdown, name)))
+    monkeypatch.setattr(markdown, "_WIKILINK_RE", NotRun())
+
+    for text in ("x[[" * 20000, "x[[a|" * 20000, ("x[[" * 2000 + "\n") * 10):
+        read[0] = 0
+        assert markdown.resolve_wikilinks(text) == text
+        assert 0 < read[0] <= 2 * len(text), (len(text), read[0])
+
+
 def test_a_title_can_open_the_fence():
     assert entry_open_fence("body", title="Title\n```") == "```"
 

@@ -21,7 +21,14 @@ _FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 # push the text after ``]]`` to the start of a line, where it can read as a
 # heading, a code fence or a metadata blockquote. A match crossing a newline is
 # left as written (#2696).
+#
+# The grammar :func:`resolve_wikilinks` implements. It is not run with ``sub``:
+# on a line of unmatched ``[[`` openers the regex rescans the rest of the line
+# from each one, quadratic in the line's length (#3618). The resolver gives the
+# same result in one pass, and a test holds it equal to ``_WIKILINK_RE.sub``.
 _WIKILINK_RE = re.compile(r"\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]")
+_WIKILINK_TARGET_END = re.compile(r"[\]|\n]")
+_WIKILINK_ALIAS_END = re.compile(r"[\]\n]")
 # Temporal-validity frontmatter formats (RFC: temporal-validity).
 # Date-only ``YYYY-MM-DD`` and quarter ``YYYY-QN`` (N in 1-4). Anything else
 # parses to ``None`` and the bound is treated as unset (no exception raised —
@@ -317,8 +324,54 @@ MARKDOWN_EXTENSIONS = frozenset({".md", ".markdown"})
 
 
 def resolve_wikilinks(text: str) -> str:
-    """The text ``chunk_file`` splits: ``[[target|alias]]`` → alias, ``[[target]]`` → target."""
-    return _WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
+    """The text ``chunk_file`` splits: ``[[target|alias]]`` → alias, ``[[target]]`` → target.
+
+    Exactly ``_WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)``, in
+    time linear in ``text``. A target runs from ``[[`` to the first ``]``,
+    ``|`` or newline and can end nowhere else, since a shorter one would leave
+    a character neither ``|`` nor ``]]`` can start with; the same holds for an
+    alias, ending at the first ``]`` or newline. So each opener is decided at
+    the first such character after it. The openers are visited left to right,
+    so the position of that character is found once and reused until an opener
+    passes it.
+    """
+    if "[[" not in text:
+        return text
+    size = len(text)
+    target_end = alias_end = -1
+
+    def first(pattern: re.Pattern[str], pos: int, known: int) -> int:
+        # ``known`` is the first match at or after an earlier position: while it
+        # is not behind ``pos`` it is also the first at or after ``pos``.
+        if known >= pos:
+            return known
+        m = pattern.search(text, pos)
+        return m.start() if m else size
+
+    parts: list[str] = []
+    copied = 0
+    i = text.find("[[")
+    while i != -1:
+        start = i + 2
+        target_end = first(_WIKILINK_TARGET_END, start, target_end)
+        end, shown = -1, ""
+        if target_end > start:
+            if text.startswith("]]", target_end):
+                end, shown = target_end + 2, text[start:target_end]
+            elif text.startswith("|", target_end):
+                alias = target_end + 1
+                alias_end = first(_WIKILINK_ALIAS_END, alias, alias_end)
+                if alias_end > alias and text.startswith("]]", alias_end):
+                    end, shown = alias_end + 2, text[alias:alias_end]
+        if end == -1:
+            i = text.find("[[", i + 1)
+            continue
+        parts.append(text[copied:i])
+        parts.append(shown)
+        copied = end
+        i = text.find("[[", end)
+    parts.append(text[copied:])
+    return "".join(parts)
 
 
 def leading_frontmatter(text: str) -> str | None:

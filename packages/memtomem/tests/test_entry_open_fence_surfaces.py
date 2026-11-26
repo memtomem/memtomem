@@ -3,8 +3,9 @@
 The Markdown chunker reads a fence that is never closed as running to the end
 of the file, so every entry appended after one is indexed as code inside it:
 no chunk of its own, no heading, no tags. The writers refuse such an entry
-before their privacy guard, claim and write, each in its own refusal form (a
-Gate B consent line can precede it: it records the consent, not the write).
+before their privacy guard and before it is appended, each in its own refusal
+form (what a writer records ahead of that point, such as a Gate B consent line,
+stays recorded, as it does when the guard refuses).
 The checker itself is pinned in ``test_entry_open_fence.py``.
 """
 

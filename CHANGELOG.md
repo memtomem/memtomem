@@ -38,9 +38,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   web `POST /api/add` and scratch promote (422 `unclosed_code_fence`), `mm add`,
   `mm agent share`, the shell `add`, `mm review approve` (a daily-file entry; a pinned
   candidate is not appended to a file) and the LangGraph store now refuse such an entry
-  before anything is written. The entry is judged as the chunker will read it, title
+  before it is appended to any file. The entry is judged as the chunker will read it, title
   included, after newline translation and wikilink resolution. A file that already ends
-  inside an open fence is not repaired.
+  inside an open fence is not repaired. Wikilink resolution, which the chunker also runs on
+  every Markdown file it indexes, is now linear in the text: a line of unmatched `[[`
+  openers made it quadratic (about 36 s for 96 KB).
 
 - **The web transfer route's Gate A 422 stops naming the offending file (#3605).** The
   privacy block answered with the engine's CLI text, which names the offending file by its

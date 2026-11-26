@@ -320,10 +320,12 @@ def entry_open_fence(
     The Markdown chunker reads a fence that never closes as running to the end
     of the file (#3618), so every entry appended after this one would be
     indexed as code inside it: no chunk, heading or tags of its own. Every
-    entry writer refuses such an entry before its privacy guard, its claim and
-    its write (:func:`open_fence_refusal` is the shared text). A Gate B consent
-    line a writer emits ahead of its guard can precede the refusal: it records
-    the consent, not the write.
+    entry writer refuses such an entry before its privacy guard and before the
+    entry is appended (:func:`open_fence_refusal` is the shared text). What a
+    writer records ahead of that point stays recorded, as it does when the
+    guard refuses: a Gate B consent line, and for the MCP tools that write
+    through ``_mem_add_core``, what they did before calling it (a candidate
+    claim, released on the refusal; a consolidation run row).
 
     The entry is read as the chunker will read it once written: the block
     :func:`entry_guard_text` renders (title and heading as written, a
@@ -357,7 +359,7 @@ def open_fence_refusal(run: str) -> str:
     return (
         f"The entry leaves a {run} code fence open, so every entry written to the file "
         "after it would be indexed inside that fence. Close the fence and retry; "
-        "nothing was written."
+        "the entry was not appended."
     )
 
 
