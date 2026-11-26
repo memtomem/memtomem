@@ -66,6 +66,7 @@ import ast
 import inspect
 import re
 import textwrap
+import types
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -261,7 +262,7 @@ def _published_callables() -> frozenset[tuple[str, str]]:
     the defining function, and the registry tests below fail.
 
     The route walk follows ``original_router`` the way
-    ``tests/web/test_web_invariants_registry.py`` does; ``_tool_manager`` is
+    ``tests/test_web_invariants_registry.py`` does; ``_tool_manager`` is
     FastMCP-private, the coupling ``tests/test_server_instructions.py`` accepts.
     """
     from starlette.routing import Route
@@ -294,19 +295,20 @@ def _dotted(relpath: str) -> str:
 
 def _walk_with_scope(tree: ast.Module) -> Iterator[tuple[ast.AST, str]]:
     """Every node of *tree*, with the ``__qualname__`` of the scope whose body
-    holds it (``""`` at module level).
+    holds it (``""`` at module level) — except a def or class itself, which is
+    paired with its own ``__qualname__``, the one its body's nodes carry.
 
     A def's decorators, defaults, bases and annotations are evaluated in the
     enclosing scope, so they belong to it, not to the def being defined.
     """
 
     def visit(node: ast.AST, qual: str, in_func: bool) -> Iterator[tuple[ast.AST, str]]:
-        yield node, qual
         if isinstance(node, _FuncDef | ast.ClassDef):
             if in_func:
                 inner = f"{qual}.<locals>.{node.name}"
             else:
                 inner = f"{qual}.{node.name}" if qual else node.name
+            yield node, inner
             body = {id(stmt) for stmt in node.body}
             for child in ast.iter_child_nodes(node):
                 if id(child) in body:
@@ -314,6 +316,7 @@ def _walk_with_scope(tree: ast.Module) -> Iterator[tuple[ast.AST, str]]:
                 else:
                     yield from visit(child, qual, in_func)
         else:
+            yield node, qual
             for child in ast.iter_child_nodes(node):
                 yield from visit(child, qual, in_func)
 
@@ -377,7 +380,7 @@ def _public_literals(
                     not_top_level.add(id(part.format_spec))
     for node, qual in _walk_with_scope(tree):
         if isinstance(node, _FuncDef):
-            defs.add((module, f"{qual}.{node.name}" if qual else node.name))
+            defs.add((module, qual))  # the def's own qualname
             continue
         owner = docstrings.get(id(node))
         # A docstring sits in its owner's body, so *qual* is the owner's qualname.
@@ -752,11 +755,53 @@ def test_a_def_docstring_is_public_exactly_when_the_def_is_published(
     """Whether a docstring is published is the registries' answer, keyed by
     ``(module, __qualname__)`` — not a decorator read from source."""
     module = _dotted(relpath)
+    report = _scan(_plant(tmp_path / "d", {relpath: source}), endpoints=frozenset())
+    assert (module, qualname) in report.defs
     assert _found(tmp_path / "a", {relpath: source}) == set()
     found = _found(tmp_path / "b", {relpath: source}, endpoints=frozenset({(module, qualname)}))
     assert {(f, ln) for f, ln, _ in found} == {(relpath, line)}
     other = frozenset({(module, qualname + "_other")})
     assert _found(tmp_path / "c", {relpath: source}, endpoints=other) == set()
+
+
+def test_walk_qualnames_match_cpython() -> None:
+    """The walk's qualnames are CPython's ``__qualname__`` for every def and
+    class, read from the compiled code objects' ``co_qualname``."""
+    source = textwrap.dedent(
+        """
+        def top(): pass
+        async def atop(): pass
+        class C:
+            def m(self):
+                def inner(): pass
+                class Local:
+                    def lm(self): pass
+            class Nested:
+                async def n(self): pass
+        def factory():
+            async def endpoint(): pass
+            class K:
+                def k(self): pass
+            f = lambda: None
+            return [x for x in ()]
+        """
+    )
+
+    def qualnames(code: types.CodeType) -> Iterator[str]:
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                if not const.co_name.startswith("<"):  # lambdas, comprehensions
+                    yield const.co_qualname
+                yield from qualnames(const)
+
+    expected = set(qualnames(compile(source, "<planted>", "exec")))
+    walked = {
+        qual
+        for node, qual in _walk_with_scope(ast.parse(source))
+        if isinstance(node, _FuncDef | ast.ClassDef)
+    }
+    assert walked == expected
+    assert "factory.<locals>.endpoint" in walked and "C.m.<locals>.Local.lm" in walked
 
 
 def test_published_callables_reads_the_live_registries(
@@ -771,6 +816,8 @@ def test_published_callables_reads_the_live_registries(
 
     # Defined in ``namespaces``, mounted by ``namespaces_read.add_api_route``.
     assert ("memtomem.web.routes.namespaces", "list_namespaces") in published
+    # Mounted only in ``dev`` mode (``_DEV_ONLY_ROUTERS``).
+    assert ("memtomem.web.routes.namespaces", "delete_namespace") in published
     assert ("memtomem.web.routes.context_skills", "import_skill_to_user") in published
     assert hasattr(context_skills, "import_skill_to_user")
     core = {t.name for t in mcp._tool_manager.list_tools()}
