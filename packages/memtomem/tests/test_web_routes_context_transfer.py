@@ -141,12 +141,26 @@ _BUSY_MESSAGE = (
     "because that entry can be an interrupted move's only copy of an artifact. Inspect it "
     "by hand, then retry. The server log has the details."
 )
+# One sentence per way an identity refusal happens (#3608): a replacement, a staging
+# entry whose identity cannot be read, and a source refused before anything moved.
 _REPLACED_MESSAGE = (
-    "the transfer could not verify a file identity it needed: the artifact was not published "
-    "to the destination. A staging copy may have been removed, and on a move the source may "
-    "not be back in place. Check the source and any staging entry by hand, then retry; if "
-    "the filesystem does not report file identity, use one that does. The server log has the "
-    "details."
+    "transfer staging was replaced out of band: the artifact was not published to the "
+    "destination. A staging copy may have been removed, and on a move the source may not be "
+    "back in place. Check the source and any staging entry by hand, then retry. The server "
+    "log has the details."
+)
+_UNVERIFIABLE_MESSAGE = (
+    "the transfer could not verify a staging entry's file identity: the artifact was not "
+    "published to the destination. A staging copy may have been removed, and on a move the "
+    "source may not be back in place. Check the source and any staging entry by hand, then "
+    "retry; if the filesystem does not report file identity, use one that does. The server "
+    "log has the details."
+)
+_SOURCE_UNVERIFIABLE_MESSAGE = (
+    "the transfer could not verify the source's file identity: nothing was moved, and the "
+    "artifact was not published to the destination. Fix access to the source, then retry; "
+    "if the filesystem does not report file identity, use one that does. The server log has "
+    "the details."
 )
 
 
@@ -559,7 +573,7 @@ async def test_unverifiable_staging_409_carries_the_filesystem_remedy(
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "transfer_staging_replaced"
-    assert detail["message"] == _REPLACED_MESSAGE
+    assert detail["message"] == _UNVERIFIABLE_MESSAGE
     _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     records = [r.getMessage() for r in _transfer_records(caplog)]
     assert len(records) == 1, records
@@ -606,7 +620,7 @@ async def test_a_move_without_file_identity_is_refused_before_it_consumes_the_so
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "transfer_staging_replaced"
-    assert detail["message"] == _REPLACED_MESSAGE
+    assert detail["message"] == _SOURCE_UNVERIFIABLE_MESSAGE
     _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     records = [r.getMessage() for r in _transfer_records(caplog)]
     assert len(records) == 1, records
@@ -700,7 +714,7 @@ async def test_a_refusal_whose_rollback_removes_staging_does_not_deny_it(
     assert len(records) == 1, records
     assert "nothing was removed" not in records[0]
     assert "nothing was removed" not in detail["message"]
-    assert detail["message"] == _REPLACED_MESSAGE
+    assert detail["message"] == _UNVERIFIABLE_MESSAGE
 
 
 @pytest.mark.asyncio
@@ -1989,3 +2003,47 @@ async def test_validation_400_passes_the_secret_scan(client, cwd_root: Path) -> 
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "validation"
     assert detail["message"] == "<redacted: secret-shape>"
+
+
+@pytest.mark.asyncio
+async def test_a_recreated_source_with_unverifiable_staging_is_a_500_partial(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2 of #3608 on the wire: a partial commit, never the retryable 409.
+
+    The move consumed the source into staging, the staging entry cannot be
+    verified, and a writer recreated the source meanwhile, so nothing was put
+    back. A 409 that says "then retry" would have the next attempt move the
+    writer's entry while the artifact stays parked.
+    """
+    from memtomem.context import migrate as migrate_mod
+    from memtomem.context import transfer as transfer_mod
+
+    source = _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    dst_store = _shared_agents(other)
+    real_identity = migrate_mod._staging_identity
+    real_scan = transfer_mod.scan_artifact_tree
+
+    def identity(path):
+        if path.parent == dst_store.resolve() and path.name.startswith(".migrate-"):
+            return None
+        return real_identity(path)
+
+    def scan_and_recreate(*args, **kwargs):
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("racer\n", encoding="utf-8")
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(migrate_mod, "_staging_identity", identity)
+    monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_and_recreate)
+
+    resp = await client.post("/api/context/agents/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 500, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "internal"
+    assert "Do NOT retry" in detail["message"]
+    assert source.read_text(encoding="utf-8") == "racer\n"
+    assert len(list(dst_store.glob(".migrate-*"))) == 1

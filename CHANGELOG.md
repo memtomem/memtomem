@@ -29,15 +29,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A failed transfer move reports the entries it can actually see (#3608).** The rollback
+  read an entry it could not `lstat` (for example, a parent without search permission) as
+  absent, and an identity it could no longer read as replaced. It then logged "no copy of
+  them survives — nothing left to recover" with the staging copy on disk, called the entry
+  it had just failed to rename back "gone", and on a cross-filesystem move told the operator
+  to look for a renamed copy and delete it while the copy sat at the path it named. Each
+  entry is now judged from one `lstat` as absent, ours, replaced or unverifiable, and only
+  an entry shown to be ours is renamed back or removed. A move that refuses on a file
+  identity after its source was consumed, and cannot put it back, is reported as a partial
+  commit (web 500, "Do NOT retry") instead of the retryable 409, since a retry would move
+  whatever is now at the canonical path. The 409 `transfer_staging_replaced` message
+  starts by saying what the engine refused on (a replaced staging entry, an unverifiable
+  one, or the source, in which case nothing was moved) and keeps #3609's account of what
+  may be left on disk. The reason code is unchanged.
+
 - **A transfer refused for an unverifiable file identity stops saying nothing was removed
   (#3609).** When a cleanup or rollback follows the refusal, it can delete the staging copy if
   a later identity read succeeds (reproduced by failing one `lstat` in tests, for a `copy`
   and for a cross-filesystem `move`). The web route's 409 `transfer_staging_replaced`
-  message now says that the artifact was not published to the destination, that a staging
-  copy may have been removed and a moved source may not be back in place, and no longer
-  asserts which cause it was; the server log keeps the engine's diagnosis. The engine's two
-  refusal texts, which the CLI prints, say that the step was refused. The reason code is
-  unchanged.
+  message now says that the artifact was not published to the destination, and that a
+  staging copy may have been removed and a moved source may not be back in place; the server
+  log keeps the engine's diagnosis. (Its opening names the cause again since #3608.) The
+  engine's two refusal texts, which the CLI prints, say that the step was refused. The reason
+  code is unchanged.
 
 - **The web `no_memtomem_store` 409 names the destination by its scope id, not its path
   (#2489).** The artifact transfer route and the settings hook-copy route answered a
