@@ -29,6 +29,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **An entry that leaves a code fence open is refused instead of swallowing every later entry
+  in its file (#3618).** The Markdown chunker reads a fence that never closes as running to
+  the end of the file, so after one such entry every entry appended to the same file was
+  indexed as code inside it: no chunk of its own, no heading, no tags, and a `tag_filter`
+  search for it found nothing. `mem_add` (and the MCP tools that write through it, such as
+  `mem_agent_share`), `mem_batch_add` (the whole batch, with the indices of the open items),
+  web `POST /api/add` and scratch promote (422 `unclosed_code_fence`), `mm add`,
+  `mm agent share`, the shell `add`, `mm review approve` (a daily-file entry; a pinned
+  candidate is not appended to a file) and the LangGraph store now refuse such an entry
+  before anything is written. The entry is judged as the chunker will read it, title
+  included, after newline translation and wikilink resolution. A file that already ends
+  inside an open fence is not repaired.
+
 - **A failed transfer move reports the entries it can actually see (#3608).** The rollback
   read an entry it could not `lstat` (for example, a parent without search permission) as
   absent, and an identity it could no longer read as replaced. It then logged "no copy of
