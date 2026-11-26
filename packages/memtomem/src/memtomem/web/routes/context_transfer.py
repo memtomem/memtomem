@@ -334,20 +334,23 @@ async def _ensure_dest_local_gitignored(dst_root: Path) -> str:
     return msg
 
 
-#: The wire text of the two staging refusals (#3532): the engine's remediation
-#: without the staging paths its text ends with, which go to the log line.
-#: The replaced one covers both engine cases (``StagingClaim.assert_still_ours``),
-#: which the exception does not tell apart without its text.
+#: The wire text of the two staging refusals (#3532): the route's own sentence,
+#: without the paths the engine's text carries, which go to the log line.
+#: The identity one covers every ``StagingIdentityLostError`` cause, which the
+#: exception does not tell apart without its text, and any rollback has already
+#: run by the time it is sent, so it claims nothing about what is still on disk
+#: (#3609).
 _STAGING_BUSY_MESSAGE = (
     "transfer staging is blocked: a name it needs is already taken and was NOT removed, "
     "because that entry can be an interrupted move's only copy of an artifact. Inspect it "
     "by hand, then retry. The server log has the details."
 )
 _STAGING_REPLACED_MESSAGE = (
-    "transfer staging was replaced out of band, or this filesystem does not report file "
-    "identity: nothing was promoted and nothing was removed. Inspect the entry by hand, "
-    "then retry; if the filesystem is the cause, stage on one that reports it. The server "
-    "log has the details."
+    "the transfer could not verify a file identity it needed: the artifact was not published "
+    "to the destination. A staging copy may have been removed, and on a move the source may "
+    "not be back in place. Check the source and any staging entry by hand, then retry; if "
+    "the filesystem does not report file identity, use one that does. The server log has the "
+    "details."
 )
 #: The 400 for a path-naming engine refusal that carries no ``safe_message`` (#3543).
 _REFUSED_MESSAGE = "the transfer request was refused; the server log has the details."
@@ -485,14 +488,23 @@ async def transfer_context_artifact(
         # a memtomem project — don't seed a half-initialized store into an
         # arbitrary registered directory. Within-project transfers keep
         # migrate's implicit-store behavior.
+        #
+        # Named by the scope id the caller sent, not by its root (#2489): the
+        # root is a host path, and a ``cd <root>`` hint is not pasteable once
+        # the path is taken out of it. Same text as the settings-copy route.
+        target = (
+            f"destination project {body.to_project_scope_id!r}"
+            if body.to_project_scope_id is not None
+            else "the destination project"
+        )
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "no_memtomem_store",
                 "message": (
-                    f"destination project has no .memtomem/ store: {dst_root}. "
-                    f"Initialize it first: cd {dst_root} && mm context init"
+                    f"{target} has no .memtomem/ store. Initialize it first: "
+                    "run `mm context init` in that project's directory."
                 ),
                 "project_scope_id": body.to_project_scope_id,
             },

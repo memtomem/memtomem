@@ -29,6 +29,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A transfer refused for an unverifiable file identity stops saying nothing was removed
+  (#3609).** When a cleanup or rollback follows the refusal, it can delete the staging copy if
+  a later identity read succeeds (reproduced by failing one `lstat` in tests, for a `copy`
+  and for a cross-filesystem `move`). The web route's 409 `transfer_staging_replaced`
+  message now says that the artifact was not published to the destination, that a staging
+  copy may have been removed and a moved source may not be back in place, and no longer
+  asserts which cause it was; the server log keeps the engine's diagnosis. The engine's two
+  refusal texts, which the CLI prints, say that the step was refused. The reason code is
+  unchanged.
+
+- **The web `no_memtomem_store` 409 names the destination by its scope id, not its path
+  (#2489).** The artifact transfer route and the settings hook-copy route answered a
+  destination without a `.memtomem/` store with its absolute root in the prose and again,
+  unquoted, in a `cd <root> && mm context init` hint, so the response carried a host path
+  (a control character in the directory name included) and the hint broke on a space. Both
+  now say `destination project '<scope id>' has no .memtomem/ store` and point to
+  `mm context init` without a path; the dashboard already showed its own localized text for
+  this reason code. The CLI refusal is unchanged.
+
 - **The web UI's Host, Origin and CSRF token checks apply when `create_app()` is mounted under a
   path prefix (#3550).** The guard decided whether a request was an `/api/*` call from the
   request path, which keeps a mount's prefix, so under `Mount("/mm", app=create_app())` every
