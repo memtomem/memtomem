@@ -1560,9 +1560,9 @@ def transfer_artifact(
                     # it names may itself be what went missing (#2327).
                     _log_rollback_survivors(src_path, restore_from, claimed, at_src=at_src)
                     if isinstance(exc, StagingIdentityLostError):
-                        # The refusal reads "nothing was promoted… then retry",
+                        # The refusal reads "this step was refused… then retry",
                         # and every surface maps it to a retryable conflict.
-                        # The source is parked, not home, so a retry would move
+                        # The source is not home, so a retry would move
                         # whatever now answers to the canonical path (#3608).
                         raise identity_refusal_not_restored(
                             f"{kind}/{name}", src_path, dst_path, (restore_from, claimed)
@@ -1600,7 +1600,8 @@ def transfer_artifact(
                         # a stranger's, and not as something renamed away.
                         logger.error(
                             "EXDEV cleanup: %s could not be verified as the "
-                            "pre-move copy this transfer parked; leaving it alone.",
+                            "pre-move copy this transfer parked; not removing it "
+                            "further.",
                             holding.path,
                         )
                         raise MigratePartialError(
@@ -1608,7 +1609,8 @@ def transfer_artifact(
                             f"pre-move copy could not be cleaned up: the entry "
                             f"at {holding.path} could not be verified as the one "
                             f"this transfer parked (its file identity could not "
-                            f"be read), so this transfer did not remove it. "
+                            f"be read), so this transfer could not confirm or "
+                            f"finish removing it. "
                             f"Verify {dst_path} holds the artifact you expect, "
                             f"then inspect {holding.path}: if it is the parked "
                             f"copy, remove it by hand. Fan-out cleanup has not "

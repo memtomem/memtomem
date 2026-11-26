@@ -2052,8 +2052,9 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
                     dst_path=dst_parent,
                 )
             if outcome is not RestoreOutcome.RESTORED and isinstance(exc, StagingIdentityLostError):
-                # The refusal says "nothing was promoted… then retry", which is
-                # true only while the source is home. It is parked (#3608).
+                # The refusal says "this step was refused… then retry", which
+                # invites a retry that is safe only while the source is home.
+                # It is not home (#3608).
                 raise identity_refusal_not_restored(src.name, src, dst_parent, (holding,)) from exc
             raise
     return StagedMove(staging, None)
