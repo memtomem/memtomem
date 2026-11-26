@@ -605,6 +605,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Sessions** | `mem_session_start` (with optional `title`), `mem_session_end`, `mem_session_list`, `mem_project_bind` (pins a stdio server started outside the project to a registered project root) |
 | **Working Memory** | `mem_scratch_set`, `mem_scratch_get`, `mem_scratch_promote` |
 | **Procedures** | `mem_procedure_save`, `mem_procedure_list` |
+| **Decisions** | `mem_decision_record` (one decision point: the options an agent offered, the one it recommended, and the one the user chose; an individual tool only in `full` mode or when `MEMTOMEM_EXTRA_TOOLS` names it, otherwise `mem_do(action="decision_record", params={...})`) |
 | **Multi-Agent** ([experimental](../../README.md#stability)) | `mem_agent_register`, `mem_agent_search`, `mem_agent_share` |
 | **Consolidation** | `mem_consolidate`, `mem_consolidate_apply` |
 | **Reflection** | `mem_reflect`, `mem_reflect_save` |
@@ -629,7 +630,7 @@ uses, so the output is identical. Useful as a sanity check between
 
 \* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions stay reachable in `core` and `standard` mode through the dispatcher — `mem_do(action="config", params={...})`, `mem_do(action="embedding_reset", params={...})`, `mem_do(action="reset", params={...})` — and the CLI equivalents are `mm config`, `mm embedding-reset`, and `mm reset`.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (39 names), or `full` (94 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents. `MEMTOMEM_EXTRA_TOOLS` names registered tools a deployment exposes individually on top of its mode (see [Configuration](configuration.md#tool-mode)).
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (39 names), or `full` (95 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents. `MEMTOMEM_EXTRA_TOOLS` names registered tools a deployment exposes individually on top of its mode (see [Configuration](configuration.md#tool-mode)).
 
 `mem_candidate_propose(content, source, source_ref, idempotency_key)` lets an
 external agent submit a review candidate without writing durable memory.
@@ -637,6 +638,41 @@ external agent submit a review candidate without writing durable memory.
 `idempotency_key` are required. The content and source reference pass the
 privacy scanner, accepted proposals remain pending for up to 30 days, and a
 reused idempotency key returns the original proposal unless its content differs.
+
+`mem_decision_record(decision_id, project, recorded_by, question, options, chosen, ...)`
+records one decision point at the moment it happens, keeping the agent's judgement
+(`recommended`, `agent_reason`) apart from the user's (`chosen`, `user_words`). The record
+is an ordinary memory entry in the project's `project_local` tier under
+`shared:<project>`: a `## Decision <decision_id>` heading and one JSON object in a `json`
+code fence. `options`, `recommended`, `chosen` and `user_words` are stored exactly as
+given; `question` (one line, at most 120 characters), `agent_reason` (at most 240) and
+`refs` (at most 5) are the agent's own words and are refused when too long, never cut.
+`decided_at` takes an ISO 8601 timestamp with a UTC offset and is stored in UTC to the
+second. The tags are derived and the caller supplies none: `decision-record`,
+`from-<recorded_by>`, and one of `decision-user-taken`, `decision-user-declined` or
+`decision-user-norec`.
+
+- **Refused before anything is written:** a value of the wrong type, an unpaired
+  surrogate, a `project` that is not the slug of the server's project root (the root's
+  directory name with each run of characters outside `[A-Za-z0-9._-]` turned into `-` and
+  leading `-` trimmed), a server with no project context, a project whose
+  `.memtomem/memories.local` is a link, a record over the 100,000-character entry limit,
+  and a record that matches a privacy pattern. The scan covers the strings as they will
+  be read back as well as the rendered entry, and the action has no `force_unsafe`.
+- **Past that point the write is a keyed `mem_add`,** and its outcomes are that tool's:
+  an error from it does not by itself say whether the entry was appended.
+- **`decision_id` is required and makes a retry safe for 24 hours.** A repeat that passes
+  the checks above returns the first result and writes nothing, without comparing its
+  members with the first call's; a changed decision is a new record with a new id. After
+  24 hours the same id appends a second record: this is replay of a lost response, not
+  uniqueness of records.
+- **A tag finds candidates, the file holds the record.** A chunk's tags are not always
+  one entry's, and the indexed text is not always the file's text, so a reader that needs
+  a value verbatim, or a count of decisions, parses the records from the day files. For a
+  project slug long enough that the day file's name no longer declares its namespace
+  ([ADR-0043](../adr/0043-rebuild-restores-namespace-from-day-file-name.md)), the record
+  is still written and indexed under `shared:<project>`.
+- The record follows ordinary entry eligibility and processing rules.
 
 `mem_candidate_evidence(candidate_id, top_k)` answers the question a reviewer
 cannot answer from the candidate text alone: does the store already say this,

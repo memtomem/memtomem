@@ -7,6 +7,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mem_decision_record` records a decision point with the agent's recommendation and the
+  user's choice kept apart (#3620).** memtomem recorded where a memory came from but not
+  whose judgement it holds. The new action, reached as
+  `mem_do(action="decision_record", params={...})`, writes one JSON record per decision:
+  the options offered, the one recommended and why (the agent's), and the one chosen with
+  the user's own words (the user's), stored verbatim. It is an ordinary memory entry in
+  the project's `project_local` tier under `shared:<project>`, tagged
+  `decision-record`, `from-<runtime>` and one of `decision-user-taken`,
+  `decision-user-declined` or `decision-user-norec`. The action validates every type
+  itself, refuses a `project` that is not the server's or whose local tier is a link,
+  scans the decoded strings as well as the rendered entry and offers no `force_unsafe`,
+  and keys its retries by a required `decision_id` in a ledger of its own, so an ordinary
+  `mem_add` key cannot replay a decision. New category `decisions`: the `core` (9) and
+  `standard` (39) tool sets are unchanged and `full` is 95. No workflow calls the action
+  yet and nothing reads the records back; both are later work.
 - **`update` gains an opt-in `backfill` mode that reaches commits older than the latest ten
   (#3579).** Every mode read only the latest ten commits, so when more than ten landed
   between two runs, `incremental` never saw the excess. `backfill` (shorthand `b`, only as
