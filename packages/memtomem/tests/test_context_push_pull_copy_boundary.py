@@ -35,7 +35,8 @@ Text is classified by where it is published:
 
 Exemptions are spans of a value, never a whole line or literal, because each is
 a place a regression could hide: a QUOTED §-citation title (the words are the
-identifier), the ``--force-unsafe-import`` flag, and the per-site spans in
+identifier), the ``--force-unsafe-import`` flag, the ``Hooks Sync`` feature
+name, and the per-site spans in
 :data:`_SITE_EXEMPTIONS`. A match lying wholly inside an exempt span is
 dropped; one that reaches past it, and the rest of the value, are still matched. :data:`_OTHER_FEATURE_FILES` skips the
 memory import/export modules whole — "Import" is their own feature's verb.
@@ -49,6 +50,15 @@ every compound), ``web/schemas/`` is not walked, a file in
 :data:`_OTHER_FEATURE_FILES` is not read at all, and the timeout suffix
 ``another sync may be in progress`` is not policed — whether "sync" is wrong
 there depends on which lock each site waits on.
+
+Three more limits, none of whose shapes exists in the trees today. A label glued
+by concatenation to a following word (``"Sync" "All"`` reads as ``SyncAll``)
+is not matched: the value has no token boundary, and matching it would also
+match identifiers such as ``SyncPhaseError``. The checks err the other way in
+two places: route path strings are matched as text, and a mounted route's
+whole docstring and every class docstring under ``web/routes/`` count as
+public, though FastAPI publishes less (``include_in_schema=False``, an explicit
+``description=``, text after ``\\f``, classes that are not schema models).
 
 A function's docstring counts as published only when that function is
 mounted or registered: a route module the app never includes, or a tool the
@@ -180,6 +190,8 @@ _SPAN_EXEMPTIONS = (
     # The CLI flag of the memory-upload / context-import privacy valve. Its
     # spelling is wire (``force_unsafe_import`` is the parameter name).
     re.compile(r"(?<![\w-])--force-unsafe-import(?![\w-])"),
+    # The name of the sibling feature, which keeps "sync" (PR-E boundary).
+    re.compile(r"\bHooks Sync\b"),
 )
 
 
@@ -914,6 +926,11 @@ def test_developer_text_is_not_policed_but_public_text_is(
             'X = "Syncs§\\"Design\\""\n',
             'X = "Synced: §\\"Design\\""\n',
             id="glued-citation-creates-no-match",
+        ),
+        pytest.param(
+            'X = "Configure Hooks Sync for this project."\n',
+            'X = "Configure Hooks Sync, or Sync skills."\n',
+            id="sibling-feature-name",
         ),
     ],
 )
