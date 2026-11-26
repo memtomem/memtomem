@@ -286,10 +286,12 @@ class RetryableError(Exception):
 class SearchDeadlineExceeded(RetryableError):
     """A search's ``deadline_ms`` processing budget ran out; it returns no results.
 
-    Raised only at safe points — a stage boundary, a wait for a read connection,
-    an embedding slice that had not started — never by cancelling work already
-    running. Every leg that degrades on ``Exception`` re-raises this first, so an
-    expiry never turns into a partial result.
+    Raised where the search detects that the budget has run out: at a stage
+    boundary, at a wait for a read connection, by an ONNX query embedding its
+    worker picks up past the budget, or when the budget-capped reranker timeout
+    fires. That timeout cancels the rerank coroutine; a local inference already
+    running continues on its worker. A SQLite read or embedding slice already
+    running is not interrupted.
     """
 
 
