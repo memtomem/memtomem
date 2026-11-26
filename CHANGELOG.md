@@ -7,6 +7,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mem_decision_record` records a decision point with the agent's recommendation and the
+  user's choice kept apart (#3620).** memtomem recorded where a memory came from but not
+  whose judgement it holds. The new action, reached as
+  `mem_do(action="decision_record", params={...})`, writes one JSON record per decision:
+  the options offered, the one recommended and why (the agent's), and the one chosen with
+  the user's own words (the user's), stored verbatim. It is an ordinary memory entry in
+  the project's `project_local` tier under `shared:<project>`, tagged
+  `decision-record`, `from-<runtime>` and one of `decision-user-taken`,
+  `decision-user-declined` or `decision-user-norec`. The action validates every type
+  itself, refuses a `project` that is not the server's or whose local tier is a link,
+  scans the decoded strings as well as the rendered entry and offers no `force_unsafe`,
+  and keys its retries by a required `decision_id` in a ledger of its own, so an ordinary
+  `mem_add` key cannot replay a decision. New category `decisions`: the `core` (9) and
+  `standard` (39) tool sets are unchanged and `full` is 95. No workflow calls the action
+  yet and nothing reads the records back; both are later work.
 - **`update` gains an opt-in `backfill` mode that reaches commits older than the latest ten
   (#3579).** Every mode read only the latest ten commits, so when more than ten landed
   between two runs, `incremental` never saw the excess. `backfill` (shorthand `b`, only as
@@ -28,6 +43,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `kimi` 0.2.32, `antigravity` 0.2.23.
 
 ### Fixed
+
+- **A project-tier write refuses a tier reached through a link (#3623).** A write with
+  `scope="project_local"` or `"project_shared"` derived its directory from the project root,
+  resolved it, and asked only whether the result was registered, so when project A's
+  `.memtomem/memories.local` was a link to project B's registered tier, a note written from
+  A landed in B, indexed as B's and invisible from A. The tier directory, and the `.memtomem`
+  holding it, are now judged with the predicate the indexer already uses to leave such a
+  tier out: a link, a junction or an entry that cannot be inspected is refused before
+  anything is written to the tier, and the message names only the relative entry. This
+  covers MCP `mem_add` and `mem_batch_add` (including a relative `file=` with a project
+  scope), `mm add`, web `POST /api/add`, `mm context memory-migrate`'s destination, `mm mem
+  init` (before its `.gitignore` block and registration) and the LangGraph store's derived
+  root (before it loads configuration). Not covered: a target the caller spells itself
+  through the link (an absolute `file=`, a relative `file=` with `..`), and links below a
+  regular tier.
 
 - **The web transfer route's Gate A 422 stops naming the offending file (#3605).** The
   privacy block answered with the engine's CLI text, which names the offending file by its

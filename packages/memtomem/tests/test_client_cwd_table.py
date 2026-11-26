@@ -110,6 +110,11 @@ TABLE: dict[str, dict[str, str]] = {
         "mem_context_compose": "query agent_id namespace",
         "mem_context_detect": "include",
         "mem_context_diff": "include scope",
+        # ``refs`` may name a file, as text that is stored and never opened.
+        "mem_decision_record": (
+            "decision_id project recorded_by question options chosen recommended "
+            "recommended_by agent_reason user_words refs decided_at"
+        ),
         "mem_dedup_merge": "keep_id delete_ids",
         "mem_dedup_remove": "remove_id keep_id",
         "mem_dedup_scan": "after",
