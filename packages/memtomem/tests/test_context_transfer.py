@@ -2915,12 +2915,14 @@ def test_an_empty_staging_set_with_an_occupied_source_is_not_called_unrecoverabl
 def test_a_source_restored_by_hand_during_the_rename_back_is_not_called_unrecoverable(
     two_projects, monkeypatch, caplog
 ):
-    """#3608: the survivor summary reads the source AFTER the rename-back, not before it.
+    """#3608: a summary that finds no staging copy does not call the bytes gone.
 
     The source was seen absent before the rename-back, then a writer put the
-    staging entry back by hand while that rename was failing. Judged by the
+    staging entry back by hand while that rename was failing. Judged by that
     earlier probe, the summary said "nothing left to recover" with the
-    artifact at its canonical path.
+    artifact at its canonical path. It now states only what it checked — no
+    staging copy found, the canonical path unchecked — so no ordering of the
+    writer against its probes can make it claim the bytes are gone.
     """
     import logging as _logging
 
