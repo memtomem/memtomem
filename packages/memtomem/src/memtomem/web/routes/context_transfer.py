@@ -334,24 +334,41 @@ async def _ensure_dest_local_gitignored(dst_root: Path) -> str:
     return msg
 
 
-#: The wire text of the two staging refusals (#3532): the route's own sentence,
+#: The wire text of the staging refusals (#3532): the route's own sentences,
 #: without the paths the engine's text carries, which go to the log line.
-#: The identity one covers every ``StagingIdentityLostError`` cause, which the
-#: exception does not tell apart without its text, and any rollback has already
-#: run by the time it is sent, so it claims nothing about what is still on disk
-#: (#3609).
 _STAGING_BUSY_MESSAGE = (
     "transfer staging is blocked: a name it needs is already taken and was NOT removed, "
     "because that entry can be an interrupted move's only copy of an artifact. Inspect it "
     "by hand, then retry. The server log has the details."
 )
-_STAGING_REPLACED_MESSAGE = (
-    "the transfer could not verify a file identity it needed: the artifact was not published "
-    "to the destination. A staging copy may have been removed, and on a move the source may "
-    "not be back in place. Check the source and any staging entry by hand, then retry; if "
-    "the filesystem does not report file identity, use one that does. The server log has the "
-    "details."
+#: One sentence per ``StagingIdentityLostError.cause`` (#3608), sharing the reason
+#: code the SPA keys on. Each leads with what the engine refused on and ends
+#: with what holds whatever ran afterwards (#3609): a staging refusal can be
+#: followed by a cleanup or rollback that removes staging, so it says nothing
+#: about what is left on disk. The source refusal is raised before anything is
+#: renamed, so "nothing was moved" holds there.
+_STAGING_IDENTITY_TAIL = (
+    "the artifact was not published to the destination. A staging copy may have been "
+    "removed, and on a move the source may not be back in place. Check the source and any "
+    "staging entry by hand, then retry"
 )
+_STAGING_REPLACED_MESSAGES = {
+    "replaced": (
+        f"transfer staging was replaced out of band: {_STAGING_IDENTITY_TAIL}. The server log "
+        "has the details."
+    ),
+    "unverifiable": (
+        "the transfer could not verify a staging entry's file identity: "
+        f"{_STAGING_IDENTITY_TAIL}; if the filesystem does not report file identity, use one "
+        "that does. The server log has the details."
+    ),
+    "source_unverifiable": (
+        "the transfer could not verify the source's file identity: nothing was moved, and the "
+        "artifact was not published to the destination. Fix access to the source, then retry; "
+        "if the filesystem does not report file identity, use one that does. The server log has "
+        "the details."
+    ),
+}
 #: The 400 for a path-naming engine refusal that carries no ``safe_message`` (#3543).
 _REFUSED_MESSAGE = "the transfer request was refused; the server log has the details."
 
@@ -666,14 +683,16 @@ async def transfer_context_artifact(
         # look at it — with its own reason code, because the remediation differs:
         # a busy name is retried, this has to be understood first. The route's own
         # sentence on the wire and the engine's in the log, like its sibling and
-        # for the same reasons.
+        # for the same reasons — one sentence per ``cause``, so the caller hears
+        # whether the entry was replaced, could not be read, or was the source
+        # and nothing moved (#3608).
         _log_refusal(kind, name, "transfer_staging_replaced", str(exc))
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "transfer_staging_replaced",
-                "message": _STAGING_REPLACED_MESSAGE,
+                "message": _STAGING_REPLACED_MESSAGES[exc.cause],
             },
         ) from exc
     except MigratePartialError as exc:

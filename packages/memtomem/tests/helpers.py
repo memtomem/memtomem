@@ -492,3 +492,52 @@ def append_judged(
     from memtomem.tools.memory_writer import append_entry, read_for_append
 
     return append_entry(file_path, content, title, tags, judged=read_for_append(file_path)).text
+
+
+class LstatFaults:
+    """Path-scoped ``lstat`` faults for the transfer identity cells (#3608).
+
+    ``denied`` paths answer ``lstat`` with ``EACCES`` — the state of an entry
+    whose parent lost search permission — and ``zeroed`` paths answer with
+    ``st_ino == 0``, a filesystem that stopped reporting identity. Both sets are
+    mutable, so a cell turns a fault on for one phase only.
+
+    Patched at the two seams the engine reads, never ``os.lstat`` alone:
+    ``Path.lstat`` is ``self.stat(follow_symlinks=False)`` on CPython 3.13, and
+    Windows CPython can answer ``os.path.lexists`` natively, so one ``os.lstat``
+    patch reaches neither everywhere. ``os.path.lexists`` answers ``False`` for
+    a denied path, which is what it does for a real ``EACCES``. Injected rather
+    than produced by ``chmod`` so the cells hold on Windows and as root.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import os
+
+        self.denied: set[Path] = set()
+        self.zeroed: set[Path] = set()
+        real_lstat = Path.lstat
+        real_lexists = os.path.lexists
+        faults = self
+
+        class _Zeroed:
+            def __init__(self, info: os.stat_result) -> None:
+                self._info = info
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._info, name)
+
+            st_ino = 0
+
+        def lstat(path: Path, *args: object, **kwargs: object) -> object:
+            if Path(path) in faults.denied:
+                raise PermissionError(13, "Permission denied (injected)", str(path))
+            info = real_lstat(path, *args, **kwargs)
+            return _Zeroed(info) if Path(path) in faults.zeroed else info
+
+        def lexists(path: object) -> bool:
+            if isinstance(path, (str, os.PathLike)) and Path(path) in faults.denied:
+                return False
+            return real_lexists(path)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+        monkeypatch.setattr(os.path, "lexists", lexists)

@@ -4936,8 +4936,11 @@ def test_a_failed_copy_keeps_the_partial_when_the_holding_entry_is_gone(
     # entry is what just went away.
     assert len(vanished) == 1, vanished
     assert not any("preserved at " + str(vanished[0]) in m for m in messages), messages
+    # The absence is seen before any rename is attempted (#3608): a rename-back
+    # runs only on an entry shown to be ours, so an absent one is reported as
+    # gone without one.
     assert any(
-        "rename-back failed" in m and str(vanished[0]) + ", which held the" in m for m in messages
+        str(vanished[0]) + ", which held the pre-move bytes, is gone" in m for m in messages
     ), messages
 
 
@@ -5389,3 +5392,326 @@ def test_migrate_scope_ambiguity_keeps_its_cli_text(scope_layout) -> None:
         "agents/foo exists in multiple scopes: project_shared, project_local. "
         "Set from_scope to one of these scopes."
     )
+
+
+# ── #3608: one probe decides, and only OURS is acted on ──────────────
+
+
+class TestClaimCheck:
+    """``StagingClaim.check`` tells absent, ours, replaced and unverifiable apart (#3608).
+
+    The predecessor asked ``os.path.lexists`` and ``still_ours`` separately:
+    ``lexists`` calls an unreadable entry absent, and ``still_ours`` calls a
+    captured identity that cannot be re-read "not ours" — the same answer as a
+    replacement, so the recovery text said "replaced" for an entry nothing
+    touched.
+    """
+
+    @staticmethod
+    def _claim(tmp_path: Path):
+        from memtomem.context.migrate import StagingClaim
+
+        entry = tmp_path / ".migrate-foo-1-aa.tmp"
+        entry.mkdir()
+        claim = StagingClaim.capture(entry)
+        assert claim.identity is not None
+        return claim
+
+    def test_truth_table(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from helpers import LstatFaults
+
+        from memtomem.context.migrate import ClaimState, StagingClaim
+
+        faults = LstatFaults(monkeypatch)
+        ours = self._claim(tmp_path)
+        assert ours.check() is ClaimState.OURS
+        assert ours.still_ours()
+
+        faults.denied.add(ours.path)
+        assert ours.check() is ClaimState.UNVERIFIABLE
+        assert not ours.still_ours()
+        faults.denied.clear()
+
+        faults.zeroed.add(ours.path)
+        assert ours.check() is ClaimState.UNVERIFIABLE
+        faults.zeroed.clear()
+
+        ours.path.rename(ours.path.with_name("aside"))
+        assert ours.check() is ClaimState.ABSENT
+        ours.path.mkdir()
+        assert ours.check() is ClaimState.REPLACED
+
+        never = StagingClaim(path=ours.path, identity=None)
+        assert never.check() is ClaimState.UNVERIFIABLE
+
+        # An ancestor that is a file: the path cannot exist, which is absence,
+        # the mapping ``bundle._collides`` already uses.
+        (tmp_path / "plain").write_text("x", encoding="utf-8")
+        under_a_file = StagingClaim(path=tmp_path / "plain" / "child", identity=(1, 2))
+        assert under_a_file.check() is ClaimState.ABSENT
+
+    def test_a_zero_inode_now_is_unverifiable_not_replaced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from helpers import LstatFaults
+
+        from memtomem.context.migrate import StagingIdentityLostError
+
+        claim = self._claim(tmp_path)
+        LstatFaults(monkeypatch).zeroed.add(claim.path)
+
+        with pytest.raises(StagingIdentityLostError) as exc_info:
+            claim.assert_still_ours("promote")
+
+        assert "replaced out of band" not in str(exc_info.value)
+        assert "cannot be verified" in str(exc_info.value)
+        assert exc_info.value.cause == "unverifiable"
+
+    def test_an_unreadable_entry_is_refused_not_waved_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from helpers import LstatFaults
+
+        from memtomem.context.migrate import StagingIdentityLostError
+
+        claim = self._claim(tmp_path)
+        LstatFaults(monkeypatch).denied.add(claim.path)
+
+        with pytest.raises(StagingIdentityLostError) as exc_info:
+            claim.assert_still_ours("promote")
+
+        assert exc_info.value.cause == "unverifiable"
+        assert "replaced out of band" not in str(exc_info.value)
+
+    def test_a_replacement_keeps_the_replaced_cause(self, tmp_path: Path) -> None:
+        from memtomem.context.migrate import StagingIdentityLostError
+
+        claim = self._claim(tmp_path)
+        claim.path.rename(claim.path.with_name("aside"))
+        claim.path.mkdir()
+
+        with pytest.raises(StagingIdentityLostError, match="was replaced out of band") as info:
+            claim.assert_still_ours("promote")
+        assert info.value.cause == "replaced"
+
+
+class TestRestoreSourceProbes:
+    """``_restore_source`` renames back only an entry it has shown to be ours (#3608)."""
+
+    @staticmethod
+    def _setup(tmp_path: Path):
+        from memtomem.context.migrate import StagingClaim
+
+        store = tmp_path / "store"
+        store.mkdir()
+        entry = store / ".migrate-foo-1-aa.tmp"
+        entry.mkdir()
+        (entry / "agent.md").write_text("ours\n", encoding="utf-8")
+        src = tmp_path / "src-store" / "foo"
+        src.parent.mkdir()
+        return StagingClaim.capture(entry), src
+
+    @staticmethod
+    def _spy_rename(monkeypatch: pytest.MonkeyPatch, fail_with: OSError | None = None):
+        from memtomem.context import migrate as migrate_mod
+
+        calls: list[tuple[Path, Path]] = []
+        real = migrate_mod.rename_no_replace
+
+        def rename(a, b, **kwargs):
+            calls.append((Path(a), Path(b)))
+            if fail_with is not None:
+                raise fail_with
+            return real(a, b, **kwargs)
+
+        monkeypatch.setattr(migrate_mod, "rename_no_replace", rename)
+        return calls
+
+    def test_an_unreadable_entry_is_not_renamed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from helpers import LstatFaults
+
+        from memtomem.context.migrate import RestoreOutcome, _restore_source
+
+        claim, src = self._setup(tmp_path)
+        calls = self._spy_rename(monkeypatch)
+        LstatFaults(monkeypatch).denied.add(claim.path)
+
+        outcome = _restore_source(claim, src, allow_cross_parent=True)
+
+        # The behaviour first, so the baseline fails on it rather than on the
+        # enum member this change adds.
+        assert calls == []
+        assert outcome is RestoreOutcome.IDENTITY_UNVERIFIABLE
+        assert (claim.path / "agent.md").read_text(encoding="utf-8") == "ours\n"
+
+    def test_an_absent_entry_is_not_renamed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        from memtomem.context.migrate import RestoreOutcome, _restore_source
+
+        claim, src = self._setup(tmp_path)
+        shutil.rmtree(claim.path)
+        calls = self._spy_rename(monkeypatch)
+        caplog.set_level("ERROR")
+
+        outcome = _restore_source(claim, src, allow_cross_parent=True)
+
+        assert outcome is RestoreOutcome.REFUSED
+        assert calls == []
+        assert any("is gone" in r.getMessage() for r in caplog.records), caplog.records
+
+    def test_an_entry_unreadable_after_a_failed_rename_is_not_called_gone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        from helpers import LstatFaults
+
+        from memtomem.context import migrate as migrate_mod
+        from memtomem.context.migrate import RestoreOutcome, _restore_source
+
+        claim, src = self._setup(tmp_path)
+        faults = LstatFaults(monkeypatch)
+
+        def rename(a, b, **kwargs):
+            faults.denied.add(claim.path)
+            raise PermissionError(errno.EACCES, "Permission denied", str(a))
+
+        monkeypatch.setattr(migrate_mod, "rename_no_replace", rename)
+        caplog.set_level("ERROR")
+
+        outcome = _restore_source(claim, src, allow_cross_parent=True)
+
+        assert outcome is RestoreOutcome.REFUSED
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("is gone" in m for m in messages), messages
+        assert any("could not be verified" in m and str(claim.path) in m for m in messages)
+        faults.denied.clear()
+        assert (claim.path / "agent.md").read_text(encoding="utf-8") == "ours\n"
+
+    def test_an_unreadable_source_gets_no_move_back_advice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        """Move-back advice writes the source path, which may be occupied when unread."""
+        from helpers import LstatFaults
+
+        from memtomem.context.migrate import RestoreOutcome, _restore_source
+
+        claim, src = self._setup(tmp_path)
+        faults = LstatFaults(monkeypatch)
+        faults.denied.add(src)
+        self._spy_rename(monkeypatch, PermissionError(errno.EACCES, "denied", str(src)))
+        caplog.set_level("ERROR")
+
+        outcome = _restore_source(claim, src, allow_cross_parent=True)
+
+        assert outcome is RestoreOutcome.REFUSED
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("mv it back" in m for m in messages), messages
+        assert any("reconcile" in m and str(claim.path) in m for m in messages), messages
+
+
+def test_stage_move_unwind_after_an_identity_refusal_is_a_partial_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An identity refusal after the source was parked must not read as retryable (#3608).
+
+    EXDEV path: the source is renamed into a holding entry beside itself, the
+    fill refuses on an identity question, and a writer has recreated the source
+    meanwhile, so the rename-back is refused. The artifact is parked, not where
+    the user left it — the refusal's own "nothing was promoted… then retry" is
+    the wrong report, and a retry would move the writer's entry instead.
+    """
+    from memtomem.context import migrate as migrate_mod
+    from memtomem.context.migrate import (
+        MigratePartialError,
+        StagingIdentityLostError,
+        _stage_move,
+    )
+
+    src = tmp_path / "src-store" / "foo"
+    src.mkdir(parents=True)
+    (src / "agent.md").write_text("original\n", encoding="utf-8")
+    dst_parent = tmp_path / "dst-store"
+    real_rename = migrate_mod.rename_no_replace
+
+    def exdev_rename(a, b, **kwargs):
+        if Path(a).parent != Path(b).parent:
+            raise OSError(errno.EXDEV, "Invalid cross-device link", str(a))
+        return real_rename(a, b, **kwargs)
+
+    def fill_refuses(holding_path, *args, **kwargs):
+        src.mkdir()
+        (src / "agent.md").write_text("racer\n", encoding="utf-8")
+        # The baseline's signature (no ``cause``), so the cell exercises the
+        # refusal on unchanged code instead of failing on construction.
+        raise StagingIdentityLostError("transfer staging cannot be verified: injected.")
+
+    monkeypatch.setattr(migrate_mod, "rename_no_replace", exdev_rename)
+    monkeypatch.setattr(migrate_mod, "_stage_copy_into", fill_refuses)
+
+    with pytest.raises(MigratePartialError) as exc_info:
+        _stage_move(src, dst_parent, "foo")
+
+    message = str(exc_info.value)
+    assert "Do NOT retry" in message
+    parked = [p for p in src.parent.iterdir() if p.name.startswith(".migrate-")]
+    assert len(parked) == 1, parked
+    assert str(parked[0]) in message
+    assert (parked[0] / "agent.md").read_text(encoding="utf-8") == "original\n"
+    assert (src / "agent.md").read_text(encoding="utf-8") == "racer\n"
+
+
+def test_stage_move_unwind_that_restores_keeps_the_identity_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other side of #3608's rule: restored means nothing moved, so the 409 holds."""
+    from memtomem.context import migrate as migrate_mod
+    from memtomem.context.migrate import StagingIdentityLostError, _stage_move
+
+    src = tmp_path / "src-store" / "foo"
+    src.mkdir(parents=True)
+    (src / "agent.md").write_text("original\n", encoding="utf-8")
+    real_rename = migrate_mod.rename_no_replace
+
+    def exdev_rename(a, b, **kwargs):
+        if Path(a).parent != Path(b).parent:
+            raise OSError(errno.EXDEV, "Invalid cross-device link", str(a))
+        return real_rename(a, b, **kwargs)
+
+    def fill_refuses(*args, **kwargs):
+        raise StagingIdentityLostError("transfer staging cannot be verified: injected.")
+
+    monkeypatch.setattr(migrate_mod, "rename_no_replace", exdev_rename)
+    monkeypatch.setattr(migrate_mod, "_stage_copy_into", fill_refuses)
+
+    with pytest.raises(StagingIdentityLostError, match="injected"):
+        _stage_move(src, tmp_path / "dst-store", "foo")
+
+    assert (src / "agent.md").read_text(encoding="utf-8") == "original\n"
+    assert not [p for p in src.parent.iterdir() if p.name.startswith(".migrate-")]
+
+
+def test_promote_of_an_absent_claim_renames_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A consumer acts only on an entry shown to be ours — absent is not that (#3608).
+
+    Passing an absent claim through to the rename let an entry that appeared
+    after the probe be promoted without its identity ever being compared.
+    """
+    from memtomem.context import migrate as migrate_mod
+    from memtomem.context.migrate import StagingClaim, _promote_move
+
+    entry = tmp_path / "store" / ".migrate-foo-1-aa.tmp"
+    entry.parent.mkdir()
+    entry.mkdir()
+    claim = StagingClaim.capture(entry)
+    entry.rmdir()
+    calls: list[tuple[object, object]] = []
+    monkeypatch.setattr(migrate_mod, "rename_no_replace", lambda a, b, **k: calls.append((a, b)))
+
+    with pytest.raises(FileNotFoundError):
+        _promote_move(claim, tmp_path / "store" / "foo")
+
+    assert calls == []

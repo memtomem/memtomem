@@ -29,6 +29,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A failed transfer move reports the entries it can actually see (#3608).** The rollback
+  read an entry it could not `lstat` (for example, a parent without search permission) as
+  absent, and an identity it could no longer read as replaced. It then logged "no copy of
+  them survives — nothing left to recover" with the staging copy on disk, called the entry
+  it had just failed to rename back "gone", and on a cross-filesystem move told the operator
+  to look for a renamed copy and delete it while the copy sat at the path it named. Each
+  entry is now judged from one `lstat` as absent, ours, replaced or unverifiable, and only
+  an entry shown to be ours is renamed back or removed. A move that refuses on a file
+  identity after its source was consumed, and cannot put it back, is reported as a partial
+  commit (web 500, "Do NOT retry") instead of the retryable 409, since a retry would move
+  whatever is now at the canonical path. The 409 `transfer_staging_replaced` message
+  starts by saying what the engine refused on (a replaced staging entry, an unverifiable
+  one, or the source, in which case nothing was moved) and keeps #3609's account of what
+  may be left on disk. The reason code is unchanged.
+
 - **A transfer refused for an unverifiable file identity stops saying nothing was removed
   (#3609).** When a cleanup or rollback follows the refusal, it can delete the staging copy if
   a later identity read succeeds (reproduced by failing one `lstat` in tests, for a `copy`

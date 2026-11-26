@@ -2627,3 +2627,283 @@ class TestAMoveWithoutFileIdentity:
         assert len(staged) == 1
         assert str(staged[0]) in message
         assert (staged[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+
+
+class TestRollbackIdentityGaps:
+    """#3608: the move rollback reports what a probe of each entry actually showed.
+
+    ``os.path.lexists`` answers ``False`` for an entry it cannot read, and a
+    re-read identity that fails looked the same as a replacement, so the
+    recovery text said "gone", "no copy survives" or "replaced" about entries
+    that were present, ours, and holding the artifact.
+    """
+
+    @staticmethod
+    def _move(two_projects):
+        return transfer_artifact(
+            "agents",
+            "foo",
+            src_project_root=two_projects["a"],
+            from_scope="project_shared",
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode="move",
+            apply_=True,
+        )
+
+    @staticmethod
+    def _exdev(monkeypatch) -> None:
+        from memtomem.context import migrate as migrate_mod
+
+        real_rename = migrate_mod.rename_no_replace
+
+        def exdev_rename(src, dst, **kwargs):
+            if Path(src).parent != Path(dst).parent:
+                raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
+            return real_rename(src, dst, **kwargs)
+
+        monkeypatch.setattr(migrate_mod, "rename_no_replace", exdev_rename)
+
+    def test_an_unreadable_staging_entry_is_not_reported_gone(
+        self, two_projects, monkeypatch, caplog
+    ):
+        import logging as _logging
+
+        import memtomem.context.transfer as transfer_mod
+        from helpers import LstatFaults
+
+        _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        faults = LstatFaults(monkeypatch)
+
+        def promote_fails(claim, dst):
+            faults.denied.add(claim.path)
+            raise OSError(errno.EIO, "injected promote failure")
+
+        monkeypatch.setattr(transfer_mod, "_promote_move", promote_fails)
+        caplog.set_level(_logging.ERROR)
+
+        # The source was consumed and could not be put back, and the entry
+        # holding it cannot be vouched for: a partial commit that names the
+        # entry as the place to look.
+        with pytest.raises(MigratePartialError) as exc_info:
+            self._move(two_projects)
+
+        faults.denied.clear()
+        messages = [r.getMessage() for r in caplog.records]
+        staged = list(dst_root.glob(".migrate-*"))
+        assert len(staged) == 1, staged
+        assert (staged[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+        assert not any("no copy of them survives" in m for m in messages), messages
+        assert not any("is gone" in m for m in messages), messages
+        assert "could not be verified" in str(exc_info.value)
+        assert str(staged[0]) in str(exc_info.value)
+        assert any("could not be verified" in m and str(staged[0]) in m for m in messages)
+
+    def test_an_unreadable_source_is_not_renamed_onto(self, two_projects, monkeypatch, caplog):
+        """A source path the ladder cannot read may be occupied; nothing is put there."""
+        import logging as _logging
+
+        import memtomem.context.transfer as transfer_mod
+        from helpers import LstatFaults
+
+        manifest = _write_canonical(
+            two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+        )
+        src_dir = manifest.parent
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        faults = LstatFaults(monkeypatch)
+
+        def promote_fails(claim, dst):
+            faults.denied.add(src_dir)
+            raise OSError(errno.EIO, "injected promote failure")
+
+        monkeypatch.setattr(transfer_mod, "_promote_move", promote_fails)
+        caplog.set_level(_logging.ERROR)
+
+        with pytest.raises(OSError, match="injected promote failure"):
+            self._move(two_projects)
+
+        faults.denied.clear()
+        messages = [r.getMessage() for r in caplog.records]
+        assert not src_dir.exists()
+        staged = list(dst_root.glob(".migrate-*"))
+        assert len(staged) == 1, staged
+        assert (staged[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+        assert any("could not be checked" in m and str(src_dir) in m for m in messages)
+
+    def test_a_recreated_source_with_unverifiable_staging_is_a_partial_commit(
+        self, two_projects, monkeypatch
+    ):
+        """Item 2: the refusal's "then retry" would move the racer's entry next time."""
+        import memtomem.context.migrate as migrate_mod
+        import memtomem.context.transfer as transfer_mod
+
+        manifest = _write_canonical(
+            two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+        )
+        dst_root = _canonical_root(two_projects, "agents", "project_shared", "b")
+        real_identity = migrate_mod._staging_identity
+        real_scan = transfer_mod.scan_artifact_tree
+
+        def identity(path):
+            if path.parent == dst_root and path.name.startswith(".migrate-"):
+                return None
+            return real_identity(path)
+
+        def scan_and_recreate(*args, **kwargs):
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text("racer\n", encoding="utf-8")
+            return real_scan(*args, **kwargs)
+
+        monkeypatch.setattr(migrate_mod, "_staging_identity", identity)
+        monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_and_recreate)
+
+        with pytest.raises(MigratePartialError) as exc_info:
+            self._move(two_projects)
+
+        message = str(exc_info.value)
+        assert "Do NOT retry" in message
+        staged = list(dst_root.glob(".migrate-*"))
+        assert len(staged) == 1, staged
+        assert str(staged[0]) in message
+        assert (staged[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+        assert manifest.read_text(encoding="utf-8") == "racer\n"
+
+    def test_exdev_cleanup_of_an_unverifiable_holding_entry_is_not_called_replaced(
+        self, two_projects, monkeypatch
+    ):
+        import memtomem.context.transfer as transfer_mod
+        from helpers import LstatFaults
+
+        manifest = _write_canonical(
+            two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+        )
+        src_store = manifest.parent.parent
+        self._exdev(monkeypatch)
+        faults = LstatFaults(monkeypatch)
+        real_promote = transfer_mod._promote_move
+
+        def promote_then_zero(claim, dst):
+            real_promote(claim, dst)
+            faults.zeroed.update(src_store.glob(".migrate-*"))
+
+        monkeypatch.setattr(transfer_mod, "_promote_move", promote_then_zero)
+
+        with pytest.raises(MigratePartialError) as exc_info:
+            self._move(two_projects)
+
+        faults.zeroed.clear()
+        message = str(exc_info.value)
+        parked = list(src_store.glob(".migrate-*"))
+        assert len(parked) == 1, parked
+        assert "is no longer the one this transfer parked" not in message
+        assert "under a name it was renamed to" not in message
+        assert "could not be verified" in message
+        assert str(parked[0]) in message
+        assert (parked[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+
+    def test_exdev_cleanup_does_not_remove_an_unreadable_holding_entry(
+        self, two_projects, monkeypatch
+    ):
+        """An entry the cleanup cannot verify is refused before anything is removed."""
+        import memtomem.context.transfer as transfer_mod
+        from helpers import LstatFaults
+
+        manifest = _write_canonical(
+            two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+        )
+        src_store = manifest.parent.parent
+        self._exdev(monkeypatch)
+        faults = LstatFaults(monkeypatch)
+        real_promote = transfer_mod._promote_move
+
+        def promote_then_deny(claim, dst):
+            real_promote(claim, dst)
+            faults.denied.update(src_store.glob(".migrate-*"))
+
+        monkeypatch.setattr(transfer_mod, "_promote_move", promote_then_deny)
+
+        with pytest.raises(MigratePartialError, match="could not be verified"):
+            self._move(two_projects)
+
+        faults.denied.clear()
+        parked = list(src_store.glob(".migrate-*"))
+        assert len(parked) == 1, parked
+        assert (parked[0] / "agent.md").read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+
+
+def test_a_removal_that_stops_on_an_unreadable_entry_is_not_reported_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3608: an ENOENT mid-removal is accepted only when the entry is SEEN absent.
+
+    ``os.path.lexists`` calls an unreadable entry absent, so a removal that
+    stopped half-way on an entry it could no longer read was reported as a
+    completed one — and the move as finished, with the parked copy on disk.
+    """
+    from helpers import LstatFaults
+
+    import memtomem.context.transfer as transfer_mod
+    from memtomem.context.migrate import StagingClaim, StagingIdentityLostError
+
+    entry = tmp_path / ".migrate-foo-1-aa.tmp"
+    entry.mkdir()
+    (entry / "agent.md").write_text("parked\n", encoding="utf-8")
+    claim = StagingClaim.capture(entry)
+    faults = LstatFaults(monkeypatch)
+
+    def rmtree_stops(path, *args, **kwargs):
+        faults.denied.add(entry)
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(path))
+
+    monkeypatch.setattr(transfer_mod.shutil, "rmtree", rmtree_stops)
+
+    with pytest.raises(StagingIdentityLostError, match="cannot be verified"):
+        transfer_mod._remove_entry(claim)
+
+    faults.denied.clear()
+    assert (entry / "agent.md").read_text(encoding="utf-8") == "parked\n"
+
+
+def test_an_empty_staging_set_with_an_occupied_source_is_not_called_unrecoverable(
+    two_projects, monkeypatch, caplog
+):
+    """#3608: "nothing left to recover" only when the canonical path was seen empty too.
+
+    Here the bytes went home by hand: a writer renamed the staging entry back
+    onto the source while the transfer was failing. No staging copy survives,
+    and the artifact is exactly where the user left it.
+    """
+    import logging as _logging
+
+    import memtomem.context.transfer as transfer_mod
+
+    manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    src_dir = manifest.parent
+
+    def promote_fails_after_a_hand_restore(claim, dst):
+        claim.path.rename(src_dir)
+        raise OSError(errno.EIO, "injected promote failure")
+
+    monkeypatch.setattr(transfer_mod, "_promote_move", promote_fails_after_a_hand_restore)
+    caplog.set_level(_logging.ERROR)
+
+    with pytest.raises(OSError, match="injected promote failure"):
+        transfer_artifact(
+            "agents",
+            "foo",
+            src_project_root=two_projects["a"],
+            from_scope="project_shared",
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode="move",
+            apply_=True,
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert not any("nothing left to recover" in m for m in messages), messages
+    assert any("no transfer staging copy of them was found" in m for m in messages), messages
