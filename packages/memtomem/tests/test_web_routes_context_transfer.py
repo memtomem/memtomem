@@ -1343,7 +1343,8 @@ def _gate_a_detail(hits: int) -> str:
         f"Gate A: a file in the artifact contains {hits} privacy pattern hit(s); write to "
         "scope='project_shared' rejected. git history is forever — no force bypass available "
         "for project_shared (ADR-0011 §5). Remove the secret-shaped values from the source "
-        "artifact and retry; the server log has the details."
+        "artifact or from the new name the request gives it, and retry; the server log has "
+        "the details."
     )
 
 
@@ -1363,11 +1364,12 @@ def _shared_body(**overrides) -> dict:
 
 
 def _refusal_logs(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [
-        r.getMessage()
-        for r in caplog.records
-        if r.name == _ROUTE_LOGGER and "refused (privacy_blocked)" in r.getMessage()
-    ]
+    """The route's warning lines for this arm, each one scanned line with no traceback.
+
+    A redacted line no longer carries the reason code (#3614), so every
+    route record counts; the arm under test emits the only one.
+    """
+    return [r.getMessage() for r in _transfer_records(caplog)]
 
 
 @pytest.mark.asyncio
@@ -1449,20 +1451,46 @@ async def test_privacy_422_same_project_move_is_path_free(client, cwd_root: Path
     ],
 )
 async def test_privacy_422_sends_no_byte_of_the_offending_file_name(
-    client, cwd_root: Path, tmp_path: Path, file_name: str
+    client, cwd_root: Path, tmp_path: Path, file_name: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The offending file's name is bytes the request did not choose (#3605)."""
+    """The offending file's name is bytes the request did not choose (#3605).
+
+    The log line gets the engine text only through the route's scanned,
+    escaped logger: no raw name, no control character."""
     manifest = _write_skill(_shared_skills(cwd_root), "foo")
     (manifest.parent / file_name).write_text(_SECRET_BODY, encoding="utf-8")
     other = _other_project(tmp_path)
     scope_b = await _register(client, other)
 
-    resp = await client.post(
-        "/api/context/skills/foo/transfer", json=_shared_body(to_project_scope_id=scope_b)
-    )
+    with caplog.at_level(logging.WARNING, logger=_ROUTE_LOGGER):
+        resp = await client.post(
+            "/api/context/skills/foo/transfer", json=_shared_body(to_project_scope_id=scope_b)
+        )
     assert resp.status_code == 422, resp.text
     assert resp.json() == {"detail": _gate_a_detail(1)}
     _assert_path_free(resp.json(), cwd_root, other)
+    (line,) = _refusal_logs(caplog)
+    assert file_name not in line
+    assert not any(ord(c) < 0x20 or ord(c) == 0x7F for c in line), line
+    assert "AKIA1234567890ABCDEF" not in line
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_blocked_by_the_requested_name(client, cwd_root: Path) -> None:
+    """A clean source copied under a credential-shaped ``as_name``: the staged
+    bytes carry the new name, so the remedy names it, and the wire does not
+    echo it (#3605)."""
+    src_manifest = _write_agent(_local_agents(cwd_root), "foo")
+    before = src_manifest.read_bytes()
+    new_name = "AKIA1234567890ABCDEF"
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer", json=_shared_body(as_name=new_name)
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    assert new_name not in resp.text
+    assert src_manifest.read_bytes() == before
 
 
 @pytest.mark.asyncio

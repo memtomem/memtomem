@@ -374,15 +374,17 @@ _REFUSED_MESSAGE = "the transfer request was refused; the server log has the det
 #: The 422 for a Gate A privacy block (#3605). It is built from the hit count alone:
 #: the engine's text names the offending file by its absolute path, and a file name is
 #: bytes the request did not choose, so none of it reaches the wire. The scan stops at
-#: the first blocked file, so the count is that file's, not the artifact's.
+#: the first blocked file, so the count is that file's, not the artifact's. The scan
+#: reads the staged bytes, which carry a requested ``as_name``, so the remedy names both.
 _PRIVACY_BLOCKED_TEMPLATE = (
     "Gate A: a file in the artifact contains {hits} privacy pattern hit(s); write to "
     "scope='project_shared' rejected. git history is forever — no force bypass available "
     "for project_shared (ADR-0011 §5). Remove the secret-shaped values from the source "
-    "artifact and retry; the server log has the details."
+    "artifact or from the new name the request gives it, and retry; the server log has "
+    "the details."
 )
-#: The 422 for any other privacy-scan failure, such as a file the scan could not read
-#: or list (#3605).
+#: The 422 for any other ``PrivacyScanError``, such as a file the scan could not read
+#: or a directory it could not list (#3605).
 _PRIVACY_REFUSED_MESSAGE = (
     "Gate A could not scan the artifact, so the write to project_shared was refused; "
     "the server log has the details."
