@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 
 import pytest
+
+from _subprocess_env import subprocess_env
 
 _VAR = "ORT_DISABLE_TELEMETRY"
 
@@ -27,12 +28,14 @@ _CHILD = (
 
 
 def _import_memtomem(preset: str | None) -> dict:
-    env = os.environ.copy()
+    env = subprocess_env()
     env.pop(_VAR, None)
     if preset is not None:
         env[_VAR] = preset
     completed = subprocess.run(
-        [sys.executable, "-c", _CHILD],
+        # ``-P``: ``-c`` puts the working directory ahead of PYTHONPATH,
+        # which ``subprocess_env()`` starts with this run's source root.
+        [sys.executable, "-P", "-c", _CHILD],
         env=env,
         capture_output=True,
         text=True,
