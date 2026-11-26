@@ -78,7 +78,11 @@ async def mem_decision_record(
     from memtomem.server.tools.memory_crud import _REPLAY_MARKER, _mem_add_core
     from memtomem.server.tools.search import _resolve_project_context_root
     from memtomem.server.validation import MAX_CONTENT_LENGTH
-    from memtomem.tools.memory_writer import entry_guard_text
+    from memtomem.tools.memory_writer import (
+        entry_guard_text,
+        entry_open_fence,
+        open_fence_refusal,
+    )
 
     try:
         record = build_decision_record(
@@ -150,6 +154,14 @@ async def mem_decision_record(
             "directory."
         )
     namespace = validate_writable_namespace(f"shared:{record.project}")
+
+    # The core refuses an entry that leaves a code fence open (#3618); asked
+    # here too, ahead of the scans, as every entry writer asks before its guard.
+    # The rendered record closes its own ```json fence, so this is not expected
+    # to fire.
+    fence = entry_open_fence(record.body, record.title, record.tags)
+    if fence is not None:
+        return f"Error: {open_fence_refusal(fence)}"
 
     # Two scans. The first is the text the core's own guard reads for these
     # arguments, so a record that passes here cannot be refused there with

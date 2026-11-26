@@ -611,7 +611,22 @@ class MemtomemStore:
 
         # ADR-0011 §5 Gate A, now told which tier it is scanning for. It reads
         # the entry as it is written, title and tags included.
-        from memtomem.tools.memory_writer import entry_guard_text
+        from memtomem.tools.memory_writer import (
+            entry_guard_text,
+            entry_open_fence,
+            open_fence_refusal,
+        )
+
+        # An entry that leaves a fence open makes every later entry in the file
+        # code inside it (#3618).
+        fence = entry_open_fence(content, title, tags)
+        if fence is not None:
+            return {
+                "error": "unclosed_code_fence",
+                "fence": fence,
+                "surface": "langgraph_add",
+                "message": open_fence_refusal(fence),
+            }
 
         guard = privacy.enforce_write_guard(
             entry_guard_text(content, title, tags),

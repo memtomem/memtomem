@@ -422,7 +422,18 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         )
 
         from memtomem import privacy
-        from memtomem.tools.memory_writer import append_entry, entry_guard_text
+        from memtomem.tools.memory_writer import (
+            append_entry,
+            entry_guard_text,
+            entry_open_fence,
+            open_fence_refusal,
+        )
+
+        # A copy that leaves a fence open would make anything later appended to
+        # its file code inside it (#3618): refused like every other entry.
+        fence = entry_open_fence(chunk.content, title, tags)
+        if fence is not None:
+            raise click.ClickException(open_fence_refusal(fence))
 
         # The copy as it is written: the heading path becomes its title and
         # the source's tags go with it.
