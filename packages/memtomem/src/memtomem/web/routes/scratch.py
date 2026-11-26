@@ -119,7 +119,26 @@ async def promote_scratch(
         raise HTTPException(status_code=404, detail=f"Key '{key}' not found")
 
     from memtomem import privacy
-    from memtomem.tools.memory_writer import append_entry, entry_guard_text
+    from memtomem.tools.memory_writer import (
+        append_entry,
+        entry_guard_text,
+        entry_open_fence,
+        open_fence_refusal,
+    )
+
+    # An entry that leaves a fence open makes every later entry in the file
+    # code inside it (#3618).
+    fence = entry_open_fence(entry["value"], body.title, body.tags)
+    if fence is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "detail": "unclosed_code_fence",
+                "fence": fence,
+                "surface": "web_api_scratch_promote",
+                "message": open_fence_refusal(fence),
+            },
+        )
 
     # Promotion is the trust-boundary crossing — scratch is short-term
     # and stays in SQLite, but LTM markdown lands on disk and feeds

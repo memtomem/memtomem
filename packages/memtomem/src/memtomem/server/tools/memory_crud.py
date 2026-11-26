@@ -1107,7 +1107,15 @@ async def _mem_add_core(
         except ValueError as exc:
             return (f"Error: {exc}\n\nAvailable templates:\n{list_templates()}", None)
 
-    from memtomem.tools.memory_writer import entry_guard_text
+    from memtomem.tools.memory_writer import entry_guard_text, entry_open_fence, open_fence_refusal
+
+    # An entry that leaves a fence open makes every later entry in the file
+    # code inside it (#3618). Refused before the privacy guard, so the guard
+    # records no outcome (a Gate B consent line above can still have been
+    # emitted: it records the consent, not the write).
+    fence = entry_open_fence(content, title, tags)
+    if fence is not None:
+        return (f"Error: {open_fence_refusal(fence)}", None)
 
     guard = privacy.enforce_write_guard(
         entry_guard_text(content, title, tags),
@@ -2416,12 +2424,27 @@ async def mem_batch_add(
     # only record outcomes after deciding whether to commit the
     # whole batch (transactional invariant: no pass record on a
     # rejected batch).
-    from memtomem.tools.memory_writer import entry_guard_text
+    from memtomem.tools.memory_writer import entry_guard_text, entry_open_fence
 
     def _entry_fields(entry: dict) -> tuple[str | None, str, list[str] | None]:
         """``(title, value, tags)`` as the block is written; the guard reads the same."""
         key = entry.get("key") or entry.get("title", "")
         return key or None, entry.get("value") or entry.get("content", ""), entry.get("tags")
+
+    # A block that leaves a fence open would make every block after it, and every
+    # later entry in the file, code inside it (#3618). The whole batch is refused,
+    # before any guard decision is taken or recorded.
+    open_fences = []
+    for idx, entry in enumerate(entries):
+        entry_title, value, entry_tags = _entry_fields(entry)
+        if value and entry_open_fence(value, entry_title, entry_tags) is not None:
+            open_fences.append(idx)
+    if open_fences:
+        return (
+            f"Error: items at indices {open_fences} leave a code fence open, so every "
+            "entry written to the file after them would be indexed inside that fence. "
+            "Whole batch rejected; close the fences and retry."
+        )
 
     decisions: list[tuple[int, str, int]] = []  # (idx, decision, hit_count)
     for idx, entry in enumerate(entries):

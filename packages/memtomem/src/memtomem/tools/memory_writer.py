@@ -295,14 +295,70 @@ def entry_guard_text(
     Callers pass the same ``content``, ``title`` and ``tags`` they pass to
     :func:`append_entry`.
     """
-    block = _render_entry_block(
+    block = _fixed_entry_block(content, title, tags)
+    return _GUARD_PART_SEPARATOR.join([block, *(tags or [])])
+
+
+def _fixed_entry_block(content: str, title: str | None, tags: list[str] | None) -> str:
+    """The block :func:`format_entry_block` writes, with its generated parts held fixed."""
+    return _render_entry_block(
         content,
         title,
         tags,
         created="1970-01-01T00:00:00+00:00",
         untitled_heading=lambda: "## Entry",
     )
-    return _GUARD_PART_SEPARATOR.join([block, *(tags or [])])
+
+
+def entry_open_fence(
+    content: str,
+    title: str | None = None,
+    tags: list[str] | None = None,
+) -> str | None:
+    """The run of the code fence the entry ``append_entry`` writes leaves open, or ``None``.
+
+    The Markdown chunker reads a fence that never closes as running to the end
+    of the file (#3618), so every entry appended after this one would be
+    indexed as code inside it: no chunk, heading or tags of its own. Every
+    entry writer refuses such an entry before its privacy guard, its claim and
+    its write (:func:`open_fence_refusal` is the shared text). A Gate B consent
+    line a writer emits ahead of its guard can precede the refusal: it records
+    the consent, not the write.
+
+    The entry is read as the chunker will read it once written: the block
+    :func:`entry_guard_text` renders (title and heading as written, a
+    multi-line title included), in the indexer's text view (universal
+    newlines, so a lone ``\\r`` is a line break), with wikilinks resolved, as
+    ``MarkdownChunker.chunk_file`` resolves them before it looks for fences.
+
+    Every destination is judged, whatever its name: the path a writer is given
+    is not the path it resolves to, and a file that holds one entry today can
+    be appended to tomorrow. Refusing an entry whose fences are open in a file
+    no fence reader sees costs a retry; letting one through costs the index of
+    every later entry.
+
+    Callers pass the same ``content``, ``title`` and ``tags`` they pass to
+    :func:`append_entry`, and call this before their privacy guard.
+    """
+    from memtomem.chunking.markdown import resolve_wikilinks, unclosed_fence
+    from memtomem.indexing.redaction_exemption import indexer_text
+
+    block = _fixed_entry_block(content, title, tags)
+    view = indexer_text(block.encode("utf-8", errors="replace"), errors="replace")
+    return unclosed_fence(resolve_wikilinks(view))
+
+
+def open_fence_refusal(run: str) -> str:
+    """The refusal every entry writer gives for :func:`entry_open_fence`.
+
+    It names only the fence run, never caller text: it is shown before the
+    privacy guard has read the entry.
+    """
+    return (
+        f"The entry leaves a {run} code fence open, so every entry written to the file "
+        "after it would be indexed inside that fence. Close the fence and retry; "
+        "nothing was written."
+    )
 
 
 def append_blocks(file_path: Path, blocks: Sequence[str], *, judged: JudgedSource) -> Appended:

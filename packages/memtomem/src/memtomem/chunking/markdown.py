@@ -86,17 +86,24 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 _BOLD_LABEL_RE = re.compile(r"^[ \t]*\*\*[^*\n]+\*\*", re.MULTILINE)
 
 
-def _fence_line_set(text: str) -> frozenset[int]:
-    """Return 1-indexed line numbers covered by a code fence, opener and closer
-    lines included.
+@dataclass(frozen=True)
+class _FenceSpan:
+    """One code fence: its 0-indexed opener and last line, and its opening run."""
 
-    Including the marker lines keeps a ``# heading``-shaped fence-marker
-    metadata row from being treated as a true markdown heading.
+    start: int
+    end: int
+    run: str
+    closed: bool
 
-    Handles unclosed fences at EOF by treating the rest of the file as fenced.
+
+def _fence_spans(lines: list[str]) -> list[_FenceSpan]:
+    """The code fences in ``lines``, in order.
+
+    A fence closes at the next line holding a run of the same character, at
+    least as long, with nothing after it. One that never closes runs to the
+    last line (``closed`` is False), which is how Markdown reads it.
     """
-    lines = split_source_lines(text)
-    inside: set[int] = set()
+    spans: list[_FenceSpan] = []
     i = 0
     while i < len(lines):
         m = _FENCE_OPEN_RE.match(lines[i])
@@ -106,7 +113,6 @@ def _fence_line_set(text: str) -> frozenset[int]:
         run = m.group(1)
         fence_char = run[0]
         min_len = len(run)
-        start = i
         j = i + 1
         while j < len(lines):
             m2 = _FENCE_OPEN_RE.match(lines[j])
@@ -115,11 +121,41 @@ def _fence_line_set(text: str) -> frozenset[int]:
                 if run2[0] == fence_char and len(run2) >= min_len and not m2.group(2).strip():
                     break
             j += 1
-        end = j if j < len(lines) else len(lines) - 1
-        for k in range(start, end + 1):
-            inside.add(k + 1)  # 1-indexed
+        closed = j < len(lines)
+        end = j if closed else len(lines) - 1
+        spans.append(_FenceSpan(start=i, end=end, run=run, closed=closed))
         i = end + 1
+    return spans
+
+
+def _fence_line_set(text: str) -> frozenset[int]:
+    """Return 1-indexed line numbers covered by a code fence, opener and closer
+    lines included.
+
+    Including the marker lines keeps a ``# heading``-shaped fence-marker
+    metadata row from being treated as a true markdown heading.
+
+    Handles unclosed fences at EOF by treating the rest of the file as fenced.
+    """
+    inside: set[int] = set()
+    for span in _fence_spans(split_source_lines(text)):
+        inside.update(range(span.start + 1, span.end + 2))  # 1-indexed
     return frozenset(inside)
+
+
+def unclosed_fence(text: str) -> str | None:
+    """The opening run of the fence ``text`` ends inside, or ``None``.
+
+    The same reading :func:`_fence_line_set` gives the chunker, so a writer can
+    ask whether the next text appended after ``text`` would be read as code.
+    Only the run is returned (````` ``` `````, ``~~~~``), never the opener's
+    info string. ``text`` is taken as the chunker reads it: a caller holding
+    text before wikilink resolution or newline translation resolves it first.
+    """
+    spans = _fence_spans(split_source_lines(text))
+    if spans and not spans[-1].closed:
+        return spans[-1].run
+    return None
 
 
 def _split_paragraphs_fence_aware(text: str) -> list[str]:
