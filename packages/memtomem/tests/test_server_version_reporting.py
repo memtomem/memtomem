@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from _subprocess_env import subprocess_env
+
 import memtomem
 from memtomem.server import mcp
 
@@ -57,7 +59,7 @@ def test_initialize_response_reports_memtomem_version(tmp_path: Path) -> None:
     xdg.mkdir()
     os.chmod(xdg, 0o700)
 
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -74,7 +76,9 @@ def test_initialize_response_reports_memtomem_version(tmp_path: Path) -> None:
     }
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "memtomem.server"],
+        # ``-P``: ``-m`` puts the working directory ahead of PYTHONPATH,
+        # which ``subprocess_env()`` starts with this run's source root.
+        [sys.executable, "-P", "-m", "memtomem.server"],
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

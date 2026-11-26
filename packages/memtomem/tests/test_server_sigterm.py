@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+from _subprocess_env import subprocess_env
+
 from memtomem.server import (
     _install_sigterm_handler,
     _sigterm_deferred,
@@ -159,7 +161,9 @@ def _spawn_server(env: dict[str, str]) -> subprocess.Popen:
     open — without that, the MCP stdio loop sees EOF immediately and
     exits via the normal path, defeating any SIGTERM / lifecycle check."""
     return subprocess.Popen(
-        [sys.executable, "-m", "memtomem.server"],
+        # ``-P``: ``-m`` puts the working directory ahead of PYTHONPATH,
+        # which ``subprocess_env()`` starts with this run's source root.
+        [sys.executable, "-P", "-m", "memtomem.server"],
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -271,7 +275,7 @@ def test_sigterm_unlinks_pid_file_end_to_end(tmp_path: Path) -> None:
     xdg.mkdir()
     os.chmod(xdg, 0o700)  # _runtime_paths validator requires owner-only
 
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -323,7 +327,7 @@ def test_server_stable_anchor_is_not_redirected_by_tmp_env(tmp_path: Path) -> No
     home.mkdir()
     tmp_tmp = tmp_path / "tmp"
     tmp_tmp.mkdir()
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["TMPDIR"] = str(tmp_tmp)
@@ -365,7 +369,7 @@ def test_server_start_creates_no_legacy_pid_file_end_to_end(tmp_path: Path) -> N
     xdg.mkdir()
     os.chmod(xdg, 0o700)
 
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -417,7 +421,7 @@ def test_server_ignores_exclusive_legacy_holder(tmp_path: Path) -> None:
     xdg.mkdir()
     os.chmod(xdg, 0o700)
 
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -478,7 +482,7 @@ def test_two_servers_on_different_stores_do_not_contend(tmp_path: Path) -> None:
     db2 = tmp_path / "store-b" / "memtomem.db"
 
     def _env_for(db: Path) -> dict[str, str]:
-        env = os.environ.copy()
+        env = subprocess_env()
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
         env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -607,7 +611,7 @@ def test_contended_server_start_preserves_pid_file_content(tmp_path: Path) -> No
     tmp_tmp.mkdir()
     if os.name != "nt":
         os.chmod(xdg, 0o700)
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -1050,7 +1054,7 @@ def test_handshake_only_server_registers_a_presence_marker(tmp_path: Path) -> No
     xdg.mkdir()
     os.chmod(xdg, 0o700)
 
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -1116,7 +1120,7 @@ def test_sigterm_removes_the_presence_marker(tmp_path: Path) -> None:
     xdg.mkdir()
     os.chmod(xdg, 0o700)
 
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -1154,7 +1158,7 @@ def test_second_server_cleans_its_marker_without_touching_the_primary(tmp_path: 
     xdg.mkdir()
     os.chmod(xdg, 0o700)
 
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -1217,7 +1221,7 @@ def test_unregisterable_presence_directory_warns_but_still_starts(tmp_path: Path
     xdg.mkdir()
     os.chmod(xdg, 0o700)
 
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)

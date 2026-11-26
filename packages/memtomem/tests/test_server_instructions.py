@@ -36,6 +36,8 @@ from typing import Any, Callable
 
 import pytest
 
+from _subprocess_env import subprocess_env
+
 from memtomem.constants import SHARED_NAMESPACE
 from memtomem.server import (
     _ALL_REGISTERED_TOOLS,
@@ -538,7 +540,7 @@ def test_initialize_response_carries_instructions(tmp_path: Path) -> None:
     xdg.mkdir()
     os.chmod(xdg, 0o700)
 
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -559,7 +561,9 @@ def test_initialize_response_carries_instructions(tmp_path: Path) -> None:
     }
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "memtomem.server"],
+        # ``-P``: ``-m`` puts the working directory ahead of PYTHONPATH,
+        # which ``subprocess_env()`` starts with this run's source root.
+        [sys.executable, "-P", "-m", "memtomem.server"],
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

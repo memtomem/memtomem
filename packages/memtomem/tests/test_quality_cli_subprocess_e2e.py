@@ -19,6 +19,8 @@ import sys
 
 import pytest
 
+from _subprocess_env import subprocess_env
+
 from .helpers import _MEMTOMEM_ENV_VARS
 
 
@@ -55,7 +57,7 @@ def test_quality_e2e_via_mm_binary(tmp_path):
     }
     (home / ".memtomem" / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
-    env = os.environ.copy()
+    env = subprocess_env()
     for var in _MEMTOMEM_ENV_VARS:
         env.pop(var, None)
     env["HOME"] = str(home)
@@ -175,7 +177,7 @@ def test_quality_experiment_e2e_via_mm_binary(tmp_path):
     }
     (home / ".memtomem" / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
-    env = os.environ.copy()
+    env = subprocess_env()
     for var in _MEMTOMEM_ENV_VARS:
         env.pop(var, None)
     env["HOME"] = str(home)

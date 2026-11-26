@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from _subprocess_env import subprocess_env
+
 from memtomem.server import (
     _ALL_REGISTERED_TOOLS,
     _CORE_TOOLS,
@@ -95,7 +97,7 @@ def _tools_under_mode(
     xdg.mkdir()
     os.chmod(xdg, 0o700)
 
-    env = os.environ.copy()
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["XDG_RUNTIME_DIR"] = str(xdg)
@@ -118,7 +120,9 @@ def _tools_under_mode(
     list_req = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "memtomem.server"],
+        # ``-P``: ``-m`` puts the working directory ahead of PYTHONPATH,
+        # which ``subprocess_env()`` starts with this run's source root.
+        [sys.executable, "-P", "-m", "memtomem.server"],
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

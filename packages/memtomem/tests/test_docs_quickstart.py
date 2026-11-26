@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from _subprocess_env import subprocess_env
+
 from .helpers import _MEMTOMEM_ENV_VARS
 
 
@@ -48,7 +50,7 @@ def test_documented_quickstart_round_trip(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
 
-    env = os.environ.copy()
+    env = subprocess_env()
     # ``HOME`` only isolates ``~/.memtomem/config.json`` reads; strip
     # developer ``MEMTOMEM_*`` overrides so pydantic-settings does not
     # re-point the subprocess at a real path (mirrors the subprocess e2e
