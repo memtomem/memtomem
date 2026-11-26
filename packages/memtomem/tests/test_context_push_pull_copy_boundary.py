@@ -25,9 +25,11 @@ literals or lines is one value. An f-string's interpolations read as ``{}``
 Text is classified by where it is published:
 
 * **public** — every ``str`` / ``bytes`` literal and f-string that is not a
-  docstring; the docstring of a FastAPI endpoint (decorated, or registered with
-  ``add_api_route``), of an MCP tool (``@mcp.tool`` / ``@register``), and of any
-  class in ``web/routes/`` (a pydantic model publishes its docstring);
+  docstring; the docstring of every function the running app or MCP server
+  publishes, read at test time from the mounted FastAPI routes (``prod`` and
+  ``dev`` modes) and the MCP tool registries (:func:`_published_callables`);
+  and the docstring of any class in ``web/routes/`` (a pydantic model
+  publishes its docstring);
 * **developer** — module docstrings and every other function or class docstring;
 * **internal** — ``#`` comments, which are not in the AST at all.
 
@@ -48,12 +50,14 @@ every compound), ``web/schemas/`` is not walked, a file in
 ``another sync may be in progress`` is not policed — whether "sync" is wrong
 there depends on which lock each site waits on.
 
-Three resolution limits, none of whose shapes exists in the trees today: an
-``add_api_route`` endpoint is resolved only when passed as a bare name (not
-``handlers.listed``); imports are collected from every scope of a module
-without lexical resolution, so two scopes importing different handlers under
-one alias leave one of them unresolved; and a site exemption names its function
-by bare name, so a same-named method in that file shares it.
+A function's docstring counts as published only when that function is
+mounted or registered: a route module the app never includes, or a tool the
+server never registers, is read as developer text. A published callable whose
+definition the walk cannot find fails
+:func:`test_every_published_callable_is_found_by_the_walk`, and a tool
+decorator that hides the function (no ``functools.wraps``) fails
+:func:`test_published_callables_reads_the_live_registries`, instead of quietly
+exempting its docstring.
 """
 
 from __future__ import annotations
@@ -65,6 +69,7 @@ import textwrap
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import Any
 from pathlib import Path
 
 import pytest
@@ -177,7 +182,11 @@ _SPAN_EXEMPTIONS = (
 
 @dataclass(frozen=True)
 class _SiteExemption:
-    """One exact substring, exempt only inside one function of one file."""
+    """One exact substring, exempt only inside one function of one file.
+
+    ``func`` is the function's ``__qualname__``: a same-named method, or a def
+    nested inside the function, is a different scope and is not exempt.
+    """
 
     relpath: str
     func: str
@@ -214,10 +223,6 @@ _OTHER_FEATURE_FILES = {
     "server/tools/importers.py": "Notion / Obsidian importers",
 }
 
-_ROUTE_METHODS = frozenset(
-    {"get", "post", "put", "patch", "delete", "head", "options", "trace", "api_route"}
-)
-
 _FuncDef = ast.FunctionDef | ast.AsyncFunctionDef
 
 
@@ -239,6 +244,47 @@ class ScanReport:
     excluded: list[str] = field(default_factory=list)
     public_literals: Counter[str] = field(default_factory=Counter)
     site_hits: Counter[_SiteExemption] = field(default_factory=Counter)
+    #: ``(module, __qualname__)`` of every def the walk saw.
+    defs: set[tuple[str, str]] = field(default_factory=set)
+
+
+def _published_callables() -> frozenset[tuple[str, str]]:
+    """``(module, __qualname__)`` of every function the product publishes.
+
+    Read from the running registries rather than from decorators in source:
+    every route ``create_app`` mounts in ``prod`` and ``dev`` mode (its
+    docstring becomes the OpenAPI description) and every MCP tool — the core
+    tools registered straight on ``mcp`` and the ``@register``-ed ``ACTIONS``
+    (their docstrings become tool descriptions and ``mem_do`` help). A
+    wrapper made with ``functools.wraps`` carries the defining function's
+    ``__module__`` and ``__qualname__``; without it the registries do not name
+    the defining function, and the registry tests below fail.
+
+    The route walk follows ``original_router`` the way
+    ``tests/web/test_web_invariants_registry.py`` does; ``_tool_manager`` is
+    FastMCP-private, the coupling ``tests/test_server_instructions.py`` accepts.
+    """
+    from starlette.routing import Route
+
+    from memtomem.server import mcp
+    from memtomem.server.tool_registry import ACTIONS
+    from memtomem.web.app import create_app
+
+    def walk(routes: list[object]) -> Iterator[Route]:
+        for route in routes:
+            if isinstance(route, Route):
+                yield route
+            elif hasattr(route, "original_router"):
+                yield from walk(route.original_router.routes)
+            elif hasattr(route, "routes"):
+                yield from walk(route.routes)
+
+    fns: list[Any] = []
+    for mode in ("prod", "dev"):
+        fns.extend(r.endpoint for r in walk(create_app(lifespan=None, mode=mode).routes))
+    fns.extend(tool.fn for tool in mcp._tool_manager.list_tools())
+    fns.extend(info.fn for info in ACTIONS.values())
+    return frozenset((fn.__module__, fn.__qualname__) for fn in fns)
 
 
 def _dotted(relpath: str) -> str:
@@ -246,70 +292,33 @@ def _dotted(relpath: str) -> str:
     return "memtomem." + relpath.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
 
 
-def _resolve_import(node: ast.ImportFrom, relpath: str) -> str | None:
-    """The absolute dotted module an ``ImportFrom`` names, if it can be read."""
-    if node.level == 0:
-        return node.module
-    # A module's relative imports start from its package; a package
-    # ``__init__``'s start from the package itself.
-    parts = _dotted(relpath).split(".")
-    if not relpath.endswith("/__init__.py"):
-        parts = parts[:-1]
-    if node.level > 1:
-        parts = parts[: -(node.level - 1)]
-    if not parts:
-        return None
-    return ".".join(parts + ([node.module] if node.module else []))
+def _walk_with_scope(tree: ast.Module) -> Iterator[tuple[ast.AST, str]]:
+    """Every node of *tree*, with the ``__qualname__`` of the scope whose body
+    holds it (``""`` at module level).
 
+    A def's decorators, defaults, bases and annotations are evaluated in the
+    enclosing scope, so they belong to it, not to the def being defined.
+    """
 
-def _route_endpoint_names(tree: ast.Module) -> Iterator[str]:
-    """Names passed as the endpoint of ``<router>.add_api_route(path, endpoint)``."""
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "add_api_route"
-        ):
-            continue
-        endpoint = node.args[1] if len(node.args) >= 2 else None
-        for kw in node.keywords:
-            if kw.arg == "endpoint":
-                endpoint = kw.value
-        if isinstance(endpoint, ast.Name):
-            yield endpoint.id
+    def visit(node: ast.AST, qual: str, in_func: bool) -> Iterator[tuple[ast.AST, str]]:
+        yield node, qual
+        if isinstance(node, _FuncDef | ast.ClassDef):
+            if in_func:
+                inner = f"{qual}.<locals>.{node.name}"
+            else:
+                inner = f"{qual}.{node.name}" if qual else node.name
+            body = {id(stmt) for stmt in node.body}
+            for child in ast.iter_child_nodes(node):
+                if id(child) in body:
+                    yield from visit(child, inner, isinstance(node, _FuncDef))
+                else:
+                    yield from visit(child, qual, in_func)
+        else:
+            for child in ast.iter_child_nodes(node):
+                yield from visit(child, qual, in_func)
 
-
-def _registered_endpoints(trees: dict[str, ast.Module]) -> set[tuple[str, str]]:
-    """``(dotted module, def name)`` of every def registered via ``add_api_route``."""
-    out: set[tuple[str, str]] = set()
-    for relpath, tree in trees.items():
-        module = _dotted(relpath)
-        imported: dict[str, tuple[str, str]] = {}
-        # Imports in any scope (a ``mount()`` function may import its
-        # handlers). Not lexically scoped, so a same-named def elsewhere in the
-        # module is policed too — the error is toward checking more.
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                source = _resolve_import(node, relpath)
-                if source is None:
-                    continue
-                for alias in node.names:
-                    imported[alias.asname or alias.name] = (source, alias.name)
-        for name in _route_endpoint_names(tree):
-            out.add(imported.get(name, (module, name)))
-    return out
-
-
-def _is_published_def(node: _FuncDef, module: str, endpoints: set[tuple[str, str]]) -> bool:
-    if (module, node.name) in endpoints:
-        return True
-    for deco in node.decorator_list:
-        target = deco.func if isinstance(deco, ast.Call) else deco
-        if isinstance(target, ast.Attribute) and target.attr in _ROUTE_METHODS | {"tool"}:
-            return True
-        if isinstance(target, ast.Name) and target.id == "register":
-            return True
-    return False
+    for child in ast.iter_child_nodes(tree):
+        yield from visit(child, "", False)
 
 
 def _docstring_node(node: ast.AST) -> ast.Constant | None:
@@ -320,26 +329,6 @@ def _docstring_node(node: ast.AST) -> ast.Constant | None:
     if isinstance(value, ast.Constant) and isinstance(value.value, str):
         return value
     return None
-
-
-def _walk_with_func(node: ast.AST, func: str | None = None) -> Iterator[tuple[ast.AST, str | None]]:
-    """Every node under *node*, with the name of the def whose body holds it.
-
-    A def's decorators, defaults and annotations are evaluated in the enclosing
-    scope, so they belong to the enclosing def, not to the one being defined.
-    """
-    for child in ast.iter_child_nodes(node):
-        yield child, func
-        if isinstance(child, _FuncDef):
-            for stmt in child.body:
-                yield stmt, child.name
-                yield from _walk_with_func(stmt, child.name)
-            for header in ast.iter_child_nodes(child):
-                if header not in child.body:
-                    yield header, func
-                    yield from _walk_with_func(header, func)
-        else:
-            yield from _walk_with_func(child, func)
 
 
 def _render(node: ast.Constant | ast.JoinedStr) -> str:
@@ -360,44 +349,54 @@ def _render(node: ast.Constant | ast.JoinedStr) -> str:
 
 
 def _public_literals(
-    relpath: str, tree: ast.Module, endpoints: set[tuple[str, str]]
-) -> Iterator[tuple[ast.Constant | ast.JoinedStr, str | None]]:
-    """Each public literal of a module once, with its enclosing def name."""
+    relpath: str,
+    tree: ast.Module,
+    endpoints: frozenset[tuple[str, str]],
+    defs: set[tuple[str, str]],
+) -> Iterator[tuple[ast.Constant | ast.JoinedStr, str]]:
+    """Each public literal of a module once, with the qualname of its scope.
+
+    Adds ``(module, qualname)`` of every def in the module to *defs*.
+    """
     module = _dotted(relpath)
-    developer_docs: set[int] = set()
+    docstrings: dict[int, ast.AST] = {}
     doc = _docstring_node(tree)
     if doc is not None:
-        developer_docs.add(id(doc))
+        docstrings[id(doc)] = tree
     not_top_level: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, _FuncDef | ast.ClassDef):
             doc = _docstring_node(node)
-            if doc is None:
-                continue
-            if isinstance(node, ast.ClassDef):
-                published = relpath.startswith("web/routes/")
-            else:
-                published = _is_published_def(node, module, endpoints)
-            if not published:
-                developer_docs.add(id(doc))
+            if doc is not None:
+                docstrings[id(doc)] = node
         elif isinstance(node, ast.JoinedStr):
             # Fragments and format specs are part of the f-string they sit in.
             for part in node.values:
                 not_top_level.add(id(part))
                 if isinstance(part, ast.FormattedValue) and part.format_spec is not None:
                     not_top_level.add(id(part.format_spec))
-    for node, func in _walk_with_func(tree):
-        if id(node) in not_top_level or id(node) in developer_docs:
+    for node, qual in _walk_with_scope(tree):
+        if isinstance(node, _FuncDef):
+            defs.add((module, f"{qual}.{node.name}" if qual else node.name))
+            continue
+        owner = docstrings.get(id(node))
+        # A docstring sits in its owner's body, so *qual* is the owner's qualname.
+        if isinstance(owner, _FuncDef) and (module, qual) not in endpoints:
+            continue
+        if isinstance(owner, ast.ClassDef) and not relpath.startswith("web/routes/"):
+            continue
+        if isinstance(owner, ast.Module) or id(node) in not_top_level:
             continue
         if isinstance(node, ast.JoinedStr) or (
             isinstance(node, ast.Constant) and isinstance(node.value, str | bytes)
         ):
-            yield node, func
+            yield node, qual
 
 
 def _scan(
     pkg_root: Path = _PKG_ROOT,
     *,
+    endpoints: frozenset[tuple[str, str]],
     roots: tuple[str, ...] = _SCAN_ROOTS,
     patterns: tuple[str, ...] = _STALE_ACTION_COPY,
     span_exemptions: tuple[re.Pattern[str], ...] = _SPAN_EXEMPTIONS,
@@ -415,10 +414,9 @@ def _scan(
                 report.files.append(relpath)
                 trees[relpath] = ast.parse(path.read_text(encoding="utf-8"), filename=relpath)
     compiled = [(p, re.compile(p)) for p in patterns]
-    endpoints = _registered_endpoints(trees)
     for relpath, tree in trees.items():
         root = next(r for r in roots if relpath.startswith(r + "/"))
-        for node, func in _public_literals(relpath, tree, endpoints):
+        for node, func in _public_literals(relpath, tree, endpoints, report.defs):
             report.public_literals[root] += 1
             value = _render(node)
             exempt: list[tuple[int, int]] = []
@@ -466,8 +464,13 @@ _FORMERLY_SWEPT = (
 
 
 @pytest.fixture(scope="module")
-def real_scan() -> ScanReport:
-    return _scan()
+def published() -> frozenset[tuple[str, str]]:
+    return _published_callables()
+
+
+@pytest.fixture(scope="module")
+def real_scan(published: frozenset[tuple[str, str]]) -> ScanReport:
+    return _scan(endpoints=published)
 
 
 def test_no_stale_sync_import_action_copy_remains(real_scan: ScanReport) -> None:
@@ -494,6 +497,36 @@ def test_each_site_exemption_fires_exactly_once(real_scan: ScanReport) -> None:
         assert real_scan.site_hits[site] == 1, (site, real_scan.site_hits[site])
 
 
+def test_every_published_callable_is_found_by_the_walk(
+    published: frozenset[tuple[str, str]], real_scan: ScanReport
+) -> None:
+    """Each mounted route and registered tool under the scan roots matches a
+    def the walk saw, so its docstring was classified, not skipped.
+
+    Every published callable must come from a scan root, ``web/app.py`` or
+    FastAPI itself (its ``openapi.json`` handler). A published function
+    defined anywhere else is outside the walk, so its docstring would go
+    unread; a new one fails here until the roots or this list say why.
+    """
+    prefixes = tuple(_dotted(root + "/x.py").removesuffix("x") for root in _SCAN_ROOTS)
+    excluded = {_dotted(relpath) for relpath in _OTHER_FEATURE_FILES}
+    outside = sorted(
+        m
+        for m, _ in published
+        if not m.startswith(prefixes) and m != "memtomem.web.app" and m != "fastapi.applications"
+    )
+    assert not outside, f"published from outside the scan roots: {outside}"
+    in_roots = {(m, q) for m, q in published if m.startswith(prefixes) and m not in excluded}
+    missing = sorted(in_roots - real_scan.defs)
+    assert not missing, f"published but not found by the walk: {missing}"
+    per_root = Counter(
+        next(r for r in _SCAN_ROOTS if m.startswith(_dotted(r))) for m, _ in in_roots
+    )
+    # Floors, well under today's counts, so an empty registry cannot pass.
+    assert per_root["web/routes"] > 100, per_root
+    assert per_root["server/tools"] > 50, per_root
+
+
 def test_other_feature_files_exist() -> None:
     for relpath in _OTHER_FEATURE_FILES:
         assert (_PKG_ROOT / relpath).is_file(), f"stale exclusion: {relpath}"
@@ -513,6 +546,9 @@ def _plant(tmp_path: Path, files: dict[str, str]) -> Path:
 
 
 def _found(tmp_path: Path, files: dict[str, str], **kwargs: object) -> set[tuple[str, int, str]]:
+    """Planted modules are not mounted or registered, so no docstring of theirs
+    is published unless the test names the def in ``endpoints``."""
+    kwargs.setdefault("endpoints", frozenset())
     report = _scan(_plant(tmp_path, files), **kwargs)  # type: ignore[arg-type]
     # Every planted fixture has at most one literal per line per pattern, so
     # a repeated row is a literal (or its fragment) reported twice.
@@ -567,24 +603,6 @@ _TOOL = "server/tools/planted.py"
             'X = "pass --would-import"\n',
             {(1, r"would-import\b"), (1, r"(?i)\b\w+-import(ed|s|ing)?\b")},
             id="flag-lookalike",
-        ),
-        pytest.param(
-            _TOOL,
-            '@register("context")\ndef mem_x():\n    """Import skills from a runtime."""\n',
-            {(3, r"Import(ed)?[:\s/]")},
-            id="mcp-register-docstring",
-        ),
-        pytest.param(
-            _TOOL,
-            '@mcp.tool()\ndef mem_x():\n    """Import skills from a runtime."""\n',
-            {(3, r"Import(ed)?[:\s/]")},
-            id="mcp-tool-docstring",
-        ),
-        pytest.param(
-            _ROUTE,
-            '@router.head("/x")\nasync def x():\n    """Sync the skills."""\n',
-            {(3, r"Sync(ed)?[:\s/]")},
-            id="head-endpoint-docstring",
         ),
         pytest.param(
             _ROUTE,
@@ -702,28 +720,71 @@ def test_scan_flags_planted_shape(
     assert _found(tmp_path, {relpath: source}) == {(relpath, ln, p) for ln, p in expected}
 
 
-def test_add_api_route_endpoint_docstrings_are_public(tmp_path: Path) -> None:
-    """``add_api_route`` publishes the endpoint's docstring, even when the
-    endpoint is defined in another module — positional or keyword, absolute or
-    relative import, aliased or not."""
-    handlers = (
-        'def listed():\n    """Sync the list."""\n\n'
-        'def patched():\n    """Sync the patch."""\n\n'
-        'def helper():\n    """Sync nothing: a helper no route registers."""\n'
-    )
-    registry = (
-        "from memtomem.web.routes.handlers import listed\n"
-        "from .handlers import patched as endpoint_fn\n"
-        'router.add_api_route("", listed, methods=["GET"])\n'
-        'router.add_api_route(path="/p", endpoint=endpoint_fn, methods=["PATCH"])\n'
-    )
-    found = _found(
-        tmp_path, {"web/routes/handlers.py": handlers, "web/routes/registry.py": registry}
-    )
-    assert found == {
-        ("web/routes/handlers.py", 2, r"Sync(ed)?[:\s/]"),
-        ("web/routes/handlers.py", 5, r"Sync(ed)?[:\s/]"),
-    }
+@pytest.mark.parametrize(
+    ("relpath", "source", "qualname", "line"),
+    [
+        pytest.param(
+            _TOOL,
+            'def mem_x():\n    """Import skills from a runtime."""\n',
+            "mem_x",
+            2,
+            id="tool",
+        ),
+        pytest.param(
+            _ROUTE,
+            'class Api:\n    async def x(self):\n        """Sync the skills."""\n',
+            "Api.x",
+            3,
+            id="method",
+        ),
+        pytest.param(
+            _ROUTE,
+            'def mount():\n    async def x():\n        """Sync the skills."""\n',
+            "mount.<locals>.x",
+            3,
+            id="nested-def",
+        ),
+    ],
+)
+def test_a_def_docstring_is_public_exactly_when_the_def_is_published(
+    tmp_path: Path, relpath: str, source: str, qualname: str, line: int
+) -> None:
+    """Whether a docstring is published is the registries' answer, keyed by
+    ``(module, __qualname__)`` — not a decorator read from source."""
+    module = _dotted(relpath)
+    assert _found(tmp_path / "a", {relpath: source}) == set()
+    found = _found(tmp_path / "b", {relpath: source}, endpoints=frozenset({(module, qualname)}))
+    assert {(f, ln) for f, ln, _ in found} == {(relpath, line)}
+    other = frozenset({(module, qualname + "_other")})
+    assert _found(tmp_path / "c", {relpath: source}, endpoints=other) == set()
+
+
+def test_published_callables_reads_the_live_registries(
+    published: frozenset[tuple[str, str]],
+) -> None:
+    """Spot-checks with one witness per registry: a decorated route, a route
+    registered with ``add_api_route`` in another module, a core MCP tool and a
+    ``@register``-ed action."""
+    from memtomem.server import mcp
+    from memtomem.server.tool_registry import ACTIONS
+    from memtomem.web.routes import context_skills
+
+    # Defined in ``namespaces``, mounted by ``namespaces_read.add_api_route``.
+    assert ("memtomem.web.routes.namespaces", "list_namespaces") in published
+    assert ("memtomem.web.routes.context_skills", "import_skill_to_user") in published
+    assert hasattr(context_skills, "import_skill_to_user")
+    core = {t.name for t in mcp._tool_manager.list_tools()}
+    assert "mem_search" in core
+    assert ("memtomem.server.tools.search", "mem_search") in published
+    assert "context_detect" in ACTIONS
+    assert ("memtomem.server.tools.context", "mem_context_detect") in published
+
+
+def test_class_docstrings_are_public_only_under_web_routes(tmp_path: Path) -> None:
+    source = 'class Report:\n    """Sync report for one runtime."""\n'
+    assert _found(tmp_path / "a", {_ROUTE: source}) == {(_ROUTE, 2, r"Sync(ed)?[:\s/]")}
+    assert _found(tmp_path / "b", {_ENGINE: source}) == set()
+    assert _found(tmp_path / "c", {_TOOL: source}) == set()
 
 
 @pytest.mark.parametrize(
@@ -740,9 +801,9 @@ def test_add_api_route_endpoint_docstrings_are_public(tmp_path: Path) -> None:
             id="inline-comment-between-tokens",
         ),
         pytest.param(
-            'def f():\n    """Import skills from a runtime."""\n',
             '@router.post("/x")\ndef f():\n    """Import skills from a runtime."""\n',
-            id="engine-vs-endpoint-docstring",
+            '@router.post("/x", summary="Import skills from a runtime.")\ndef f():\n    pass\n',
+            id="decorated-but-unregistered-docstring",
         ),
         pytest.param(
             '"""Sync skills: the module docstring."""\n',
@@ -829,19 +890,22 @@ def test_other_feature_files_are_skipped_and_only_they(tmp_path: Path) -> None:
     assert _found(tmp_path, files) == {("web/routes/export_more.py", 1, r"Import(ed)?[:\s/]")}
 
 
-def test_add_api_route_endpoint_in_a_package_or_a_function_scope(tmp_path: Path) -> None:
-    """The endpoint lives in a package ``__init__`` and is imported inside a
-    ``mount()`` function — both still resolve to the def that FastAPI publishes."""
-    files = {
-        "web/routes/handlers/__init__.py": 'def listed():\n    """Sync the list."""\n',
-        "web/routes/handlers/mounting.py": (
-            "def mount(router):\n"
-            "    from . import listed as endpoint\n"
-            '    router.add_api_route("/", endpoint=endpoint)\n'
-        ),
-    }
-    assert _found(tmp_path, files) == {
-        ("web/routes/handlers/__init__.py", 2, r"Sync(ed)?[:\s/]"),
+def test_site_exemption_does_not_reach_a_nested_def_or_a_same_named_method(
+    tmp_path: Path,
+) -> None:
+    site = _SITE_EXEMPTIONS[0]
+    source = (
+        "def apply_settings_sync():\n"
+        "    def helper():\n"
+        '        return "Settings sync timed out"\n\n'
+        "class Gateway:\n"
+        "    def apply_settings_sync(self):\n"
+        '        return "Settings sync timed out"\n'
+    )
+    pattern = r"(?i)\b(sync|import) timed out"
+    assert _found(tmp_path, {site.relpath: source}) == {
+        (site.relpath, 3, pattern),
+        (site.relpath, 7, pattern),
     }
 
 
@@ -865,13 +929,15 @@ def test_site_exemption_counts_each_occurrence(tmp_path: Path) -> None:
         "def apply_settings_sync():\n"
         '    raise E("Settings sync timed out. Settings sync timed out.")\n'
     )
-    report = _scan(_plant(tmp_path, {site.relpath: source}))
+    report = _scan(_plant(tmp_path, {site.relpath: source}), endpoints=frozenset())
     assert report.offences == []
     assert report.site_hits[site] == 2  # so the exactly-once check above fails
 
 
 def test_two_literals_on_one_line_are_two_offences(tmp_path: Path) -> None:
-    report = _scan(_plant(tmp_path, {_ENGINE: 'X = ["Sync skills", "Sync agents"]\n'}))
+    report = _scan(
+        _plant(tmp_path, {_ENGINE: 'X = ["Sync skills", "Sync agents"]\n'}), endpoints=frozenset()
+    )
     assert [(o.line, o.col) for o in report.offences] == [(1, 5), (1, 20)]
 
 
