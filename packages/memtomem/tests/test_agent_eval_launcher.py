@@ -261,7 +261,14 @@ def test_main_gives_every_child_the_isolated_env_and_one_interpreter(
     assert len(calls) == 3  # import probe, indexer, server
     assert "memtomem.__path__" in calls[0][0][-1]
     assert executed == [str(python)]
-    assert calls[1][0][-2:] == ["index", str(cwd.resolve() / "mm-notes")]
+    assert calls[1][0] == [
+        str(python),
+        "-P",
+        "-c",
+        launcher._INDEX,
+        "index",
+        str(cwd.resolve() / "mm-notes"),
+    ]
     assert calls[2][0][-1] == launcher._SERVE
     expected_env = launcher.server_env(
         {

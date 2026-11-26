@@ -4,9 +4,10 @@
 ``claude plugin eval`` starts this as the plugin's MCP server (``--mocks off``) with the run's
 temporary HOME and an empty workspace inside it. The launcher:
 
-1. starts only inside an eval run: the host's ``CLAUDE_CODE_EVAL_CONFINED`` marker is set,
-   HOME is not (and is not inside) the user's real home, and the working directory is inside
-   HOME. If the host stops setting the marker, the launcher refuses rather than guesses;
+1. refuses to start unless the host's ``CLAUDE_CODE_EVAL_CONFINED`` marker is set, HOME is
+   not the user's real home (nor inside or above it), and the working directory is inside HOME.
+   This is a layout check, not proof of an eval run. If the host stops setting the marker, the
+   launcher refuses rather than guesses;
 2. keeps the server away from real stores by construction: the environment is built from
    scratch (no inherited ``MEMTOMEM_*``, dotenv off), the runtime dir and database live in a
    state directory created fresh inside HOME, and the only memory root is ``<cwd>/mm-notes``,

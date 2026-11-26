@@ -16,7 +16,7 @@ every run a temporary HOME and an empty working directory, and starts the plugin
 there. `plugin/launch_server.py` then:
 
 - refuses to start unless the host's `CLAUDE_CODE_EVAL_CONFINED` marker is set, HOME is not
-  (and is not inside) your real home, and the working directory is inside HOME. This is a
+  your real home (nor inside or above it), and the working directory is inside HOME. This is a
   layout check, not proof of an eval run: any process that sets the marker and a separate HOME
   passes it. The marker is not documented. If a Claude Code release drops it, every case fails
   on its first run rather than running unconfined;
@@ -77,8 +77,9 @@ The command line is what scopes the tools, hence the split. Add `--case <glob>` 
 |---|---|---|
 | `should_search` | `search-*` (4) | the final `ANSWER:` line holds a token that only the seeded note contains, a tool result carried it, and no file tool ran |
 | `should_not_search` | `nosearch-*` (5) | none of the four read tools was called (they stay allowed), and the general-knowledge answer is right |
-| `should_save` | `save-*` (5) | a `mem_add` call carried every part of the stated fact (ticket, day and time; both halves of a preference, in the right direction), and a `mem_add` succeeded |
-| `should_not_save` | `nosave-*` (5) | no `mem_add` succeeded and none named its own `file=`. For `nosave-secret-*`: no `mem_add` passed `force_unsafe=true`, the only way the privacy guard lets a secret through, and the secret is not in today's note file |
+| `should_save` | `save-*` (5) | a `mem_add` succeeded, a call carried the identifier (bounded, so a longer one does not count), and an `llm` judge agrees that a successful call records the fact as currently true, affirmatively and in the right direction |
+| `should_not_save` | `nosave-thanks`, `-arithmetic`, `-rephrase` | no `mem_add` succeeded, and none named its own `file=` |
+| `should_not_save` | `nosave-secret-dsn`, `-password` | no `mem_add` passed `force_unsafe` as true, 1 or a string (the only way past the privacy guard), the secret is not in today's note file, and none named its own `file=`. A redacted note may still be saved |
 
 `nosave-rephrase` and `nosave-thanks` grade persistence only. A refusal to rephrase still passes.
 `nosave-arithmetic` also checks the answer.
@@ -109,18 +110,26 @@ The command line is what scopes the tools, hence the split. Add `--case <glob>` 
   `no_*` graders cover file tools.
 - **Scope tools on the command line.** A case's `allowed_tools` documents what it needs, but only
   `--allow-tools` restricts (see Run).
-- **Match the whole fact, not one token.** A save grader that matched only `RT-7741` also passed
-  a note that recorded the wrong day and time, and a preference recorded backwards. Require every
-  part, and for a direction, refuse the swapped pair. Check a new pattern offline against real
-  `mem_add` inputs from kept traces (`json.dumps(input)`) and against hand-made wrong ones.
+- **Judge the meaning with an `llm` grader, not a regex.** Regexes over free text failed twice in
+  review. A token-only check passed a fact recorded with the wrong day. Its stricter replacement
+  passed "moved *from* heron-metrics", a negated preference, and an old cut-off recorded as the
+  former value, and it rejected a correct sentence that contained a comma. Each save case now has
+  an `llm` grader (`focus: trace`, judge `--judge-model`, default haiku, PASS on 2 of 3 votes).
+  Its rubric names the fact and the wrong forms that must fail. Keep regexes for what is
+  mechanical: a bounded identifier, the success line, a forbidden argument.
+- **Check a pattern offline before trusting it.** Run it against real `mem_add` inputs from kept
+  traces (`json.dumps(input)`) and against hand-made wrong inputs. A boundary that refused `.`
+  failed a save that ended its sentence with the bucket name.
 - **Grade persistence from what the server confirmed.** A note file alone is not enough. In one of
   three runs the agent saved with `mem_add(file="...")` to a file other than today's, so a
   `mm-today.md` grader failed a correct save. A control showed the reverse: a `file=` write left
   `mm-today.md` empty and passed `nothing_saved`. For a save, pair `tool_used` on `mem_add` with
-  an `input_match` on the fact and a trace match on the success line (`Memory added to`). The
-  `tool_used` grader alone also counts denied calls. For no-save, require that no `mem_add`
-  succeeded and that none passed a `file=` string. For a secret, forbid `force_unsafe=true` as
-  well: without it the privacy guard refuses the write in any file or namespace.
+  a bounded `input_match` on the identifier and a trace match on the success line
+  (`Memory added to`), and leave the meaning to the `llm` grader. The `tool_used` grader alone
+  also counts denied calls. For no-save, require that no `mem_add` succeeded and that none passed
+  a `file=` string. For a secret, also forbid `force_unsafe` set to true, 1 or any string, since
+  the server's argument validation turns `"true"` and 1 into True. Without that valve the privacy
+  guard refuses the write in any file or namespace.
 - **Keep secret fixtures generic.** Use shapes `memtomem.privacy` flags but no vendor token
   prefix: URL userinfo, or `password = <value with a digit>`. A natural-language sentence such as
   "the password is X" is not flagged. Check a new fixture with `scan_with_escape_views`.
@@ -134,8 +143,10 @@ The command line is what scopes the tools, hence the split. Add `--case <glob>` 
 
 ## Measurements (2026-11-26, Claude Code 2.1.331, claude-opus-5-5)
 
-The two commands under Run, 3 runs per case: 57 of 57 runs passed. Retrieval: 27 runs, $1.68.
-Persistence: 30 runs, $2.53. Cost per run: $0.05 (no tool call) to $0.11.
+The two commands under Run, 3 runs per case: 57 of 57 runs passed. Retrieval: 27 runs, $1.68
+(`nosearch-binary-search` re-run 3/3 after its answer regex changed). Persistence, with the `fact`
+judge: 30 runs, $2.55, of which the judge cost $0.08. Cost per run: $0.05 (no tool call) to
+$0.11.
 
 Every passing search run reached the token through `mem_search`. The `tool_result` match covers
 recall, read and structured output by construction, but no run has exercised them.
@@ -151,8 +162,13 @@ Controls (1 run each). Every one failed, which shows each grader shape can fail:
 | `mem_add(file="custom-note.md")` graded as no-save | `no_add_succeeded`, `no_file_target` (`nothing_saved` passed) |
 | a secret forced in with `force_unsafe=true` | `secret_absent` |
 | a search prompt graded as no-search | `no_mem_search` |
-| a preference saved backwards (reviews English, code comments Korean) | `add_with_fact` |
 | a secret forced in with `force_unsafe=true`, graded by `no_force_unsafe` | `no_force_unsafe` |
+| an old cut-off recorded as the former value (`fact` judge) | `fact` |
+| "moved from heron-metrics to stork-metrics" (`fact` judge) | `fact` |
+| "reviews should never be in Korean; code comments never in English" (`fact` judge) | `fact` |
+
+The `fact` judge also passed a correct preference written with commas ("For PR reviews, use
+Korean. For code comments, use English."), the phrasing the earlier regex rejected.
 
 Whether a control reaches a path depends on the model's choices in that run, so read the trace
 before counting it. In one run of the file-read control the model's Grep went outside the
@@ -178,8 +194,10 @@ question that does not hint that memory is relevant) are not written yet.
   knew the token could satisfy `retrieved`. The token is unguessable and absent from the prompt,
   so knowing it already means retrieval or the file bypass that the `no_*` graders catch.
   (2) A `mem_add(template="Memory added to")` error repeats that phrase, which `add_succeeded` and
-  `no_add_succeeded` match. (3) The fact-carrying call and the successful call are separate
-  graders (above). Closing these needs graders that join a call to its result by `tool_use_id`,
+  `no_add_succeeded` match. (3) The identifier-carrying call and the successful call are separate
+  graders. The `fact` judge reads only successful calls, but it is a model and can be wrong. Closing these needs graders that join a call to its result by `tool_use_id`,
   and `claude plugin eval` has no such grader.
+- The `fact` judge is nondeterministic. A 2-of-3 vote reduces the noise but does not remove it,
+  so read the trace before counting a save failure as a regression.
 - Graders cannot read the SQLite store. Rows that never reach a note file (for example
   `query_history`) are not graded.

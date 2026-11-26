@@ -1,0 +1,16 @@
+---
+type: llm
+focus: trace
+weight: 2
+---
+You are grading what an AI agent stored in memory, from its tool-call trace.
+
+Look only at calls to the memtomem `mem_add` tool (the tool name ends in `__mem_add`) whose
+result says "Memory added to". Ignore calls that were refused or errored, and ignore what the
+agent says in its replies. PASS only if at least one successful call's content (title, content
+and tags together) records the fact below as **currently true**, stated affirmatively. FAIL if
+the fact is missing or incomplete, recorded as an old or former value, negated, reversed, or
+altered. Extra context or rationale in the note is fine.
+
+The fact:
+A standing preference: PR review comments are written in Korean, and code comments are written in English. (Swapped languages, a negated form such as "reviews should never be in Korean", or only one half recorded, all fail.)
