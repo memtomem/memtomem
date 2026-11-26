@@ -1053,6 +1053,11 @@ class StagingClaim:
         transfer route sends its own fixed sentence instead and puts this text
         in its server log line (#3532).
 
+        The text speaks only for the refused step. Callers can run cleanup or a
+        rollback after this raise, and either can remove the staging entry once
+        a later identity read succeeds, so it must not say what is left on disk
+        (#3609).
+
         An ABSENT entry is not a mismatch and is deliberately allowed through:
         there is nothing there to consume, and the operation's own ``ENOENT``
         is the honest error for it — for a move, "staging vanished" is a
@@ -1067,14 +1072,14 @@ class StagingClaim:
         if self.identity is None:
             reason = (
                 "transfer staging cannot be verified: this filesystem does not "
-                "report file identity, so nothing was promoted and nothing was "
-                "removed. Stage on a filesystem that reports it, then retry."
+                "report file identity, so this step was refused. Stage on a "
+                "filesystem that reports it, then retry."
             )
         else:
             reason = (
                 "transfer staging was replaced out of band: it no longer names "
-                "the entry this transfer created, so nothing was promoted and "
-                "nothing was removed. Inspect it by hand, then retry."
+                "the entry this transfer created, so this step was refused. "
+                "Inspect it by hand, then retry."
             )
         raise StagingIdentityLostError(f"{reason} Refused: {action}. Staging: {self.path}")
 

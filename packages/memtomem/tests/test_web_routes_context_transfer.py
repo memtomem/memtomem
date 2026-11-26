@@ -16,7 +16,9 @@ covers what the WEB surface adds (ADR-0023 §10):
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -140,10 +142,11 @@ _BUSY_MESSAGE = (
     "by hand, then retry. The server log has the details."
 )
 _REPLACED_MESSAGE = (
-    "transfer staging was replaced out of band, or this filesystem does not report file "
-    "identity: nothing was promoted and nothing was removed. Inspect the entry by hand, "
-    "then retry; if the filesystem is the cause, stage on one that reports it. The server "
-    "log has the details."
+    "the transfer could not verify a file identity it needed: the artifact was not published "
+    "to the destination. A staging copy may have been removed, and on a move the source may "
+    "not be back in place. Check the source and any staging entry by hand, then retry; if "
+    "the filesystem does not report file identity, use one that does. The server log has the "
+    "details."
 )
 
 
@@ -561,6 +564,7 @@ async def test_unverifiable_staging_409_carries_the_filesystem_remedy(
     records = [r.getMessage() for r in _transfer_records(caplog)]
     assert len(records) == 1, records
     assert "transfer staging cannot be verified" in records[0]
+    assert "nothing was removed" not in records[0]
 
 
 @pytest.mark.asyncio
@@ -612,6 +616,91 @@ async def test_a_move_without_file_identity_is_refused_before_it_consumes_the_so
     assert not (dst_store / "foo.md").exists() and not (dst_store / "foo").exists()
     for store in (_shared_agents(cwd_root), dst_store):
         assert not store.exists() or not list(store.glob(".migrate-*")), store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["copy", "move"])
+async def test_a_refusal_whose_rollback_removes_staging_does_not_deny_it(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog, mode: str
+) -> None:
+    """This 409 can follow a removal, so neither text says nothing was removed (#3609).
+
+    The identity read before the promote fails once. The rollback's own read
+    succeeds, so it removes the staging copy; on a move across filesystems it
+    first puts the source back.
+    """
+    from memtomem.context import migrate as migrate_mod
+    from memtomem.context import transfer as transfer_mod
+
+    move = mode == "move"
+    source = _write_agent(_shared_agents(cwd_root), "foo")
+    before = source.read_bytes()
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    src_store, dst_store = _shared_agents(cwd_root), _shared_agents(other)
+    crossed: list[Path] = []
+
+    if move:
+        real_rename = migrate_mod.rename_no_replace
+
+        def exdev_rename(src, dst, **kwargs):
+            # Cross-store only: parking the source and restoring it are
+            # same-parent renames, and must keep working.
+            if Path(src).parent != Path(dst).parent:
+                crossed.append(Path(src))
+                raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
+            return real_rename(src, dst, **kwargs)
+
+        monkeypatch.setattr(migrate_mod, "rename_no_replace", exdev_rename)
+
+    real_scan = transfer_mod.scan_artifact_tree
+    scanned: list[Path] = []
+
+    def scan_then_arm(*args, **kwargs):
+        result = real_scan(*args, **kwargs)
+        staged = Path(args[0])
+        assert [p.name for p in dst_store.glob(".migrate-*")] == [staged.name]
+        # A move is on the cross-filesystem path only if the injected EXDEV
+        # fired, the source is parked beside itself AND a separate copy sits
+        # in the destination store.
+        assert len(crossed) == (1 if move else 0), crossed
+        assert len(list(src_store.glob(".migrate-*"))) == (1 if move else 0)
+        assert source.exists() is not move
+        scanned.append(staged)
+        return result
+
+    real_lstat = Path.lstat
+    fired: list[Path] = []
+
+    def lstat(self, *args, **kwargs):
+        if scanned and not fired and self == scanned[0]:
+            fired.append(self)
+            raise OSError(errno.EIO, "injected one-shot failure", str(self))
+        return real_lstat(self, *args, **kwargs)
+
+    monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_then_arm)
+    monkeypatch.setattr(Path, "lstat", lstat)
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post(
+            "/api/context/agents/foo/transfer", json={**_move_body(scope_b), "mode": mode}
+        )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "transfer_staging_replaced"
+    assert len(scanned) == 1 and fired == scanned, (scanned, fired)
+    # What is on disk: the source is where it was, and the staging copy is gone.
+    assert source.read_bytes() == before
+    assert not os.path.lexists(scanned[0])
+    for store in (src_store, dst_store):
+        assert not list(store.glob(".migrate-*")), store
+    assert not (dst_store / "foo").exists()
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert len(records) == 1, records
+    assert "nothing was removed" not in records[0]
+    assert "nothing was removed" not in detail["message"]
+    assert detail["message"] == _REPLACED_MESSAGE
 
 
 @pytest.mark.asyncio
