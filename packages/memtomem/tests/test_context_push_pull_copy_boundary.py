@@ -128,12 +128,13 @@ _SCAN_ROOTS = ("context", "web/routes", "server/tools")
 #: first enumeration missed ~20 sites. Each pattern is matched against a whole
 #: literal value, so no pattern is anchored on a quote character.
 _STALE_ACTION_COPY = (
-    # A capitalised action label anywhere in a value: "Sync skills",
-    # f"{kind}Import …", "Synced: 3", "Sync/Import", "Sync-skills".
-    # Case-sensitive, so
+    # A capitalised action label anywhere in a value, ended by anything but
+    # an identifier character: "Sync skills", f"{kind}Import …", "Synced: 3",
+    # "Sync/Import", "Sync-skills", "Sync!". "SyncPhaseError" and "Imports"
+    # are not labels. Case-sensitive, so
     # "in sync" is not hit.
-    r"Sync(ed)?[:\s/-]",
-    r"Import(ed)?[:\s/-]",
+    r"Sync(ed)?(?!\w)",
+    r"Import(ed)?(?!\w)",
     # A bare action label, e.g. a validation-manifest ``"action": "Sync"``
     # value, and the same pair written out inside prose.
     r"^(Sync|Import)(ed)?$",
@@ -617,49 +618,49 @@ _TOOL = "server/tools/planted.py"
         pytest.param(
             _ROUTE,
             '@router.get("/x", summary=("Run " "Sync skills"))\nasync def x():\n    pass\n',
-            {(1, r"Sync(ed)?[:\s/-]")},
+            {(1, r"Sync(ed)?(?!\w)")},
             id="decorator-summary-concatenated",
         ),
         pytest.param(
             _ENGINE,
             'X = f"{kind}" f"Import skills"\n',
-            {(1, r"Import(ed)?[:\s/-]")},
+            {(1, r"Import(ed)?(?!\w)")},
             id="fstring-fstring-concat",
         ),
         pytest.param(
             _ENGINE,
             'X = f"{kind}" "Import skills"\n',
-            {(1, r"Import(ed)?[:\s/-]")},
+            {(1, r"Import(ed)?(?!\w)")},
             id="fstring-plain-concat",
         ),
         pytest.param(
             _ENGINE,
             'X = "Auto" "Sync skills"\n',
-            {(1, r"Sync(ed)?[:\s/-]")},
+            {(1, r"Sync(ed)?(?!\w)")},
             id="word-glued-by-concat",
         ),
         pytest.param(
             _ENGINE,
             'X = f"Auto" f"Import skills"\n',
-            {(1, r"Import(ed)?[:\s/-]")},
+            {(1, r"Import(ed)?(?!\w)")},
             id="word-glued-by-fstring-concat",
         ),
         pytest.param(
             _ENGINE,
             'X = {"action": "Import"}\n',
-            {(1, r"^(Sync|Import)(ed)?$")},
+            {(1, r"^(Sync|Import)(ed)?$"), (1, r"Import(ed)?(?!\w)")},
             id="bare-action-label",
         ),
         pytest.param(
             _ENGINE,
             """X = 'Example: {"action": "Import"}'\n""",
-            {(1, r'"action": "(Sync|Import)"')},
+            {(1, r'"action": "(Sync|Import)"'), (1, r"Import(ed)?(?!\w)")},
             id="embedded-action-label",
         ),
         pytest.param(
             _ENGINE,
             'X = b"Import skills"\n',
-            {(1, r"Import(ed)?[:\s/-]")},
+            {(1, r"Import(ed)?(?!\w)")},
             id="bytes",
         ),
         pytest.param(
@@ -683,7 +684,7 @@ _TOOL = "server/tools/planted.py"
         pytest.param(
             _ENGINE,
             'X = {"action": "Import" "\\nskills"}\n',
-            {(1, r"Import(ed)?[:\s/-]")},
+            {(1, r"Import(ed)?(?!\w)")},
             id="label-then-newline",
         ),
         pytest.param(
@@ -701,25 +702,43 @@ _TOOL = "server/tools/planted.py"
         pytest.param(
             _ENGINE,
             'X = {"action": "Import" ": Skills"}\n',
-            {(1, r"Import(ed)?[:\s/-]")},
+            {(1, r"Import(ed)?(?!\w)")},
             id="label-then-colon",
         ),
         pytest.param(
             _ENGINE,
             'X = {"action": "Sync" "/Import"}\n',
-            {(1, r"Sync(ed)?[:\s/-]")},
+            {(1, r"Sync(ed)?(?!\w)"), (1, r"Import(ed)?(?!\w)")},
             id="label-then-slash",
         ),
         pytest.param(
             _ENGINE,
             'X = {"action": "Sync" "-skills"}\n',
-            {(1, r"Sync(ed)?[:\s/-]")},
+            {(1, r"Sync(ed)?(?!\w)")},
             id="label-then-hyphen",
         ),
         pytest.param(
             _ENGINE,
+            'X = {"action": "Sync" "!"}\n',
+            {(1, r"Sync(ed)?(?!\w)")},
+            id="label-then-punctuation",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = {"action": "Import" "…"}\n',
+            {(1, r"Import(ed)?(?!\w)")},
+            id="label-then-ellipsis",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = "SyncPhaseError raised; Imports are pinned"\n',
+            set(),
+            id="identifier-is-not-a-label",
+        ),
+        pytest.param(
+            _ENGINE,
             'X = f"see #123 \\"Import skills\\""\n',
-            {(1, r"Import(ed)?[:\s/-]")},
+            {(1, r"Import(ed)?(?!\w)")},
             id="quoted-label-beside-issue-number",
         ),
     ],
@@ -836,7 +855,7 @@ def test_published_callables_reads_the_live_registries(
 
 def test_class_docstrings_are_public_only_under_web_routes(tmp_path: Path) -> None:
     source = 'class Report:\n    """Sync report for one runtime."""\n'
-    assert _found(tmp_path / "a", {_ROUTE: source}) == {(_ROUTE, 2, r"Sync(ed)?[:\s/-]")}
+    assert _found(tmp_path / "a", {_ROUTE: source}) == {(_ROUTE, 2, r"Sync(ed)?(?!\w)")}
     assert _found(tmp_path / "b", {_ENGINE: source}) == set()
     assert _found(tmp_path / "c", {_TOOL: source}) == set()
 
@@ -892,7 +911,7 @@ def test_developer_text_is_not_policed_but_public_text_is(
             id="escaped-citation-beside-stale-copy",
         ),
         pytest.param(
-            'X = "Synced§\\"Design\\""\n',
+            'X = "Syncs§\\"Design\\""\n',
             'X = "Synced: §\\"Design\\""\n',
             id="glued-citation-creates-no-match",
         ),
@@ -941,7 +960,7 @@ def test_other_feature_files_are_skipped_and_only_they(tmp_path: Path) -> None:
     source = 'X = "Import chunks from a bundle."\n'
     files = {relpath: source for relpath in _OTHER_FEATURE_FILES}
     files["web/routes/export_more.py"] = source
-    assert _found(tmp_path, files) == {("web/routes/export_more.py", 1, r"Import(ed)?[:\s/-]")}
+    assert _found(tmp_path, files) == {("web/routes/export_more.py", 1, r"Import(ed)?(?!\w)")}
 
 
 def test_site_exemption_does_not_reach_a_nested_def_or_a_same_named_method(
@@ -1010,10 +1029,10 @@ def test_two_literals_on_one_line_are_two_offences(tmp_path: Path) -> None:
 #: The line-scanner predecessor's patterns, verbatim, each with a source line it
 #: matched and the pattern of :data:`_STALE_ACTION_COPY` that now covers it.
 _LEGACY = (
-    (r'"Sync(ed)?[: ]', 'X = "Synced: 3 skills"', r"Sync(ed)?[:\s/-]"),
-    (r'f"Sync ', 'X = f"Sync {kind}"', r"Sync(ed)?[:\s/-]"),
-    (r'"Import(ed)? ', 'X = "Imported 3 skills"', r"Import(ed)?[:\s/-]"),
-    (r'f"Import ', 'X = f"Import {kind}"', r"Import(ed)?[:\s/-]"),
+    (r'"Sync(ed)?[: ]', 'X = "Synced: 3 skills"', r"Sync(ed)?(?!\w)"),
+    (r'f"Sync ', 'X = f"Sync {kind}"', r"Sync(ed)?(?!\w)"),
+    (r'"Import(ed)? ', 'X = "Imported 3 skills"', r"Import(ed)?(?!\w)"),
+    (r'f"Import ', 'X = f"Import {kind}"', r"Import(ed)?(?!\w)"),
     (r"\bto import\b", 'X = "nothing to import"', r"\bto import\b"),
     (r"already imported from", 'X = "already imported from claude"', r"already imported from"),
     (
@@ -1043,9 +1062,11 @@ _LEGACY = (
     ),
     (r"→ Sync\)", 'X = "(Context → Sync)"', r"→ Sync\)"),
     (r'"action": "(Sync|Import)"', 'X = {"action": "Sync"}', r"^(Sync|Import)(ed)?$"),
-    (r'"action": "(Sync|Import)"', 'X = {"action": "Import" "\\nskills"}', r"Import(ed)?[:\s/-]"),
-    (r'"action": "(Sync|Import)"', 'X = {"action": "Import" ": Skills"}', r"Import(ed)?[:\s/-]"),
-    (r'"action": "(Sync|Import)"', 'X = {"action": "Sync" "-skills"}', r"Sync(ed)?[:\s/-]"),
+    (r'"action": "(Sync|Import)"', 'X = {"action": "Import" "\\nskills"}', r"Import(ed)?(?!\w)"),
+    (r'"action": "(Sync|Import)"', 'X = {"action": "Import" ": Skills"}', r"Import(ed)?(?!\w)"),
+    (r'"action": "(Sync|Import)"', 'X = {"action": "Sync" "-skills"}', r"Sync(ed)?(?!\w)"),
+    (r'"action": "(Sync|Import)"', 'X = {"action": "Sync" "!"}', r"Sync(ed)?(?!\w)"),
+    (r'"action": "(Sync|Import)"', 'X = {"action": "Import" "…"}', r"Import(ed)?(?!\w)"),
     (
         r"they sync from the working file",
         'X = "they sync from the working file"',
