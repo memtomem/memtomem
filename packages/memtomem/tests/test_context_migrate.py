@@ -4548,11 +4548,13 @@ def test_e4_rollback_with_nothing_left_offers_no_recovery_path(scope_layout, mon
     assert not (dst_root / "foo").exists()
 
     messages = [r.getMessage() for r in caplog.records]
-    survivor_lines = [m for m in messages if "surviving" in m or "no copy of them survives" in m]
+    survivor_lines = [m for m in messages if "surviving" in m or "no transfer staging copy" in m]
     assert len(survivor_lines) == 1, messages
+    # An observation about the paths checked, not a verdict that nothing is
+    # left (#3608): the canonical path is named as unchecked.
     assert (
-        "the pre-move bytes of " + str(src) + " were not restored and no copy of "
-        "them survives" in survivor_lines[0]
+        "the pre-move bytes of " + str(src) + " were not restored by this "
+        "transfer, and no transfer staging copy of them was found" in survivor_lines[0]
     ), survivor_lines
     assert ".migrate-foo-" not in survivor_lines[0], survivor_lines
 

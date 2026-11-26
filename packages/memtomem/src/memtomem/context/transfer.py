@@ -596,9 +596,7 @@ def _remove_entry(entry: StagingClaim) -> None:
             raise
 
 
-def _log_rollback_survivors(
-    src_path: Path, *candidates: StagingClaim, at_src: EntryProbe = EntryProbe.ABSENT
-) -> None:
+def _log_rollback_survivors(src_path: Path, *candidates: StagingClaim) -> None:
     """Name the pre-move copies that are ON DISK and ours, and only those.
 
     The rollback ladder preserves whatever it finds and never deletes what it
@@ -620,10 +618,12 @@ def _log_rollback_survivors(
     to recover". Ours: a surviving copy. Unverifiable: named as a place to
     look, never counted. Replaced: named as not ours.
 
-    "Nothing left to recover" is said only when *at_src* — the ladder's own
-    probe of the canonical path — was ABSENT too. With the source present or
-    unreadable, an empty staging set means no STAGING copy was found, not that
-    the bytes are gone: an out-of-band rename-back can have put them home.
+    An empty result is reported as what it is — no copy at the paths this
+    transfer created — and never as "nothing left to recover" (#3608). That
+    verdict needs the canonical path too, and no order of probes keeps the two
+    answers consistent: a writer restoring the entry by hand between them
+    makes both look empty while the artifact is home. So the canonical path is
+    named as unchecked, not judged.
 
     ``lstat``, not ``exists``: a flat artifact that is itself a symlink is
     parked AS a link, and if its target went away the dangling link is still
@@ -665,17 +665,11 @@ def _log_rollback_survivors(
             "copy" if len(survivors) == 1 else "copies",
             ", ".join(str(path) for path in survivors),
         )
-    elif not unverifiable and not replaced and at_src is EntryProbe.ABSENT:
-        logger.error(
-            "transfer rollback: the pre-move bytes of %s were not restored and "
-            "no copy of them survives — nothing left to recover.",
-            src_path,
-        )
     elif not unverifiable and not replaced:
         logger.error(
             "transfer rollback: the pre-move bytes of %s were not restored by "
-            "this transfer, and no transfer staging copy of them was found; what "
-            "is now at that path was not checked — inspect it by hand.",
+            "this transfer, and no transfer staging copy of them was found; that "
+            "path itself was not checked here — inspect it by hand.",
             src_path,
         )
 
@@ -1558,12 +1552,7 @@ def transfer_artifact(
                     # from that probe: the EXDEV path keeps a second copy at
                     # the destination on purpose (#2313), and the holding entry
                     # it names may itself be what went missing (#2327).
-                    # The source is probed again here rather than reusing
-                    # ``at_src``: that answer predates the rename-back, and a
-                    # writer can have put the bytes home meanwhile (#3608).
-                    _log_rollback_survivors(
-                        src_path, restore_from, claimed, at_src=_probe(src_path)[0]
-                    )
+                    _log_rollback_survivors(src_path, restore_from, claimed)
                     if isinstance(exc, StagingIdentityLostError):
                         # The refusal reads "this step was refused… then retry",
                         # and every surface maps it to a retryable conflict.

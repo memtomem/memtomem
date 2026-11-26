@@ -1459,9 +1459,12 @@ class TestReplacedStagingIsNeitherRemovedNorPromoted:
         # and its wording; what this cell pins is that the state is REPORTED —
         # a silent "nothing to do" reads as a clean rollback while the artifact
         # is gone from both ends. Since #2327 the report is a probe of what
-        # actually survives, and here that set is empty.
+        # actually survives, and here that set is empty. Since #3608 it says
+        # so as an observation about the paths it checked, not as "nothing left
+        # to recover", which no order of probes could keep true.
         assert any(
-            "nothing left to recover" in r.getMessage() and str(src_dir) in r.getMessage()
+            "no transfer staging copy of them was found" in r.getMessage()
+            and str(src_dir) in r.getMessage()
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
 
