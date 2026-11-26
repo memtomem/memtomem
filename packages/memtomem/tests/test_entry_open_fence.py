@@ -198,6 +198,7 @@ WRITERS = {
     ("cli/review_cmd.py", "_decide"),
     ("cli/shell.py", "_cmd_add"),
     ("integrations/langgraph.py", "add"),
+    ("server/tools/decision_record.py", "mem_decision_record"),
     ("server/tools/memory_crud.py", "_mem_add_core"),
     ("server/tools/memory_crud.py", "mem_batch_add"),
     ("web/routes/scratch.py", "promote_scratch"),
