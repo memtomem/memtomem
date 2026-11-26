@@ -29,6 +29,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The web transfer route's Gate A 422 stops naming the offending file (#3605).** The
+  privacy block answered with the engine's CLI text, which names the offending file by its
+  absolute path, so the decoded `detail` carried the host path to the project, plus whatever
+  characters the file's name held, control characters included. The `detail` is still the
+  standard string envelope, now built from the blocked file's hit count alone: `Gate A: a
+  file in the artifact contains <n> privacy pattern hit(s); write to scope='project_shared'
+  rejected. …`. The remedy names both the source artifact and a new name the request gives
+  it, since the scan reads the staged bytes, which carry an `as_name`. Any other
+  `PrivacyScanError`, such as a file the scan could not read or a directory it could not
+  list, gets a fixed sentence. The engine's text goes to the server's warning line, through
+  the same secret scan as the route's other refusal lines, and the CLI message is unchanged.
+
 - **A failed transfer move reports the entries it can actually see (#3608).** The rollback
   read an entry it could not `lstat` (for example, a parent without search permission) as
   absent, and an identity it could no longer read as replaced. It then logged "no copy of
