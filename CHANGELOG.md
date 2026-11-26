@@ -7,6 +7,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mem_decision_record` records a decision point with the agent's recommendation and the
+  user's choice kept apart (#3620).** memtomem recorded where a memory came from but not
+  whose judgement it holds. The new action, reached as
+  `mem_do(action="decision_record", params={...})`, writes one JSON record per decision:
+  the options offered, the one recommended and why (the agent's), and the one chosen with
+  the user's own words (the user's), stored verbatim. It is an ordinary memory entry in
+  the project's `project_local` tier under `shared:<project>`, tagged
+  `decision-record`, `from-<runtime>` and one of `decision-user-taken`,
+  `decision-user-declined` or `decision-user-norec`. The action validates every type
+  itself, refuses a `project` that is not the server's or whose local tier is a link,
+  scans the decoded strings as well as the rendered entry and offers no `force_unsafe`,
+  and keys its retries by a required `decision_id` in a ledger of its own, so an ordinary
+  `mem_add` key cannot replay a decision. New category `decisions`: the `core` (9) and
+  `standard` (39) tool sets are unchanged and `full` is 95. No workflow calls the action
+  yet and nothing reads the records back; both are later work.
 - **`update` gains an opt-in `backfill` mode that reaches commits older than the latest ten
   (#3579).** Every mode read only the latest ten commits, so when more than ten landed
   between two runs, `incremental` never saw the excess. `backfill` (shorthand `b`, only as
@@ -28,6 +43,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `kimi` 0.2.32, `antigravity` 0.2.23.
 
 ### Fixed
+
+- **An entry that leaves a code fence open is refused instead of swallowing every later entry
+  in its file (#3618).** The Markdown chunker reads a fence that never closes as running to
+  the end of the file, so after one such entry every entry appended to the same file was
+  indexed as code inside it: no chunk of its own, no heading, no tags, and a `tag_filter`
+  search for it found nothing. `mem_add` (and the MCP tools that write through it, such as
+  `mem_agent_share`), `mem_batch_add` (the whole batch, with the indices of the open items),
+  web `POST /api/add` and scratch promote (422 `unclosed_code_fence`), `mm add`,
+  `mm agent share`, the shell `add`, `mm review approve` (a daily-file entry; a pinned
+  candidate is not appended to a file) and the LangGraph store now refuse such an entry
+  before it is appended to any file. The entry is judged as the chunker will read it, title
+  included, after newline translation and wikilink resolution. A file that already ends
+  inside an open fence is not repaired. Wikilink resolution, which the chunker also runs on
+  every Markdown file it indexes, is now linear in the text: a line of unmatched `[[`
+  openers made it quadratic (about 36 s for 96 KB).
+
+- **A project-tier write refuses a tier reached through a link (#3623).** A write with
+  `scope="project_local"` or `"project_shared"` derived its directory from the project root,
+  resolved it, and asked only whether the result was registered, so when project A's
+  `.memtomem/memories.local` was a link to project B's registered tier, a note written from
+  A landed in B, indexed as B's and invisible from A. The tier directory, and the `.memtomem`
+  holding it, are now judged with the predicate the indexer already uses to leave such a
+  tier out: a link, a junction or an entry that cannot be inspected is refused before
+  anything is written to the tier, and the message names only the relative entry. This
+  covers MCP `mem_add` and `mem_batch_add` (including a relative `file=` with a project
+  scope), `mm add`, web `POST /api/add`, `mm context memory-migrate`'s destination, `mm mem
+  init` (before its `.gitignore` block and registration) and the LangGraph store's derived
+  root (before it loads configuration). Not covered: a target the caller spells itself
+  through the link (an absolute `file=`, a relative `file=` with `..`), and links below a
+  regular tier.
 
 - **The web transfer route's Gate A 422 stops naming the offending file (#3605).** The
   privacy block answered with the engine's CLI text, which names the offending file by its
@@ -2413,12 +2458,14 @@ provider's README describes its catalog install.
   memory directory, which is indexed like any other note. The provider README
   lists what is stored, sent and dropped, and how to purge a mirror.
 - **`mem_search` takes `deadline_ms`, a budget for the server's own
-  processing.** It bounds the wait for a read connection, and is checked between
-  search stages and when a queued query embedding reaches the model, which then
-  does not run; past it the call returns `Error (retryable): … deadline …
-  exceeded …` and records nothing. Work already running — a SQLite read, an
-  embedding slice — finishes first, and a query embedding queued behind other
-  inference waits for it before failing, so this is not a response deadline.
+  processing.** It bounds the wait for a read connection, caps the reranker's
+  timeout, and is checked between search stages and when the worker picks up a
+  queued ONNX query embedding, which does not run if the budget has run out by
+  then. When the search detects an expiry, the call returns `Error (retryable):
+  … deadline … exceeded …`, persists no query-run observation and counts no
+  access. Work already running — a SQLite read, an embedding slice — finishes
+  first, and a query embedding queued behind other inference waits for it, so
+  this is not a response deadline.
   Without it, search runs exactly as before.
 - **`mem_do(action="version")` advertises `hermes_mirror`, `search_deadline_ms`
   and `namespace_selectors`.** The Hermes provider asks before its first call

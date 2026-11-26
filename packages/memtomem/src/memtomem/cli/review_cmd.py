@@ -207,7 +207,23 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
             raise click.ClickException(f"Candidate is not pending (status={candidate['status']})")
         if decision == "approved":
             from memtomem import privacy
-            from memtomem.tools.memory_writer import entry_guard_text
+            from memtomem.tools.memory_writer import (
+                entry_guard_text,
+                entry_open_fence,
+                open_fence_refusal,
+            )
+
+            # A daily-file entry that leaves a fence open makes every later entry
+            # in that file code inside it (#3618). A pinned destination is a
+            # standalone block that nothing is appended after.
+            if candidate["destination"] != "pinned":
+                fence = entry_open_fence(
+                    candidate["content"],
+                    f"Approved {candidate['kind']}",
+                    ["formation-approved", candidate["kind"]],
+                )
+                if fence is not None:
+                    raise click.ClickException(open_fence_refusal(fence))
 
             # Read as the daily-file entry is written (its title and tags carry
             # the candidate's kind); a pinned destination writes less than that.
