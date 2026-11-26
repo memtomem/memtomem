@@ -849,8 +849,8 @@ async def add_memory(
     # falling back to the historical ``~/.memtomem/memories`` — the
     # "index nothing" state must not silently write into a directory the
     # active config disabled (#1768). Project tiers route through
-    # ``resolve_memory_scope_dir`` against the server's project root so
-    # writes land in ``<proj>/.memtomem/memories[/.local]/`` — the same
+    # ``resolve_project_tier_write_dir`` against the server's project root so
+    # writes land in ``<proj>/.memtomem/memories[.local]/`` — the same
     # path the MCP ``mem_add(scope=...)`` flow uses. Refuses unregistered
     # project-tier dirs upfront so the row's persisted scope cannot
     # diverge from what the read surface / watcher can actually see.
@@ -863,7 +863,7 @@ async def add_memory(
             MemoryScopeError,
             is_project_tier_registered,
             project_tier_registration_error,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
         )
         from memtomem.runtime.project_context import _resolve_project_context_from_dirs
 
@@ -873,7 +873,7 @@ async def add_memory(
         # ``app.state.project_root`` was set to ``Path.cwd()`` in the
         # lifespan; if the server is launched from a subdirectory of a
         # registered project, the raw cwd has no ``.memtomem/memories``
-        # tree, so ``resolve_memory_scope_dir`` would land on the wrong
+        # tree, so ``resolve_project_tier_write_dir`` would land on the wrong
         # directory and ``is_project_tier_registered`` would 422 — while
         # MCP correctly writes under the project root. Falls back to
         # the lifespan cwd only if no registered tier covers the cwd
@@ -884,7 +884,9 @@ async def add_memory(
         if project_root is None:
             project_root = Path(server_project_root)
         try:
-            base = resolve_memory_scope_dir(req.scope, project_root)
+            # A linked tier is refused before the registration check, which
+            # would accept another project's tier it leads to (#3623).
+            base = resolve_project_tier_write_dir(req.scope, project_root)
         except MemoryScopeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if not is_project_tier_registered(base, pmdirs):
