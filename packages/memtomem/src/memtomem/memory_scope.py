@@ -190,6 +190,40 @@ def resolve_memory_scope_dir(
     raise MemoryScopeError(f"unsupported memory scope: {scope!r}")
 
 
+def resolve_project_tier_write_dir(
+    scope: TargetScope,
+    project_root: Path | None,
+    user_base: Path = DEFAULT_USER_MEMORY_DIR,
+) -> Path:
+    """:func:`resolve_memory_scope_dir` for a write into the tier it returns.
+
+    A project tier is derived from ``project_root`` and then resolved, so a
+    tier directory, or the ``.memtomem`` holding it, delivered as a link names
+    whatever the link points at — another project's registered tier among
+    them, where the registration check finds it and the write lands (#3623).
+    Such a tier is refused here with the indexer's own predicate,
+    :func:`project_tier_is_relinked`, which the indexer uses to leave that
+    tier out. It is judged before anything is resolved, so a link that loops
+    is refused, not followed. Every other case is
+    :func:`resolve_memory_scope_dir`'s answer, errors included.
+
+    Raises:
+        MemoryScopeError: As :func:`resolve_memory_scope_dir` does, and when
+            the project tier is reached through a link or cannot be
+            inspected. The message names only the entries relative to the
+            project root: a web response carries it.
+    """
+    if project_root is not None and scope in ("project_shared", "project_local"):
+        if project_tier_is_relinked(project_tier_dir(scope, project_root)):
+            entry = f".memtomem/{_PROJECT_TIER_DIR_NAMES[scope]}"
+            raise MemoryScopeError(
+                f"{entry}, or the .memtomem directory holding it, is a symbolic link or "
+                "junction, or could not be inspected; nothing was written. Replace a link "
+                "with a regular directory, or make the entry readable."
+            )
+    return resolve_memory_scope_dir(scope, project_root, user_base)
+
+
 def resolve_scope_target(
     base: Path,
     name: str | Path,

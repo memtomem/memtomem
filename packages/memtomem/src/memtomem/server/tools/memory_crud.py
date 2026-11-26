@@ -855,13 +855,15 @@ def _validate_path(
             )
         from memtomem.memory_scope import (
             MemoryScopeError,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
         )
 
         try:
             # ``user_base`` is unused for project tiers — don't index a
-            # possibly-empty ``memory_dirs`` here (#1768).
-            base = resolve_memory_scope_dir(scope, project_root)
+            # possibly-empty ``memory_dirs`` here (#1768). A linked tier is
+            # refused: its target may be another project's registered tier,
+            # which the root check below would accept (#3623).
+            base = resolve_project_tier_write_dir(scope, project_root)
         except MemoryScopeError as exc:
             return None, f"Error: {exc}"
         target = (base / raw).resolve()
@@ -1150,7 +1152,7 @@ async def _mem_add_core(
             is_project_tier_registered,
             project_tier_registration_error,
             require_user_base,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
             resolve_scope_target,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
@@ -1172,7 +1174,9 @@ async def _mem_add_core(
             if project_root_override is not None:
                 project_root = project_root_override
             try:
-                base = resolve_memory_scope_dir(effective_scope, project_root)
+                # A linked tier is refused before the registration check,
+                # which would accept another project's tier it leads to (#3623).
+                base = resolve_project_tier_write_dir(effective_scope, project_root)
             except MemoryScopeError as exc:
                 return (f"Error: {exc}", None)
             # ADR-0011: refuse if the resolved tier directory is not
@@ -2499,7 +2503,7 @@ async def mem_batch_add(
             is_project_tier_registered,
             project_tier_registration_error,
             require_user_base,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
             resolve_scope_target,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
@@ -2514,7 +2518,8 @@ async def mem_batch_add(
         else:
             project_root = _resolve_project_context_root(app)
             try:
-                base = resolve_memory_scope_dir(effective_scope, project_root)
+                # A linked tier is refused, as in ``_mem_add_core`` (#3623).
+                base = resolve_project_tier_write_dir(effective_scope, project_root)
             except MemoryScopeError as exc:
                 return f"Error: {exc}"
             # ADR-0011 PR-D round 6: refuse if the resolved tier dir is
