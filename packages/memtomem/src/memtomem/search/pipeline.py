@@ -1591,10 +1591,12 @@ class SearchPipeline:
         deadline_ms: int | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         # ``deadline_ms``: a processing budget for the ranked search (see
-        # ``search/deadline.py``). It bounds the waits for a read connection and
-        # a still-queued query embedding, and is checked at stage boundaries;
-        # on expiry the search raises ``SearchDeadlineExceeded`` and records
-        # nothing. ``None`` runs exactly the search without it.
+        # ``search/deadline.py``). It bounds the wait for a read connection,
+        # caps the reranker timeout, and is checked at stage boundaries; it does
+        # not bound the wait for a query embedding (an ONNX slice its worker
+        # picks up after the budget has run out does not run). An expiry the
+        # search detects raises ``SearchDeadlineExceeded``. ``None`` runs
+        # exactly the search without it.
         #
         # Two independent axes (#1802, split by #2671).
         #

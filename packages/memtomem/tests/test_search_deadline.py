@@ -1,12 +1,4 @@
-"""``deadline_ms`` on mem_search: a server-processing budget, not a response deadline.
-
-Pinned here: expiry raises ``SearchDeadlineExceeded`` (rendered as a retryable
-error) and records nothing; the wait for a read connection and a still-queued
-embedding slice are bounded, while a slice or read already running completes;
-every leg that degrades on ``Exception`` lets the expiry through; the BM25 task
-is settled, never orphaned; and a search without a budget makes exactly the
-calls it made before.
-"""
+"""``deadline_ms`` on mem_search: a server-processing budget, not a response deadline."""
 
 from __future__ import annotations
 

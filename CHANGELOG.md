@@ -2458,12 +2458,14 @@ provider's README describes its catalog install.
   memory directory, which is indexed like any other note. The provider README
   lists what is stored, sent and dropped, and how to purge a mirror.
 - **`mem_search` takes `deadline_ms`, a budget for the server's own
-  processing.** It bounds the wait for a read connection, and is checked between
-  search stages and when a queued query embedding reaches the model, which then
-  does not run; past it the call returns `Error (retryable): … deadline …
-  exceeded …` and records nothing. Work already running — a SQLite read, an
-  embedding slice — finishes first, and a query embedding queued behind other
-  inference waits for it before failing, so this is not a response deadline.
+  processing.** It bounds the wait for a read connection, caps the reranker's
+  timeout, and is checked between search stages and when the worker picks up a
+  queued ONNX query embedding, which does not run if the budget has run out by
+  then. When the search detects an expiry, the call returns `Error (retryable):
+  … deadline … exceeded …`, persists no query-run observation and counts no
+  access. Work already running — a SQLite read, an embedding slice — finishes
+  first, and a query embedding queued behind other inference waits for it, so
+  this is not a response deadline.
   Without it, search runs exactly as before.
 - **`mem_do(action="version")` advertises `hermes_mirror`, `search_deadline_ms`
   and `namespace_selectors`.** The Hermes provider asks before its first call
