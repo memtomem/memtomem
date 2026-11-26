@@ -228,16 +228,42 @@ async def test_mm_agent_share_scans_the_heading_path_it_copies(bm25_only_compone
 
 @pytest.fixture
 def rendered(monkeypatch):
-    """Every block rendered, split into the guard's (fixed time) and the writer's."""
-    calls: dict[str, list] = {"scanned": [], "written": []}
+    """Every block rendered, split into the guard's, the open-fence check's and the writer's.
+
+    The guard and the fence check both render with a fixed time, so a render is
+    told apart by which of the two is running, not by its time.
+    """
+    calls: dict[str, list] = {"scanned": [], "fenced": [], "written": []}
     original = memory_writer._render_entry_block
+    reader: list[str] = []
 
     def record(content, title, tags, *, created, untitled_heading):
-        kind = "scanned" if created.startswith("1970-") else "written"
-        calls[kind].append((content, title, tuple(tags or ())))
+        fixed = created.startswith("1970-")
+        # A fixed-time render outside both readers is this module's own
+        # ``entry_guard_text`` computing the expected text: not recorded.
+        kind = reader[-1] if reader else (None if fixed else "written")
+        if kind is not None:
+            assert (kind == "written") is not fixed, kind
+            calls[kind].append((content, title, tuple(tags or ())))
         return original(content, title, tags, created=created, untitled_heading=untitled_heading)
 
+    def reading_as(kind, real):
+        def wrapper(*args, **kwargs):
+            reader.append(kind)
+            try:
+                return real(*args, **kwargs)
+            finally:
+                reader.pop()
+
+        return wrapper
+
     monkeypatch.setattr(memory_writer, "_render_entry_block", record)
+    monkeypatch.setattr(
+        memory_writer, "entry_guard_text", reading_as("scanned", memory_writer.entry_guard_text)
+    )
+    monkeypatch.setattr(
+        memory_writer, "entry_open_fence", reading_as("fenced", memory_writer.entry_open_fence)
+    )
 
     calls["guarded"] = []
     real_guard = privacy.enforce_write_guard
@@ -251,9 +277,13 @@ def rendered(monkeypatch):
 
 
 def _scanned_as_written(rendered) -> None:
-    """The renders agree, and the guard read exactly the text for what was written."""
+    """The renders agree, and the guard read exactly the text for what was written.
+
+    The open-fence check (#3618) reads the same entries.
+    """
     assert rendered["written"], "nothing was written"
     assert rendered["scanned"] == rendered["written"]
+    assert rendered["fenced"] == rendered["written"]
     for content, title, tags in rendered["written"]:
         assert entry_guard_text(content, title, list(tags) or None) in rendered["guarded"]
 

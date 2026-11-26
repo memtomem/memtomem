@@ -803,7 +803,21 @@ async def add_memory(
     # on project_shared writes fire on the Web path too (ADR-0011 PR-D
     # round 7 parity — same fix as the chunks PATCH path at
     # ``chunks.py:73-86``).
-    from memtomem.tools.memory_writer import entry_guard_text
+    from memtomem.tools.memory_writer import entry_guard_text, entry_open_fence, open_fence_refusal
+
+    # An entry that leaves a fence open makes every later entry in the file
+    # code inside it (#3618).
+    fence = entry_open_fence(req.content, req.title, req.tags)
+    if fence is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "detail": "unclosed_code_fence",
+                "fence": fence,
+                "surface": "web_api_add",
+                "message": open_fence_refusal(fence),
+            },
+        )
 
     # The entry as it is written: the title and tags go into the file too.
     guard = privacy.enforce_write_guard(
