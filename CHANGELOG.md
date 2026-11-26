@@ -44,6 +44,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A search whose `deadline_ms` budget runs out during the session-summary rescue no longer
+  logs and counts the expiry as a rescue failure (#3637).** The rescue's links walk and its
+  target hydration caught `SearchDeadlineExceeded` from their read-connection lease as a
+  storage failure: each logged it (a WARNING with a traceback the first time in a process) and
+  set the rescue-failed flag, though the search still raised the expiry at its next stage
+  boundary and returned no results. Both now let the expiry through, as the summary lookup
+  already did; any other storage failure still degrades the rescue as before.
+
 - **An entry that leaves a code fence open is refused instead of swallowing every later entry
   in its file (#3618).** The Markdown chunker reads a fence that never closes as running to
   the end of the file, so after one such entry every entry appended to the same file was
