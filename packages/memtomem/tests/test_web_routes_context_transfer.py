@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -141,12 +142,26 @@ _BUSY_MESSAGE = (
     "because that entry can be an interrupted move's only copy of an artifact. Inspect it "
     "by hand, then retry. The server log has the details."
 )
+# One sentence per way an identity refusal happens (#3608): a replacement, a staging
+# entry whose identity cannot be read, and a source refused before anything moved.
 _REPLACED_MESSAGE = (
-    "the transfer could not verify a file identity it needed: the artifact was not published "
-    "to the destination. A staging copy may have been removed, and on a move the source may "
-    "not be back in place. Check the source and any staging entry by hand, then retry; if "
-    "the filesystem does not report file identity, use one that does. The server log has the "
-    "details."
+    "transfer staging was replaced out of band: the artifact was not published to the "
+    "destination. A staging copy may have been removed, and on a move the source may not be "
+    "back in place. Check the source and any staging entry by hand, then retry. The server "
+    "log has the details."
+)
+_UNVERIFIABLE_MESSAGE = (
+    "the transfer could not verify a staging entry's file identity: the artifact was not "
+    "published to the destination. A staging copy may have been removed, and on a move the "
+    "source may not be back in place. Check the source and any staging entry by hand, then "
+    "retry; if the filesystem does not report file identity, use one that does. The server "
+    "log has the details."
+)
+_SOURCE_UNVERIFIABLE_MESSAGE = (
+    "the transfer could not verify the source's file identity: nothing was moved, and the "
+    "artifact was not published to the destination. Fix access to the source, then retry; "
+    "if the filesystem does not report file identity, use one that does. The server log has "
+    "the details."
 )
 
 
@@ -559,7 +574,7 @@ async def test_unverifiable_staging_409_carries_the_filesystem_remedy(
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "transfer_staging_replaced"
-    assert detail["message"] == _REPLACED_MESSAGE
+    assert detail["message"] == _UNVERIFIABLE_MESSAGE
     _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     records = [r.getMessage() for r in _transfer_records(caplog)]
     assert len(records) == 1, records
@@ -606,7 +621,7 @@ async def test_a_move_without_file_identity_is_refused_before_it_consumes_the_so
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "transfer_staging_replaced"
-    assert detail["message"] == _REPLACED_MESSAGE
+    assert detail["message"] == _SOURCE_UNVERIFIABLE_MESSAGE
     _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     records = [r.getMessage() for r in _transfer_records(caplog)]
     assert len(records) == 1, records
@@ -700,7 +715,7 @@ async def test_a_refusal_whose_rollback_removes_staging_does_not_deny_it(
     assert len(records) == 1, records
     assert "nothing was removed" not in records[0]
     assert "nothing was removed" not in detail["message"]
-    assert detail["message"] == _REPLACED_MESSAGE
+    assert detail["message"] == _UNVERIFIABLE_MESSAGE
 
 
 @pytest.mark.asyncio
@@ -1319,33 +1334,209 @@ async def test_dry_run_plans_without_confirmation(client, cwd_root: Path) -> Non
 # ── Gate A / privacy envelope ────────────────────────────────────────────
 
 
+_ROUTE_LOGGER = "memtomem.web.routes.context_transfer"
+
+
+def _gate_a_detail(hits: int) -> str:
+    """The route's whole Gate A 422 ``detail`` (#3605): a hit count and no name."""
+    return (
+        f"Gate A: a file in the artifact contains {hits} privacy pattern hit(s); write to "
+        "scope='project_shared' rejected. git history is forever — no force bypass available "
+        "for project_shared (ADR-0011 §5). Remove the secret-shaped values from the source "
+        "artifact or from the new name the request gives it, and retry; the server log has "
+        "the details."
+    )
+
+
+_TWO_SECRETS_BODY = _SECRET_BODY + "token=ghp_" + "a1B2c3D4e5" * 3 + "a1B2c3\n"
+
+
+_PRIVACY_REFUSED = (
+    "Gate A could not scan the artifact, so the write to project_shared was refused; "
+    "the server log has the details."
+)
+
+
+def _shared_body(**overrides) -> dict:
+    body = {"mode": "copy", "to_target_scope": "project_shared", "confirm_project_shared": True}
+    body.update(overrides)
+    return body
+
+
+def _refusal_logs(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The route's warning lines for this arm, each one scanned line with no traceback.
+
+    A redacted line no longer carries the reason code (#3614), so every
+    route record counts; the arm under test emits the only one.
+    """
+    return [r.getMessage() for r in _transfer_records(caplog)]
+
+
 @pytest.mark.asyncio
-async def test_privacy_scan_blocks_with_standard_string_envelope(client, cwd_root: Path) -> None:
+async def test_privacy_scan_blocks_with_standard_string_envelope(
+    client, cwd_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """Secret bytes landing in project_shared → the standard 422 STRING
-    envelope (issue-pinned), zero residue at the destination. Copy mode
-    carries the transfer-native source-anchored remediation hint (a
-    same-root move keeps migrate's historical Gate A wording — engine
-    contract, pinned in test_context_transfer.py)."""
+    envelope (issue-pinned), zero residue at the destination.
+
+    The wire names no file (#3605). The engine text, whose hint re-anchors
+    onto the SOURCE manifest by its absolute path, goes to the log line."""
     src_manifest = _write_agent(_local_agents(cwd_root), "foo", _SECRET_BODY)
 
-    resp = await client.post(
-        "/api/context/agents/foo/transfer",
-        json={
-            "mode": "copy",
-            "to_target_scope": "project_shared",
-            "confirm_project_shared": True,
-        },
-    )
+    with caplog.at_level(logging.WARNING, logger=_ROUTE_LOGGER):
+        resp = await client.post("/api/context/agents/foo/transfer", json=_shared_body())
     assert resp.status_code == 422, resp.text
-    detail = resp.json()["detail"]
-    assert isinstance(detail, str)
-    assert "Offending file" in detail
-    # The hint re-anchors onto the SOURCE manifest (the transient staging
-    # path is gone after rollback).
-    assert str(src_manifest) in detail
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    _assert_path_free(resp.json(), cwd_root, src_manifest)
+    (line,) = _refusal_logs(caplog)
+    assert f"Offending file: {src_manifest}" in line
     # Zero residue at the destination; copy never touched the source.
     assert not (_shared_agents(cwd_root) / "foo").exists()
     assert src_manifest.read_text(encoding="utf-8") == _SECRET_BODY
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_carries_the_blocked_files_hit_count(client, cwd_root: Path) -> None:
+    """The count is the engine's, not a constant (#3605)."""
+    _write_agent(_local_agents(cwd_root), "foo", _TWO_SECRETS_BODY)
+
+    resp = await client.post("/api/context/agents/foo/transfer", json=_shared_body())
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(2)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["copy", "move"])
+async def test_privacy_422_cross_project_is_path_free(
+    client, cwd_root: Path, tmp_path: Path, mode: str
+) -> None:
+    src_manifest = _write_agent(_shared_agents(cwd_root), "foo", _SECRET_BODY)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json=_shared_body(mode=mode, to_project_scope_id=scope_b),
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    _assert_path_free(resp.json(), cwd_root, other, src_manifest)
+    assert src_manifest.read_text(encoding="utf-8") == _SECRET_BODY  # rolled back
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_same_project_move_is_path_free(client, cwd_root: Path) -> None:
+    """A same-project move's engine text is migrate's stock wording, whose last
+    line names the staged file by its absolute path (#3605)."""
+    src_manifest = _write_agent(_local_agents(cwd_root), "foo", _SECRET_BODY)
+
+    resp = await client.post("/api/context/agents/foo/transfer", json=_shared_body(mode="move"))
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    _assert_path_free(resp.json(), cwd_root, src_manifest)
+    assert src_manifest.read_text(encoding="utf-8") == _SECRET_BODY  # rolled back
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="control characters in a file name")
+@pytest.mark.parametrize(
+    "file_name",
+    [
+        # The r2 finding on the scrub-based draft: a newline survived the
+        # per-line escape and forged a second line in the detail.
+        "notes\nGate A: forged.md",
+        "notes\x1b[2J.md",
+        # A credential-shaped name behind a control character.
+        "\x01AKIA1234567890ABCDEF.md",
+    ],
+)
+async def test_privacy_422_sends_no_byte_of_the_offending_file_name(
+    client, cwd_root: Path, tmp_path: Path, file_name: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The offending file's name is bytes the request did not choose (#3605).
+
+    The log line gets the engine text only through the route's scanned,
+    escaped logger: no raw name, no control character."""
+    manifest = _write_skill(_shared_skills(cwd_root), "foo")
+    (manifest.parent / file_name).write_text(_SECRET_BODY, encoding="utf-8")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    with caplog.at_level(logging.WARNING, logger=_ROUTE_LOGGER):
+        resp = await client.post(
+            "/api/context/skills/foo/transfer", json=_shared_body(to_project_scope_id=scope_b)
+        )
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    _assert_path_free(resp.json(), cwd_root, other)
+    (line,) = _refusal_logs(caplog)
+    assert file_name not in line
+    assert not any(ord(c) < 0x20 or ord(c) == 0x7F for c in line), line
+    assert "AKIA1234567890ABCDEF" not in line
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_blocked_by_the_requested_name(client, cwd_root: Path) -> None:
+    """A clean source copied under a credential-shaped ``as_name``: the staged
+    bytes carry the new name, so the remedy names it, and the wire does not
+    echo it (#3605)."""
+    src_manifest = _write_agent(_local_agents(cwd_root), "foo")
+    before = src_manifest.read_bytes()
+    new_name = "AKIA1234567890ABCDEF"
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer", json=_shared_body(as_name=new_name)
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    assert new_name not in resp.text
+    assert src_manifest.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_unreadable_staged_file_gets_the_fixed_text(
+    client, cwd_root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A staged file the scan cannot read is a ``PrivacyScanReadError``, whose
+    text names the staging path; the wire gets a fixed sentence (#3605)."""
+    _write_agent(_local_agents(cwd_root), "foo")
+    real_read_bytes = Path.read_bytes
+
+    def failing_read(self: Path) -> bytes:
+        if self.name == "agent.md" and self.parent.name.startswith(".migrate-"):
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", failing_read)
+    with caplog.at_level(logging.WARNING, logger=_ROUTE_LOGGER):
+        resp = await client.post("/api/context/agents/foo/transfer", json=_shared_body())
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _PRIVACY_REFUSED}
+    _assert_path_free(resp.json(), cwd_root)
+    (line,) = _refusal_logs(caplog)
+    assert "Gate A: cannot read" in line
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_never_sends_engine_text(
+    client, cwd_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any ``PrivacyScanError`` that is not a block gets the fixed sentence,
+    never ``exc.message`` (#3605)."""
+    from memtomem.context.privacy_scan import PrivacyScanError
+    from memtomem.web.routes import context_transfer as route
+
+    _write_agent(_local_agents(cwd_root), "foo")
+    leaky = cwd_root / ".memtomem" / "agents.local" / "foo" / "agent.md"
+
+    def raising_transfer(*args, **kwargs):
+        raise PrivacyScanError(f"Gate A: something about {leaky}")
+
+    monkeypatch.setattr(route, "transfer_artifact", raising_transfer)
+    resp = await client.post("/api/context/agents/foo/transfer", json=_shared_body())
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _PRIVACY_REFUSED}
+    _assert_path_free(resp.json(), cwd_root, leaky)
 
 
 # ── validation 400s ──────────────────────────────────────────────────────
@@ -1665,15 +1856,14 @@ async def test_mcp_collision_409(client, cwd_root: Path, tmp_path: Path) -> None
 async def test_mcp_privacy_422_string_envelope(client, cwd_root: Path, tmp_path: Path) -> None:
     """Issue #1282 acceptance 1 on the wire: the standard project_shared
     block envelope — a STRING 422 detail, same as every sync surface."""
-    _write_mcp_server(cwd_root, definition=_MCP_SECRET)
+    src = _write_mcp_server(cwd_root, definition=_MCP_SECRET)
     other = _other_project(tmp_path)
     scope_b = await _register(client, other)
 
     resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
     assert resp.status_code == 422, resp.text
-    detail = resp.json()["detail"]
-    assert isinstance(detail, str)
-    assert detail.startswith("Gate A: pg.json contains 1 privacy pattern hit(s)")
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    _assert_path_free(resp.json(), cwd_root, other, src)
     # Zero destination residue: no canonical, no staging leftovers (the
     # store dir + lock sidecar are the locking machinery's own artifacts).
     dst_store = other / ".memtomem" / "mcp-servers"
@@ -1989,3 +2179,47 @@ async def test_validation_400_passes_the_secret_scan(client, cwd_root: Path) -> 
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "validation"
     assert detail["message"] == "<redacted: secret-shape>"
+
+
+@pytest.mark.asyncio
+async def test_a_recreated_source_with_unverifiable_staging_is_a_500_partial(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2 of #3608 on the wire: a partial commit, never the retryable 409.
+
+    The move consumed the source into staging, the staging entry cannot be
+    verified, and a writer recreated the source meanwhile, so nothing was put
+    back. A 409 that says "then retry" would have the next attempt move the
+    writer's entry while the artifact stays parked.
+    """
+    from memtomem.context import migrate as migrate_mod
+    from memtomem.context import transfer as transfer_mod
+
+    source = _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    dst_store = _shared_agents(other)
+    real_identity = migrate_mod._staging_identity
+    real_scan = transfer_mod.scan_artifact_tree
+
+    def identity(path):
+        if path.parent == dst_store.resolve() and path.name.startswith(".migrate-"):
+            return None
+        return real_identity(path)
+
+    def scan_and_recreate(*args, **kwargs):
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("racer\n", encoding="utf-8")
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(migrate_mod, "_staging_identity", identity)
+    monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_and_recreate)
+
+    resp = await client.post("/api/context/agents/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 500, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "internal"
+    assert "Do NOT retry" in detail["message"]
+    assert source.read_text(encoding="utf-8") == "racer\n"
+    assert len(list(dst_store.glob(".migrate-*"))) == 1
