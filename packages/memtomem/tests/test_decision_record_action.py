@@ -335,7 +335,7 @@ class TestProject:
         """A's ``memories.local`` is a link to B's registered tier.
 
         The core resolves the tier through the link and finds it registered,
-        so without the action's check an A-labelled record lands in B.
+        so without the tier resolver's refusal an A-labelled record lands in B.
         """
         comp, _mem_dir = bm25_only_components
         root_b, tier_b = _make_project(tmp_path, "project-b")
@@ -352,8 +352,65 @@ class TestProject:
         assert _resolve_project_context_root(app) == root_a
 
         out = await _record(StubCtx(app), project="project-a")
-        assert out.startswith("Error: this project's .memtomem/memories.local"), out
-        assert "is a link; nothing was written" in out
+        assert out.startswith("Error: .memtomem/memories.local, or the .memtomem directory"), out
+        assert "nothing was written" in out
+        assert list(tier_b.rglob("*.md")) == []
+
+    @pytest.mark.asyncio
+    async def test_a_retry_after_the_tier_becomes_a_link_is_refused_not_replayed(
+        self, bm25_only_components, tmp_path
+    ):
+        """The ledger holds A's first success; the tier is then a link to B.
+
+        The core reads its ledger before it judges the tier, so a retry of the
+        same id would be answered with the earlier success, naming a path that
+        now leads into B.
+        """
+        comp, _mem_dir = bm25_only_components
+        root_b, tier_b = _make_project(tmp_path, "project-b")
+        root_a, tier_a = _make_project(tmp_path, "project-a")
+        shared_a = root_a / ".memtomem" / "memories"
+        shared_a.mkdir()
+        comp.config.indexing.project_memory_dirs = [shared_a, tier_a, tier_b]
+        app = AppContext.from_components(comp)
+        app.client_cwd = root_a
+        ctx = StubCtx(app)
+        first = await _record(ctx, project="project-a")
+        assert first.startswith("Memory added to ") and _REPLAY_MARKER not in first, first
+
+        tier_a.rename(tmp_path / "moved-aside")
+        try:
+            tier_a.symlink_to(tier_b, target_is_directory=True)
+        except OSError:
+            pytest.skip("this platform cannot create a directory link here")
+
+        retry = await _record(ctx, project="project-a")
+        assert retry.startswith("Error: .memtomem/memories.local, or the .memtomem"), retry
+        assert _REPLAY_MARKER not in retry
+        assert list(tier_b.rglob("*.md")) == []
+
+    @pytest.mark.asyncio
+    async def test_a_linked_tier_is_refused_ahead_of_the_privacy_scans(
+        self, bm25_only_components, tmp_path
+    ):
+        comp, _mem_dir = bm25_only_components
+        root_b, tier_b = _make_project(tmp_path, "project-b")
+        root_a = (tmp_path / "project-a").resolve()
+        shared_a = root_a / ".memtomem" / "memories"
+        shared_a.mkdir(parents=True)
+        try:
+            (root_a / ".memtomem" / "memories.local").symlink_to(tier_b, target_is_directory=True)
+        except OSError:
+            pytest.skip("this platform cannot create a directory link here")
+        comp.config.indexing.project_memory_dirs = [shared_a, tier_b]
+        app = AppContext.from_components(comp)
+        app.client_cwd = root_a
+        privacy.reset_for_tests()
+
+        out = await _record(StubCtx(app), project="project-a", user_words="token: sk-" + "a" * 30)
+        assert out.startswith("Error: .memtomem/memories.local, or the .memtomem"), out
+        assert "privacy pattern" not in out
+        assert privacy.snapshot()["by_tool"] == {}, privacy.snapshot()
         assert list(tier_b.rglob("*.md")) == []
 
     @pytest.mark.asyncio
