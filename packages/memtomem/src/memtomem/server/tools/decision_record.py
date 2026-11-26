@@ -52,8 +52,8 @@ async def mem_decision_record(
 
     ``options``, ``recommended``, ``chosen`` and ``user_words`` are stored
     exactly as given. A changed decision is a new record with a new
-    ``decision_id``. For 24 hours a repeated ``decision_id`` writes nothing
-    and replays the first call's result once that call has completed.
+    ``decision_id``, which is this write's idempotency key: a repeat is
+    handled as ``mem_add`` handles a repeated ``idempotency_key``.
 
     Args:
         decision_id: Lowercase UUID the caller generates for this decision.
@@ -115,18 +115,30 @@ async def mem_decision_record(
         )
     server_slug = project_slug(root.name)
     if server_slug != record.project:
-        # Named so the caller can correct the call, but this runs before the
-        # guard: a slug shaped like a credential is replaced, not echoed.
-        given = privacy.sanitize_audit_value(record.project)
+        # Each slug is named so the caller can correct the call, but only as
+        # it is: this runs before the guard, and the sanitizer replaces a slug
+        # shaped like a credential and shortens a long one, neither of which
+        # could be passed back.
+        given = (
+            f"project '{record.project}'"
+            if privacy.sanitize_audit_value(record.project) == record.project
+            else "the project given"
+        )
+        if server_slug is None:
+            return (
+                f"Error: {given} is not this server's project, whose root directory "
+                "name gives no usable slug; nothing was written. Record the decision "
+                "from a server running in the project it belongs to."
+            )
         named = (
-            f"'{privacy.sanitize_audit_value(server_slug)}'"
-            if server_slug is not None
-            else "a root with no usable slug"
+            f"'{server_slug}'"
+            if privacy.sanitize_audit_value(server_slug) == server_slug
+            else "not shown here; it is derived from the project root's directory name"
         )
         return (
-            f"Error: project '{given}' is not this server's project ({named}); "
-            "nothing was written. Pass this project's slug, or record the decision from a "
-            "server running in the other project."
+            f"Error: {given} is not this server's project ({named}); nothing was "
+            "written. Pass this project's slug, or record the decision from a server "
+            "running in the other project."
         )
     # The core resolves the tier directory through a link and asks only whether
     # the result is registered, so a linked tier could carry this project's

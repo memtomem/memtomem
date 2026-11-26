@@ -295,7 +295,7 @@ class TestProject:
         assert privacy.scan(shaped)
 
         out = await _record(ctx, project=shaped)
-        assert out.startswith("Error: project '"), out
+        assert out.startswith("Error: the project given is not this server's project"), out
         assert shaped not in out and "'proj'" in out
         assert list(tier.rglob("*.md")) == []
 
@@ -307,6 +307,8 @@ class TestProject:
         out = await _record(StubCtx(app), project="other-project")
         assert out.startswith("Error: project 'other-project' is not this server's project"), out
         assert shaped not in out
+        # A value that was replaced cannot be passed back, so none is offered.
+        assert "redacted" not in out and "not shown here" in out
         assert list(shaped_tier.rglob("*.md")) == []
 
     @pytest.mark.asyncio
@@ -427,6 +429,8 @@ class TestProject:
         out = await _record(StubCtx(app), project=slug)
         assert out.startswith("Memory added to "), out
         assert f"- Namespace: shared:{slug}" in out
+        stored = await app.storage.recall_chunks(project_context_root=root)
+        assert stored and {row.metadata.namespace for row in stored} == {f"shared:{slug}"}
         (path,) = sorted(tier.rglob("*.md"))
         declared = decode_day_file_namespace(path.name)
         assert declared == (f"shared:{slug}" if decodes else None)
@@ -646,6 +650,9 @@ class TestCoreOutcomes:
             pytest.skip("the UTC day rolled over since the first write")
         assert sorted(tier.rglob("*.md")) == [day_file]
         assert "Decision id" not in out, out
-        assert "nothing was written" in out, out
+        assert out.startswith(f"Error: mem_add refused: {day_file.name} holds content matching "), (
+            out
+        )
+        assert "nothing was written" in out
         assert day_file.read_bytes() == before
         assert [key for key, _ in _ledger_rows(app, SURFACE)] == [_ledger_key(app.client_cwd, ID_1)]

@@ -661,11 +661,11 @@ second. The tags are derived and the caller supplies none: `decision-record`,
   be read back as well as the rendered entry, and the action has no `force_unsafe`.
 - **Past that point the write is a keyed `mem_add`,** and its outcomes are that tool's:
   an error from it does not by itself say whether the entry was appended.
-- **`decision_id` is required and keys the write for 24 hours.** A repeat that passes the
-  checks above appends nothing: once the first call has completed it gets that call's
-  result back, without its members being compared with the first call's. A changed
-  decision is a new record with a new id. After 24 hours the id is free again and a call
-  with it is a new write: this is replay of a lost response, not uniqueness of records.
+- **`decision_id` is required and is the write's idempotency key.** A repeat is handled as
+  `mem_add` handles a repeated `idempotency_key`, in a ledger of this action's own, so a
+  key used with `mem_add` and a `decision_id` never answer for each other. The key exists
+  to make a lost response safe to retry; it is not uniqueness of records, and a changed
+  decision is a new record with a new id.
 - **A tag finds candidates, the file holds the record.** A chunk's tags are not always
   one entry's, and the indexed text is not always the file's text, so a reader that needs
   a value verbatim, or a count of decisions, parses the records from the day files. For a
