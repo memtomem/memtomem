@@ -391,6 +391,21 @@ Apache License 2.0.
 
 For questions about the CLA, contact contact@dapada.co.kr.
 
+### AI-assisted contributions
+
+You may use AI tools, such as code assistants or agents, to help write a
+contribution. Using a tool does not change what you represent when you sign:
+[Section 5 of the CLA](CLA.md#5-representations) still applies to each of
+your own contributions. Before you submit tool-assisted work, review all of
+it, make sure you can explain it, and take responsibility for it as if you
+had written it by hand. Work that is not your original creation, for example
+code or text a tool reproduced from someone else's work, is not part of your
+own contribution: leave it out, or follow
+[Section 7 of the CLA](CLA.md#7-submissions-on-behalf-of-others).
+
+Please say in the pull request description which tools you used and for
+what. This is not a gate. It tells the reviewer where to look harder.
+
 ## Reporting Issues
 
 Open an issue at https://github.com/memtomem/memtomem/issues with:
