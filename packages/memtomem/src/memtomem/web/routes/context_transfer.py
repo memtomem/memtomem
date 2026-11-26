@@ -71,7 +71,7 @@ from memtomem.context.migrate import (
     StagingIdentityLostError,
     TransferStagingBusyError,
 )
-from memtomem.context.privacy_scan import PrivacyScanError
+from memtomem.context.privacy_scan import PrivacyBlockedError, PrivacyScanError
 from memtomem.context.projects import ProjectScope, compute_scope_id
 from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.context.transfer import (
@@ -371,6 +371,22 @@ _STAGING_REPLACED_MESSAGES = {
 }
 #: The 400 for a path-naming engine refusal that carries no ``safe_message`` (#3543).
 _REFUSED_MESSAGE = "the transfer request was refused; the server log has the details."
+#: The 422 for a Gate A privacy block (#3605). It is built from the hit count alone:
+#: the engine's text names the offending file by its absolute path, and a file name is
+#: bytes the request did not choose, so none of it reaches the wire. The scan stops at
+#: the first blocked file, so the count is that file's, not the artifact's.
+_PRIVACY_BLOCKED_TEMPLATE = (
+    "Gate A: a file in the artifact contains {hits} privacy pattern hit(s); write to "
+    "scope='project_shared' rejected. git history is forever — no force bypass available "
+    "for project_shared (ADR-0011 §5). Remove the secret-shaped values from the source "
+    "artifact and retry; the server log has the details."
+)
+#: The 422 for any other privacy-scan failure, such as a file the scan could not read
+#: or list (#3605).
+_PRIVACY_REFUSED_MESSAGE = (
+    "Gate A could not scan the artifact, so the write to project_shared was refused; "
+    "the server log has the details."
+)
 
 
 def _log_refusal(kind: str, name: str, reason_code: str, text: str) -> None:
@@ -591,7 +607,14 @@ async def transfer_context_artifact(
     except PrivacyScanError as exc:
         # The standard project_shared block envelope (string detail) every
         # sync surface emits — issue-pinned exception to the object envelope.
-        raise HTTPException(422, exc.message) from exc
+        # ``exc.message`` names the offending file by its absolute path
+        # (#3605), so it goes to the log line only.
+        _log_refusal(kind, name, "privacy_blocked", exc.message)
+        if isinstance(exc, PrivacyBlockedError):
+            message = _PRIVACY_BLOCKED_TEMPLATE.format(hits=int(exc.blocked.hits_count))
+        else:
+            message = _PRIVACY_REFUSED_MESSAGE
+        raise HTTPException(422, message) from exc
     except ArtifactNotFoundError as exc:
         # ``safe_message`` when the engine's text names a path (#3532); the
         # other not-found texts name none.
