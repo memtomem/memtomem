@@ -35,11 +35,13 @@ from memtomem.source_provenance import (
 from memtomem.tools.memory_writer import (
     EditBaseMismatchError,
     IndexedBase,
+    OpenFenceEditError,
     SourceBase,
     SourceChangedError,
     SourceRemovedError,
     SourceReplacedError,
     WrittenSource,
+    open_fence_edit_refusal,
     read_pre_image,
     read_with_source_key,
     remove_lines,
@@ -534,6 +536,10 @@ async def edit_chunk(
                     "base_hash": exc.body_hash,
                 },
             ) from exc
+        except OpenFenceEditError as exc:
+            # Raised inside the rewrite before a byte was written (#3633): the
+            # edit would open a code fence over the entries after it.
+            raise HTTPException(status_code=409, detail=open_fence_edit_refusal(exc.run)) from exc
         except StaleSourceProvenanceError as exc:
             # Normally a pure refusal. Invalidate conservatively: if this type
             # came from a later stage, the helper still ran its normal rollback.
