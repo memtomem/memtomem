@@ -275,3 +275,132 @@ async def test_upload_openapi_keeps_multipart_file_array_contract(app) -> None:
         "type": "array",
         "items": {"type": "string", "format": "binary"},
     }
+
+
+async def _consume(scope, receive, send):
+    while (await receive()).get("more_body", False):
+        pass
+    await send({"type": "http.response.start", "status": 204, "headers": []})
+    await send({"type": "http.response.body", "body": b""})
+
+
+async def _stream(data: bytes):
+    yield data
+
+
+class TestBodyLimitUnderAPathPrefix:
+    """#3607: the limit follows the path the router serves, wherever the app is mounted.
+
+    Under ``Mount("/mm", ...)`` or a server ``root_path`` the scope's ``path`` keeps the
+    prefix, so a limiter that read it alone saw ``/mm/api/...`` as a non-API path and let any
+    body through. The limiter now classifies the route path and the full path and applies the
+    tighter of the limits they select, so no request gets a looser limit than before.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _small_limits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(body_limit, "JSON_REQUEST_LIMIT", 4)
+        monkeypatch.setattr(body_limit, "UPLOAD_REQUEST_LIMIT", 8)
+
+    @staticmethod
+    def _mounted(prefix: str) -> AsyncClient:
+        from starlette.applications import Starlette
+        from starlette.routing import Mount
+
+        limited = body_limit.UploadBodyLimitMiddleware(_consume)
+        outer = Starlette(routes=[Mount(prefix, app=limited)])
+        return AsyncClient(transport=ASGITransport(app=outer), base_url="http://test")
+
+    @staticmethod
+    def _root_path(root_path: str) -> AsyncClient:
+        transport = ASGITransport(
+            app=body_limit.UploadBodyLimitMiddleware(_consume), root_path=root_path
+        )
+        return AsyncClient(transport=transport, base_url="http://test")
+
+    async def test_a_mounted_json_route_gets_the_json_limit(self) -> None:
+        async with self._mounted("/mm") as client:
+            response = await client.post(
+                "/mm/api/add", content=b"12345", headers={"content-type": "application/json"}
+            )
+        assert response.status_code == 413
+        assert response.json() == {"detail": "JSON request too large"}
+
+    @pytest.mark.parametrize("route", ["/api/upload", "/api/export/import"])
+    async def test_a_mounted_multipart_route_gets_the_upload_limit(self, route: str) -> None:
+        """A streamed body has no ``Content-Length``, so the receive cap is what refuses it."""
+        async with self._mounted("/mm") as client:
+            exact = await client.post(f"/mm{route}", content=_stream(b"12345678"))
+            overflow = await client.post(f"/mm{route}", content=_stream(b"123456789"))
+        assert exact.status_code == 204
+        assert overflow.status_code == 413
+        assert overflow.json() == {"detail": "Upload request too large"}
+
+    async def test_a_server_root_path_gets_the_upload_limit(self) -> None:
+        async with self._root_path("/mm") as client:
+            exact = await client.post("/mm/api/upload", content=_stream(b"12345678"))
+            overflow = await client.post("/mm/api/upload", content=_stream(b"123456789"))
+        assert exact.status_code == 204
+        assert overflow.status_code == 413
+        assert overflow.json() == {"detail": "Upload request too large"}
+
+    async def test_a_mounted_non_api_path_is_not_limited(self) -> None:
+        async with self._mounted("/mm") as client:
+            response = await client.post("/mm/favicon.ico", content=b"x" * 64)
+        assert response.status_code == 204
+
+    async def test_the_tighter_limit_wins_when_both_paths_are_classified(self) -> None:
+        """Under ``/api/x`` the full path reads as JSON and the route path as an upload.
+
+        Before #3607 such a request got the JSON limit from its full path; it still does, so
+        reading the route path never loosens a limit.
+        """
+        async with self._mounted("/api/x") as client:
+            response = await client.post("/api/x/api/upload", content=b"123456")
+        assert response.status_code == 413
+        assert response.json() == {"detail": "JSON request too large"}
+
+    async def test_the_full_path_still_counts_when_only_it_is_classified(self) -> None:
+        """``root_path="/api"`` makes the route path ``/upload``, which selects no limit."""
+        async with self._root_path("/api") as client:
+            exact = await client.post("/api/upload", content=_stream(b"12345678"))
+            overflow = await client.post("/api/upload", content=_stream(b"123456789"))
+        assert exact.status_code == 204
+        assert overflow.status_code == 413
+        assert overflow.json() == {"detail": "Upload request too large"}
+
+    async def test_a_partial_segment_root_path_keeps_the_full_path(self) -> None:
+        """``get_route_path`` returns the full path when ``root_path`` ends mid-segment."""
+        async with self._root_path("/ap") as client:
+            response = await client.post("/api/add", content=b"12345")
+        assert response.status_code == 413
+        assert response.json() == {"detail": "JSON request too large"}
+
+    def test_the_real_app_under_a_mount_refuses_an_oversized_json_body(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real middleware stack, CSRF enforced, so the 413 is the limiter's answer."""
+        from starlette.applications import Starlette
+        from starlette.routing import Mount
+        from starlette.testclient import TestClient
+
+        from memtomem.web.app import create_app
+
+        monkeypatch.delenv("MEMTOMEM_WEB__CSRF_ENFORCE", raising=False)
+        inner = create_app(lifespan=None, mode="prod")
+        assert inner.state.csrf_enforce is True
+        client = TestClient(Starlette(routes=[Mount("/mm", app=inner)]))
+
+        response = client.post(
+            "/mm/api/add",
+            content=b'{"content": "12345"}',
+            headers={
+                "content-type": "application/json",
+                "Host": "127.0.0.1:8080",
+                "Origin": "http://127.0.0.1:8080",
+                "X-Memtomem-CSRF": inner.state.csrf_token,
+            },
+        )
+
+        assert response.status_code == 413, response.text
+        assert response.json() == {"detail": "JSON request too large"}
