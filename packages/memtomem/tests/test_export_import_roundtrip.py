@@ -88,7 +88,8 @@ class _DeterministicEmbedder:
     similarity, mirroring how a real dense model never returns exactly-orthogonal
     vectors; without it zero-overlap distractors tie and the lowest top-k slot is
     ordered by an arbitrary tie-break. The vectors carry no real semantic
-    meaning; the round trip against a real model is ``test_golden_path.py``.
+    meaning; the add/search/recall round trip against a real model is
+    ``test_golden_path.py``.
     """
 
     _WORD_RE = re.compile(r"\w+", re.UNICODE)
