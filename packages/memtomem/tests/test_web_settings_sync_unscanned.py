@@ -256,6 +256,27 @@ async def test_a_tier_symlinked_to_a_missing_tier_is_reported(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+async def test_two_tiers_linked_to_one_missing_file_are_both_reported(
+    client, project_root: Path, fake_home: Path
+) -> None:
+    """Both project tiers link to the same missing file. A broken link is
+    not a visit of its destination, so the second link is reported too."""
+    claude_dir = project_root / ".claude"
+    missing = project_root / "elsewhere.json"
+    (claude_dir / "settings.json").symlink_to(missing)
+    (claude_dir / "settings.local.json").symlink_to(missing)
+
+    response = await client.get("/api/settings-sync?target_scope=user")
+
+    assert response.status_code == 200, response.text
+    rows = _rows_by_tier(response.json())
+    assert {tier: row["reason"] for tier, row in rows.items()} == {
+        "project_shared": "broken symlink",
+        "project_local": "broken symlink",
+    }, rows
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
 def test_a_readable_tier_still_dedups_its_symlinked_alias(tmp_path: Path, monkeypatch) -> None:
     """A tier that does exist still counts as seen: its symlinked alias is
     scanned once, not twice."""

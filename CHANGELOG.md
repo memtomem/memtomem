@@ -71,9 +71,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   skip it and the unscanned report lists it as `invalid JSON`, where before the checks
   crashed. The Web route's own comparison of the canonical and selected target files does
   not use that reader and is unchanged. A tier linked to another tier that does not exist
-  (`.claude/settings.local.json` → a missing `.claude/settings.json`) is now reported as a
-  broken symlink on every surface; before, the missing tier counted as seen and the link was
-  skipped as its alias.
+  (`.claude/settings.local.json` → a missing `.claude/settings.json`), or two tiers linked to
+  the same missing file, are now reported as broken symlinks on every surface; before, the
+  missing destination counted as seen and the later link was skipped as its alias.
 
 - **A search whose `deadline_ms` budget runs out during the session-summary rescue no longer
   logs and counts the expiry as a rescue failure (#3637).** The rescue's links walk and its
