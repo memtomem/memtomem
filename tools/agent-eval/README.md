@@ -150,7 +150,8 @@ involved. Each carries only the tag `capability`. Each also has the `no_read` / 
 `no_glob` graders and grades meaning with an `llm` judge, `correct`. The judge has no
 `focus`, so it reads only the final reply (measured, see "Capability set" under
 Measurements). Regexes check only what is mechanical: the bounded token on the last
-`ANSWER:` line (`answer`), and the bounded token inside a `"type":"tool_result"` record
+`ANSWER:` line (`answer`, in the three cases whose answer is a single value), and the bounded
+token inside a `"type":"tool_result"` record
 (`retrieved*`).
 
 | case | seed | `correct` passes only when the final reply… | other graders |
@@ -158,8 +159,8 @@ Measurements). Regexes check only what is mechanical: the bounded token on the l
 | `cap-superseded-registry` | an Aug note and an Oct note that replaces it without naming the old host. The prompt asks for the current host and the previous one | gives the Oct host as current, names the Aug host as the previous one, and grounds it in October replacing August. It must not present the old host as current or as an alternative, call the new host doubtful, say the previous host is unknown, or give a reason that contradicts the notes | `retrieved_old`: the old host reached the agent. Only the Aug note names it, so this means both notes were seen |
 | `cap-distractor-bucket` | two notes, same heading, no cross-reference, Jun and Oct, different buckets | gives the Oct bucket and grounds it in the later note | none. The prompt asks only for the current bucket, so a grounded answer from the Oct note alone passes. Whether the Jun note also reached the agent is read from the trace (it did in every measured run) |
 | `cap-multihop-oncall` | a port-change log (Sept: ledger-api, Oct: quota-svc) and one on-call note per service | names ledger-api as the service changed in September **and** gives its handle. A right handle on a wrong join fails | `retrieved_hop1`: port 7342, which only the September entry holds |
-| `cap-nohint-psql` | `staging-db` (port 6519) | ends with one `psql` invocation for `staging-db.internal:6519`, user `deploy`, database `app`. Flags, `key=value` and a URI all pass | `answer` requires `6519` on the last `ANSWER:` line |
-| `cap-nohint-deploy` | a note giving the prod deploy command and its required region | ends with one `rlsctl deploy` for build 1234, env prod, region `kx-north-9` | `answer` requires the region on the last `ANSWER:` line |
+| `cap-nohint-psql` | `staging-db` (port 6519) | ends with one `psql` invocation for `staging-db.internal:6519`, user `deploy`, database `app`. Flags, `key=value` and a URI all pass | no `answer` regex: the judge grades the whole command, port included |
+| `cap-nohint-deploy` | a note giving the prod deploy command and its required region | ends with one `rlsctl deploy` for build 1234, env prod, region `kx-north-9` | no `answer` regex: the judge grades the whole command, region included |
 
 The two `cap-nohint-*` prompts ask for a command and do not mention memory or a stored value.
 
@@ -333,7 +334,7 @@ paragraph after the table). The verdicts below are from the live runs:
 | the Aug registry note removed from the seed | `retrieved_old` failed; `answer`, `retrieved`, `correct` passed |
 | the September entry removed from the port log | `retrieved_hop1`, `answer`, `correct` failed (`retrieved` passed: the on-call notes still came back) |
 | forced replies whose last `ANSWER:` line holds the right token (13 near-misses: OLD called current, NEW called doubtful, right bucket on the June note's authority, both buckets, right handle on the wrong service, psql wrong host / user / database, a second `-h`, `echo psql …`, deploy wrong build / env / executable) | `correct` failed in all 13; `answer` passed, as designed |
-| forced replies with the token replaced (psql `-p 5432`, deploy `--region us-east-1`) | `answer` and `correct` failed |
+| forced replies with the token replaced (psql `-p 5432`, deploy `--region us-east-1`) | `answer` and `correct` failed. Those `answer` graders were removed afterwards, and `correct` alone fails these replies |
 | forced `WRONG_ANSWER: <right host>`, and a right `ANSWER:` line followed by a wrong one | `answer` and `correct` failed in both: the real grader reads the last-line anchor as Python `re` does |
 | forced correct replies: one per case, plus the psql `key=value` and URI forms (7) | `answer` and `correct` passed |
 | revised superseded judge (reason required): the correct reply, the right host with the wrong reason ("August chose it, nothing changed in October"), OLD called current, NEW called doubtful | `correct` passed the first and failed the other three (3 of 3 votes each); `answer` passed all four |
@@ -344,7 +345,11 @@ Review changed the graders after these runs:
 - The `retrieved_hop1` and psql `retrieved` patterns require the whole phrase `port <digits>`,
   bounded on both sides. A verbose result's UUID chunk id can hold the same four digits.
 - The identifier boundaries also exclude `_`.
-- psql's `answer` accepts `-p6519` after a space.
+- The two command cases (`cap-nohint-psql`, `cap-nohint-deploy`) lost their `answer` regex. Over
+  a command line it kept rejecting valid forms (a quoted `"-p6519"` was the last one found). The
+  judge already grades the whole command, token included, and failed every token-replaced control.
+  The regex had passed in all 6 measured runs of those cases, so removing it changes no recorded
+  case verdict.
 - The superseded rubric requires the reason, and then the previous host; its prompt asks for
   the previous host.
 - The distractor case lost its `retrieved_old` grader. It required the Jun bucket, which the prompt
@@ -354,7 +359,8 @@ Review changed the graders after these runs:
 The superseded changes were measured in new live runs (the last two rows of the table, and the
 re-runs above). The committed regex patterns were replayed with Python `re` over every kept
 trace and final reply above. They gave the recorded verdict in all 110 regex grader results.
-That count includes the 4 results of the distractor `retrieved_old` grader, since removed:
+That count includes results of graders removed since then: the distractor `retrieved_old` and the
+two command cases' `answer`:
 
 | run | results |
 |---|---|

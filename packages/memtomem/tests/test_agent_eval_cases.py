@@ -43,13 +43,13 @@ _CAPABILITY = {
         "retrieved_hop1": ("regex", "trace", "contains"),
         "correct": ("llm", None, None),
     },
+    # The command cases have no `answer` regex: whether the final command is right, token
+    # included, is the judge's call, and a token regex over a command line only added false FAILs.
     "cap-nohint-psql": {
-        "answer": ("regex", "last_message", "contains"),
         "retrieved": ("regex", "trace", "contains"),
         "correct": ("llm", None, None),
     },
     "cap-nohint-deploy": {
-        "answer": ("regex", "last_message", "contains"),
         "retrieved": ("regex", "trace", "contains"),
         "correct": ("llm", None, None),
     },
@@ -69,7 +69,8 @@ def _grader(case: str, name: str) -> dict:
 
 def _matches(case: str, name: str, text: str) -> bool:
     # The graders run as JavaScript regexes. The patterns stick to syntax both engines read the
-    # same way, and no flags are set; the kept-trace controls in the README cover the real engine.
+    # same way, and no flags are set. Python `re` here is not the real engine: the README says
+    # which pattern versions ran live and which were only replayed under Python.
     return re.search(_grader(case, name)["pattern"], text) is not None
 
 
@@ -184,43 +185,6 @@ _ANSWERS = {
             "ANSWER: heron-ledger-oncall-2",
             "ANSWER: heron-ledger-oncall, marten-quota-oncall",
             "WRONG_ANSWER: heron-ledger-oncall",
-        ],
-    ),
-    "cap-nohint-psql": (
-        [
-            "ANSWER: psql -h staging-db.internal -p 6519 -U deploy -d app",
-            'ANSWER: `psql "host=staging-db.internal port=6519 user=deploy dbname=app"`',
-            "ANSWER: psql postgresql://deploy@staging-db.internal:6519/app",
-            "ANSWER: psql --host=staging-db.internal --port=6519 --username=deploy app.",
-            "ANSWER: psql -h staging-db.internal -p6519 -U deploy -d app",
-        ],
-        [
-            "ANSWER: psql -h staging-db.internal -p 5432 -U deploy -d app",
-            "ANSWER: psql -h staging-db.internal -p 65190 -U deploy -d app",
-            "ANSWER: psql -h staging-db.internal -p 16519 -U deploy -d app",
-            "ANSWER: psql -p 6519 -d app\nOr use port 5432.",
-            "ANSWER: psql -p 5432 -d app\n6519",
-            "ANSWER: psql -p 6519\nANSWER: psql -p 5432",
-            "WRONG_ANSWER: psql -h staging-db.internal -p 6519 -U deploy -d app",
-            "ANSWER: psql -h staging-db.internal -p 5432 -U deploy -d app6519archive",
-            "ANSWER: psql -h staging-db.internal -p 5432 -U deploy -d app_6519",
-            "ANSWER: psql -h staging-db.internal -p 5432 -U deploy -d app-p6519",
-            "psql -h staging-db.internal -p 6519 -U deploy -d app",
-        ],
-    ),
-    "cap-nohint-deploy": (
-        [
-            "ANSWER: rlsctl deploy --build 1234 --env prod --region kx-north-9",
-            "ANSWER: `rlsctl deploy --region=kx-north-9 --env=prod --build=1234`",
-        ],
-        [
-            "ANSWER: rlsctl deploy --build 1234 --env prod --region kx-north-90",
-            "ANSWER: rlsctl deploy --build 1234 --env prod --region kx-north-9b",
-            "ANSWER: rlsctl deploy --build 1234 --env prod --region kx-north-9_backup",
-            "ANSWER: rlsctl deploy --build 1234 --env prod --region us-east-1",
-            "ANSWER: rlsctl deploy --region kx-north-9\nANSWER: rlsctl deploy --region us-east-1",
-            "ANSWER: rlsctl deploy --build 1234 --env prod\nkx-north-9",
-            "WRONG_ANSWER: rlsctl deploy --build 1234 --env prod --region kx-north-9",
         ],
     ),
 }
