@@ -26,6 +26,8 @@ import sys
 import pytest
 from click.testing import CliRunner
 
+from _subprocess_env import subprocess_env
+
 from memtomem.cli import cli
 
 from .helpers import set_home
@@ -140,7 +142,7 @@ class TestFreshNoopIndexSubprocess:
         home.mkdir()
         mem_dir = _make_memory_dir(str(home))
 
-        env = os.environ.copy()
+        env = subprocess_env()
         # Strip developer ``MEMTOMEM_*`` overrides — ``HOME`` only
         # isolates ``~/.memtomem/config.json`` reads, but
         # pydantic-settings still applies env-var overrides from the

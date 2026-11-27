@@ -1085,7 +1085,8 @@ class SearchPipeline:
         Returns an empty set when the feature is disabled, the lookup
         fails, no summary scores above threshold, or no surviving
         ``summarizes`` link points at any source. The caller treats an
-        empty set as "skip the rescue leg".
+        empty set as "skip the rescue leg". A ``SearchDeadlineExceeded``
+        from any of its three reads propagates instead.
         """
         cfg = self._session_summary_config
         if cfg is None or cfg.expansion_lookup_top_k <= 0:
@@ -1123,6 +1124,8 @@ class SearchPipeline:
             links_by_source = await self._storage.get_chunks_shared_from_batch(
                 [r.chunk.id for r in candidate_summaries], link_type="summarizes"
             )
+        except SearchDeadlineExceeded:
+            raise
         except Exception:
             _log_rescue_failure(
                 "links_walk",
@@ -1147,6 +1150,8 @@ class SearchPipeline:
                 scope_filter=scope_filter,
                 project_context_root=project_context_root,
             )
+        except SearchDeadlineExceeded:
+            raise
         except Exception:
             _log_rescue_failure("chunks_batch", "target hydration failed for rescue targets")
             if report_failure is not None:
@@ -1591,10 +1596,12 @@ class SearchPipeline:
         deadline_ms: int | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         # ``deadline_ms``: a processing budget for the ranked search (see
-        # ``search/deadline.py``). It bounds the waits for a read connection and
-        # a still-queued query embedding, and is checked at stage boundaries;
-        # on expiry the search raises ``SearchDeadlineExceeded`` and records
-        # nothing. ``None`` runs exactly the search without it.
+        # ``search/deadline.py``). It bounds the wait for a read connection,
+        # caps the reranker timeout, and is checked at stage boundaries; it does
+        # not bound the wait for a query embedding (an ONNX slice its worker
+        # picks up after the budget has run out does not run). An expiry the
+        # search detects raises ``SearchDeadlineExceeded``. ``None`` runs
+        # exactly the search without it.
         #
         # Two independent axes (#1802, split by #2671).
         #

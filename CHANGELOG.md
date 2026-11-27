@@ -44,6 +44,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A chunk edit that would put the entries after it inside a code fence is refused (#3633).**
+  `mem_edit` and the web `PATCH /api/chunks/{id}` wrote a body that left a fence open, and
+  every later entry in the file then dropped out of the index (no chunk, heading or tags of
+  its own), though they had been indexed correctly before. The edit reported success.
+  Both surfaces now refuse such an edit before writing (web: 409). For a Markdown source, the
+  whole file is compared before and after the edit under the chunker's fence rules: the
+  edit is refused when it puts a previously unfenced, non-blank line after the edited span
+  inside a fence, or makes a file that ended outside a fence end inside one. A file that
+  already ended inside a fence can still be edited and repaired. Deleting a chunk can still
+  open a fence the same way (#3669).
+
+- **A search whose `deadline_ms` budget runs out during the session-summary rescue no longer
+  logs and counts the expiry as a rescue failure (#3637).** The rescue's links walk and its
+  target hydration caught `SearchDeadlineExceeded` from their read-connection lease as a
+  storage failure: each logged it (a WARNING with a traceback the first time in a process) and
+  set the rescue-failed flag, though the search still raised the expiry at its next stage
+  boundary and returned no results. Both now let the expiry through, as the summary lookup
+  already did; any other storage failure still degrades the rescue as before.
+
 - **An entry that leaves a code fence open is refused instead of swallowing every later entry
   in its file (#3618).** The Markdown chunker reads a fence that never closes as running to
   the end of the file, so after one such entry every entry appended to the same file was
@@ -129,6 +148,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   gated, which under a mount whose own prefix starts with `/api/` includes the app's non-API
   paths. `mm web` serves the app at the root and was not affected. The `web.csrf.observe` log
   line still records the request path.
+
+- **The web UI's request-body limits apply when `create_app()` is mounted under a path prefix
+  (#3607).** The limiter chose the JSON (4 MiB) or upload (201 MiB) limit from the request
+  path, which keeps a mount's prefix, so under `Mount("/mm", app=create_app())` (or a server
+  `root_path`) `/mm/api/*` requests read as non-API paths and had no body limit at all. The
+  limiter now also classifies the path the router matches and applies the tighter of the
+  limits the two paths select, so no request gets a looser limit than before: under a mount
+  whose own prefix starts with `/api/`, the upload routes keep the JSON limit they had. `mm web`
+  serves the app at the root and was not affected.
 
 - **A context transfer `move` refuses before it moves anything when the source has no file
   identity it can read (#3545).** On a filesystem that reports `st_ino == 0` (reproduced by
@@ -2458,12 +2486,14 @@ provider's README describes its catalog install.
   memory directory, which is indexed like any other note. The provider README
   lists what is stored, sent and dropped, and how to purge a mirror.
 - **`mem_search` takes `deadline_ms`, a budget for the server's own
-  processing.** It bounds the wait for a read connection, and is checked between
-  search stages and when a queued query embedding reaches the model, which then
-  does not run; past it the call returns `Error (retryable): … deadline …
-  exceeded …` and records nothing. Work already running — a SQLite read, an
-  embedding slice — finishes first, and a query embedding queued behind other
-  inference waits for it before failing, so this is not a response deadline.
+  processing.** It bounds the wait for a read connection, caps the reranker's
+  timeout, and is checked between search stages and when the worker picks up a
+  queued ONNX query embedding, which does not run if the budget has run out by
+  then. When the search detects an expiry, the call returns `Error (retryable):
+  … deadline … exceeded …`, persists no query-run observation and counts no
+  access. Work already running — a SQLite read, an embedding slice — finishes
+  first, and a query embedding queued behind other inference waits for it, so
+  this is not a response deadline.
   Without it, search runs exactly as before.
 - **`mem_do(action="version")` advertises `hermes_mirror`, `search_deadline_ms`
   and `namespace_selectors`.** The Hermes provider asks before its first call

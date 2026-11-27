@@ -74,7 +74,7 @@ async def mem_decision_record(
     from memtomem.constants import validate_writable_namespace
     from memtomem.decision_record import DecisionRecordError, build_decision_record, project_slug
     from memtomem.indexing.engine import PrivacyRejection
-    from memtomem.memory_scope import project_tier_dir, project_tier_is_relinked
+    from memtomem.memory_scope import MemoryScopeError, resolve_project_tier_write_dir
     from memtomem.server.tools.memory_crud import _REPLAY_MARKER, _mem_add_core
     from memtomem.server.tools.search import _resolve_project_context_root
     from memtomem.server.validation import MAX_CONTENT_LENGTH
@@ -144,15 +144,15 @@ async def mem_decision_record(
             "written. Pass this project's slug, or record the decision from a server "
             "running in the other project."
         )
-    # The core resolves the tier directory through a link and asks only whether
-    # the result is registered, so a linked tier could carry this project's
-    # record into another project's.
-    if project_tier_is_relinked(project_tier_dir("project_local", root)):
-        return (
-            "Error: this project's .memtomem/memories.local, or the .memtomem directory "
-            "holding it, is a link; nothing was written. Replace the link with a regular "
-            "directory."
-        )
+    # The core asks the same resolver, but only after its idempotency ledger,
+    # which would answer a retry with an earlier success whose reported path
+    # now passes through a link, and after this action's privacy scans, which
+    # would answer a linked tier with advice about its content. Asked here,
+    # the tier is judged first.
+    try:
+        resolve_project_tier_write_dir("project_local", root)
+    except MemoryScopeError as exc:
+        return f"Error: {exc}"
     namespace = validate_writable_namespace(f"shared:{record.project}")
 
     # The core refuses an entry that leaves a code fence open (#3618); asked

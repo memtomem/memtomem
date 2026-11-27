@@ -49,9 +49,11 @@ from memtomem.source_provenance import (
 )
 from memtomem.tools.memory_writer import (
     EditBaseMismatchError,
+    OpenFenceEditError,
     RestoreOutcome,
     SourceChangedError,
     WrittenSource,
+    open_fence_edit_refusal,
     read_pre_image,
     read_with_source_key,
     restore_pre_image_quietly,
@@ -714,6 +716,9 @@ async def _mutate_file_and_reindex(
             # every gate in front of it: hand back what the span holds, so one
             # retry against the source text can succeed.
             return None, edit_base_mismatch_message(exc)
+        if isinstance(exc, OpenFenceEditError) and not mutation_completed:
+            # Refused inside the rewrite before a byte was written (#3633).
+            return None, f"Error: {open_fence_edit_refusal(exc.run)}"
         if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
             # No byte was written. In particular, do not reindex here: doing
             # so could erase the stale row and bless an unrelated replacement.

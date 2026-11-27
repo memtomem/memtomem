@@ -27,8 +27,7 @@ pytest.importorskip(
     reason="fastembed not installed — install with `pip install memtomem[onnx]`",
 )
 
-# ``onnx_components`` fixture lives in ``conftest.py`` — shared with
-# ``test_multilingual_regression.py``.
+# ``onnx_components`` fixture lives in ``conftest.py``.
 
 
 class TestOnnxGoldenPath:

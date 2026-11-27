@@ -224,6 +224,45 @@ async def test_mem_add_project_local_into_a_regular_tier_still_writes(
     assert _snapshot(projects.b_dot) == before
 
 
+@pytest.mark.asyncio
+async def test_mem_add_into_a_tier_that_fails_to_resolve_is_refused_without_its_path(
+    bm25_only_components, monkeypatch, projects
+):
+    """#3646: the tier passed the link check, then ``resolve()`` raised.
+
+    That is a tier swapped for a loop in between on Python 3.12, whose
+    ``RuntimeError`` names the absolute path. It is injected here, on A's own
+    registered tier, so the refusal is the only thing that stops the write.
+    """
+    comp, _ = bm25_only_components
+    a_local = projects.a / ".memtomem" / "memories.local"
+    a_local.mkdir(parents=True)
+    # ``_mcp`` registers B's tiers; A's local tier is added after it.
+    ctx = _mcp(comp, monkeypatch, projects)
+    comp.config.indexing.project_memory_dirs = [
+        *comp.config.indexing.project_memory_dirs,
+        a_local,
+    ]
+    real_resolve = Path.resolve
+
+    def _resolve(self, *args, **kwargs):
+        if self == a_local:
+            raise RuntimeError(f"Symlink loop from '{self}'")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+    before = _snapshot(projects.b_dot)
+
+    out = await memory_crud.mem_add(
+        content="a note written from project a", scope="project_local", ctx=ctx
+    )
+
+    _assert_refused(out, projects, ".memtomem/memories.local")
+    assert out.startswith("Error: "), out
+    assert not list(a_local.rglob("*")), out
+    assert _snapshot(projects.b_dot) == before
+
+
 # ---------------------------------------------------------------------------
 # CLI mm mem add, web POST /api/add
 # ---------------------------------------------------------------------------

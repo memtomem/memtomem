@@ -1,10 +1,13 @@
 """The ``deadline_ms`` processing budget of one search.
 
 A budget on server processing, not an end-to-end response deadline: it bounds
-waits (a read connection, an embedding slice still queued) and is checked at
-stage boundaries. Work already running — a SQLite read on its worker thread, an
-inference slice that started — completes first. Absent a budget, nothing here
-runs: callers hold ``None`` and every helper is skipped.
+the wait for a read connection, caps the reranker timeout, and is checked at
+stage boundaries. It does not bound the wait for a query embedding: an embedder
+that declares ``supports_query_deadline`` (ONNX) checks the budget once, when
+its worker picks the slice up, so a slice picked up after the budget has run
+out does not run, but a queued slice first waits for the work ahead of it. An
+ONNX slice or SQLite read that has already started is not interrupted. With
+``None`` the budget is not enforced.
 """
 
 from __future__ import annotations
