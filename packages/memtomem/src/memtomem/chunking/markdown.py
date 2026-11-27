@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 from dataclasses import dataclass
@@ -182,21 +183,25 @@ def fences_after_edit(before: str, after: str, tail_lines: int) -> str | None:
     new_lines = split_source_lines(after)
     old_spans = _fence_spans(old_lines)
     new_spans = _fence_spans(new_lines)
-    old_fenced = _fenced_from_end(old_spans, len(old_lines))
-    tail_start = len(new_lines) - tail_lines
-    for span in new_spans:
-        for index in range(max(span.start, tail_start), span.end + 1):
-            from_end = len(new_lines) - 1 - index
-            if from_end not in old_fenced and new_lines[index].strip():
-                return span.run
+    if tail_lines > 0:
+        # A tail line at ``index`` in ``after`` is at ``index - shift`` in
+        # ``before``; the old fences are compared as intervals, not line sets.
+        shift = len(new_lines) - len(old_lines)
+        old_starts = [span.start for span in old_spans]
+        tail_start = len(new_lines) - tail_lines
+        for span in new_spans:
+            for index in range(max(span.start, tail_start), span.end + 1):
+                if new_lines[index].strip() and not _in_spans(old_spans, old_starts, index - shift):
+                    return span.run
     if new_spans and not new_spans[-1].closed and not (old_spans and not old_spans[-1].closed):
         return new_spans[-1].run
     return None
 
 
-def _fenced_from_end(spans: list[_FenceSpan], total: int) -> set[int]:
-    """The fenced lines of ``spans``, each counted from the last line (0 = last)."""
-    return {total - 1 - i for span in spans for i in range(span.start, span.end + 1)}
+def _in_spans(spans: list[_FenceSpan], starts: list[int], index: int) -> bool:
+    """Whether line ``index`` lies in one of ``spans`` (ordered, disjoint; ``starts`` theirs)."""
+    at = bisect.bisect_right(starts, index) - 1
+    return at >= 0 and index <= spans[at].end
 
 
 def _split_paragraphs_fence_aware(text: str) -> list[str]:

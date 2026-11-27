@@ -38,6 +38,20 @@ TAIL = "## Next\n\nbody\n"
             "```",
             id="no-final-newline-both-end-open-tail-newly-fenced",
         ),
+        pytest.param(
+            "a\n```\nx\n```\n## N\n```\ny\n```\n",
+            "b\nc\n```\nx\n```\n## N\n```\ny\n```\n",
+            7,
+            None,
+            id="shifted-tail-with-several-fences-unchanged",
+        ),
+        pytest.param(
+            "a\n```\nx\n```\n## N\n```\ny\n```\n",
+            "b\n~~~\n```\nx\n```\n## N\n```\ny\n```\n",
+            7,
+            "~~~",
+            id="shifted-tail-with-several-fences-newly-covered",
+        ),
         pytest.param("a\n", "", 0, None, id="empty-result"),
         pytest.param("```\nx\n", "", 0, None, id="empty-result-after-an-open-fence"),
         pytest.param(
