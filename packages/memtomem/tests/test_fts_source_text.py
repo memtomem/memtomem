@@ -246,7 +246,9 @@ _KNOWN_MENTIONS = Counter(
         ("storage/sqlite_schema.py", "_migrate_chunks_uniqueness"): 1,
         ("storage/sqlite_schema.py", "_rewrite_fts_source_text"): 2,
         ("storage/sqlite_schema.py", "create_tables"): 1,
-        ("storage/sqlite_search_ops.py", "_query"): 2,
+        # The BM25 statement (two mentions) and its fill statement (#3662: two
+        # arms and the AND-match exclusion, six mentions); both only read.
+        ("storage/sqlite_search_ops.py", "_query"): 8,
         ("storage/sqlite_search_ops.py", "_restrict_to_column"): 1,
     }
 )

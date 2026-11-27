@@ -44,6 +44,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A keyword search fills a short all-words result with any-word matches, so a word only a
+  newer note holds no longer hides an older note by itself (#3662).** The BM25 leg tried the
+  all-words (AND) form of the query and fell back to the any-word (OR) form only when AND
+  found nothing, so one word that only a newer note contains made AND non-empty and an older
+  note sharing every other word never came back: a search returned one side of a
+  disagreement with no sign the other existed. The default install searches with BM25 only,
+  so this was the default. Now, when AND finds at least one result but fewer than the leg
+  asked for, one statement returns the AND results followed by the OR results that are not
+  AND matches, under the same filters. AND results keep their order and scores; the added
+  results are scaled so none scores above the last AND result, because the session-summary
+  rescue and the BM25-only result list sort by score. A query that shares no word with a
+  note still does not find it, AND results that already fill the leg leave no room for OR
+  ones, and stronger OR matches can take the slots that remain. A filter long enough that
+  the fill statement would bind more than 999 variables (SQLite's ceiling before 3.32) keeps
+  the AND results alone. Cost, measured on a 39,667-chunk store over its 400 most recent
+  distinct queries (`top_k` 50): 63 of them now run the second statement, and their BM25 leg
+  goes from a median of 9.9 ms to 86.9 ms (p90 44.5 → 264.5 ms, p99 192.3 → 798.5 ms); over
+  all 400 the median goes from 127.2 to 134.5 ms. For each of the 63, the ordered list of
+  chunk ids begins with the list it returned before; the other 337 return the same ordered
+  chunk ids as before.
+
 - **A chunk edit that would put the entries after it inside a code fence is refused (#3633).**
   `mem_edit` and the web `PATCH /api/chunks/{id}` wrote a body that left a fence open, and
   every later entry in the file then dropped out of the index (no chunk, heading or tags of

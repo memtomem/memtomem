@@ -300,7 +300,13 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > on the model, reported alongside in a `reranker` key), `"rrf"`
 > (reciprocal-rank fusion), `"bm25"` / `"dense"` (unfused single-retriever
 > scores when only one retriever is enabled), or `"none"` (filter-only
-> enumeration — no relevance scale; the filter is the selector). Optional
+> enumeration — no relevance scale; the filter is the selector). Under `"bm25"`,
+> when the all-words match found fewer candidates than the keyword leg asked for
+> and the leg filled the rest with any-word matches, those added candidates are
+> scaled down if, and only if, the first of them would score above the last
+> all-words candidate: then their scores are capped relative to that candidate,
+> which may itself be dropped by later stages, rather than being their own BM25
+> values. Optional
 > modifier stages (time decay, access/importance/entity boosts; all off by default)
 > multiply on top of the base scale when enabled. Pick score thresholds per
 > scale — or skip score gating for a scale you don't recognize — instead of

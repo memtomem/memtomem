@@ -91,6 +91,10 @@ _VISIBLE_SOURCE = VISIBLE_SOURCE_CHUNKS
 _FTS_CONTENT_COLUMN = "content"
 _FTS_SOURCE_COLUMN = "source_file"
 
+#: SQLite's host-parameter ceiling on builds older than 3.32 (32766 after).
+#: The BM25 fill statement stays under it on every runtime (#3662).
+_HOST_PARAM_FLOOR = 999
+
 
 def _chunk_ids_sql(column_alias: str = "") -> str:
     """SQL fragment restricting rows to an explicit chunk-id set.
@@ -203,6 +207,25 @@ def _restrict_to_column(column: str, body: str) -> str:
     return "{" + column + "} : (" + body + ")"
 
 
+def _scale_fill(rows: Sequence[tuple]) -> list[tuple[tuple, float]]:
+    """``(chunk row, score)`` for the fill statement's rows, fill scores capped (#3662).
+
+    Each row ends in rank, arm (0 = AND, 1 = OR fill) and tie-break. When both
+    arms are present and the first fill row outscores the last AND row, every
+    fill score is multiplied by one factor that brings the first down to the
+    last AND score, and capped there so float rounding cannot lift it above.
+    Either arm alone is returned with its own scores. The statement orders AND
+    rows before fill rows, so ``rows`` is read in that order.
+    """
+    and_scores = [abs(row[-3]) for row in rows if row[-2] == 0]
+    fill_scores = [abs(row[-3]) for row in rows if row[-2] != 0]
+    if and_scores and fill_scores and fill_scores[0] > and_scores[-1]:
+        cap = and_scores[-1]
+        factor = cap / fill_scores[0]
+        fill_scores = [min(score * factor, cap) for score in fill_scores]
+    return [(row[:-3], score) for row, score in zip(rows, and_scores + fill_scores, strict=True)]
+
+
 def _column_match(column: str, query: str, *, use_or: bool, tokenizer: str = "unicode61") -> str:
     """Tokenize *query* and restrict it to one column — one call, one analysis.
 
@@ -308,6 +331,27 @@ class SearchOpsMixin:
             # for the four ``(column, form)`` expressions directly would analyse
             # the query once per expression, which for a morphological backend
             # is the expensive half of the call.
+            #
+            # A short AND result is filled with OR rows, not returned alone
+            # (#3662). The OR pass used to run only when AND found nothing, so
+            # one word that only a newer note holds hid an older note sharing
+            # every other word: a search returned one side of a disagreement.
+            # When AND returns at least one row but fewer than ``top_k``, the
+            # fill statement returns, in one statement and so from one
+            # snapshot, the AND rows followed by the OR rows that are not AND
+            # matches. The first AND statement only decides that; its rows are
+            # dropped, so a write landing between the two cannot produce a list
+            # that no version of the store held. Excluding every AND-matching
+            # rowid, unfiltered, is exact: an AND match the filters reject
+            # fails the same filters in the OR arm.
+            #
+            # Fill rows are scored by a different MATCH expression, so one can
+            # score above the AND rows it follows, and the rescue merge and the
+            # BM25-only passthrough sort by score. They are scaled by one factor
+            # so the first fill row scores at most the last AND row: order and
+            # ratios among fill rows are kept, scores are non-increasing, and a
+            # fill row may tie the last AND row. Their ``score`` is then a
+            # capped BM25 value, not that row's own.
             tokenizer = self._fts_tokenizer
             and_body = _fts.tokenize_for_fts(query, for_query=True, tokenizer=tokenizer)
             or_body = _fts.tokenize_for_fts(query, for_query=True, use_or=True, tokenizer=tokenizer)
@@ -323,7 +367,7 @@ class SearchOpsMixin:
                 else (_FTS_CONTENT_COLUMN,)
             )
 
-            def _query(conn: sqlite3.Connection) -> list:
+            def _query(conn: sqlite3.Connection) -> list[tuple[tuple, float]]:
                 # ADR-0011 §6 + PR-D review #2: filter must run *inside* the
                 # FTS candidate selection, not after a post-LIMIT join. With
                 # the previous shape (``LIMIT k`` on chunks_fts MATCH, then
@@ -349,34 +393,68 @@ class SearchOpsMixin:
                        WHERE chunks_fts MATCH ? {ns_clause} {scope_clause} {metadata_clause} {source_clause} {_VISIBLE_SOURCE_C}
                        ORDER BY fts.rank, {tie_break}, c.id
                        LIMIT ?"""
-                rows: list = []
+                # The fill: arm 0 is ``sql`` for the AND body, arm 1 the OR body
+                # minus every AND match. Each arm orders and limits itself, and
+                # carries its arm and tie-break so the bounded union can be put
+                # back in that order. Its rows end in rank, arm, tie-break.
+                fill_sql = f"""SELECT * FROM (
+                       SELECT c.*, fts.rank AS fill_rank, 0 AS fill_arm, {tie_break} AS fill_tie
+                       FROM chunks_fts fts
+                       JOIN chunks c ON c.rowid = fts.rowid
+                       WHERE chunks_fts MATCH ? {ns_clause} {scope_clause} {metadata_clause} {source_clause} {_VISIBLE_SOURCE_C}
+                       ORDER BY fts.rank, {tie_break}, c.id
+                       LIMIT ?)
+                       UNION ALL SELECT * FROM (
+                       SELECT c.*, fts.rank AS fill_rank, 1 AS fill_arm, {tie_break} AS fill_tie
+                       FROM chunks_fts fts
+                       JOIN chunks c ON c.rowid = fts.rowid
+                       WHERE chunks_fts MATCH ?
+                       AND fts.rowid NOT IN (SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?)
+                       {ns_clause} {scope_clause} {metadata_clause} {source_clause} {_VISIBLE_SOURCE_C}
+                       ORDER BY fts.rank, {tie_break}, c.id
+                       LIMIT ?)
+                       ORDER BY fill_arm, fill_rank, fill_tie, id
+                       LIMIT ?"""
+                filter_params = ns_params + scope_params + metadata_params + source_params
+                # The fill binds every filter twice. A filter that fits the
+                # single statement but not twice over (a long namespace list
+                # under the 999 floor) keeps the AND rows alone, as before.
+                can_fill = 2 * len(filter_params) + 5 <= _HOST_PARAM_FLOOR
+                scored: list[tuple[tuple, float]] = []
                 for column in columns:
-                    for body in bodies:
-                        rows = conn.execute(
-                            sql,
-                            [_restrict_to_column(column, body)]
-                            + ns_params
-                            + scope_params
-                            + metadata_params
-                            + source_params
-                            + [top_k],
+                    and_match = _restrict_to_column(column, and_body)
+                    rows = conn.execute(sql, [and_match] + filter_params + [top_k]).fetchall()
+                    if rows and len(rows) < top_k and len(bodies) == 2 and can_fill:
+                        or_match = _restrict_to_column(column, or_body)
+                        filled = conn.execute(
+                            fill_sql,
+                            [and_match]
+                            + filter_params
+                            + [top_k, or_match, and_match]
+                            + filter_params
+                            + [top_k, top_k],
                         ).fetchall()
-                        if rows:
-                            break
-                    if rows:
+                        scored = _scale_fill(filled)
+                    elif not rows and len(bodies) == 2:
+                        or_match = _restrict_to_column(column, or_body)
+                        rows = conn.execute(sql, [or_match] + filter_params + [top_k]).fetchall()
+                        scored = [(row[:-1], abs(row[-1])) for row in rows]
+                    else:
+                        scored = [(row[:-1], abs(row[-1])) for row in rows]
+                    if scored:
                         break
-                return rows
+                return scored
 
-            rows = await self._run_read_in_thread(db, _query)
+            scored = await self._run_read_in_thread(db, _query)
 
         return [
             SearchResult(
-                chunk=self._row_to_chunk(row[:-1]),
-                score=abs(row[-1]),
+                chunk=self._row_to_chunk(chunk_row),
+                score=score,
                 rank=rank_idx + 1,
                 source="bm25",
             )
-            for rank_idx, row in enumerate(rows)
+            for rank_idx, (chunk_row, score) in enumerate(scored)
         ]
 
     @property

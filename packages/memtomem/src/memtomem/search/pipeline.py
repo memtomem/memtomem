@@ -2210,7 +2210,11 @@ class SearchPipeline:
                 else:
                     # Passthrough keeps raw retriever scores — a distinct
                     # scale (#1767): Okapi BM25 is unbounded positive, far
-                    # outside the RRF ceiling.
+                    # outside the RRF ceiling. Rows the BM25 leg filled in
+                    # after a short AND result may carry scores it scaled down
+                    # to the last AND row's (#3662), so a stable sort on these
+                    # base scores keeps the leg's order; modifier stages can
+                    # still reorder it, as they reorder any rows.
                     fused = bm25_results[:rerank_pool]
                     stats.score_scale = "bm25"
             elif use_dense:

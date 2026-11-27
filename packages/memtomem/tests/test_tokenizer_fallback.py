@@ -92,7 +92,11 @@ class TestMixedStoreRecall:
         ids = await self._mixed_store(storage, monkeypatch)
 
         _use_kiwi(monkeypatch, storage)
-        assert await self._found(storage, ids, "예산을") == ["a"]
+        # Under kiwipiepy the AND form matches only ``a``; ``b`` comes back
+        # through the OR fill a short AND result now gets (#3662), its
+        # unicode61 token matching the stem's prefix. The damage stays in the
+        # other direction, which has one term and so no OR form to fill with.
+        assert await self._found(storage, ids, "예산을") == ["a", "b"]
         _fall_back(monkeypatch, storage)
         assert await self._found(storage, ids, "예산을") == ["b"]
         # A bare stem still reaches both through unicode61's prefix ``*``,
