@@ -146,7 +146,8 @@ class EmbeddingConfig(ConfigModel):
     def cpu_model_defaults(self) -> "EmbeddingConfig":
         from memtomem.embedding.profiles import e5_contract_error, is_bge_m3, is_e5
 
-        if self.provider.lower() == "onnx" and not self.model:
+        auto_selected = self.provider.lower() == "onnx" and not self.model
+        if auto_selected:
             object.__setattr__(self, "model", "multilingual-e5-small")
         if self.provider.lower() == "onnx" and is_e5(self.model):
             for key, value in {
@@ -157,7 +158,12 @@ class EmbeddingConfig(ConfigModel):
             }.items():
                 if key not in self.model_fields_set:
                     object.__setattr__(self, key, value)
-            error = e5_contract_error(self.model, self.dimension, self.max_sequence_tokens)
+            error = e5_contract_error(
+                self.model,
+                self.dimension,
+                self.max_sequence_tokens,
+                auto_selected=auto_selected,
+            )
             if error:
                 raise ValueError(error)
         if self.onnx_variant == "fp32" and self.onnx_artifact_path:

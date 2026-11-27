@@ -108,7 +108,7 @@ from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.visibility import chunk_valid_at, neighbor_visible
 from memtomem.search.reranker.base import close_reranker_safely
 from memtomem.storage.base import ContextWindowRows, SearchMetadataFilter, parse_tag_filter
-from memtomem.storage.sqlite_helpers import match_source_filter_value, norm_path
+from memtomem.storage.sqlite_helpers import match_source_filter_value, norm_path, resolve_path
 
 logger = logging.getLogger(__name__)
 
@@ -420,16 +420,33 @@ def _matches_metadata(
     return True
 
 
+def _comparison_path(path: Path | str) -> Path:
+    """``path`` resolved for comparing a source with an exclusion root.
+
+    Python 3.12's ``resolve()`` raises ``RuntimeError`` for a symlink loop
+    (3.13+ returns a path instead). :func:`resolve_path` returns
+    ``os.path.realpath`` there, which keeps the links resolved before the
+    loop, so a pinned root whose tier loops still excludes a hit the index
+    recorded under it (#3670). An ``OSError`` from resolving leaves the
+    spelled absolute path as the key, so the comparison never raises.
+    """
+    path = Path(path).expanduser()
+    try:
+        return resolve_path(path)
+    except OSError:
+        return path.absolute()
+
+
 def _normalize_source_roots(roots: tuple[Path, ...] | None) -> tuple[Path, ...]:
     if not roots:
         return ()
-    return tuple(sorted({root.expanduser().resolve(strict=False) for root in roots}, key=str))
+    return tuple(sorted({_comparison_path(root) for root in roots}, key=str))
 
 
 def _source_is_excluded(source_file: Path, roots: tuple[Path, ...]) -> bool:
     if not roots:
         return False
-    source = Path(source_file).expanduser().resolve(strict=False)
+    source = _comparison_path(source_file)
     return any(source == root or source.is_relative_to(root) for root in roots)
 
 
