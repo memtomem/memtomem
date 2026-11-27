@@ -737,21 +737,16 @@ async def components(tmp_path):
     os.environ["MEMTOMEM_EMBEDDING__MODEL"] = "bge-m3"
     os.environ["MEMTOMEM_EMBEDDING__DIMENSION"] = "1024"
 
-    # Prevent ~/.memtomem/config.json from overriding test settings
     config = Mem2MemConfig()
-    # Apply env vars directly (bypass load_config_overrides)
     config.storage.sqlite_path = Path(db_path)
     config.embedding.model = "bge-m3"
     config.embedding.dimension = 1024
     config.indexing.memory_dirs = [Path(mem_dir)]
 
-    # Monkey-patch to skip config.json loading
-    import memtomem.config as _cfg
-
-    _orig = _cfg.load_config_overrides
-    _cfg.load_config_overrides = lambda c: None
-    comp = await create_components(config)
-    _cfg.load_config_overrides = _orig
+    # load_ambient_config=False: neither ~/.memtomem/config.d nor config.json is
+    # layered onto this config (the config.d half is pinned by
+    # test_component_fixture_hermeticity.py).
+    comp = await create_components(config, load_ambient_config=False)
     yield comp
     await close_components(comp)
 
@@ -788,8 +783,9 @@ def memory_dir(components: Components):
 async def bm25_only_components(tmp_path, monkeypatch):
     """Real BM25-only component stack with a tmp DB + memory_dir.
 
-    Hermetic against ``~/.memtomem/config.json`` and developer
-    ``MEMTOMEM_*`` env vars. Dense search is off so we don't pull an
+    Hermetic against ``~/.memtomem/config.json``, ``~/.memtomem/config.d``
+    (pinned by ``test_component_fixture_hermeticity.py``) and the environment
+    variables that bind ``Mem2MemConfig``. Dense search is off so we don't pull an
     embedder; ``chunks_vec`` still needs a non-zero dimension to satisfy
     ``upsert_chunks``. Yields ``(components, memory_dir)``.
 
@@ -812,7 +808,7 @@ async def bm25_only_components(tmp_path, monkeypatch):
     config.embedding.dimension = 1024
     config.search.enable_dense = False  # BM25-only — no embedder needed
 
-    comp = await create_components(config)
+    comp = await create_components(config, load_ambient_config=False)
     try:
         yield comp, mem_dir
     finally:
@@ -823,12 +819,13 @@ async def bm25_only_components(tmp_path, monkeypatch):
 async def onnx_components(tmp_path, monkeypatch):
     """Component stack with ONNX multilingual MiniLM-L12 against a tmp DB.
 
-    Hermetic — bypasses ``~/.memtomem/config.json`` and any developer-set
-    ``MEMTOMEM_EMBEDDING__*`` / ``MEMTOMEM_STORAGE__*`` env vars.
+    Hermetic against ``~/.memtomem/config.json``, ``~/.memtomem/config.d`` and
+    the environment variables that bind ``Mem2MemConfig``.
 
-    Shared between ``test_golden_path.py`` (2-chunk sanity) and
-    ``test_multilingual_regression.py`` (~80-chunk quality floors).  Both files
-    expect the fastembed model to be cached by the ``test-golden-path`` CI job.
+    Used by ``test_golden_path.py``, which expects the fastembed model to be
+    cached by the ``test-golden-path`` CI job, and by
+    ``test_component_fixture_hermeticity.py``, which checks its config without
+    loading the model.
     Determinism env vars (``PYTHONHASHSEED``, ``OMP_NUM_THREADS``) are set at
     the CI job level; this fixture does not re-set them in-process.
     """
@@ -856,11 +853,7 @@ async def onnx_components(tmp_path, monkeypatch):
     # limit so the test proves memtomem actively narrows the tokenizer.
     config.embedding.max_sequence_tokens = 64
 
-    import memtomem.config as _cfg
-
-    monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
-
-    comp = await create_components(config)
+    comp = await create_components(config, load_ambient_config=False)
     try:
         yield comp, mem_dir
     finally:
