@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from pydantic import ValidationError
 
 from memtomem.config import (
     EmbeddingConfig,
@@ -12,6 +13,7 @@ from memtomem.config import (
     Mem2MemConfig,
     embedding_policy_fingerprint,
     stored_policy_variant_conflict,
+    validation_error_message,
 )
 from memtomem.embedding.profiles import E5_TOKENIZER
 from memtomem.indexing.watcher import FileWatcher, _STOP_SENTINEL
@@ -188,6 +190,46 @@ def test_existing_bge_config_is_preserved():
 def test_e5_rejects_incompatible_model_contract(override):
     with pytest.raises(ValueError):
         EmbeddingConfig(provider="onnx", **override)
+
+
+_E5_VALUE_ERRORS = [
+    ({"dimension": 1024}, "multilingual-e5-small requires dimension=384"),
+    ({"max_sequence_tokens": 0}, "multilingual-e5-small requires max_sequence_tokens=512"),
+]
+
+
+@pytest.mark.parametrize("blank", [{}, {"model": ""}], ids=["omitted", "blank"])
+@pytest.mark.parametrize("override, requirement", _E5_VALUE_ERRORS)
+def test_e5_error_says_the_model_was_auto_selected(blank, override, requirement):
+    """#2462: the user never named E5, so the error says so and names the fixes."""
+    (field,) = override
+    with pytest.raises(ValidationError) as excinfo:
+        EmbeddingConfig(provider="onnx", **blank, **override)
+
+    assert validation_error_message(excinfo.value) == (
+        f"{requirement} (embedding.model is empty, so multilingual-e5-small was selected "
+        "automatically; set embedding.model and embedding.dimension for the model you intend, "
+        f"for example bge-m3 and 1024, or remove embedding.{field})"
+    )
+
+
+@pytest.mark.parametrize("override, requirement", _E5_VALUE_ERRORS)
+def test_e5_error_for_a_named_model_is_unchanged(override, requirement):
+    with pytest.raises(ValidationError) as excinfo:
+        EmbeddingConfig(provider="onnx", model="multilingual-e5-small", **override)
+
+    assert validation_error_message(excinfo.value) == requirement
+
+
+@pytest.mark.parametrize("override, requirement", _E5_VALUE_ERRORS)
+def test_the_auto_selected_e5_error_remedies_load(override, requirement):
+    removed = EmbeddingConfig(provider="onnx")
+    assert (removed.dimension, removed.max_sequence_tokens) == (384, 512)
+
+    values = {**override, "model": "bge-m3", "dimension": 1024}
+    named = EmbeddingConfig(provider="onnx", **values)
+    assert (named.model, named.dimension) == ("bge-m3", 1024)
+    assert named.max_sequence_tokens == override.get("max_sequence_tokens", 1024)
 
 
 async def test_continuous_events_cannot_starve_maximum_wait():

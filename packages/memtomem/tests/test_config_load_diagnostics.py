@@ -14,14 +14,23 @@ on the config as a load diagnostic for the status/config/web surfaces.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from memtomem import config as _cfg
 from memtomem import config_signature as _sig
 from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
 from memtomem.errors import ConfigError
+
+AUTO_SELECTED_E5 = (
+    "multilingual-e5-small requires dimension=384 (embedding.model is empty, "
+    "so multilingual-e5-small was selected automatically; set embedding.model and "
+    "embedding.dimension for the model you intend, for example bge-m3 and 1024, "
+    "or remove embedding.dimension)"
+)
 
 STALE_E5 = {
     "embedding": {
@@ -119,6 +128,39 @@ class TestRejectedSectionDiagnostics:
         assert "multilingual-e5-small requires dimension=384" in diagnostic.error
         # Reading never rewrites the user's file.
         assert override_path.read_text() == raw
+
+    def test_a_model_nobody_named_is_reported_as_auto_selected(
+        self, override_path: Path, config_d_dir: Path
+    ) -> None:
+        """#2462: a ``dimension`` left over from another model, with no ``model``."""
+        override_path.write_text(json.dumps({"embedding": {"provider": "onnx", "dimension": 1024}}))
+        cfg = Mem2MemConfig()
+
+        with pytest.raises(ConfigError, match=re.escape(AUTO_SELECTED_E5)):
+            load_config_overrides(cfg, migrate=False, strict=True)
+
+        (diagnostic,) = cfg.load_diagnostics
+        assert AUTO_SELECTED_E5 in diagnostic.error
+
+    def test_a_model_filled_for_an_earlier_layer_is_still_auto_selected(
+        self, override_path: Path, config_d_dir: Path
+    ) -> None:
+        (config_d_dir / "10-embedding.json").write_text(
+            json.dumps({"embedding": {"provider": "onnx"}})
+        )
+        override_path.write_text(json.dumps({"embedding": {"dimension": 1024}}))
+
+        with pytest.raises(ConfigError, match=re.escape(AUTO_SELECTED_E5)):
+            _sig.build_fresh_config(migrate=False)
+
+    def test_environment_values_report_the_auto_selected_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__PROVIDER", "onnx")
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__DIMENSION", "1024")
+
+        with pytest.raises(ValidationError, match=re.escape(AUTO_SELECTED_E5)):
+            Mem2MemConfig()
 
     def test_status_warning_payload_is_strings_only(
         self, override_path: Path, config_d_dir: Path
