@@ -456,14 +456,13 @@ def _source_lines(source: str) -> list[str]:
     return io.StringIO(source).readlines()
 
 
-def _string_pieces(source: str) -> list[_Piece]:
+def _string_pieces(source: str, lines: list[str]) -> list[_Piece]:
     """Every string piece of a module, in source order, from one tokenize pass.
 
     A t-string (3.14) run is not a piece — :func:`_template_parts` keeps its
     synthesized nodes from being split — but literals inside its replacement
     fields are, one level deeper.
     """
-    lines = _source_lines(source)
     line_starts = [0]
     for line in lines:
         line_starts.append(line_starts[-1] + len(line))
@@ -619,9 +618,13 @@ def _scan(
     token_rx = re.compile(token_start) if token_start is not None else None
     for relpath, tree in trees.items():
         root = next(r for r in roots if relpath.startswith(r + "/"))
-        pieces = _string_pieces(sources[relpath]) if token_rx is not None else []
-        char_col = _CharColumns(_source_lines(sources[relpath]))
-        synthesized = _template_parts(tree)
+        if token_rx is not None:
+            # ``lines`` is ``_source_lines`` (split at ``\n`` only) of the
+            # module: the piece offsets and the column tables both index it.
+            lines = _source_lines(sources[relpath])
+            pieces = _string_pieces(sources[relpath], lines)
+            char_col = _CharColumns(lines)
+            synthesized = _template_parts(tree)
         for node, func in _public_literals(relpath, tree, endpoints, report.defs):
             report.public_literals[root] += 1
             value = _render(node)
@@ -1043,8 +1046,8 @@ _TOOL = "server/tools/planted.py"
         ),
         pytest.param(
             _ENGINE,
-            '\x0cX = "Sync" "All"\n',
-            {(1, _TOKEN_START_LABEL)},
+            '# \x0cabcdefghiABCDEFGHI1234567890\nY = f"{x}" "ImportSkills"\n',
+            {(2, _TOKEN_START_LABEL)},
             id="form-feed-is-not-a-line-break",
         ),
         pytest.param(
