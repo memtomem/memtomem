@@ -720,10 +720,9 @@ def folds_unicode_forms(monkeypatch):
 
 
 @pytest.fixture
-async def components(tmp_path):
+async def components(tmp_path, monkeypatch):
     """Create components with a temporary DB for isolated testing."""
     import json
-    import os
 
     db_path = str(tmp_path / "test.db")
     mem_dir = str(tmp_path / "memories")
@@ -732,10 +731,10 @@ async def components(tmp_path):
     # See #206.
     (tmp_path / "memories").mkdir(exist_ok=True)
 
-    os.environ["MEMTOMEM_STORAGE__SQLITE_PATH"] = db_path
-    os.environ["MEMTOMEM_INDEXING__MEMORY_DIRS"] = json.dumps([mem_dir])
-    os.environ["MEMTOMEM_EMBEDDING__MODEL"] = "bge-m3"
-    os.environ["MEMTOMEM_EMBEDDING__DIMENSION"] = "1024"
+    monkeypatch.setenv("MEMTOMEM_STORAGE__SQLITE_PATH", db_path)
+    monkeypatch.setenv("MEMTOMEM_INDEXING__MEMORY_DIRS", json.dumps([mem_dir]))
+    monkeypatch.setenv("MEMTOMEM_EMBEDDING__MODEL", "bge-m3")
+    monkeypatch.setenv("MEMTOMEM_EMBEDDING__DIMENSION", "1024")
 
     config = Mem2MemConfig()
     config.storage.sqlite_path = Path(db_path)
@@ -749,14 +748,6 @@ async def components(tmp_path):
     comp = await create_components(config, load_ambient_config=False)
     yield comp
     await close_components(comp)
-
-    for key in (
-        "MEMTOMEM_STORAGE__SQLITE_PATH",
-        "MEMTOMEM_INDEXING__MEMORY_DIRS",
-        "MEMTOMEM_EMBEDDING__MODEL",
-        "MEMTOMEM_EMBEDDING__DIMENSION",
-    ):
-        os.environ.pop(key, None)
 
 
 @pytest.fixture
