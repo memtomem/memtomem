@@ -1137,6 +1137,8 @@ class TestNoHardcodedStrings:
             "settings.hooks.target_label_user",
             "settings.hooks.duplicate_banner_one",
             "settings.hooks.duplicate_banner_many",
+            "settings.hooks.unscanned_canonical_row",
+            "settings.hooks.unscanned_target_row",
             "toast.sync_scope_changed",
         ]
         leaks: list[str] = []

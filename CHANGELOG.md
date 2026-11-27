@@ -64,6 +64,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   already ended inside a fence can still be edited and repaired. Deleting a chunk can still
   open a fence the same way (#3669).
 
+- **The Web Hooks panel reports the settings files it could not check (#2644).** The CLI
+  (`mm context settings-doctor`, the `sync`/`diff --include=settings` warnings) and the MCP
+  context branches already reported a settings file that exists but could not be read; the
+  Web panel did not, so a tier the duplicate check skipped — invalid JSON, not a JSON object,
+  or, since #2476, a parent directory without search permission — disappeared from it without
+  a trace. `GET /api/settings-sync` (and `GET /api/context/settings`) now returns
+  `unscanned_settings` rows (`source`, `tier`, `path`, `reason`, the keys of
+  `settings-doctor --json`); a row's `path` is the tier's fixed location
+  (`.claude/settings.local.json`, `~/.claude/settings.json`, …), never the file's host path.
+  The panel shows one "was not checked" row per file. `POST /api/settings-sync` and the
+  `/context/sync-all*` rows are unchanged. The settings reader behind these checks now treats
+  a file nested deep enough to raise `RecursionError` in the JSON decoder, or holding an
+  integer past Python's digit limit, as unreadable: the duplicate, matcher and command checks
+  skip it and the unscanned report lists it as `invalid JSON`, where before the checks
+  crashed. The Web route's own comparison of the canonical and selected target files does
+  not use that reader and is unchanged. A tier linked to another tier that does not exist
+  (`.claude/settings.local.json` → a missing `.claude/settings.json`), or two tiers linked to
+  the same missing file, are now reported as broken symlinks on every surface; before, the
+  missing destination counted as seen and the later link was skipped as its alias.
+
 - **A search whose `deadline_ms` budget runs out during the session-summary rescue no longer
   logs and counts the expiry as a rescue failure (#3637).** The rescue's links walk and its
   target hydration caught `SearchDeadlineExceeded` from their read-connection lease as a
