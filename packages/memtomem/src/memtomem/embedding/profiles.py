@@ -46,21 +46,36 @@ def is_bge_m3(model: str) -> bool:
     return resolve_embedder_id(model) == BGE_M3_MODEL
 
 
-def e5_contract_error(model: str, dimension: int, max_sequence_tokens: int) -> str | None:
+def e5_contract_error(
+    model: str, dimension: int, max_sequence_tokens: int, *, auto_selected: bool = False
+) -> str | None:
     """Why an ONNX E5 configuration cannot load, or ``None`` when it can.
 
     Shared by ``EmbeddingConfig``'s validator and the loader. Sections do not
     validate assignment, so a model assigned after construction reaches the
     loader without the E5 defaults the validator would have applied.
+
+    ``auto_selected`` says the caller filled E5 into an empty ``model``; the
+    message then says so and names how to fix it.
     """
     if not is_e5(model):
         return None
     spelled = "" if model in ("multilingual-e5-small", E5_MODEL) else f" ({model!r} is {E5_MODEL})"
     if dimension != 384:
-        return f"multilingual-e5-small requires dimension=384{spelled}"
-    if max_sequence_tokens != 512:
-        return f"multilingual-e5-small requires max_sequence_tokens=512{spelled}"
-    return None
+        field, required = "dimension", 384
+    elif max_sequence_tokens != 512:
+        field, required = "max_sequence_tokens", 512
+    else:
+        return None
+    message = f"multilingual-e5-small requires {field}={required}{spelled}"
+    if auto_selected:
+        # The dimension goes with the model: ``model`` alone can leave it at 0.
+        message += (
+            " (embedding.model is empty, so multilingual-e5-small was selected automatically; "
+            "set embedding.model and embedding.dimension for the model you intend, "
+            f"for example bge-m3 and 1024, or remove embedding.{field})"
+        )
+    return message
 
 
 def is_minilm(model: str) -> bool:
