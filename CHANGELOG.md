@@ -44,6 +44,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The E5 embedding model's `config.json`, `tokenizer_config.json` and
+  `special_tokens_map.json` are checked against sha256 pins (#2465).** The pinned E5
+  snapshot verified only `onnx/model.onnx` and `tokenizer.json`; the three other files
+  FastEmbed reads from it were pinned by revision alone, so a cached copy that no longer
+  matched the pinned revision was loaded as is. Each is now hashed the way the model and
+  tokenizer are, and a mismatch stops the load with the same
+  `Pinned E5 artifact checksum mismatch` error. As for those two, a check that passed is
+  reused within one process while the file's size and modification time stay the same.
+
 - **A chunk edit that would put the entries after it inside a code fence is refused (#3633).**
   `mem_edit` and the web `PATCH /api/chunks/{id}` wrote a body that left a fence open, and
   every later entry in the file then dropped out of the index (no chunk, heading or tags of

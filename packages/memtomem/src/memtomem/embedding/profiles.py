@@ -20,6 +20,15 @@ E5_REVISION = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
 E5_TOKENIZER = f"model:{E5_MODEL}@{E5_REVISION}"
 E5_TOKENIZER_SHA256 = "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
 E5_MODEL_SHA256 = "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"
+# The other files of the pinned snapshot FastEmbed reads. A revision is immutable on
+# the Hub, but a cached copy is not, so each is checked like the model and tokenizer.
+# These are public file digests; gitleaks' generic-api-key rule reads a hex value under a
+# name containing "token" as a key, hence the allow markers.
+E5_AUXILIARY_SHA256 = {
+    "config.json": "69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959",
+    "tokenizer_config.json": "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b",  # gitleaks:allow
+    "special_tokens_map.json": "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7",  # gitleaks:allow
+}
 CPU_VARIANTS = ("fp32", "int8-arm64", "int8-avx2", "int8-avx512", "int8-avx512-vnni")
 
 BGE_M3_MODEL = "BAAI/bge-m3"
@@ -143,9 +152,11 @@ def e5_snapshot() -> Path:
             )
         )
     resolve_tokenizer(E5_TOKENIZER)
-    model = snapshot / "onnx/model.onnx"
-    stat = model.stat()
-    _verify_file(model, stat.st_mtime_ns, stat.st_size, E5_MODEL_SHA256)
+    pins = {"onnx/model.onnx": E5_MODEL_SHA256, **E5_AUXILIARY_SHA256}
+    for name, expected in pins.items():
+        path = snapshot / name
+        stat = path.stat()
+        _verify_file(path, stat.st_mtime_ns, stat.st_size, expected)
     return snapshot
 
 
