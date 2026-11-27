@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from starlette._utils import get_route_path
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 UPLOAD_REQUEST_LIMIT = 201 * 1024 * 1024
@@ -13,6 +14,15 @@ _MULTIPART_PATHS = frozenset({"/api/upload", "/api/export/import"})
 
 class _BodyTooLarge(Exception):
     pass
+
+
+def _budget(path: str) -> tuple[int, str] | None:
+    """The limit and refusal detail one spelling of the request path selects, if any."""
+    if path in _MULTIPART_PATHS:
+        return UPLOAD_REQUEST_LIMIT, "Upload request too large"
+    if path.startswith("/api/"):
+        return JSON_REQUEST_LIMIT, "JSON request too large"
+    return None
 
 
 class UploadBodyLimitMiddleware:
@@ -27,16 +37,22 @@ class UploadBodyLimitMiddleware:
             return
 
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
-        path = scope.get("path", "")
-        if path in _MULTIPART_PATHS:
-            limit = UPLOAD_REQUEST_LIMIT
-            detail = "Upload request too large"
-        elif path.startswith("/api/"):
-            limit = JSON_REQUEST_LIMIT
-            detail = "JSON request too large"
-        else:
+        # Classify the path the router matches as well as ``scope["path"]``: under a ``Mount``
+        # (or a server ``root_path``) the latter keeps the prefix, so on it alone an ``/api/*``
+        # request under a prefix such as ``/mm`` read as a non-API path and got no limit
+        # (#3607). ``get_route_path`` is the function Starlette's and FastAPI's routers call.
+        # When both spellings select a limit, the tighter one applies, so reading the route
+        # path never loosens what the full path limited before — under a mount whose own
+        # prefix starts with ``/api/``, an upload route keeps the JSON limit.
+        selected = [
+            budget
+            for budget in (_budget(get_route_path(scope)), _budget(scope.get("path", "")))
+            if budget is not None
+        ]
+        if not selected:
             await self.app(scope, receive, send)
             return
+        limit, detail = min(selected, key=lambda budget: budget[0])
 
         raw_length = headers.get(b"content-length")
         if raw_length:

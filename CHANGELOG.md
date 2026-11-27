@@ -138,6 +138,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   paths. `mm web` serves the app at the root and was not affected. The `web.csrf.observe` log
   line still records the request path.
 
+- **The web UI's request-body limits apply when `create_app()` is mounted under a path prefix
+  (#3607).** The limiter chose the JSON (4 MiB) or upload (201 MiB) limit from the request
+  path, which keeps a mount's prefix, so under `Mount("/mm", app=create_app())` (or a server
+  `root_path`) `/mm/api/*` requests read as non-API paths and had no body limit at all. The
+  limiter now also classifies the path the router matches and applies the tighter of the
+  limits the two paths select, so no request gets a looser limit than before: under a mount
+  whose own prefix starts with `/api/`, the upload routes keep the JSON limit they had. `mm web`
+  serves the app at the root and was not affected.
+
 - **A context transfer `move` refuses before it moves anything when the source has no file
   identity it can read (#3545).** On a filesystem that reports `st_ino == 0` (reproduced by
   simulating one in tests) the move would rename the source into staging, then refuse to
