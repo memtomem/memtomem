@@ -323,6 +323,8 @@ def test_snapshot_download_is_guarded(monkeypatch, tmp_path, recorder, helper):
     snapshot = tmp_path / "snapshot"
     (snapshot / "onnx").mkdir(parents=True)
     (snapshot / "onnx/model.onnx").write_bytes(b"model")
+    for name in profiles.E5_AUXILIARY_SHA256:
+        (snapshot / name).write_text("{}", encoding="utf-8")
 
     def download(*_args, cache_dir, **_kwargs):
         recorder.append(("download", cache_dir))
