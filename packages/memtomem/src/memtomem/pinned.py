@@ -27,7 +27,7 @@ from memtomem.memory_scope import (
 # Runtime import (not TYPE_CHECKING): the alias must resolve for
 # typing.get_type_hints(ContextBundle) — this is a public payload dataclass
 # and reflection-based consumers may introspect it.
-from memtomem.search.pipeline import ScoreScale
+from memtomem.search.pipeline import ScoreScale, _comparison_path
 
 PINNED_BLOCK_MAX_CHARS = 2_000
 PINNED_TOTAL_MAX_CHARS = 6_000
@@ -228,23 +228,22 @@ class PinnedContextStore:
     def _exclusion_root(self, scope: TargetScope) -> Path:
         try:
             return self._base(scope).resolve(strict=False)
-        except RuntimeError:
+        except (OSError, RuntimeError):
             if scope == "user" or self.project_root is None:
                 raise
-            from memtomem.storage.sqlite_helpers import resolve_path
-
-            # Python 3.12's loop error: the root is ``os.path.realpath`` of
-            # the spelled one, which keeps the links resolved before the loop.
-            # It is kept rather than dropped: a block indexed before its tier
-            # became a loop can still come back as a hit, and compose must
-            # drop it.
-            return resolve_path(project_tier_dir(scope, self.project_root) / "pinned")
+            # The root the search pipeline compares with: ``os.path.realpath``
+            # of the spelled one on Python 3.12's loop error, which keeps the
+            # links resolved before the loop, or the spelled path itself on an
+            # ``OSError``. It is kept rather than dropped: a block indexed
+            # before its tier became a loop can still come back as a hit, and
+            # compose must drop it.
+            return _comparison_path(project_tier_dir(scope, self.project_root) / "pinned")
 
     def search_exclusion_roots(self) -> tuple[Path, ...]:
         """Return every in-scope pinned root, independent of parsing or shadowing.
 
-        A project tier that fails to resolve gives ``os.path.realpath`` of its
-        spelled root (#3670).
+        A project tier that fails to resolve gives its spelled root as the
+        search pipeline compares it (``_comparison_path``, #3670).
         """
         scopes: tuple[TargetScope, ...] = (
             ("user", "project_shared", "project_local")

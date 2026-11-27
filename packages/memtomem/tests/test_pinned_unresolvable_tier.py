@@ -56,12 +56,18 @@ def _other(scope: str) -> str:
     return next(s for s in _SCOPES if s != scope)
 
 
-def _fail_resolving(monkeypatch, tier: Path) -> None:
+#: How resolving the tier fails: Python 3.12's loop error, or an ``OSError``.
+_FAILURES = ("loop", "oserror")
+
+
+def _fail_resolving(monkeypatch, tier: Path, kind: str = "loop") -> None:
     """Make ``Path.resolve`` raise for ``tier`` and below, as a loop does on 3.12."""
     real_resolve = Path.resolve
 
     def _resolve(self, *args, **kwargs):
         if self == tier or self.is_relative_to(tier):
+            if kind == "oserror":
+                raise OSError(errno.ENAMETOOLONG, "File name too long", str(self))
             raise RuntimeError(f"Symlink loop from '{self}'")
         return real_resolve(self, *args, **kwargs)
 
@@ -88,28 +94,31 @@ def _expected_roots(store: PinnedContextStore, root: Path, failed: str) -> tuple
 # -- the injected 3.12 failure, on every Python ---------------------------------------------
 
 
+@pytest.mark.parametrize("kind", _FAILURES)
 @pytest.mark.parametrize("scope", _SCOPES)
 def test_exclusion_roots_give_the_spelled_root_of_a_tier_that_fails_to_resolve(
-    tmp_path, monkeypatch, scope
+    tmp_path, monkeypatch, scope, kind
 ):
     store, root = _store(tmp_path)
-    _fail_resolving(monkeypatch, _tier(root, scope))
+    _fail_resolving(monkeypatch, _tier(root, scope), kind)
     assert store.search_exclusion_roots() == _expected_roots(store, root, scope)
 
 
+@pytest.mark.parametrize("kind", _FAILURES)
 @pytest.mark.parametrize("scope", _SCOPES)
-def test_list_reads_the_other_tiers_when_one_fails_to_resolve(tmp_path, monkeypatch, scope):
+def test_list_reads_the_other_tiers_when_one_fails_to_resolve(tmp_path, monkeypatch, scope, kind):
     store, root = _store(tmp_path)
-    _fail_resolving(monkeypatch, _tier(root, scope))
+    _fail_resolving(monkeypatch, _tier(root, scope), kind)
     assert [(b.block_id, b.scope, b.content) for b in store.list()] == [
         ("profile", "user", "user profile")
     ]
 
 
+@pytest.mark.parametrize("kind", _FAILURES)
 @pytest.mark.parametrize("scope", _SCOPES)
-def test_get_from_a_tier_that_fails_to_resolve_finds_nothing(tmp_path, monkeypatch, scope):
+def test_get_from_a_tier_that_fails_to_resolve_finds_nothing(tmp_path, monkeypatch, scope, kind):
     store, root = _store(tmp_path)
-    _fail_resolving(monkeypatch, _tier(root, scope))
+    _fail_resolving(monkeypatch, _tier(root, scope), kind)
     assert store.get("profile", scope=scope) is None
 
 
@@ -126,9 +135,10 @@ def _assert_path_free_refusal(exc: pytest.ExceptionInfo[ValueError], tmp_path: P
     assert exc.value.__suppress_context__
 
 
+@pytest.mark.parametrize("kind", _FAILURES)
 @pytest.mark.parametrize("scope", _SCOPES)
 def test_set_into_a_tier_that_fails_to_resolve_after_its_check_is_refused(
-    tmp_path, monkeypatch, scope
+    tmp_path, monkeypatch, scope, kind
 ):
     store, root = _store(tmp_path)
     before = sorted(p for p in tmp_path.rglob("*") if p.is_file())
@@ -136,7 +146,7 @@ def test_set_into_a_tier_that_fails_to_resolve_after_its_check_is_refused(
     # A context, not ``undo()``: the autouse isolation fixtures share ``monkeypatch``.
     with monkeypatch.context() as patch:
         patch.setattr("memtomem.pinned.entry_is_link", lambda _entry: False)
-        _fail_resolving(patch, _tier(root, scope))
+        _fail_resolving(patch, _tier(root, scope), kind)
         with pytest.raises(ValueError, match=_REFUSAL) as exc:
             store.set("team", "safe", scope=scope, confirm_project_shared=True)
     _assert_path_free_refusal(exc, tmp_path)
@@ -144,16 +154,17 @@ def test_set_into_a_tier_that_fails_to_resolve_after_its_check_is_refused(
     assert sorted(p for p in tmp_path.rglob("*") if p.is_file()) == before
 
 
+@pytest.mark.parametrize("kind", _FAILURES)
 @pytest.mark.parametrize("scope", _SCOPES)
 def test_delete_from_a_tier_that_fails_to_resolve_after_its_check_is_refused(
-    tmp_path, monkeypatch, scope
+    tmp_path, monkeypatch, scope, kind
 ):
     store, root = _store(tmp_path)
     block = store.set("team", "safe", scope=scope, confirm_project_shared=True)
     saved = block.source_path.read_bytes()
     with monkeypatch.context() as patch:
         patch.setattr("memtomem.pinned.entry_is_link", lambda _entry: False)
-        _fail_resolving(patch, _tier(root, scope))
+        _fail_resolving(patch, _tier(root, scope), kind)
         with pytest.raises(ValueError, match=_REFUSAL) as exc:
             store.delete("team", scope=scope, confirm_project_shared=True)
     _assert_path_free_refusal(exc, tmp_path)
@@ -168,6 +179,8 @@ def test_a_user_tier_that_fails_to_resolve_still_raises(tmp_path, monkeypatch):
         store.list()
     with pytest.raises(RuntimeError):
         store.search_exclusion_roots()
+    with pytest.raises(RuntimeError):
+        store.get("profile", scope="user")
 
 
 # -- read errors below a tier that resolved --------------------------------------------------
@@ -279,11 +292,14 @@ def test_a_looping_tier_under_a_linked_dot_memtomem_still_excludes_its_indexed_h
     assert not _source_is_excluded(root / "notes.md", roots)
 
 
-def test_the_pipeline_falls_back_to_realpath_when_resolve_raises(tmp_path, monkeypatch):
-    tier = tmp_path / "project" / ".memtomem" / "memories.local"
+@pytest.mark.parametrize("kind", _FAILURES)
+def test_the_pipeline_falls_back_when_resolve_raises(tmp_path, monkeypatch, kind):
+    """``realpath`` on the loop error, the spelled path on an ``OSError``; never a raise."""
+    base = tmp_path.resolve()
+    tier = base / "project" / ".memtomem" / "memories.local"
     spelled = tier / "pinned"
-    other = (tmp_path / "elsewhere").resolve()
-    _fail_resolving(monkeypatch, tier)
+    other = base / "elsewhere"
+    _fail_resolving(monkeypatch, tier, kind)
     assert _normalize_source_roots((spelled, other)) == tuple(sorted((spelled, other), key=str))
     assert _source_is_excluded(spelled / "general" / "old.md", (spelled,))
     assert not _source_is_excluded(other / "notes.md", (spelled,))
@@ -302,7 +318,10 @@ def _hit(chunk_id: str, source: Path, content: str) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_compose_drops_a_stale_hit_under_a_tier_that_fails_to_resolve(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", _FAILURES)
+async def test_compose_drops_a_stale_hit_under_a_tier_that_fails_to_resolve(
+    tmp_path, monkeypatch, kind
+):
     store, root = _store(tmp_path)
     tier = _tier(root, "project_local")
     stale = _hit("stale", tier / "pinned" / "general" / "old.md", "stale pinned block")
@@ -315,7 +334,7 @@ async def test_compose_drops_a_stale_hit_under_a_tier_that_fails_to_resolve(tmp_
                 score_scale="rrf"
             )
 
-    _fail_resolving(monkeypatch, tier)
+    _fail_resolving(monkeypatch, tier, kind)
     bundle = await ContextAssembler(store, Pipeline()).compose("deployment")
     assert [b.block_id for b in bundle.pinned] == ["profile"]
     assert [r["content"] for r in bundle.retrieved] == ["ordinary memory"]

@@ -427,9 +427,14 @@ def _comparison_path(path: Path | str) -> Path:
     (3.13+ returns a path instead). :func:`resolve_path` returns
     ``os.path.realpath`` there, which keeps the links resolved before the
     loop, so a pinned root whose tier loops still excludes a hit the index
-    recorded under it (#3670).
+    recorded under it (#3670). An ``OSError`` from resolving leaves the
+    spelled absolute path as the key, so the comparison never raises.
     """
-    return resolve_path(Path(path).expanduser())
+    path = Path(path).expanduser()
+    try:
+        return resolve_path(path)
+    except OSError:
+        return path.absolute()
 
 
 def _normalize_source_roots(roots: tuple[Path, ...] | None) -> tuple[Path, ...]:
