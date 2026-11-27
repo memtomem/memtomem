@@ -297,14 +297,34 @@ def test_a_readable_tier_still_dedups_its_symlinked_alias(tmp_path: Path, monkey
     assert "project_local" not in tiers, tiers
 
 
-async def test_a_deeply_nested_tier_is_reported_not_a_500(
-    client, project_root: Path, fake_home: Path
+def _decoder_raises(monkeypatch, exc: BaseException) -> None:
+    """Make the settings reader's ``json.loads`` raise ``exc``.
+
+    Deep nesting raises ``RecursionError`` only where the decoder hits a limit:
+    100,000 levels raise it on CPython 3.13.9 but parse on 3.14.10 (measured),
+    so a real input cannot pin the handler on every runner."""
+    from types import SimpleNamespace
+
+    from memtomem.context import settings_doctor
+
+    def loads(_text: str) -> object:
+        raise exc
+
+    # Replace the module's ``json`` name only: patching ``json.loads`` itself
+    # would also break the test client's ``response.json()``.
+    monkeypatch.setattr(
+        settings_doctor, "json", SimpleNamespace(loads=loads, JSONDecodeError=json.JSONDecodeError)
+    )
+
+
+async def test_a_tier_the_decoder_gives_up_on_is_reported_not_a_500(
+    client, project_root: Path, fake_home: Path, monkeypatch
 ) -> None:
     """With no canonical hooks the duplicate check returns before reading any
-    tier, but the unscanned report reads every one: nesting deep enough to
-    raise ``RecursionError`` in ``json.loads`` must be a row, not a 500."""
-    depth = 100_000
-    _write(project_root / ".claude" / "settings.local.json", "[" * depth + "]" * depth)
+    tier, but the unscanned report reads every one: a ``RecursionError`` from
+    ``json.loads`` must be a row, not a 500."""
+    _write(project_root / ".claude" / "settings.local.json", "[[]]")
+    _decoder_raises(monkeypatch, RecursionError("maximum recursion depth exceeded"))
 
     response = await client.get("/api/settings-sync?target_scope=project_shared")
 
@@ -314,17 +334,36 @@ async def test_a_deeply_nested_tier_is_reported_not_a_500(
 
 
 @pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(RecursionError("maximum recursion depth exceeded"), id="recursion"),
+        pytest.param(ValueError("Exceeds the limit for integer string conversion"), id="value"),
+    ],
+)
+def test_read_settings_reports_a_decoder_failure_as_invalid_json(
+    tmp_path: Path, monkeypatch, exc: BaseException
+) -> None:
+    """``RecursionError`` (deep nesting) and a plain ``ValueError`` (an integer
+    past the digit limit) are not ``JSONDecodeError``; the CLI, MCP and Web
+    readers of the tiers all go through this one."""
+    from memtomem.context.settings_doctor import _read_settings
+
+    path = tmp_path / "settings.json"
+    _write(path, "{}")
+    _decoder_raises(monkeypatch, exc)
+    assert _read_settings(path) == (None, "invalid JSON")
+
+
+@pytest.mark.parametrize(
     "text",
     [
-        pytest.param("[" * 100_000 + "]" * 100_000, id="recursion-limit"),
         pytest.param('{"n": ' + "9" * 5_000 + "}", id="integer-digit-limit"),
         pytest.param("{not json", id="syntax"),
     ],
 )
-def test_read_settings_reports_a_decoder_failure_as_invalid_json(tmp_path: Path, text: str) -> None:
-    """``json.loads`` raises ``RecursionError`` for deep nesting and a plain
-    ``ValueError`` past the integer digit limit, neither a ``JSONDecodeError``;
-    the CLI, MCP and Web readers of the tiers all go through this one."""
+def test_read_settings_reports_real_undecodable_text_as_invalid_json(
+    tmp_path: Path, text: str
+) -> None:
     from memtomem.context.settings_doctor import _read_settings
 
     path = tmp_path / "settings.json"
