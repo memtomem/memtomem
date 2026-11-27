@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -18,6 +19,7 @@ from memtomem.memory_scope import (
     EMPTY_MEMORY_DIRS_ERROR,
     entry_is_link,
     project_tier_dir,
+    project_tier_is_relinked,
     require_user_base,
     resolve_memory_scope_dir,
 )
@@ -119,6 +121,27 @@ def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return metadata, text[marker + 5 :].rstrip("\n")
 
 
+def _link_refusal(entry: str) -> str:
+    """The mutation refusal for a project entry, named relative to the project root."""
+    return (
+        f"{entry} in this project is a link (or cannot be inspected); Pinned Context is "
+        "not written or deleted through a link, and nothing was changed. Replace the link "
+        "with a regular directory, or make the entry readable."
+    )
+
+
+def _is_loop_error(exc: OSError, tier: Path) -> bool:
+    """Whether a read below ``tier`` failed because a link there loops.
+
+    POSIX answers the loop ``ELOOP``; Windows answers ``EINVAL``, which it also
+    gives for other things, so there the tier or its ``.memtomem`` must be a link
+    as well (the rule ``tools/memory_writer.py`` uses for the same answer).
+    """
+    if exc.errno == errno.ELOOP:
+        return True
+    return exc.errno == errno.EINVAL and project_tier_is_relinked(tier)
+
+
 class PinnedContextStore:
     def __init__(
         self,
@@ -185,15 +208,51 @@ class PinnedContextStore:
             return resolve_memory_scope_dir(scope, self.project_root, self.user_base) / "pinned"
         return resolve_memory_scope_dir(scope, self.project_root) / "pinned"
 
+    def _read_base(self, scope: TargetScope) -> Path | None:
+        """``_base`` for a read: a project tier that fails to resolve has no blocks (#3670).
+
+        Python 3.12's ``resolve()`` raises ``RuntimeError`` for a symlink loop,
+        naming the absolute path; 3.13+ returns a path instead of raising
+        (for a tier that is a link to itself, its spelled path). Reads must
+        stay total (#1768), so such a tier reads as empty. The user tier is
+        not caught: it is the user's own layout, and ``__init__`` has already
+        resolved it.
+        """
+        try:
+            return self._base(scope)
+        except (OSError, RuntimeError):
+            if scope == "user":
+                raise
+            return None
+
+    def _exclusion_root(self, scope: TargetScope) -> Path:
+        try:
+            return self._base(scope).resolve(strict=False)
+        except RuntimeError:
+            if scope == "user" or self.project_root is None:
+                raise
+            from memtomem.storage.sqlite_helpers import resolve_path
+
+            # Python 3.12's loop error: the root is ``os.path.realpath`` of
+            # the spelled one, which keeps the links resolved before the loop.
+            # It is kept rather than dropped: a block indexed before its tier
+            # became a loop can still come back as a hit, and compose must
+            # drop it.
+            return resolve_path(project_tier_dir(scope, self.project_root) / "pinned")
+
     def search_exclusion_roots(self) -> tuple[Path, ...]:
-        """Return every in-scope pinned root, independent of parsing or shadowing."""
+        """Return every in-scope pinned root, independent of parsing or shadowing.
+
+        A project tier that fails to resolve gives ``os.path.realpath`` of its
+        spelled root (#3670).
+        """
         scopes: tuple[TargetScope, ...] = (
             ("user", "project_shared", "project_local")
             if self.project_root is not None
             else ("user",)
         )
         return tuple(
-            self._base(scope).resolve(strict=False)
+            self._exclusion_root(scope)
             for scope in scopes
             if not (scope == "user" and self.user_base is None)
         )
@@ -206,11 +265,6 @@ class PinnedContextStore:
             agent_id = _validate_id(agent_id, "agent id")
             return Path("agents") / agent_id / f"{block_id}.md"
         return Path("general") / f"{block_id}.md"
-
-    def _path(self, scope: TargetScope, block_id: str, agent_id: str | None) -> Path:
-        # Ids first: an invalid id is reported before anything about the scope.
-        relative = self._relative_path(block_id, agent_id)
-        return self._base(scope) / relative
 
     def _mutation_path(self, scope: TargetScope, block_id: str, agent_id: str | None) -> Path:
         """Where ``set`` and ``delete`` act, refusing a project tier reached through a link.
@@ -227,8 +281,10 @@ class PinnedContextStore:
         whatever is at that name, and ``unlink`` removes a link, not its
         target. The user tier is the user's own layout and is not judged.
         Nothing above the project root is asked about either. The check is
-        made when the path is chosen; a link put there afterwards is not seen.
-        Reads do not call this and behave as before.
+        made when the path is chosen; a link put there afterwards is not seen,
+        except that a tier which then fails to resolve (Python 3.12 raises for
+        a loop, naming the absolute path) gets the same refusal (#3670).
+        Reads do not call this.
         """
         relative = self._relative_path(block_id, agent_id)
         root = self.project_root
@@ -241,12 +297,12 @@ class PinnedContextStore:
                 entries.append(entries[-1] / part)
             for entry in entries:
                 if entry_is_link(entry):
-                    raise ValueError(
-                        f"{entry.relative_to(root).as_posix()} in this project is a link (or "
-                        "cannot be inspected); Pinned Context is not written or deleted "
-                        "through a link, and nothing was changed. Replace the link with a "
-                        "regular directory, or make the entry readable."
-                    )
+                    raise ValueError(_link_refusal(entry.relative_to(root).as_posix()))
+            try:
+                return self._base(scope) / relative
+            except (OSError, RuntimeError):
+                # The exception names the absolute path; the refusal must not.
+                raise ValueError(_link_refusal(tier.relative_to(root).as_posix())) from None
         return self._base(scope) / relative
 
     def set(
@@ -324,11 +380,24 @@ class PinnedContextStore:
     ) -> PinnedBlock | None:
         if scope == "user" and self.user_base is None:
             return None
-        path = self._path(scope, block_id, agent_id)
+        # Ids first: an invalid id is reported before anything about the scope.
+        relative = self._relative_path(block_id, agent_id)
+        base = self._read_base(scope)
+        if base is None:
+            return None
+        path = base / relative
         try:
             text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return None
+        except OSError as exc:
+            # 3.13+ returns a path for a looping tier instead of raising, and
+            # the read through it fails; that tier holds no block either (#3670).
+            if scope == "user" or self.project_root is None:
+                raise
+            if _is_loop_error(exc, project_tier_dir(scope, self.project_root)):
+                return None
+            raise
         metadata, content = _split_frontmatter(text)
         return PinnedBlock(
             block_id=str(metadata.get("id", block_id)),
@@ -379,11 +448,22 @@ class PinnedContextStore:
     def _read_scope(self, scope: TargetScope) -> list[PinnedBlock]:
         if scope == "user" and self.user_base is None:
             return []
-        base = self._base(scope)
-        if not base.exists():
+        base = self._read_base(scope)
+        if base is None:
+            return []
+        try:
+            if not base.exists():
+                return []
+            paths = sorted(base.rglob("*.md"))
+        except OSError:
+            # A project tier that resolved but cannot be inspected or walked
+            # (a loop below it, a directory that denies traversal) has no
+            # blocks: reads stay total (#3670). The user tier keeps raising.
+            if scope == "user":
+                raise
             return []
         blocks: list[PinnedBlock] = []
-        for path in sorted(base.rglob("*.md")):
+        for path in paths:
             try:
                 metadata, content = _split_frontmatter(path.read_text(encoding="utf-8"))
                 blocks.append(
