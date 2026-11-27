@@ -44,6 +44,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A chunk edit that would put the entries after it inside a code fence is refused (#3633).**
+  `mem_edit` and the web `PATCH /api/chunks/{id}` wrote a body that left a fence open, and
+  every later entry in the file then dropped out of the index (no chunk, heading or tags of
+  its own), though they had been indexed correctly before. The edit reported success.
+  Both surfaces now refuse such an edit before writing (web: 409). The edited file is judged
+  as the chunker reads it, before and after the edit. An edit is refused when it puts a
+  line after the edited span inside a fence that was outside one, which also catches a
+  fence that runs to a closer or an already-open fence further down, or when it makes the
+  file end inside a fence. A file that already ended inside a fence can still be edited and
+  repaired. Non-Markdown sources are not judged. An edit is also refused, as stale, when the
+  file's text outside the span gained a line separator other than LF after indexing.
+  Deleting a chunk can still open a fence the same way (#3669).
+
 - **A search whose `deadline_ms` budget runs out during the session-summary rescue no longer
   logs and counts the expiry as a rescue failure (#3637).** The rescue's links walk and its
   target hydration caught `SearchDeadlineExceeded` from their read-connection lease as a
