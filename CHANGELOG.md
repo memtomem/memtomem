@@ -44,6 +44,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- Swap recovery warnings list competing marker files or both paths of a failed recovery
+  rename. The transfer response still tells callers to see the server log (#3544).
+
 - **The E5 embedding model's `config.json`, `tokenizer_config.json` and
   `special_tokens_map.json` are checked against sha256 pins (#2465).** The pinned E5
   snapshot verified only `onnx/model.onnx` and `tokenizer.json`; the three other files
