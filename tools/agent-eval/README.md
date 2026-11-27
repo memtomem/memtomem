@@ -81,8 +81,12 @@ claude plugin eval . --trust-plugin --mocks off --ablation none --no-publish --t
   --disallow-tools Read Grep Glob Agent --max-cost-usd 3 \
   --tag capability \
   --allow-tools ${T}__mem_search ${T}__mem_recall ${T}__mem_read ${T}__mem_list \
-  --json /tmp/agent-eval-capability.json
+  --keep-temp --json /tmp/agent-eval-capability.json
 ```
+
+`--keep-temp` keeps each run's trace. A passing `cap-distractor-bucket` run says nothing on its
+own about whether the older (Jun) note reached the agent; only the trace shows that, so report it
+next to the pass rate.
 
 In zsh, a flag list kept in one variable is passed as a single argument (`unknown option`).
 Write the flags out as above, or keep them in an array and pass `"${FLAGS[@]}"`.
@@ -358,16 +362,16 @@ Review changed the graders after these runs:
 
 The superseded changes were measured in new live runs (the last two rows of the table, and the
 re-runs above). The committed regex patterns were replayed with Python `re` over every kept
-trace and final reply above. They gave the recorded verdict in all 110 regex grader results.
-That count includes results of graders removed since then: the distractor `retrieved_old` and the
-two command cases' `answer`:
+trace and final reply above. The committed graders gave the recorded verdict in all 84 of their
+results. The other 26 recorded results belong to graders removed since then (the distractor
+`retrieved_old` and the two command cases' `answer`) and were not replayed:
 
-| run | results |
-|---|---|
-| the first measurement | 39 |
-| the control runs with traces | 43 |
-| the superseded re-runs (two prompt versions) | 18 |
-| their forced replies | 10 |
+| run | committed graders, replayed | removed graders |
+|---|---|---|
+| the first measurement | 30 | 9 |
+| the control runs with traces | 26 | 17 |
+| the superseded re-runs (two prompt versions) | 18 | 0 |
+| their forced replies | 10 | 0 |
 
 The controls therefore hold for the committed graders as far as that replay reaches. It does not
 cover the real JavaScript engine on the new patterns.
