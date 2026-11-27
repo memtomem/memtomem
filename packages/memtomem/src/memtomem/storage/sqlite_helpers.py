@@ -516,6 +516,24 @@ def match_source_filter_value(filter_str: str, source_path: str) -> bool:
     return norm_filter in norm_source
 
 
+def decode_tags_column(raw: str) -> list | None:
+    """A ``chunks.tags`` value as a list, or ``None`` when it does not hold one."""
+    try:
+        decoded = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return decoded if isinstance(decoded, list) else None
+
+
+def tags_column_is_empty(raw: str) -> bool:
+    """Whether the chunk reader sees no tags in ``raw`` (SQL: ``memtomem_tags_empty``).
+
+    A ``json_valid()`` guard would not agree with that reader: it rejects the
+    ``NaN`` and ``Infinity`` that ``json.dumps`` writes and ``json.loads`` reads.
+    """
+    return not decode_tags_column(raw)
+
+
 def source_namespaces_admit(
     namespaces: str | None, namespace: str | None, system_prefixes: Sequence[str]
 ) -> bool:

@@ -393,19 +393,24 @@ class RelationMixin:
                 batch.append((json.dumps(new_tags), now, row[0]))
         return self._write_tag_batch(db, batch)
 
-    async def set_chunk_tags(self, chunk_id: UUID, tags: Sequence[str]) -> bool:
+    async def set_chunk_tags(
+        self, chunk_id: UUID, tags: Sequence[str], *, only_if_untagged: bool = False
+    ) -> bool:
         """Overwrite one chunk's tags whole-store, unless its source is hidden.
 
         For bulk taggers that run outside any project boundary. Only ``tags``
         and ``updated_at`` are written, so nothing read earlier can overwrite
         newer metadata, and a chunk deleted meanwhile is not recreated. The
-        hold is judged in this statement. ``False`` means no row was written.
+        hold is judged in this statement, and so is ``only_if_untagged``, which
+        leaves a chunk that carries tags by now as it is. ``False`` means no
+        row was written.
         """
         db = self._get_db()
+        untagged = " AND memtomem_tags_empty(tags)" if only_if_untagged else ""
         with self._rolls_back_if_standalone(db):
             cursor = db.execute(
                 "UPDATE chunks SET tags = ?, updated_at = ? "
-                f"WHERE id = ? AND {VISIBLE_SOURCE_CHUNKS}",  # nosec B608
+                f"WHERE id = ? AND {VISIBLE_SOURCE_CHUNKS}{untagged}",  # nosec B608
                 (json.dumps(list(tags)), utc_stamp(datetime.now(timezone.utc)), str(chunk_id)),
             )
             self._commit_if_standalone(db)
