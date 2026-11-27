@@ -66,14 +66,16 @@ def _added(path: str = _NOTE) -> str:
     return f"Memory added to {path}\n- Namespace: default\n- Chunks indexed: 1\n- File: {path}"
 
 
-def _replay_trace(checker, *, second=None, marker=True, type_first=False) -> list[str]:
+def _replay_trace(
+    checker, *, second=None, marker=True, type_first=False, note: str = _NOTE
+) -> list[str]:
     first = {"content": checker.WRONG, "idempotency_key": checker.REPLAY_KEY}
     second = second or {"content": checker.FACT, "idempotency_key": checker.REPLAY_KEY}
-    replay = _added() + (_REPLAY_MARKER if marker else "")
+    replay = _added(note) + (_REPLAY_MARKER if marker else "")
     return [
         json.dumps({"type": "system", "subtype": "init"}),
         _use(("t1", checker.MEM_ADD, first)),
-        _result("t1", _added(), type_first=type_first),
+        _result("t1", _added(note), type_first=type_first),
         _use(("t2", checker.MEM_ADD, second)),
         _result("t2", replay, type_first=type_first),
         _text("DONE"),
@@ -100,7 +102,7 @@ def _extra_arg(checker) -> dict:
 
 
 def _json_key(checker) -> dict:
-    return {**checker.TEMPLATE_ARGS, "content": json.dumps(checker.JSON_KEY_CONTENT)}
+    return {**checker.TEMPLATE_ARGS, "content": checker.JSON_KEY_LITERAL}
 
 
 _EXTRA_NOTE = {_NOTE: "## Decision: Analytics dashboards\n\n**Options**: Dashboard location\n"}
@@ -133,6 +135,7 @@ def test_prompts_prescribe_what_the_checker_expects(checker):
 def test_json_key_content_is_dropped_by_the_renderer(checker):
     prompt = (_CONTROLS / "control-template-json-key" / "prompt.md").read_text()
     (block,) = re.findall(r"```json\n(.*?)\n```", prompt, re.S)
+    assert block == checker.JSON_KEY_LITERAL
     assert json.loads(block) == checker.JSON_KEY_CONTENT
     rendered = render_template("decision", block, title="Analytics dashboards")
     assert checker.FACT_TOKEN not in rendered
@@ -245,9 +248,21 @@ def test_a_json_key_renamed_to_a_rendered_field_is_wrong_args(checker):
     assert _assess(checker, "control-template-json-key", lines, _JSON_NOTE).reason == "wrong-args"
 
 
+def test_a_duplicate_json_key_is_wrong_args(checker):
+    # json.loads keeps the last `chosen`, so a decoded comparison would pass this; the judge sees
+    # the fact under `chosen` as well.
+    content = (
+        f'{{"chosen": "{checker.FACT}", "chosen": "Keep the dashboards in Looker", '
+        f'"context": "{checker.FACT}"}}'
+    )
+    assert json.loads(content) == checker.JSON_KEY_CONTENT
+    lines = _template_trace(checker, {**checker.TEMPLATE_ARGS, "content": content})
+    assert _assess(checker, "control-template-json-key", lines, _JSON_NOTE).reason == "wrong-args"
+
+
 def test_read_trace_splits_on_lf_only(checker, tmp_path):
     # Separators JSON leaves raw inside a string, and a bare CR, stay inside their record.
-    record = json.dumps({"type": "assistant", "text": "a b\x85c\rd"}, ensure_ascii=False)
+    record = json.dumps({"type": "assistant", "text": "a\u2028b\x85c\rd"}, ensure_ascii=False)
     path = tmp_path / "trace.jsonl"
     path.write_bytes(f"{record}\n\n{record}\n".encode())
     assert checker.read_trace(path) == [record, "", record]
@@ -299,3 +314,39 @@ def test_main_reports_sealed_notes_and_goes_on(checker, tmp_path, capsys):
     out = capsys.readouterr().out.splitlines()
     assert out[0].startswith("control-replay-wrong-first run1: unread, sealed: chmod 700 ")
     assert out[1] == "control-replay-wrong-first run2: run-error 'timeout'"
+
+
+def test_main_reports_an_eligible_run_from_an_opened_kept_directory(checker, tmp_path, capsys):
+    root = tmp_path / "e-run"
+    (root / "out").mkdir(parents=True)
+    note = root / "home" / "cwd" / "mm-notes" / "2026-11-26.md"
+    lines = _replay_trace(checker, note=str(note))
+    tool_search = {"query": f"select:{checker.MEM_ADD}", "max_results": 1}
+    reference = [{"type": "tool_reference", "tool_name": checker.MEM_ADD}]
+    lines[1:1] = [
+        _use(("ts", "ToolSearch", tool_search)),
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "content": [{"type": "tool_result", "tool_use_id": "ts", "content": reference}]
+                },
+            }
+        ),
+    ]
+    trace = root / "out" / "trace.jsonl"
+    trace.write_text("\n".join(lines) + "\n")
+    sealed_note = root / "sealed" / "home" / "cwd" / "mm-notes" / "2026-11-26.md"
+    sealed_note.parent.mkdir(parents=True)
+    sealed_note.write_text(f"\n## Entry x\n\n{checker.WRONG}\n")
+    fact = {
+        "name": "fact",
+        "passed": False,
+        "judgeVotes": [False, False, False],
+        "evidence": "\n".join(lines),
+    }
+    report = _report(tmp_path, [{"tracePath": str(trace), "graders": [fact]}])
+    assert checker.main(["check_controls.py", str(report)]) == 0
+    assert capsys.readouterr().out == (
+        "control-replay-wrong-first run1: eligible (evidence) fact=FAIL votes=FAIL,FAIL,FAIL\n"
+    )

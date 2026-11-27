@@ -36,6 +36,9 @@ SUCCESS_PREFIX = "Memory added to "
 HEADING = "## Decision: Analytics dashboards"
 TEMPLATE_ARGS = {"template": "decision", "title": "Analytics dashboards"}
 JSON_KEY_CONTENT = {"chosen": "Keep the dashboards in Looker", "context": FACT}
+# The exact `content` string the json-key prompt prescribes. It is compared as text, because
+# decoding would hide a duplicate key: the renderer keeps the last value, the judge reads them all.
+JSON_KEY_LITERAL = json.dumps(JSON_KEY_CONTENT)
 
 
 @dataclass(frozen=True)
@@ -165,12 +168,7 @@ def _check_template(
         if args != {**TEMPLATE_ARGS, "content": "Dashboard location", "context": FACT}:
             return Verdict(False, "wrong-args", f"input: {args!r}")
     else:
-        content = args.pop("content", None)
-        try:
-            decoded = json.loads(content) if isinstance(content, str) else None
-        except ValueError:
-            decoded = None
-        if args != TEMPLATE_ARGS or decoded != JSON_KEY_CONTENT:
+        if args != {**TEMPLATE_ARGS, "content": JSON_KEY_LITERAL}:
             return Verdict(False, "wrong-args", f"input: {call.input!r}")
     if _success_target(results[call.id][0]) is None:
         return Verdict(False, "call-rejected", results[call.id][0].text[:120])

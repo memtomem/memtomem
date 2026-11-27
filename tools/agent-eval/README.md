@@ -254,11 +254,11 @@ question that does not hint that memory is relevant) are not written yet.
   argument, present in the call's trace record and absent from the stored note, the judge returned
   FAIL in 3 of 3. The runs do not show what the server received. Grading the template case needs
   the stored entry, which no save case reads.
-- The `fact` judge sees the whole trace when it has at most 24 records, and otherwise only the
-  first 12 and the last 12. The text is then clipped to its first 80,000 and last 20,000 UTF-16
-  code units. Both limits were read from the Claude Code 2.1.331 bundle. In all 9 control runs the
-  `fact` result carried an `evidence` field, and it equalled the trace's records joined by
-  newlines. The 15 kept save traces had 11 to 17 records, and `max_turns: 8` keeps a run near that
+- The `fact` judge is given every record of a trace that has at most 24, and otherwise only the
+  first 12 and the last 12. The selected text is then clipped to its first 80,000 and last 20,000
+  UTF-16 code units, so even a short trace can lose the middle of one long record. Both limits
+  were read from the Claude Code 2.1.331 bundle. In all 9 control runs the `fact` result carried
+  an `evidence` field, and it equalled the trace's records joined by newlines. The 15 kept save traces had 11 to 17 records, and `max_turns: 8` keeps a run near that
   size. A save case that raises `max_turns` could push the write out of the judge's view.
 - The `fact` judge is nondeterministic. A 2-of-3 vote reduces the noise but does not remove it,
   so read the trace before counting a save failure as a regression.
