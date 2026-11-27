@@ -95,6 +95,37 @@ The command line is what scopes the tools, hence the split. Add `--case <glob>` 
 - Add `--keep-temp` to keep each run's `out/trace.jsonl`, and read the transcripts.
   A score cannot tell a wrong agent from a wrong grader.
 
+### Controls for the `fact` rubric
+
+`plugin/controls/` holds control cases for clauses of the save cases' `fact` rubric. They are not
+part of the suite. The default eval directory is `evals/`, so they run only with
+`--eval-dir controls`. Each control prescribes an exact sequence of `mem_add` calls. Its only
+grader is a byte-for-byte copy of `save-dashboard-workspace/graders/fact.md`, and that grader must
+FAIL. A grader cannot say whether a run made the prescribed calls, because `claude plugin eval`
+has no grader that joins a call to its result. `check_controls.py` decides that instead, from the
+kept trace and the note file the server reported writing:
+
+```bash
+cd tools/agent-eval/plugin
+T=mcp__plugin_memtomem-agent-eval_memtomem
+claude plugin eval . --eval-dir controls --trust-plugin --mocks off --ablation none --no-publish \
+  --threshold 0 -j 3 --runs 3 --disallow-tools Read Grep Glob Agent --max-cost-usd 3 \
+  --allow-tools ${T}__mem_add ${T}__mem_search --keep-temp \
+  --json /tmp/agent-eval-controls.json --output-dir /tmp/agent-eval-controls \
+  --report /tmp/agent-eval-controls.html
+# open each kept directory with the chmod command claude plugin eval prints, then:
+python3 -I ../check_controls.py /tmp/agent-eval-controls.json
+```
+
+`--output-dir` and `--report` keep the results out of the checkout. For each run the checker prints
+`eligible` or `not-reached:<reason>`, followed by the `fact` verdict and its votes. Count only
+eligible runs with votes. Whether the judge saw the deciding records is read from the grader's
+`evidence` field. A result without that field is `not-reached:judge-visibility-unverified`, because
+the checker does not rebuild the judge's view. A run without a `tracePath`, or one whose note files
+it cannot read (a sealed directory, for example), is printed as `unread` and makes the exit status
+1. A missing or malformed trace stops the checker with a traceback. The offline tests are in
+`packages/memtomem/tests/test_agent_eval_controls.py`.
+
 ## Writing a case
 
 `plugin/evals/<case>/prompt.md` holds the prompt and frontmatter (`runs`, `max_turns`, `tags`,
@@ -170,6 +201,21 @@ Controls (1 run each). Every one failed, which shows each grader shape can fail:
 The `fact` judge also passed a correct preference written with commas ("For PR reviews, use
 Korean. For code comments, use English."), the phrasing the earlier regex rejected.
 
+Controls for two clauses of the `fact` rubric (2026-11-26 UTC, Claude Code 2.1.331, claude-opus-5-5,
+3 runs each, $0.74 in total), run as "Controls for the `fact` rubric" shows. `check_controls.py`
+found all 9 runs eligible. Each made exactly the prescribed calls, the server wrote the entry
+that the prescription implies, and the `fact` grader's `evidence` held every deciding record (9 to
+16 records per trace).
+
+| control | stored entry | `fact` |
+|---|---|---|
+| `control-replay-wrong-first`: stork-metrics saved, then heron-metrics with the same `idempotency_key`, answered `[idempotent replay]` | stork-metrics | FAIL in 3 of 3 runs, 9 of 9 votes |
+| `control-template-extra-arg`: `template="decision"`, with the fact only in an undeclared top-level `context` argument | the decision heading and `Options` line, no fact | FAIL in 3 of 3, 9 of 9 votes |
+| `control-template-json-key`: `template="decision"`, with the fact in a `context` key of the JSON `content`, a key the decision template does not render | the decision heading and `Chosen` line, no fact | **PASS** in 3 of 3, 9 of 9 votes |
+
+The third control's PASS follows the rubric as written, because the fact sits in `content` and the
+rubric counts `content` as stored. See Known limits.
+
 Whether a control reaches a path depends on the model's choices in that run, so read the trace
 before counting it. In one run of the file-read control the model's Grep went outside the
 workspace, was denied, and the model answered `UNKNOWN`.
@@ -195,11 +241,25 @@ question that does not hint that memory is relevant) are not written yet.
   `no_add_succeeded` match. (3) The identifier-carrying call and the successful call are separate
   graders. The `fact` judge is asked to pair each call with its result and to skip refusals,
   errors and `[idempotent replay]` results. It sees the trace, not the stored entry, so the pairing
-  is the judge's reading, not a check. Closing these routes needs a grader that joins a call to its
-  result by `tool_use_id` or reads the stored entry back, and `claude plugin eval` has no such grader.
-- The `fact` judge sees only the first 12 and the last 12 messages of a trace. The 15 kept save
-  traces had 11 to 17 records, and `max_turns: 8` keeps a run near that size. A save case that
-  raises `max_turns` could push the write out of the judge's view.
+  is the judge's reading, not a check. In a control whose correct value got only a replay, the
+  judge returned FAIL in 3 of 3 runs (see Measurements). The votes do not show how it got there.
+  Closing these routes needs a grader that joins a call to its result by
+  `tool_use_id` or reads the stored entry back, and `claude plugin eval` has no such grader.
+- A save made with `template=` is judged from its arguments, not from the entry the template
+  rendered. Template fields arrive as JSON keys in `content`, and `render_template`
+  (`memtomem/templates.py`) drops every key the template does not name. The rubric counts `content`
+  as stored, so the judge passed such a save in 3 of 3 control runs while the note held no fact.
+  The rubric's example, "other arguments, such as template fields", names the wrong place:
+  `mem_add` has no argument per template field. When the fact was in an undeclared top-level
+  argument, present in the call's trace record and absent from the stored note, the judge returned
+  FAIL in 3 of 3. The runs do not show what the server received. Grading the template case needs
+  the stored entry, which no save case reads.
+- The `fact` judge sees the whole trace when it has at most 24 records, and otherwise only the
+  first 12 and the last 12. The text is then clipped to its first 80,000 and last 20,000 UTF-16
+  code units. Both limits were read from the Claude Code 2.1.331 bundle. In all 9 control runs the
+  `fact` result carried an `evidence` field, and it equalled the trace's records joined by
+  newlines. The 15 kept save traces had 11 to 17 records, and `max_turns: 8` keeps a run near that
+  size. A save case that raises `max_turns` could push the write out of the judge's view.
 - The `fact` judge is nondeterministic. A 2-of-3 vote reduces the noise but does not remove it,
   so read the trace before counting a save failure as a regression.
 - Graders cannot read the SQLite store. Rows that never reach a note file (for example
