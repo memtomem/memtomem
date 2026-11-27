@@ -31,9 +31,10 @@ _CAPABILITY = {
         "correct": ("llm", None, None),
     },
     "cap-distractor-bucket": {
+        # No retrieved_old: the prompt asks only for the current bucket, so a grounded answer
+        # from the October note alone must not fail.
         "answer": ("regex", "last_message", "contains"),
         "retrieved": ("regex", "trace", "contains"),
-        "retrieved_old": ("regex", "trace", "contains"),
         "correct": ("llm", None, None),
     },
     "cap-multihop-oncall": {
@@ -244,7 +245,6 @@ _RETRIEVALS = [
     ("cap-superseded-registry", "retrieved", _REGISTRY_OCT, "cr-falcon-5813.internal-2"),
     ("cap-superseded-registry", "retrieved_old", _REGISTRY_AUG, "cr-otter-2207.internals"),
     ("cap-distractor-bucket", "retrieved", "gs://bkp-ibis-7146.", "gs://bkp-ibis-71460"),
-    ("cap-distractor-bucket", "retrieved_old", "gs://bkp-wren-3390.", "gs://xbkp-wren-3390"),
     ("cap-multihop-oncall", "retrieved", _OWNER, "heron-ledger-oncall2"),
     ("cap-multihop-oncall", "retrieved_hop1", _HOP1, "port 73420"),
     ("cap-nohint-psql", "retrieved", "on port 6519. The old", "port 65190"),

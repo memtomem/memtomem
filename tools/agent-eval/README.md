@@ -156,7 +156,7 @@ Measurements). Regexes check only what is mechanical: the bounded token on the l
 | case | seed | `correct` passes only when the final reply… | other graders |
 |---|---|---|---|
 | `cap-superseded-registry` | an Aug note and an Oct note that replaces it without naming the old host. The prompt asks for the current host and the previous one | gives the Oct host as current, names the Aug host as the previous one, and grounds it in October replacing August. It must not present the old host as current or as an alternative, call the new host doubtful, say the previous host is unknown, or give a reason that contradicts the notes | `retrieved_old`: the old host reached the agent. Only the Aug note names it, so this means both notes were seen |
-| `cap-distractor-bucket` | two notes, same heading, no cross-reference, Jun and Oct, different buckets | gives the Oct bucket and grounds it in the later note | `retrieved_old`, as above, for the Jun bucket |
+| `cap-distractor-bucket` | two notes, same heading, no cross-reference, Jun and Oct, different buckets | gives the Oct bucket and grounds it in the later note | none. The prompt asks only for the current bucket, so a grounded answer from the Oct note alone passes. Whether the Jun note also reached the agent is read from the trace (it did in every measured run) |
 | `cap-multihop-oncall` | a port-change log (Sept: ledger-api, Oct: quota-svc) and one on-call note per service | names ledger-api as the service changed in September **and** gives its handle. A right handle on a wrong join fails | `retrieved_hop1`: port 7342, which only the September entry holds |
 | `cap-nohint-psql` | `staging-db` (port 6519) | ends with one `psql` invocation for `staging-db.internal:6519`, user `deploy`, database `app`. Flags, `key=value` and a URI all pass | `answer` requires `6519` on the last `ANSWER:` line |
 | `cap-nohint-deploy` | a note giving the prod deploy command and its required region | ends with one `rlsctl deploy` for build 1234, env prod, region `kx-north-9` | `answer` requires the region on the last `ANSWER:` line |
@@ -298,7 +298,8 @@ returns no rows (#3662).
 The no-hint prompts did not stop the model from searching. With the current prompts every
 capability case passed every run it was measured on, so on this model the set does not start
 below 100% as #3649 hoped. It still separates effort: the superseded case needed 3 to 5 memory
-calls where the others needed 1 to 3. Prompts were not tuned to make cases fail.
+calls where the others needed 1 to 3. Prompts were not tuned to make cases fail. Cases with
+headroom are #3664.
 
 Each `cap-nohint-*` run called `mem_search` (no other memory tool), received the seeded note,
 and passed `correct`.
@@ -346,10 +347,14 @@ Review changed the graders after these runs:
 - psql's `answer` accepts `-p6519` after a space.
 - The superseded rubric requires the reason, and then the previous host; its prompt asks for
   the previous host.
+- The distractor case lost its `retrieved_old` grader. It required the Jun bucket, which the prompt
+  does not ask for. It had passed in all 3 measured runs and failed in the no-grant control, so
+  removing it changes none of the recorded case verdicts.
 
 The superseded changes were measured in new live runs (the last two rows of the table, and the
 re-runs above). The committed regex patterns were replayed with Python `re` over every kept
-trace and final reply above. They gave the recorded verdict in all 110 regex grader results:
+trace and final reply above. They gave the recorded verdict in all 110 regex grader results.
+That count includes the 4 results of the distractor `retrieved_old` grader, since removed:
 
 | run | results |
 |---|---|
