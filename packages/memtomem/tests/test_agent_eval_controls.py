@@ -301,7 +301,7 @@ def test_main_reports_sealed_notes_and_goes_on(checker, tmp_path, capsys):
     root = tmp_path / "e-run"
     (root / "out").mkdir(parents=True)
     trace = root / "out" / "trace.jsonl"
-    trace.write_text("\n".join(_replay_trace(checker)) + "\n")
+    trace.write_text("\n".join(_replay_trace(checker)) + "\n", newline="\n")
     notes = root / "sealed" / "home" / "cwd" / "mm-notes"
     notes.mkdir(parents=True)
     (notes / "2026-11-26.md").write_text(checker.WRONG)
@@ -335,7 +335,8 @@ def test_main_reports_an_eligible_run_from_an_opened_kept_directory(checker, tmp
         ),
     ]
     trace = root / "out" / "trace.jsonl"
-    trace.write_text("\n".join(lines) + "\n")
+    # LF as Claude Code writes it: a text-mode write on Windows would turn it into CRLF.
+    trace.write_text("\n".join(lines) + "\n", newline="\n")
     sealed_note = root / "sealed" / "home" / "cwd" / "mm-notes" / "2026-11-26.md"
     sealed_note.parent.mkdir(parents=True)
     sealed_note.write_text(f"\n## Entry x\n\n{checker.WRONG}\n")
