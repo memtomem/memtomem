@@ -120,13 +120,13 @@ async def test_get_reports_unreadable_tiers_path_free(
     assert rows["project_local"] == {
         "source": "tier",
         "tier": "project_local",
-        "path": os.path.join(".claude", "settings.local.json"),
+        "path": ".claude/settings.local.json",
         "reason": "invalid JSON",
     }
     assert rows["user"] == {
         "source": "tier",
         "tier": "user",
-        "path": os.path.join("~", ".claude", "settings.json"),
+        "path": "~/.claude/settings.json",
         "reason": "not a JSON object",
     }
     assert not [s for s in _strings(data) if str(tmp_path) in s], data
@@ -144,7 +144,7 @@ async def test_get_reports_an_unreadable_canonical(client, project_root: Path) -
         None: {
             "source": "canonical",
             "tier": None,
-            "path": str(Path(CANONICAL_SETTINGS_FILE)),
+            "path": ".memtomem/settings.json",
             "reason": "invalid JSON",
         }
     }
@@ -199,8 +199,8 @@ async def test_a_row_names_its_file_by_tier_and_no_host_path(
     assert response.status_code == 200, response.text
     data = response.json()
     rows = _rows_by_tier(data)
-    assert rows["user"]["path"] == os.path.join("~", ".claude", "settings.json"), rows
-    assert rows["project_local"]["path"] == os.path.join(".claude", "settings.local.json")
+    assert rows["user"]["path"] == "~/.claude/settings.json", rows
+    assert rows["project_local"]["path"] == ".claude/settings.local.json"
     home_name = Path(home_rel).name
     texts = [s for row in data["unscanned_settings"] for s in _strings(row)]
     assert not [s for s in texts if str(tmp_path) in s or home_name in s], texts
@@ -222,12 +222,14 @@ def test_display_paths_match_resolve_scope_path(tmp_path: Path, monkeypatch) -> 
     for scope in ALL_SCOPES:
         real = resolve_scope_path(root, scope)
         if scope == "user":
-            expected = os.path.join("~", real.relative_to(host_home()))
+            expected = "~/" + real.relative_to(host_home()).as_posix()
         else:
-            expected = str(real.relative_to(root))
+            expected = real.relative_to(root).as_posix()
         assert settings_sync._TIER_DISPLAY_PATHS[scope] == expected, scope
-    assert settings_sync._CANONICAL_DISPLAY_PATH == str(
-        (root / CANONICAL_SETTINGS_FILE).relative_to(root)
+    assert (
+        settings_sync._CANONICAL_DISPLAY_PATH
+        == (root / CANONICAL_SETTINGS_FILE).relative_to(root).as_posix()
+        == ".memtomem/settings.json"
     )
 
 
@@ -249,7 +251,7 @@ async def test_a_tier_symlinked_to_a_missing_tier_is_reported(
         "project_local": {
             "source": "tier",
             "tier": "project_local",
-            "path": os.path.join(".claude", "settings.local.json"),
+            "path": ".claude/settings.local.json",
             "reason": "broken symlink",
         }
     }, rows

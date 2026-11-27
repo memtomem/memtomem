@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -239,12 +238,14 @@ def _path_free_text(text: str, project_root: Path) -> str:
 #: by anchor leaked parts of it in every form tried (``~ice/…`` for a home
 #: that is a string prefix of the frozen one, ``<path>'private/…`` after a
 #: quote, ``alice/…`` for a home under the project root).
-#: ``test_display_paths_match_resolve_scope_path`` keeps this in step.
-_CANONICAL_DISPLAY_PATH = str(Path(CANONICAL_SETTINGS_FILE))
+#: ``test_display_paths_match_resolve_scope_path`` keeps this in step. POSIX
+#: separators on every platform, as the Web API's display paths use
+#: (``context_gateway._safe_rel``).
+_CANONICAL_DISPLAY_PATH = Path(CANONICAL_SETTINGS_FILE).as_posix()
 _TIER_DISPLAY_PATHS = {
-    "user": os.path.join("~", ".claude", "settings.json"),
-    "project_shared": os.path.join(".claude", "settings.json"),
-    "project_local": os.path.join(".claude", "settings.local.json"),
+    "user": "~/.claude/settings.json",
+    "project_shared": ".claude/settings.json",
+    "project_local": ".claude/settings.local.json",
 }
 
 
