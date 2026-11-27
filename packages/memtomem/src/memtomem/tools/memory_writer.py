@@ -949,6 +949,75 @@ class EditBaseMismatchError(StaleSourceProvenanceError):
         self.body_hash = body_hash
 
 
+class OpenFenceEditError(StaleSourceProvenanceError):
+    """The edit would open a code fence over the text after it; nothing was written.
+
+    Raised from inside the rewrite, as :class:`EditBaseMismatchError` is: after
+    every gate in front of it (a Gate B consent line and the privacy guard's
+    audit stay recorded) and before a byte is written. Carries only the fence
+    run, never caller text (#3633).
+    """
+
+    def __init__(self, run: str) -> None:
+        super().__init__("open_fence")
+        self.run = run
+
+
+def open_fence_edit_refusal(run: str) -> str:
+    """The refusal both edit surfaces give for :class:`OpenFenceEditError`."""
+    return (
+        f"The edit leaves a {run} code fence open over the text after it, so the entries "
+        "there would be indexed inside the fence (or the next entry appended to the file "
+        "would be). Close the fence and retry; nothing was written."
+    )
+
+
+def _require_lf_line_breaks(text: str) -> None:
+    """Refuse a source whose ``splitlines()`` rows are not its LF rows.
+
+    The rewrites splice ``splitlines()`` rows, the chunker counts LF rows, and
+    the indexer gives such a snapshot no span hash for that reason
+    (``IndexEngine.chunk_content``). A separator written outside the span
+    after indexing leaves the span's hash valid, so the rewrite asks again:
+    it would turn the separator into a line break and misplace the fence
+    judgement of :func:`_edit_open_fence`.
+    """
+    lf_lines = text.split("\n")
+    if text.endswith("\n"):
+        lf_lines.pop()
+    if text.splitlines() != lf_lines:
+        raise StaleSourceProvenanceError(
+            "Source holds line breaks other than LF; it can no longer be edited by line"
+        )
+
+
+def _edit_open_fence(file_path: Path, before: str, after: str, tail_lines: int) -> None:
+    """Raise :class:`OpenFenceEditError` when the edit fences the text after it.
+
+    Only a file the Markdown chunker reads is judged: the registry picks the
+    chunker by ``file_path.suffix``, and the edit surfaces re-index the path
+    they rewrite. Both texts are taken in the view ``entry_open_fence`` uses,
+    the indexer's newlines with wikilinks resolved.
+    """
+    from memtomem.chunking.markdown import (
+        MARKDOWN_EXTENSIONS,
+        fences_after_edit,
+        resolve_wikilinks,
+    )
+    from memtomem.indexing.redaction_exemption import indexer_text
+
+    if file_path.suffix not in MARKDOWN_EXTENSIONS:
+        return
+
+    def view(text: str) -> str:
+        data = text.encode("utf-8", errors="replace")
+        return resolve_wikilinks(indexer_text(data, errors="replace"))
+
+    run = fences_after_edit(view(before), view(after), tail_lines)
+    if run is not None:
+        raise OpenFenceEditError(run)
+
+
 def _source_region_end(span: list[str]) -> int:
     """Index after the span's last non-blank line: its trailing blanks stay put."""
     end = len(span)
@@ -1079,6 +1148,7 @@ def replace_chunk_body(
         trailing_newline = text.endswith("\n")
         lines = text.splitlines()
         _validate_source_span(lines, start_line, end_line, expected_source_span_hash)
+        _require_lf_line_breaks(text)
         span = lines[start_line - 1 : end_line]
         source = chunk_source_text(lines, start_line, end_line)
         source_hash = source_text_hash(source)
@@ -1097,6 +1167,7 @@ def replace_chunk_body(
         result = "\n".join(new_lines)
         if trailing_newline:
             result += "\n"
+        _edit_open_fence(file_path, text, result, len(lines) - end_line)
         return result
 
     return _rewrite_in_place(file_path, expected_identity, edit)
@@ -1144,12 +1215,14 @@ def replace_lines(
         trailing_newline = text.endswith("\n")
         lines = text.splitlines()
         _validate_source_span(lines, start_line, end_line, expected_source_span_hash)
+        _require_lf_line_breaks(text)
         before = lines[: start_line - 1]
         after = lines[end_line:]
         new_lines = before + new_content.splitlines() + after
         result = "\n".join(new_lines)
         if trailing_newline:
             result += "\n"
+        _edit_open_fence(file_path, text, result, len(after))
         return result
 
     return _rewrite_in_place(file_path, expected_identity, edit)

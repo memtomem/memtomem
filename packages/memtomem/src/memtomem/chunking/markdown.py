@@ -165,6 +165,40 @@ def unclosed_fence(text: str) -> str | None:
     return None
 
 
+def fences_after_edit(before: str, after: str, tail_lines: int) -> str | None:
+    """The run of a fence an edit opens over the text after it, or ``None`` (#3633).
+
+    ``before`` and ``after`` are a whole file before and after an edit of one
+    span, both as the chunker reads them; their last ``tail_lines`` lines are
+    the text after the span, the same lines in both. The edit is refused when
+    it puts a non-blank line of that tail inside a fence that was outside one,
+    or makes the file end inside a fence it did not end inside: the next entry
+    appended would be read as code. The end state alone is not enough, since a
+    fence the edit opens can run to a closer or an open fence further down and
+    swallow every heading on the way. A blank line newly covered is ignored,
+    and tail lines that leave a fence (a repair) are allowed.
+    """
+    old_lines = split_source_lines(before)
+    new_lines = split_source_lines(after)
+    old_spans = _fence_spans(old_lines)
+    new_spans = _fence_spans(new_lines)
+    old_fenced = _fenced_from_end(old_spans, len(old_lines))
+    tail_start = len(new_lines) - tail_lines
+    for span in new_spans:
+        for index in range(max(span.start, tail_start), span.end + 1):
+            from_end = len(new_lines) - 1 - index
+            if from_end not in old_fenced and new_lines[index].strip():
+                return span.run
+    if new_spans and not new_spans[-1].closed and not (old_spans and not old_spans[-1].closed):
+        return new_spans[-1].run
+    return None
+
+
+def _fenced_from_end(spans: list[_FenceSpan], total: int) -> set[int]:
+    """The fenced lines of ``spans``, each counted from the last line (0 = last)."""
+    return {total - 1 - i for span in spans for i in range(span.start, span.end + 1)}
+
+
 def _split_paragraphs_fence_aware(text: str) -> list[str]:
     """Split *text* on blank lines, but keep each code fence as one atomic block.
 
