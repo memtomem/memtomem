@@ -50,12 +50,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   its own), though they had been indexed correctly before. The edit reported success.
   Both surfaces now refuse such an edit before writing (web: 409). The edited file is judged
   as the chunker reads it, before and after the edit. An edit is refused when it puts a
-  line after the edited span inside a fence that was outside one, which also catches a
-  fence that runs to a closer or an already-open fence further down, or when it makes the
-  file end inside a fence. A file that already ended inside a fence can still be edited and
-  repaired. Non-Markdown sources are not judged. An edit is also refused, as stale, when the
-  file's text outside the span gained a line separator other than LF after indexing.
-  Deleting a chunk can still open a fence the same way (#3669).
+  non-blank line after the edited span inside a fence that was outside one, which also
+  catches a fence that runs to a closer or an already-open fence further down, or when it
+  makes a file that ended outside a fence end inside one. A file that already ended inside a
+  fence can still be edited and repaired. Non-Markdown sources are not judged. An edit is
+  also refused, as stale, when the file's text has gained a line separator that
+  `str.splitlines()` splits on and LF splitting does not (such as U+2028) after indexing;
+  CRLF and a lone CR are translated to LF on reading and are not affected. Deleting a
+  chunk can still open a fence the same way (#3669).
 
 - **A search whose `deadline_ms` budget runs out during the session-summary rescue no longer
   logs and counts the expiry as a rescue failure (#3637).** The rescue's links walk and its
