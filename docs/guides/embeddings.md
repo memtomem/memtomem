@@ -13,6 +13,8 @@ Embeddings are **opt-in** — out of the box memtomem runs keyword-only search w
 - **Want cloud accuracy with no local compute?** → **OpenAI** with `text-embedding-3-small` (needs an API key; text is sent to OpenAI).
 - **Multilingual with a larger model?** → **`bge-m3`** on ONNX or Ollama (1024-dim; ~2.3 GB on ONNX).
 
+BM25-only search looks first for chunks that match every term of your query; when it finds any, chunks that match only some of the terms are left out of its keyword results. A related note that lacks one query word, such as an older decision a newer note replaced in different words, can be missing from the results. Embeddings can bring such notes back, and so can a shorter query using words both notes share.
+
 Switch any time with `mm init` (interactive) or `mm embedding-reset` (handles the dimension migration safely). Whichever you pick, set the provider, model, and dimension together — choose a row from the table below.
 
 ## Supported Models

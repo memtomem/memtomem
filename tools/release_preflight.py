@@ -59,8 +59,10 @@ _FetchJSON = Callable[[str, float], tuple[int, Any]]
 # Both HTTP boundaries deliberately handle the full protocol-error family.
 # Callers decide whether to retry; persistent protocol/configuration errors
 # must end in a diagnostic refusal, not escape the gate as a raw traceback.
-# Decode errors have separate policies: readiness probes reject malformed
-# metadata immediately; CI polling allows up to three consecutive API errors.
+# Decode errors have separate policies. ``_request_json``, which serves the PyPI
+# metadata checks and the MCP registry version lookup, treats a JSON or Unicode
+# decoding error as terminal; CI polling aborts on the third consecutive API error
+# (two retries).
 _HTTP_TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
 
 
