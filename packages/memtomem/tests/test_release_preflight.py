@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import importlib.util
 import copy
 import http.client
+import importlib.util
 import io
 import json
 import shlex
@@ -12,6 +12,7 @@ import subprocess
 import tarfile
 import tomllib
 import urllib.error
+import urllib.parse
 import zipfile
 from pathlib import Path
 from types import ModuleType
@@ -1519,8 +1520,10 @@ def test_wait_ci_cli_reports_truncated_response_without_traceback(
 
 
 def test_cli_converts_protocol_error_at_the_final_boundary(monkeypatch, capsys):
-    # Inject past the HTTP boundaries to verify the CLI's defensive fallback;
-    # current HTTP callers already convert protocol errors themselves.
+    # Replacing ``validate_opencode_pypi`` bypasses the normal exception conversion,
+    # so only ``main``'s fallback can catch this. In a real run ``_request_json``
+    # converts protocol errors itself; ``_request_runs`` does not, and its polling
+    # caller ``wait_for_exact_main_ci`` converts them.
     def fail(*args, **kwargs):
         raise http.client.BadStatusLine("broken status")
 
@@ -1729,9 +1732,22 @@ def test_registry_rejects_bad_metadata_without_polling(tmp_path, response):
 
 @pytest.mark.parametrize("state", ["active", "deprecated", "deleted"])
 def test_registry_refuses_every_already_listed_state(tmp_path, state):
-    replies = iter([(200, _pypi_metadata()), (200, {"status": state})])
+    calls = []
+
+    def fetch(url, timeout):
+        calls.append(url)
+        if url.startswith("https://pypi.org/"):
+            return 200, _pypi_metadata()
+        # The default registry API hides deleted versions: without this query a
+        # deleted record answers like a version that was never published.
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        if state == "deleted" and query.get("include_deleted") != ["true"]:
+            return 404, None
+        return 200, {"status": state}
+
     with pytest.raises(rp.ReleaseCheckError, match="already listed"):
-        rp.validate_registry_publish("v0.3.6", _repo(tmp_path), fetch_json=lambda *_: next(replies))
+        rp.validate_registry_publish("v0.3.6", _repo(tmp_path), fetch_json=fetch)
+    assert [url.startswith("https://pypi.org/") for url in calls] == [True, False]
 
 
 @pytest.mark.parametrize("status", [301, 401, 403, 429, 500, 503])
@@ -1877,6 +1893,17 @@ def test_http_probe_distinguishes_bad_json_from_transient_network(monkeypatch):
     monkeypatch.setattr(rp.urllib.request, "urlopen", unavailable)
     with pytest.raises(rp._ProbePending, match="could not confirm"):
         rp._request_json("https://pypi.org/example", 10)
+
+
+def test_http_probe_treats_malformed_utf8_as_terminal(monkeypatch):
+    # Valid JSON apart from the one byte, so only decoding can refuse it.
+    monkeypatch.setattr(
+        rp.urllib.request, "urlopen", lambda *a, **kw: _JSONResponse(b'{"info": "\xff"}')
+    )
+    with pytest.raises(rp.ReleaseCheckError, match="invalid JSON") as error:
+        rp._request_json("https://pypi.org/example", 10)
+    assert not isinstance(error.value, rp._ProbePending)
+    assert isinstance(error.value.__cause__, UnicodeDecodeError)
 
 
 @pytest.mark.parametrize(
