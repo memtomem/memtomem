@@ -45,7 +45,7 @@ The launcher is POSIX-only. Its offline tests are in
 
 ## Run
 
-Run the suite as two invocations, one per tool set:
+Run the regression suite as two invocations, one per tool set:
 
 ```bash
 cd tools/agent-eval/plugin
@@ -70,6 +70,22 @@ A case's `allowed_tools` does not narrow what `--allow-tools` grants. In a probe
 listed only `mem_search` still ran `mem_add` successfully when the command line granted it.
 The command line is what scopes the tools, hence the split. Add `--case <glob>` for a subset and
 `--runs 1` for a quick pass.
+
+### Capability set
+
+The `capability` cases ("Capability cases" below) are not part of the regression pair: neither
+command above selects their tag. Run them with the retrieval tool set:
+
+```bash
+claude plugin eval . --trust-plugin --mocks off --ablation none --no-publish --threshold 0 -j 3 \
+  --disallow-tools Read Grep Glob Agent --max-cost-usd 3 \
+  --tag capability \
+  --allow-tools ${T}__mem_search ${T}__mem_recall ${T}__mem_read ${T}__mem_list \
+  --json /tmp/agent-eval-capability.json
+```
+
+In zsh, a flag list kept in one variable is passed as a single argument (`unknown option`).
+Write the flags out as above, or keep them in an array and pass `"${FLAGS[@]}"`.
 
 ## Cases
 
@@ -125,6 +141,31 @@ the checker does not rebuild the judge's view. A run without a `tracePath`, or o
 it cannot read (a sealed directory, for example), is printed as `unread` and makes the exit status
 1. A missing or malformed trace stops the checker with a traceback. The offline tests are in
 `packages/memtomem/tests/test_agent_eval_controls.py`.
+
+### Capability cases
+
+These are meant to measure what the regression set cannot: whether the agent resolves
+conflicting notes, joins two notes, and searches when nothing in the prompt says memory is
+involved. Each carries only the tag `capability`. Each also has the `no_read` / `no_grep` /
+`no_glob` graders and grades meaning with an `llm` judge, `correct`. The judge has no
+`focus`, so it reads only the final reply (measured, see "Capability set" under
+Measurements). Regexes check only what is mechanical: the bounded token on the last
+`ANSWER:` line (`answer`), and the bounded token inside a `"type":"tool_result"` record
+(`retrieved*`).
+
+| case | seed | `correct` passes only when the final reply… | other graders |
+|---|---|---|---|
+| `cap-superseded-registry` | an Aug note and an Oct note that replaces it without naming the old host | gives the Oct host as current, because October replaced August. The old host may appear as the former one, but not as current or as an alternative. The reply must not call the new host doubtful or give a reason that contradicts the notes | `retrieved_old`: the old host reached the agent. Only the Aug note names it, so this means both notes were seen |
+| `cap-distractor-bucket` | two notes, same heading, no cross-reference, Jun and Oct, different buckets | gives the Oct bucket and grounds it in the later note | `retrieved_old`, as above, for the Jun bucket |
+| `cap-multihop-oncall` | a port-change log (Sept: ledger-api, Oct: quota-svc) and one on-call note per service | names ledger-api as the service changed in September **and** gives its handle. A right handle on a wrong join fails | `retrieved_hop1`: port 7342, which only the September entry holds |
+| `cap-nohint-psql` | `staging-db` (port 6519) | ends with one `psql` invocation for `staging-db.internal:6519`, user `deploy`, database `app`. Flags, `key=value` and a URI all pass | `answer` requires `6519` on the last `ANSWER:` line |
+| `cap-nohint-deploy` | a note giving the prod deploy command and its required region | ends with one `rlsctl deploy` for build 1234, env prod, region `kx-north-9` | `answer` requires the region on the last `ANSWER:` line |
+
+The two `cap-nohint-*` prompts ask for a command and do not mention memory or a stored value.
+
+**Promotion.** A case that passes every run in two separate measurements moves to a regression
+tag (`should_search`) and loses `capability`. Its offline pins in
+`packages/memtomem/tests/test_agent_eval_cases.py` move with it.
 
 ## Writing a case
 
@@ -220,10 +261,92 @@ Whether a control reaches a path depends on the model's choices in that run, so 
 before counting it. In one run of the file-read control the model's Grep went outside the
 workspace, was denied, and the model answered `UNKNOWN`.
 
-**This suite is saturated: every case passes every run.** It works as a regression check, so a
-drop after an edit to instructions or tool descriptions is the signal. It cannot show
-improvement. Cases that would measure capability (superseded decisions, multi-hop recall, a
-question that does not hint that memory is relevant) are not written yet.
+**The regression set is saturated: every case passes every run.** It works as a regression
+check, so a drop after an edit to instructions or tool descriptions is the signal. It cannot
+show improvement. The capability cases are measured separately, in "Capability set" below.
+
+### Capability set (2026-11-27, Claude Code 2.1.331, claude-opus-5-5)
+
+The command under "Run → Capability set", 3 runs per case: 13 of 15 runs passed, $1.25.
+
+| case | passed | notes from the traces |
+|---|---|---|
+| `cap-superseded-registry` | 1/3 | Every run answered the Oct host and passed `correct`. In two runs the single `mem_search` ("container registry host CI push images") returned only the Oct note, so `retrieved_old` failed: the conflict never reached the agent. The passing run also called `mem_recall` and saw both notes |
+| `cap-distractor-bucket` | 3/3 | `mem_search` returned both notes every time, the Oct note first in two runs and the Jun note first in one, so the rank did not decide the answer |
+| `cap-multihop-oncall` | 3/3 | three searches each: the port log first, then the on-call notes |
+| `cap-nohint-psql` | 3/3 | every run searched first, without being asked to |
+| `cap-nohint-deploy` | 3/3 | every run searched first, without being asked to |
+
+The superseded case is the only one below 100%. Its judge was revised after review to also
+require the reason (October replaced August), and the case was run 3 more times: 0/3. Every one
+of those runs answered the Oct host, gave that reason and passed `correct`, but saw only the Oct
+note, so `retrieved_old` failed. That makes 1 of 6 across both measurements. These are coverage
+failures, not wrong answers. Every query seen so far that held a word the Aug note lacks
+("host", "August", "read-only") returned only the Oct note. The probe query "CI image registry",
+whose words are all in both notes, returned both. Whether `mem_search` needs every query term to
+match was not checked here.
+
+The no-hint prompts did not stop the model from searching. On this model the capability set
+starts close to saturated too. Prompts were not tuned to make cases fail.
+
+Each `cap-nohint-*` run called `mem_search` (no other memory tool), received the seeded note,
+and passed `correct`.
+
+The judge's setting was fixed by two probe runs before any case was written. Each was one run
+with `mem_search` granted, and each judge cast three votes:
+
+- In the first, the earlier text named the old host as current and the final reply was right.
+  The default judge (no `focus`) voted PASS 3 of 3, and its evidence was the final message.
+- In the second, the earlier text and the `mem_search` result both had the new host. The final
+  reply called the old host current in prose and still printed the new host on its `ANSWER:`
+  line. The default judge voted FAIL 3 of 3.
+
+A `focus: trace` judge voted the same way in both. The second probe covers two directions at
+once (a right tool result followed by a stale reply, and right earlier text followed by a stale
+reply). They were not run separately.
+
+A trace record is one line of compact JSON with escaped newlines. A `mem_search` result
+appears three times in its line (`content`, `tool_use_result`, `structuredContent`), 1,800
+characters for two short notes. The `retrieved*` window is therefore 20,000 characters.
+
+Controls, 1 run each. Each control copied the case graders as they stood when it ran. Every
+forced reply was checked against the judge's evidence and matched the intended text exactly.
+After the controls, review changed some regex patterns and the superseded rubric (see the
+paragraph after the table). The verdicts below are from the live runs:
+
+| control | result |
+|---|---|
+| each case with no memtomem tool granted, prompt asking for a memory search (5) | the denial was recorded in every trace; `answer`, `retrieved` and `correct` failed in each, and `retrieved_old` / `retrieved_hop1` failed where present |
+| file tools allowed (`Agent` still denied), prompt asking for Glob, Grep and Read | the model called all three; `no_glob`, `no_grep`, `no_read` failed |
+| the Aug registry note removed from the seed | `retrieved_old` failed; `answer`, `retrieved`, `correct` passed |
+| the September entry removed from the port log | `retrieved_hop1`, `answer`, `correct` failed (`retrieved` passed: the on-call notes still came back) |
+| forced replies whose last `ANSWER:` line holds the right token (13 near-misses: OLD called current, NEW called doubtful, right bucket on the June note's authority, both buckets, right handle on the wrong service, psql wrong host / user / database, a second `-h`, `echo psql …`, deploy wrong build / env / executable) | `correct` failed in all 13; `answer` passed, as designed |
+| forced replies with the token replaced (psql `-p 5432`, deploy `--region us-east-1`) | `answer` and `correct` failed |
+| forced `WRONG_ANSWER: <right host>`, and a right `ANSWER:` line followed by a wrong one | `answer` and `correct` failed in both: the real grader reads the last-line anchor as Python `re` does |
+| forced correct replies: one per case, plus the psql `key=value` and URI forms (7) | `answer` and `correct` passed |
+| revised superseded judge: the correct reply, the right host with the wrong reason ("August chose it, nothing changed in October"), OLD called current, NEW called doubtful | `correct` passed the first and failed the other three (3 of 3 votes each); `answer` passed all four |
+
+Review changed the graders after these runs:
+
+- The `retrieved_hop1` and psql `retrieved` patterns require the whole phrase `port <digits>`,
+  bounded on both sides. A verbose result's UUID chunk id can hold the same four digits.
+- The identifier boundaries also exclude `_`.
+- psql's `answer` accepts `-p6519` after a space.
+- The superseded rubric requires the reason.
+
+Only the rubric change needed a new live run (the last row of the table). The committed regex
+patterns were replayed with Python `re` over every kept trace and final reply above. They gave
+the recorded verdict in all 95 regex grader results:
+
+| run | results |
+|---|---|
+| the first measurement | 39 |
+| the control runs with traces | 43 |
+| the re-run superseded case | 9 |
+| its forced replies | 4 |
+
+The controls therefore hold for the committed graders as far as that replay reaches. It does not
+cover the real JavaScript engine on the new patterns.
 
 ## Known limits
 
@@ -262,5 +385,11 @@ question that does not hint that memory is relevant) are not written yet.
   size. A save case that raises `max_turns` could push the write out of the judge's view.
 - The `fact` judge is nondeterministic. A 2-of-3 vote reduces the noise but does not remove it,
   so read the trace before counting a save failure as a regression.
+- The capability `retrieved*` patterns read the rest of the trace line after a
+  `"type":"tool_result"` marker, not only that result's payload. A result without the token
+  followed, on the same line, by another block that carries it would pass. A hostname token
+  also passes with an extra label after it (`cr-otter-2207.internal.example`), because a period
+  is accepted as a boundary so that a sentence can end with the host. The seeds produce neither
+  shape. Like the routes above, these are left as known limits rather than closed in a regex.
 - Graders cannot read the SQLite store. Rows that never reach a note file (for example
   `query_history`) are not graded.
