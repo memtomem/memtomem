@@ -4639,3 +4639,109 @@ class TestStrictGrammarRule:
 
         assert result.exit_code == 0
         assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == ""
+
+
+class TestWikilinkMatcherIsLinear:
+    """The doctor's wikilink grammar, matched in one pass (#3634).
+
+    ``_WIKILINK_RE`` run with ``sub`` / ``finditer`` rescanned the rest of a text
+    token from every unclosed ``[[``, quadratic in the token's length. The
+    regex is kept as the grammar and these tests hold the matcher equal to it.
+    """
+
+    _UNCLOSED = ("x[[" * 20000, "x[[a|" * 20000, ("x[[" * 2000 + "\n") * 10)
+    # Every opener fails at the same distant ``]``: a matcher that cached only
+    # end-of-input misses, not found delimiters, would rescan to it each time.
+    _ONE_DISTANT_CLOSER = ("x[[" * 20000 + "]x", "x[[a|" * 20000 + "]x")
+
+    @staticmethod
+    def _spec(text):
+        from memtomem.cli.memory_doctor_cmd import _WIKILINK_RE
+
+        return [(m.start(), m.end(), m.group(1)) for m in _WIKILINK_RE.finditer(text)]
+
+    @staticmethod
+    def _scrub_spec(text):
+        from memtomem.cli.memory_doctor_cmd import _WIKILINK_RE
+
+        return _WIKILINK_RE.sub("", text)
+
+    def test_parsing_unclosed_openers_does_not_run_the_regex(self, monkeypatch):
+        from memtomem.cli import memory_doctor_cmd
+
+        class NotRun:
+            def __getattr__(self, name):
+                raise AssertionError(f"the backtracking regex was used ({name})")
+
+        monkeypatch.setattr(memory_doctor_cmd, "_WIKILINK_RE", NotRun())
+        for text in self._UNCLOSED + self._ONE_DISTANT_CLOSER:
+            parsed = parse_memory_index("- [a](a.md) " + text + "\n")
+            assert parsed.wikilinks == ()
+
+    def test_end_searches_scan_at_most_twice_the_text(self, monkeypatch):
+        """Counted, not timed: the distance the target and alias end searches scan,
+        from each start position to the delimiter found (or the end of the text),
+        stays within twice the text. Only those two searches are counted."""
+        from memtomem.cli import memory_doctor_cmd
+
+        read = [0]
+
+        class Counting:
+            def __init__(self, pattern):
+                self._pattern = pattern
+
+            def search(self, text, pos):
+                m = self._pattern.search(text, pos)
+                read[0] += (m.start() if m else len(text)) - pos
+                return m
+
+        for name in ("_WIKILINK_TARGET_END", "_WIKILINK_ALIAS_END"):
+            monkeypatch.setattr(memory_doctor_cmd, name, Counting(getattr(memory_doctor_cmd, name)))
+        for text in self._UNCLOSED + self._ONE_DISTANT_CLOSER:
+            read[0] = 0
+            assert memory_doctor_cmd._wikilink_spans(text) == []
+            assert 0 < read[0] <= 2 * len(text), (len(text), read[0])
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "no links",
+            "[[a]] and [[b|c]]",
+            "[[[a]]",  # the target may hold a ``[``
+            "[[a|b|c]]",  # the alias may hold a ``|``
+            "[[]] [[|a]] [[a|]]",  # an empty target or alias is not a link
+            "[[a]b]]",  # nor one crossing ``]``
+            "[[a\nb]] [[a|b\nc]]",  # unlike the chunker's, a newline is let through
+            "[[a| ]]",
+            "[[a][[b]]",
+            "x[[" * 50 + "[[ok]]",
+        ],
+    )
+    def test_spans_match_the_grammar(self, text):
+        from memtomem.cli.memory_doctor_cmd import _scrub_wikilinks, _wikilink_spans
+
+        spans = _wikilink_spans(text)
+        assert spans == self._spec(text)
+        assert _scrub_wikilinks(text, spans) == self._scrub_spec(text)
+
+    def test_spans_match_the_grammar_on_random_text(self):
+        import random
+
+        from memtomem.cli.memory_doctor_cmd import _scrub_wikilinks, _wikilink_spans
+
+        tokens = ["[", "]", "|", "\n", "a", " ", "[[", "]]", "|]]", "b|c"]
+        rng = random.Random(3634)
+        for _ in range(20000):
+            text = "".join(rng.choice(tokens) for _ in range(rng.randint(0, 24)))
+            spans = _wikilink_spans(text)
+            assert spans == self._spec(text), repr(text)
+            assert _scrub_wikilinks(text, spans) == self._scrub_spec(text), repr(text)
+
+    def test_a_decoded_newline_match_is_scrubbed_but_not_collected(self):
+        """``&#10;`` decodes to a newline inside the text token, so the match is
+        scrubbed (no stranded brackets, the label stays a wikilink) but raw
+        source never wrote it, so the census does not collect it."""
+        parsed = parse_memory_index("- [[memo]](note) then [[a&#10;b|c&#10;d]]\n")
+        assert parsed.entries == ()
+        assert parsed.wikilinks == ((1, "memo"),)

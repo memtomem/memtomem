@@ -307,7 +307,70 @@ _WIKILINK_LABEL_RE = re.compile(r"^\[[^\[\]]*\]$")
 # (``&#10;``) decoded to it, and refusing that match changes what
 # :func:`_settle_wikilink_labels` makes of a ``[[memo]](note)`` label on the
 # same line.
+#
+# The grammar :func:`_wikilink_spans` implements. It is not run with ``sub`` or
+# ``finditer``: on a run of unclosed ``[[`` openers the regex rescans the rest of
+# the token from each one, quadratic in the token's length (#3634). The spans
+# give the same matches in one pass, and a test holds them equal to this regex.
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+_WIKILINK_TARGET_END = re.compile(r"[\]|]")
+_WIKILINK_ALIAS_END = re.compile(r"\]")
+
+
+def _wikilink_spans(text: str) -> list[tuple[int, int, str]]:
+    """``(start, end, target)`` of each match ``_WIKILINK_RE.finditer(text)`` yields.
+
+    In time linear in *text*. A target runs from ``[[`` to the first ``]`` or
+    ``|`` and can end nowhere else, since a shorter one would leave a character
+    neither ``|`` nor ``]]`` can start with; the same holds for an alias,
+    ending at the first ``]``. So each opener is decided at the first such
+    character after it. The openers are visited left to right, so the position
+    of that character is found once and reused until an opener passes it.
+    """
+    spans: list[tuple[int, int, str]] = []
+    if "[[" not in text:
+        return spans
+    size = len(text)
+    target_end = alias_end = -1
+
+    def first(pattern: re.Pattern[str], pos: int, known: int) -> int:
+        # ``known`` is the first match at or after an earlier position: while it
+        # is not behind ``pos`` it is also the first at or after ``pos``.
+        if known >= pos:
+            return known
+        m = pattern.search(text, pos)
+        return m.start() if m else size
+
+    i = text.find("[[")
+    while i != -1:
+        start = i + 2
+        target_end = first(_WIKILINK_TARGET_END, start, target_end)
+        end = -1
+        if target_end > start:
+            if text.startswith("]]", target_end):
+                end = target_end + 2
+            elif text.startswith("|", target_end):
+                alias = target_end + 1
+                alias_end = first(_WIKILINK_ALIAS_END, alias, alias_end)
+                if alias_end > alias and text.startswith("]]", alias_end):
+                    end = alias_end + 2
+        if end == -1:
+            i = text.find("[[", i + 1)
+            continue
+        spans.append((i, end, text[start:target_end]))
+        i = text.find("[[", end)
+    return spans
+
+
+def _scrub_wikilinks(text: str, spans: list[tuple[int, int, str]]) -> str:
+    """*text* with *spans* removed: ``_WIKILINK_RE.sub("", text)`` for its spans."""
+    parts: list[str] = []
+    copied = 0
+    for start, end, _target in spans:
+        parts.append(text[copied:start])
+        copied = end
+    parts.append(text[copied:])
+    return "".join(parts)
 
 
 def _wikilink_in(raw: str, inner: str) -> bool:
@@ -556,15 +619,16 @@ def _read_inline(token: Token) -> tuple[list[tuple[str, str, bool]], list[str], 
             # brackets no whole ``[[…]]`` accounts for — the strands a needle
             # split across token boundaries always leaves — force opacity.
             claim_sources.append(child.content)
-            scrubbed = _WIKILINK_RE.sub("", child.content)
+            spans = _wikilink_spans(child.content)
+            scrubbed = _scrub_wikilinks(child.content, spans)
             if "[" in scrubbed or "]" in scrubbed:
                 opaque = True  # stranded brackets: split or escaped syntax
             if _UNRESOLVED_LINK_SYNTAX_RE.search(child.content):
                 unresolved = True
             events.extend(
-                ("wiki", m.group(1), "")
-                for m in _WIKILINK_RE.finditer(child.content)
-                if _wikilink_in(raw, m.group(0)[2:-2])
+                ("wiki", target, "")
+                for start, end, target in spans
+                if _wikilink_in(raw, child.content[start + 2 : end - 2])
             )
     links, wikilinks = _settle_wikilink_labels(raw, events, claim_sources, opaque)
     return links, wikilinks, unresolved
