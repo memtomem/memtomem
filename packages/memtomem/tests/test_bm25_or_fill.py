@@ -243,26 +243,28 @@ class TestTheHostParameterFloor:
     """The fill binds the filters twice; under the pre-3.32 ceiling it must not raise."""
 
     @pytest.mark.asyncio
-    async def test_a_long_namespace_list_keeps_the_and_rows(self, storage):
+    @pytest.mark.parametrize(
+        ("count", "fills"),
+        # The fill binds 2 * count + 6 values: 998 at 496, 1000 at 497.
+        [(1, True), (496, True), (497, False), (499, False)],
+    )
+    async def test_the_fill_runs_only_while_it_fits(self, storage, count, fills):
         both = _make_chunk("pangolin and quokka share a note", source="notes/both.md")
         eligible = _make_chunk("pangolin diets", source="notes/pangolin.md")
         await storage.upsert_chunks([both, eligible, *_unrelated(5)])
-        namespaces = NamespaceFilter.parse(",".join(["default", *(f"ns{i}" for i in range(499))]))
+        names = ["default", *(f"ns{i}" for i in range(count - 1))]
         conns = [storage._get_db(), *storage._read_pool]
         previous = [c.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999) for c in conns]
         try:
             results = await storage.bm25_search(
-                "pangolin quokka", top_k=10, namespace_filter=namespaces
-            )
-            filled = await storage.bm25_search(
-                "pangolin quokka", top_k=10, namespace_filter=NamespaceFilter.parse("default")
+                "pangolin quokka", top_k=10, namespace_filter=NamespaceFilter.parse(",".join(names))
             )
         finally:
             for conn, limit in zip(conns, previous, strict=True):
                 conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, limit)
 
-        assert [r.chunk.id for r in results] == [both.id]
-        assert [r.chunk.id for r in filled] == [both.id, eligible.id]
+        expected = [both.id, eligible.id] if fills else [both.id]
+        assert [r.chunk.id for r in results] == expected
 
 
 class TestScores:

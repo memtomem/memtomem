@@ -416,27 +416,31 @@ class SearchOpsMixin:
                        ORDER BY fill_arm, fill_rank, fill_tie, id
                        LIMIT ?"""
                 filter_params = ns_params + scope_params + metadata_params + source_params
-                # The fill binds every filter twice. A filter that fits the
-                # single statement but not twice over (a long namespace list
-                # under the 999 floor) keeps the AND rows alone, as before.
-                can_fill = 2 * len(filter_params) + 5 <= _HOST_PARAM_FLOOR
                 scored: list[tuple[tuple, float]] = []
                 for column in columns:
                     and_match = _restrict_to_column(column, and_body)
+                    or_match = _restrict_to_column(column, or_body)
+                    fill_params = (
+                        [and_match]
+                        + filter_params
+                        + [top_k, or_match, and_match]
+                        + filter_params
+                        + [top_k, top_k]
+                    )
                     rows = conn.execute(sql, [and_match] + filter_params + [top_k]).fetchall()
-                    if rows and len(rows) < top_k and len(bodies) == 2 and can_fill:
-                        or_match = _restrict_to_column(column, or_body)
-                        filled = conn.execute(
-                            fill_sql,
-                            [and_match]
-                            + filter_params
-                            + [top_k, or_match, and_match]
-                            + filter_params
-                            + [top_k, top_k],
-                        ).fetchall()
+                    # The fill binds every filter twice. A filter that fits the
+                    # single statement but not twice over (a long namespace list
+                    # under the 999 floor) keeps the AND rows alone, as before.
+                    # Measured on the list that is bound, not counted by hand.
+                    if (
+                        rows
+                        and len(rows) < top_k
+                        and len(bodies) == 2
+                        and len(fill_params) <= _HOST_PARAM_FLOOR
+                    ):
+                        filled = conn.execute(fill_sql, fill_params).fetchall()
                         scored = _scale_fill(filled)
                     elif not rows and len(bodies) == 2:
-                        or_match = _restrict_to_column(column, or_body)
                         rows = conn.execute(sql, [or_match] + filter_params + [top_k]).fetchall()
                         scored = [(row[:-1], abs(row[-1])) for row in rows]
                     else:
