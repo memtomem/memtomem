@@ -204,24 +204,42 @@ def resolve_project_tier_write_dir(
     Such a tier is refused here with the indexer's own predicate,
     :func:`project_tier_is_relinked`, which the indexer uses to leave that
     tier out. It is judged before anything is resolved, so a link that loops
-    is refused, not followed. Every other case is
-    :func:`resolve_memory_scope_dir`'s answer, errors included.
+    is refused, not followed. The tier is then resolved by
+    :func:`resolve_memory_scope_dir`; an ``OSError`` or ``RuntimeError`` from
+    that resolution is refused the same way (#3646). One such failure is an
+    entry swapped for a loop after the check, on a Python whose ``resolve()``
+    raises on a loop (3.12 raises ``RuntimeError``, naming the absolute path). Where
+    ``resolve()`` returns the spelled path instead (3.13+), that path is the
+    answer. Only this resolution is covered: a tier resolved elsewhere, as
+    the project-context lookup does, keeps its own behaviour, and an entry
+    swapped after this returns is not bound to the later ``open``. Every
+    other case is :func:`resolve_memory_scope_dir`'s answer, errors included.
 
     Raises:
         MemoryScopeError: As :func:`resolve_memory_scope_dir` does, and when
-            the project tier is reached through a link or cannot be
-            inspected. The message names only the entries relative to the
-            project root: a web response carries it.
+            the project tier is reached through a link, cannot be inspected,
+            or fails to resolve. The message names only the entries relative
+            to the project root: a web response carries it.
     """
     if project_root is not None and scope in ("project_shared", "project_local"):
         if project_tier_is_relinked(project_tier_dir(scope, project_root)):
-            entry = f".memtomem/{_PROJECT_TIER_DIR_NAMES[scope]}"
-            raise MemoryScopeError(
-                f"{entry}, or the .memtomem directory holding it, is a symbolic link or "
-                "junction, or could not be inspected; nothing was written. Replace a link "
-                "with a regular directory, or make the entry readable."
-            )
+            raise MemoryScopeError(_relinked_tier_refusal(scope))
+        try:
+            return resolve_memory_scope_dir(scope, project_root, user_base)
+        except (OSError, RuntimeError):
+            # The exception names the absolute path; the refusal must not.
+            raise MemoryScopeError(_relinked_tier_refusal(scope)) from None
     return resolve_memory_scope_dir(scope, project_root, user_base)
+
+
+def _relinked_tier_refusal(scope: str) -> str:
+    """The write resolver's refusal of a project tier, naming only project-relative entries."""
+    entry = f".memtomem/{_PROJECT_TIER_DIR_NAMES[scope]}"
+    return (
+        f"{entry}, or the .memtomem directory holding it, is a symbolic link or "
+        "junction, or could not be inspected; nothing was written. Replace a link "
+        "with a regular directory, or make the entry readable."
+    )
 
 
 def resolve_scope_target(
