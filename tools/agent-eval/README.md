@@ -155,7 +155,7 @@ Measurements). Regexes check only what is mechanical: the bounded token on the l
 
 | case | seed | `correct` passes only when the final reply… | other graders |
 |---|---|---|---|
-| `cap-superseded-registry` | an Aug note and an Oct note that replaces it without naming the old host | gives the Oct host as current, because October replaced August. The old host may appear as the former one, but not as current or as an alternative. The reply must not call the new host doubtful or give a reason that contradicts the notes | `retrieved_old`: the old host reached the agent. Only the Aug note names it, so this means both notes were seen |
+| `cap-superseded-registry` | an Aug note and an Oct note that replaces it without naming the old host. The prompt asks for the current host and the previous one | gives the Oct host as current, names the Aug host as the previous one, and grounds it in October replacing August. It must not present the old host as current or as an alternative, call the new host doubtful, say the previous host is unknown, or give a reason that contradicts the notes | `retrieved_old`: the old host reached the agent. Only the Aug note names it, so this means both notes were seen |
 | `cap-distractor-bucket` | two notes, same heading, no cross-reference, Jun and Oct, different buckets | gives the Oct bucket and grounds it in the later note | `retrieved_old`, as above, for the Jun bucket |
 | `cap-multihop-oncall` | a port-change log (Sept: ledger-api, Oct: quota-svc) and one on-call note per service | names ledger-api as the service changed in September **and** gives its handle. A right handle on a wrong join fails | `retrieved_hop1`: port 7342, which only the September entry holds |
 | `cap-nohint-psql` | `staging-db` (port 6519) | ends with one `psql` invocation for `staging-db.internal:6519`, user `deploy`, database `app`. Flags, `key=value` and a URI all pass | `answer` requires `6519` on the last `ANSWER:` line |
@@ -267,7 +267,10 @@ show improvement. The capability cases are measured separately, in "Capability s
 
 ### Capability set (2026-11-27, Claude Code 2.1.331, claude-opus-5-5)
 
-The command under "Run → Capability set", 3 runs per case: 13 of 15 runs passed, $1.25.
+The command under "Run → Capability set", 3 runs per case, with the first version of the
+superseded prompt: 13 of 15 runs passed, $1.25. With the current superseded prompt (below), the
+case's re-run passed 3/3, and no other case changed. The combined 15/15 was not run as one
+measurement.
 
 | case | passed | notes from the traces |
 |---|---|---|
@@ -277,17 +280,25 @@ The command under "Run → Capability set", 3 runs per case: 13 of 15 runs passe
 | `cap-nohint-psql` | 3/3 | every run searched first, without being asked to |
 | `cap-nohint-deploy` | 3/3 | every run searched first, without being asked to |
 
-The superseded case is the only one below 100%. Its judge was revised after review to also
-require the reason (October replaced August), and the case was run 3 more times: 0/3. Every one
-of those runs answered the Oct host, gave that reason and passed `correct`, but saw only the Oct
-note, so `retrieved_old` failed. That makes 1 of 6 across both measurements. These are coverage
-failures, not wrong answers. Every query seen so far that held a word the Aug note lacks
-("host", "August", "read-only") returned only the Oct note. The probe query "CI image registry",
-whose words are all in both notes, returned both. Whether `mem_search` needs every query term to
-match was not checked here.
+The superseded case went through two revisions after review:
 
-The no-hint prompts did not stop the model from searching. On this model the capability set
-starts close to saturated too. Prompts were not tuned to make cases fail.
+1. **The judge also required the reason** (October replaced August), and the case was run 3 more
+   times: 0/3. Every run answered the Oct host, gave that reason and passed `correct`, but saw
+   only the Oct note, so `retrieved_old` failed.
+2. **The prompt asks for the previous host too.** The first version asked only for the current
+   host, which the Oct note answers by itself. `retrieved_old` then failed grounded answers. The
+   judge now requires the Aug host to be named, and the case passed 3/3 ($0.29). In each run the
+   first `mem_search` returned only the Oct note. The agent then searched again (3 to 5 memory
+   calls: reworded queries, a `source_filter`, `mem_list`) and found the Aug note.
+
+Every query seen so far that held a word the Aug note lacks ("host", "August", "read-only")
+returned only the Oct note. BM25 tries the AND form of a query and falls back to OR only when AND
+returns no rows (#3662).
+
+The no-hint prompts did not stop the model from searching. With the current prompts every
+capability case passed every run it was measured on, so on this model the set does not start
+below 100% as #3649 hoped. It still separates effort: the superseded case needed 3 to 5 memory
+calls where the others needed 1 to 3. Prompts were not tuned to make cases fail.
 
 Each `cap-nohint-*` run called `mem_search` (no other memory tool), received the seeded note,
 and passed `correct`.
@@ -324,7 +335,8 @@ paragraph after the table). The verdicts below are from the live runs:
 | forced replies with the token replaced (psql `-p 5432`, deploy `--region us-east-1`) | `answer` and `correct` failed |
 | forced `WRONG_ANSWER: <right host>`, and a right `ANSWER:` line followed by a wrong one | `answer` and `correct` failed in both: the real grader reads the last-line anchor as Python `re` does |
 | forced correct replies: one per case, plus the psql `key=value` and URI forms (7) | `answer` and `correct` passed |
-| revised superseded judge: the correct reply, the right host with the wrong reason ("August chose it, nothing changed in October"), OLD called current, NEW called doubtful | `correct` passed the first and failed the other three (3 of 3 votes each); `answer` passed all four |
+| revised superseded judge (reason required): the correct reply, the right host with the wrong reason ("August chose it, nothing changed in October"), OLD called current, NEW called doubtful | `correct` passed the first and failed the other three (3 of 3 votes each); `answer` passed all four |
+| current superseded judge (previous host required): two correct replies, the right host and reason with "memory does not name the previous host", the wrong reason, OLD called current, NEW called doubtful | `correct` passed the two correct replies and failed the other four (3 of 3 votes each); `answer` passed all six |
 
 Review changed the graders after these runs:
 
@@ -332,18 +344,19 @@ Review changed the graders after these runs:
   bounded on both sides. A verbose result's UUID chunk id can hold the same four digits.
 - The identifier boundaries also exclude `_`.
 - psql's `answer` accepts `-p6519` after a space.
-- The superseded rubric requires the reason.
+- The superseded rubric requires the reason, and then the previous host; its prompt asks for
+  the previous host.
 
-Only the rubric change needed a new live run (the last row of the table). The committed regex
-patterns were replayed with Python `re` over every kept trace and final reply above. They gave
-the recorded verdict in all 95 regex grader results:
+The superseded changes were measured in new live runs (the last two rows of the table, and the
+re-runs above). The committed regex patterns were replayed with Python `re` over every kept
+trace and final reply above. They gave the recorded verdict in all 110 regex grader results:
 
 | run | results |
 |---|---|
 | the first measurement | 39 |
 | the control runs with traces | 43 |
-| the re-run superseded case | 9 |
-| its forced replies | 4 |
+| the superseded re-runs (two prompt versions) | 18 |
+| their forced replies | 10 |
 
 The controls therefore hold for the committed graders as far as that replay reaches. It does not
 cover the real JavaScript engine on the new patterns.

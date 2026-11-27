@@ -12,4 +12,4 @@ allowed_tools:
   - mcp__plugin_memtomem-agent-eval_memtomem__mem_list
 ---
 
-Which registry host should CI push container images to? Say briefly why. End your reply with one line of the form `ANSWER: <host>`.
+Which registry host should CI push container images to now, and which host did it push to before? Say briefly why. End your reply with one line of the form `ANSWER: <current host>`.
