@@ -550,7 +550,9 @@ def _iter_scan_targets(
     """Yield ``(source, tier, path, data, failure_reason)`` for every settings file.
 
     Canonical settings first, then each tier, skipping a tier path that
-    resolves to one already visited (symlinked tiers).
+    resolves to one already visited (symlinked tiers). A tier with nothing at
+    its path is not a visit: a link from a later tier to it is broken, and is
+    reported as such rather than skipped as an alias of a missing file (#2644).
     """
     canonical_path = project_root / CANONICAL_SETTINGS_FILE
     yield ("canonical", None, canonical_path, *_read_settings(canonical_path))
@@ -561,8 +563,10 @@ def _iter_scan_targets(
         resolved = _resolved(tier_path)
         if resolved in seen_paths:
             continue
-        seen_paths.add(resolved)
-        yield ("tier", scope, tier_path, *_read_settings(tier_path))
+        data, reason = _read_settings(tier_path)
+        if data is not None or reason is not None:
+            seen_paths.add(resolved)
+        yield ("tier", scope, tier_path, data, reason)
 
 
 def find_unportable_hook_commands(

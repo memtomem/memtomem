@@ -231,6 +231,49 @@ def test_display_paths_match_resolve_scope_path(tmp_path: Path, monkeypatch) -> 
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+async def test_a_tier_symlinked_to_a_missing_tier_is_reported(
+    client, project_root: Path, fake_home: Path
+) -> None:
+    """``project_local`` links to ``project_shared``, which does not exist.
+    The scan visits ``project_shared`` first; a tier with nothing at its path
+    must not count as seen, or the broken link resolving to it is skipped."""
+    claude_dir = project_root / ".claude"
+    (claude_dir / "settings.local.json").symlink_to(claude_dir / "settings.json")
+
+    response = await client.get("/api/settings-sync?target_scope=user")
+
+    assert response.status_code == 200, response.text
+    rows = _rows_by_tier(response.json())
+    assert rows == {
+        "project_local": {
+            "source": "tier",
+            "tier": "project_local",
+            "path": os.path.join(".claude", "settings.local.json"),
+            "reason": "broken symlink",
+        }
+    }, rows
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_a_readable_tier_still_dedups_its_symlinked_alias(tmp_path: Path, monkeypatch) -> None:
+    """A tier that does exist still counts as seen: its symlinked alias is
+    scanned once, not twice."""
+    from memtomem.context.settings_doctor import _iter_scan_targets
+
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    root = tmp_path / "project"
+    claude_dir = root / ".claude"
+    _write(claude_dir / "settings.json", "{not json")
+    (claude_dir / "settings.local.json").symlink_to(claude_dir / "settings.json")
+
+    tiers = [tier for source, tier, *_ in _iter_scan_targets(root) if source == "tier"]
+    assert tiers.count("project_shared") == 1
+    assert "project_local" not in tiers, tiers
+
+
 async def test_a_deeply_nested_tier_is_reported_not_a_500(
     client, project_root: Path, fake_home: Path
 ) -> None:
