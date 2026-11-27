@@ -239,6 +239,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   and its other `[search]` settings still apply.) Tab and DEL are still accepted: namespaces can
   hold them, and SQL and Python agree on them.
 
+### Documentation
+
+- **The embeddings guide says what BM25-only search leaves out (#3662).** BM25-only search
+  looks first for chunks that match every term of a query; when it finds any, chunks that
+  match only some of the terms are left out of its keyword results, so a related note that
+  lacks one query word, such as an older decision a newer note replaced, can be missing.
+  Search behaviour is unchanged. On the agent eval's registry-host sample, hybrid search with
+  ONNX `multilingual-e5-small` returned both notes for all four queries tried.
+
 ## [0.7.14] — 2026-11-24
 
 A patch of fixes, most of them in `mm init` for source checkouts and uv workspaces: it checks
