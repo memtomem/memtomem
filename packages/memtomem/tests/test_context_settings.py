@@ -1046,8 +1046,9 @@ class TestClaudeSettingsCrossProcessLock:
         handler's 60s deadline, re-opening the orphaned-worker window.
 
         The clock is simulated (#2750): one virtual clock stands in for ``time``
-        in both ``settings`` (which sets the shared deadline) and ``_atomic``
-        (which polls against it), and only the backoff sleeps advance it. A
+        in both ``settings`` (which sets the shared deadline and grants each
+        acquire what is left of it) and ``_atomic`` (which polls until its
+        grant runs out), and only the backoff sleeps advance it. A
         real-time bound measures the runner as much as the code: a stall on a
         loaded runner moves a wall-clock inequality, the flake #2351 removed one
         layer down. Time spent inside the real lock calls is not on that clock.
@@ -1084,6 +1085,11 @@ class TestClaudeSettingsCrossProcessLock:
         monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_BUDGET_S", budget)
 
         clock = _LockWaitRecorder(atomic_mod.portalocker.lock, atomic_mod.time, virtual_clock=True)
+        # Start the clock away from zero: at zero, a deadline anchored to the
+        # clock's origin instead of the call's start grants the same timeouts.
+        clock.sleep(100.0)
+        clock.reset()
+        assert clock.monotonic() == 100.0
         acquires: list[dict] = []
         orig_file_lock = settings_mod._file_lock
 
