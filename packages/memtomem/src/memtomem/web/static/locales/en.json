@@ -1099,6 +1099,8 @@
   "settings.hooks.needs_confirmation_body": "Server refused the write for the following target(s):\n{targets}\nReview via `mm settings sync` for details.",
   "settings.hooks.duplicate_banner_one": "1 memtomem-managed hook entry already exists in the {tier} target ({path}) — run {cmd} to move it. Active target: {active}.",
   "settings.hooks.duplicate_banner_many": "{count} memtomem-managed hook entries already exist in the {tier} target ({path}) — run {cmd} to move them. Active target: {active}.",
+  "settings.hooks.unscanned_canonical_row": "Canonical settings file ({path}) was not checked: {reason}. Hook duplicates, matchers and commands in it are unverified.",
+  "settings.hooks.unscanned_target_row": "{tier} target file ({path}) was not checked: {reason}. Hook duplicates, matchers and commands in it are unverified.",
   "settings.hooks.malformed_target_row": "Target rule under \"{event}\" has a non-string matcher ({type}) — {consequence}",
   "settings.hooks.malformed_target_owned": "the next sync removes this memtomem-managed rule.",
   "settings.hooks.malformed_target_user": "Claude Code will never fire it; fix the matcher by hand.",

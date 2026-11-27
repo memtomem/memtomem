@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -50,12 +51,16 @@ from memtomem.context.settings_copy import (
 from memtomem.context.settings_doctor import (
     DuplicateTier,
     detect_duplicate_tiers,
+    find_unscanned_settings_files,
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
-from memtomem.context.error_redact import redact_engine_reason
+from memtomem.context.error_redact import (
+    redact_engine_reason,
+    scrub_residual_absolute_paths,
+)
 from memtomem.web.routes.context_gateway import sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
@@ -209,6 +214,60 @@ def _serialize_duplicate_tiers(duplicates: list[DuplicateTier], project_root: Pa
             ],
         }
         for dup in duplicates
+    ]
+
+
+def _path_free_text(text: str, project_root: Path) -> str:
+    """A ``reason`` passed through the MCP composition
+    (``server/tools/context.py`` ``_redact_reason_unescaped``): root strip,
+    ``$HOME`` collapse and secret replacement, then the residual scrub for a
+    path under neither root.
+
+    Defense in depth, not the guarantee: ``_read_settings`` produces a reason
+    from a fixed vocabulary that names no path. The scrub is text matching and
+    does not catch every path shape (a Windows path with doubled backslashes
+    in exception text, for one), so a reason that ever carries exception text
+    needs its own review."""
+    return scrub_residual_absolute_paths(sanitize_diff_reason(text, project_root) or "")
+
+
+#: Where each settings file lives, as the panel names it. A row's ``path`` is
+#: looked up here by its tier rather than derived from the file's host path:
+#: ``resolve_scope_path`` places every tier at a fixed spot under the project
+#: root or the home, so the tier alone names the file, and no host path is
+#: read, trimmed or redacted for display. Trimming the real path by text or
+#: by anchor leaked parts of it in every form tried (``~ice/…`` for a home
+#: that is a string prefix of the frozen one, ``<path>'private/…`` after a
+#: quote, ``alice/…`` for a home under the project root).
+#: ``test_display_paths_match_resolve_scope_path`` keeps this in step.
+_CANONICAL_DISPLAY_PATH = str(Path(CANONICAL_SETTINGS_FILE))
+_TIER_DISPLAY_PATHS = {
+    "user": os.path.join("~", ".claude", "settings.json"),
+    "project_shared": os.path.join(".claude", "settings.json"),
+    "project_local": os.path.join(".claude", "settings.local.json"),
+}
+
+
+def _serialize_unscanned_settings(project_root: Path) -> list[dict]:
+    """Settings files that exist but no check could read (#2644).
+
+    The same rows, keyed the same way, as ``unscanned_settings`` in
+    ``mm context settings-doctor --json``; the CLI and the MCP context
+    branches report these files as warnings. Without them a tier the
+    duplicate check skipped (invalid JSON, not an object, or a parent
+    directory without search permission, #2476) left the panel with no
+    sign that it went unchecked.
+    """
+    return [
+        {
+            "source": item.source,
+            "tier": item.tier,
+            "path": (
+                _CANONICAL_DISPLAY_PATH if item.tier is None else _TIER_DISPLAY_PATHS[item.tier]
+            ),
+            "reason": _path_free_text(item.reason, project_root),
+        }
+        for item in find_unscanned_settings_files(project_root)
     ]
 
 
@@ -572,6 +631,10 @@ async def get_settings_sync(
     payload["duplicate_tier_warnings"] = _serialize_duplicate_tiers(
         detect_duplicate_tiers(project_root, active_scope=target_scope), project_root
     )
+    # GET only: the panel paints its banners from this response, and every
+    # successful POST reloads it. The POST body is also the ``settings`` row of
+    # ``/context/sync-all*``, whose wire shape this report does not widen.
+    payload["unscanned_settings"] = _serialize_unscanned_settings(project_root)
     return payload
 
 

@@ -133,7 +133,11 @@ def _read_settings(path: Path) -> tuple[dict | None, str | None]:
         return None, "unreadable"
     try:
         raw = json.loads(text)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
+        # ``JSONDecodeError`` is a ``ValueError``, as is an integer past the
+        # digit limit; nesting past the recursion limit raises
+        # ``RecursionError``. Each is a file no check could read, not a crash
+        # of the checks built on this reader (#2644).
         return None, "invalid JSON"
     if not isinstance(raw, dict):
         return None, "not a JSON object"
@@ -148,8 +152,9 @@ def _load_settings_dict(path: Path) -> dict | None:
     must not abort the doctor or the sync warnings (#2476). Skipping does not
     hide the tier: :func:`find_unscanned_settings_files` reads the same file
     through the same :func:`_read_settings` and reports why it was not checked.
-    Callers that do not render that report — the Web settings-sync duplicate
-    check — miss the skipped tier (#2644).
+    The CLI, the MCP context branches and the Web settings-sync GET render
+    that report beside the duplicate check (#2644); the Web POST, whose
+    response the panel does not render, carries only the duplicates.
     """
     data, _reason = _read_settings(path)
     return data
