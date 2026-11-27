@@ -7,21 +7,28 @@ each build their own ``Mem2MemConfig``. ``create_components`` layers
 fixtures used to rely on) leaves that layer in place. CI has no ``config.d``, so
 only a developer with a fragment saw their tests run on a different config.
 
-Each test here puts a fragment in a redirected ``config.d`` before the fixture
-under test is built, checks that the fragment is one ``load_config_d`` applies
-(so a pass cannot come from a fragment nobody reads), and then checks the
-fixture's config still holds the default.
+Each ``config.d`` test here puts a fragment in a redirected ``config.d`` before
+the fixture under test is built, checks that the fragment is one
+``load_config_d`` applies (so a pass cannot come from a fragment nobody reads),
+and then checks the fixture's config still holds the default.
+
+The last test is about what ``components`` leaves behind (#3668): the
+``MEMTOMEM_*`` names it sets are restored when building or closing the stack
+raises.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
+import os
 
 import pytest
 
 from memtomem.config import Mem2MemConfig, load_config_d
 from memtomem.embedding.onnx import OnnxEmbedder
 
+from . import conftest as shared_fixtures
 from .helpers import isolate_config_paths
 
 _PROBE_VALUE = 9.5
@@ -88,3 +95,47 @@ def test_onnx_components_ignores_config_d(onnx_components):
     comp, _mem_dir = onnx_components
     _assert_fragment_is_live()
     assert comp.config.session_summary.expansion_score_threshold == _DEFAULT_VALUE
+
+
+@pytest.mark.parametrize("failing", ["setup", "teardown"])
+async def test_components_restores_environment_when_it_raises(failing, monkeypatch, tmp_path):
+    """Drive the fixture's generator by hand so the raise lands inside the test."""
+    expected = {
+        "MEMTOMEM_STORAGE__SQLITE_PATH": str(tmp_path / "test.db"),
+        "MEMTOMEM_INDEXING__MEMORY_DIRS": json.dumps([str(tmp_path / "memories")]),
+        "MEMTOMEM_EMBEDDING__MODEL": "bge-m3",
+        "MEMTOMEM_EMBEDDING__DIMENSION": "1024",
+    }
+    # Set through the test's own monkeypatch, so a failing run cannot leak either.
+    for name in expected:
+        monkeypatch.setenv(name, "before-the-fixture")
+    seen: dict[str, str | None] = {}
+
+    async def create(config, **kwargs):
+        seen.update({name: os.environ.get(name) for name in expected})
+        if failing == "setup":
+            raise RuntimeError("setup failed")
+        return object()
+
+    async def close(comp):
+        raise RuntimeError("teardown failed")
+
+    monkeypatch.setattr(shared_fixtures, "create_components", create)
+    monkeypatch.setattr(shared_fixtures, "close_components", close)
+    fixture_function = inspect.unwrap(shared_fixtures.components)
+
+    # This context stands in for pytest finalizing the fixture's ``monkeypatch``.
+    with pytest.MonkeyPatch.context() as fixture_monkeypatch:
+        available = {"tmp_path": tmp_path, "monkeypatch": fixture_monkeypatch}
+        generator = fixture_function(
+            **{name: available[name] for name in inspect.signature(fixture_function).parameters}
+        )
+        if failing == "teardown":
+            await anext(generator)
+        with pytest.raises(RuntimeError, match=f"{failing} failed"):
+            await anext(generator)
+
+    assert seen == expected
+    assert {name: os.environ.get(name) for name in expected} == dict.fromkeys(
+        expected, "before-the-fixture"
+    )
