@@ -442,11 +442,13 @@ def _find_marker(root: Path, name: str) -> Path | None:
     if not found:
         return None
     if len(found) > 1:
+        found.sort(key=lambda path: path.name)
         raise SwapRecoveryError(
             errno.EBUSY,
             "two swap markers claim the same artifact; refusing to guess which "
-            f"transaction owns the transients ({', '.join(sorted(p.name for p in found))})",
+            f"transaction owns the transients ({', '.join(path.name for path in found)})",
             str(root / name),
+            retained=found,
         )
     return found[0]
 
@@ -907,7 +909,7 @@ def _rename_recovery(src: Path, dst: Path) -> None:
                 retained=(src, dst),
             ) from exc
         raise SwapRecoveryError(
-            errno.EBUSY, f"swap recovery rename failed ({exc})", str(dst)
+            errno.EBUSY, f"swap recovery rename failed ({exc})", str(dst), retained=(src,)
         ) from exc
 
 
