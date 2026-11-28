@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -298,7 +299,8 @@ def test_main_lets_a_missing_trace_raise(checker, tmp_path):
     sys.platform == "win32" or os.geteuid() == 0, reason="mode 000 must refuse a listing"
 )
 def test_main_reports_sealed_notes_and_goes_on(checker, tmp_path, capsys):
-    root = tmp_path / "e-run"
+    # A space and a quote: the printed chmod command must survive being pasted into a shell.
+    root = tmp_path / "e run's"
     (root / "out").mkdir(parents=True)
     trace = root / "out" / "trace.jsonl"
     trace.write_text("\n".join(_replay_trace(checker)) + "\n", newline="\n")
@@ -312,7 +314,10 @@ def test_main_reports_sealed_notes_and_goes_on(checker, tmp_path, capsys):
     finally:
         (root / "sealed").chmod(0o700)
     out = capsys.readouterr().out.splitlines()
-    assert out[0].startswith("control-replay-wrong-first run1: unread, sealed: chmod 700 ")
+    prefix = "control-replay-wrong-first run1: unread, sealed: "
+    assert out[0].startswith(prefix)
+    command = shlex.split(out[0].removeprefix(prefix))
+    assert command == ["chmod", "700", str(root), str(root / "sealed")]
     assert out[1] == "control-replay-wrong-first run2: run-error 'timeout'"
 
 
