@@ -977,10 +977,10 @@ async def test_swap_recovery_409_without_safe_message_falls_back(
 async def test_swap_recovery_409_secret_shaped_name_is_scanned(
     client, cwd_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The composed text still goes through the secret scan (#3532).
+    """A validated artifact name can match a provider-token pattern (#3532).
 
-    A validated artifact name can match a provider-token pattern, and the
-    wire sentence and the log line both carry the name.
+    The wire message is then the marker. The log line keeps the kind and the
+    reason code, with the marker for the name and for the engine text (#3614).
     """
     from memtomem.web.routes._errors import _SECRET_REDACTED_MARKER
 
@@ -998,7 +998,10 @@ async def test_swap_recovery_409_secret_shaped_name_is_scanned(
     assert detail["reason_code"] == "swap_recovery_pending"
     assert detail["message"] == _SECRET_REDACTED_MARKER
     logged = [r.getMessage() for r in _transfer_records(caplog)]
-    assert logged == [_SECRET_REDACTED_MARKER], logged
+    assert logged == [
+        f"transfer skills/{_SECRET_REDACTED_MARKER} refused (swap_recovery_pending): "
+        f"{_SECRET_REDACTED_MARKER}"
+    ], logged
 
 
 @pytest.mark.asyncio
@@ -1045,14 +1048,39 @@ async def test_refusal_log_line_escapes_control_characters(caplog) -> None:
     ]
 
 
+def test_refusal_log_line_with_a_secret_shaped_name_drops_the_engine_text_too(caplog) -> None:
+    """A rule can hit the name alone and miss it inside the engine text (#3614).
+
+    The GitLab rule refuses a trailing ``-``, so the staging path built from this
+    name scans clean. Only the hit on the name keeps it out of the record.
+    """
+    from memtomem import privacy
+    from memtomem.web.routes import context_transfer as route_mod
+    from memtomem.web.routes._errors import _SECRET_REDACTED_MARKER
+
+    name = "glpat-" + "a" * 20  # assembled at runtime: a synthetic GitLab token
+    text = f"Occupied: /s/.migrate-{name}-424242-deadbeef.tmp"
+    assert privacy.scan(name)
+    assert not privacy.scan(text)
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        route_mod._log_refusal("agents", name, "transfer_staging_busy", text)
+
+    assert [r.getMessage() for r in _transfer_records(caplog)] == [
+        f"transfer agents/{_SECRET_REDACTED_MARKER} refused (transfer_staging_busy): "
+        f"{_SECRET_REDACTED_MARKER}"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_refusal_log_line_scans_the_paths_not_only_the_name(
     client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:
-    """A secret shape in a staging path, with an ordinary artifact name, still redacts the line.
+    """A secret shape in a staging path, with an ordinary artifact name, redacts the engine text.
 
-    The secret-name cell cannot tell a whole-line scan from a name-only one,
-    because the name itself trips the scanner (#3532).
+    The secret-name cell cannot tell a text scan from a name-only one, because
+    the name itself trips the scanner (#3532). The kind, the name and the reason
+    code stay in the record (#3614).
     """
     from memtomem.context import migrate as migrate_mod
     from memtomem.web.routes._errors import _SECRET_REDACTED_MARKER
@@ -1071,7 +1099,9 @@ async def test_refusal_log_line_scans_the_paths_not_only_the_name(
 
     assert resp.status_code == 409, resp.text
     assert resp.json()["detail"]["message"] == _BUSY_MESSAGE
-    assert [r.getMessage() for r in _transfer_records(caplog)] == [_SECRET_REDACTED_MARKER]
+    assert [r.getMessage() for r in _transfer_records(caplog)] == [
+        f"transfer agents/foo refused (transfer_staging_busy): {_SECRET_REDACTED_MARKER}"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1366,8 +1396,8 @@ def _shared_body(**overrides) -> dict:
 def _refusal_logs(caplog: pytest.LogCaptureFixture) -> list[str]:
     """The route's warning lines for this arm, each one scanned line with no traceback.
 
-    A redacted line no longer carries the reason code (#3614), so every
-    route record counts; the arm under test emits the only one.
+    Every route record counts, so a caller also sees an arm that logged twice or
+    under another reason code; the arm under test emits the only one.
     """
     return [r.getMessage() for r in _transfer_records(caplog)]
 
@@ -1457,6 +1487,8 @@ async def test_privacy_422_sends_no_byte_of_the_offending_file_name(
 
     The log line gets the engine text only through the route's scanned,
     escaped logger: no raw name, no control character."""
+    from memtomem.web.routes._errors import _SECRET_REDACTED_MARKER
+
     manifest = _write_skill(_shared_skills(cwd_root), "foo")
     (manifest.parent / file_name).write_text(_SECRET_BODY, encoding="utf-8")
     other = _other_project(tmp_path)
@@ -1470,6 +1502,11 @@ async def test_privacy_422_sends_no_byte_of_the_offending_file_name(
     assert resp.json() == {"detail": _gate_a_detail(1)}
     _assert_path_free(resp.json(), cwd_root, other)
     (line,) = _refusal_logs(caplog)
+    # A hit in the engine text takes only that text, not the reason code (#3614).
+    prefix = "transfer skills/foo refused (privacy_blocked): "
+    assert line.startswith(prefix), line
+    if "AKIA" in file_name:
+        assert line == prefix + _SECRET_REDACTED_MARKER
     assert file_name not in line
     assert not any(ord(c) < 0x20 or ord(c) == 0x7F for c in line), line
     assert "AKIA1234567890ABCDEF" not in line
