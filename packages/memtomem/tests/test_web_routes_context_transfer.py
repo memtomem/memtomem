@@ -843,7 +843,7 @@ async def test_swap_recovery_409_is_path_free(
     other = _other_project(tmp_path)
     scope_b = await _register(client, other)
     wedged = _shared_skills(cwd_root if side == "source" else other)
-    _plant_two_swap_markers(wedged, "foo")
+    markers = _plant_two_swap_markers(wedged, "foo")
 
     with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
         resp = await client.post("/api/context/skills/foo/transfer", json=_move_body(scope_b))
@@ -860,10 +860,49 @@ async def test_swap_recovery_409_is_path_free(
     assert records[0] == (
         "transfer skills/foo refused (swap_recovery_pending): "
         f"{_swap_message(side, 'foo').removesuffix(' The server log has the details.')} "
-        f"Entries: {wedged / 'foo'}"
+        f"Entries: {wedged / 'foo'}, {markers[0]}, {markers[1]}"
     )
     # Nothing was moved: the source is where it was.
     assert (_shared_skills(cwd_root) / "foo" / "SKILL.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_swap_recovery_409_logs_both_rename_paths(
+    client,
+    cwd_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from memtomem.context import _dir_swap
+
+    _write_skill(_shared_skills(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    paths = _dir_swap._swap_paths(_shared_skills(other), "foo", "111-aaaaaa")
+    paths.old.mkdir(parents=True)
+    _dir_swap._write_marker(paths)
+
+    def fail_rollback(src: Path, dst: Path) -> None:
+        assert (src, dst) == (paths.old, paths.dst)
+        raise OSError(errno.EIO, "simulated recovery rename failure")
+
+    monkeypatch.setattr(_dir_swap, "rename_no_replace", fail_rollback)
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post("/api/context/skills/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    assert resp.json()["detail"] == {
+        "error_kind": "conflict",
+        "reason_code": "swap_recovery_pending",
+        "message": _swap_message("destination", "foo"),
+    }
+    (record,) = _transfer_records(caplog)
+    assert record.getMessage().endswith(f"Entries: {paths.dst}, {paths.old}")
+    assert paths.marker.is_file()
+    assert paths.old.is_dir()
+    assert not paths.dst.exists()
 
 
 @pytest.mark.asyncio
