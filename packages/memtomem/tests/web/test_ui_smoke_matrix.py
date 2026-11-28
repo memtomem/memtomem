@@ -580,19 +580,20 @@ def test_reset_panel_counts_every_stored_chunk(page) -> None:
     """A reset deletes held and pending sources too, so the Reset panel shows
     ``stored_chunks``, not the listed ``total_chunks`` (#3115). It asks with
     ``totals_only=true``: one count needs neither the Home source scan nor the
-    histogram. The header's own refresh also sends ``totals_only``, so what is
-    pinned is the absence of a full ``/api/stats`` request once Reset opens."""
+    histogram. The header's own refresh also sends ``totals_only``, so seeing one
+    such request proves nothing: every ``/api/stats`` request made once Reset
+    opens must carry exactly that query, which also rules out ``summary_only``."""
     page.set_viewport_size({"width": 1440, "height": 900})
     _install_smoke_stubs(page, "prod")
-    full_requests: list[str] = []
+    stats_queries: list[str] = []
 
     with _web_server("prod") as base_url:
         page.goto(f"{base_url}/#settings", wait_until="domcontentloaded")
         page.on(
             "request",
             lambda request: (
-                full_requests.append(request.url)
-                if urlparse(request.url).path == "/api/stats" and not urlparse(request.url).query
+                stats_queries.append(urlparse(request.url).query)
+                if urlparse(request.url).path == "/api/stats"
                 else None
             ),
         )
@@ -601,7 +602,9 @@ def test_reset_panel_counts_every_stored_chunk(page) -> None:
             "() => document.querySelector('#reset-chunk-count')?.textContent === '7'",
             timeout=5_000,
         )
-    assert full_requests == []
+    # Non-empty: the panel's own request is among them.
+    assert stats_queries
+    assert all(query == "totals_only=true" for query in stats_queries), stats_queries
 
 
 def test_home_sources_tile_counts_the_list_it_sits_above(page) -> None:
