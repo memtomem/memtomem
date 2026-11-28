@@ -7,10 +7,14 @@ each build their own ``Mem2MemConfig``. ``create_components`` layers
 fixtures used to rely on) leaves that layer in place. CI has no ``config.d``, so
 only a developer with a fragment saw their tests run on a different config.
 
-Each ``config.d`` test here puts a fragment in a redirected ``config.d`` before
-the fixture under test is built, checks that the fragment is one
-``load_config_d`` applies (so a pass cannot come from a fragment nobody reads),
-and then checks the fixture's config still holds the default.
+Tests that build their own stack call ``isolate_memtomem_env`` and then
+``create_components(config)`` with the default ``load_ambient_config=True``;
+that helper keeps ``config.d`` out of reach for them (#3667).
+
+Before the component fixture under test is built, the autouse fixture here puts
+a fragment in a redirected ``config.d`` and checks that ``load_config_d``
+applies it, so a pass cannot come from a fragment nobody reads. Each
+``config.d`` test then checks that its config still holds the default.
 
 The last test is about what ``components`` leaves behind (#3668): the
 ``MEMTOMEM_*`` names it sets are restored when building or closing the stack
@@ -27,9 +31,10 @@ import pytest
 
 from memtomem.config import Mem2MemConfig, load_config_d
 from memtomem.embedding.onnx import OnnxEmbedder
+from memtomem.runtime.components import close_components, create_components
 
 from . import conftest as shared_fixtures
-from .helpers import isolate_config_paths
+from .helpers import isolate_config_paths, isolate_memtomem_env
 
 _PROBE_VALUE = 9.5
 # The declared default, read without the environment: a module-level
@@ -42,8 +47,11 @@ _DEFAULT_VALUE = Mem2MemConfig.without_environment().session_summary.expansion_s
 def _config_d_fragment(monkeypatch, tmp_path_factory):
     """A ``config.d`` fragment in place before any component fixture is built.
 
-    Autouse fixtures are set up before the ones a test requests, so the
-    fixture under test reads this directory, not the developer's.
+    Autouse fixtures are set up before the ones a test requests, so a fixture
+    under test that did load ambient config would find this probe, not the
+    developer's directory. The witness runs here, before that fixture:
+    ``bm25_only_components`` calls ``isolate_memtomem_env``, which moves
+    ``config.d`` away again.
     """
     root = isolate_config_paths(monkeypatch, tmp_path_factory.mktemp("ambient"))
     (root / "config.d").mkdir()
@@ -51,6 +59,7 @@ def _config_d_fragment(monkeypatch, tmp_path_factory):
         json.dumps({"session_summary": {"expansion_score_threshold": _PROBE_VALUE}}),
         encoding="utf-8",
     )
+    _assert_fragment_is_live()
 
 
 @pytest.fixture(autouse=True)
@@ -81,20 +90,39 @@ def _assert_fragment_is_live() -> None:
 
 
 def test_components_ignores_config_d(components):
-    _assert_fragment_is_live()
     assert components.config.session_summary.expansion_score_threshold == _DEFAULT_VALUE
 
 
 def test_bm25_only_components_ignores_config_d(bm25_only_components):
     comp, _mem_dir = bm25_only_components
-    _assert_fragment_is_live()
     assert comp.config.session_summary.expansion_score_threshold == _DEFAULT_VALUE
 
 
 def test_onnx_components_ignores_config_d(onnx_components):
     comp, _mem_dir = onnx_components
-    _assert_fragment_is_live()
     assert comp.config.session_summary.expansion_score_threshold == _DEFAULT_VALUE
+
+
+async def test_isolate_memtomem_env_hides_config_d(monkeypatch, tmp_path):
+    """A stack built after the helper, with ``load_ambient_config`` left on (#3667)."""
+    isolate_memtomem_env(monkeypatch)
+
+    direct = Mem2MemConfig()
+    load_config_d(direct)
+    assert direct.session_summary.expansion_score_threshold == _DEFAULT_VALUE
+
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir()
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "stack.db"
+    config.indexing.memory_dirs = [mem_dir]
+    config.embedding.dimension = 1024
+    config.search.enable_dense = False
+    comp = await create_components(config)
+    try:
+        assert comp.config.session_summary.expansion_score_threshold == _DEFAULT_VALUE
+    finally:
+        await close_components(comp)
 
 
 @pytest.mark.parametrize("failing", ["setup", "teardown"])
