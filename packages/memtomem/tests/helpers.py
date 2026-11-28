@@ -100,8 +100,8 @@ _NO_CONFIG_D = Path(__file__).resolve() / "config.d"
 
 
 def isolate_memtomem_env(monkeypatch) -> None:
-    """Keep the developer's ``MEMTOMEM_*`` names listed below, ``config.json`` and
-    ``config.d`` away from a hand-built ``Mem2MemConfig`` passed to ``create_components``.
+    """Keep the developer's ``_MEMTOMEM_ENV_VARS``, ``config.json`` and ``config.d``
+    away from a hand-built ``Mem2MemConfig`` passed to ``create_components``.
 
     The names in ``_MEMTOMEM_ENV_VARS`` are deleted, ``load_config_overrides`` is
     stubbed out, and ``config.d`` is pointed at a path that can never hold a
