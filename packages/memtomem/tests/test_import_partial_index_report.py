@@ -8,13 +8,18 @@ earlier were tagged or the session flagged. The engine's own ``current_files``
 now says whether a file's stored chunks describe what it read: refusals,
 including the ones that report no error, are listed as not indexed, and a
 summary refresh that fails after the chunk write commits does not undo it.
+
+The tags a call passes go on every current file, including one whose content did
+not change and so indexed no chunk (#3186).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -22,7 +27,7 @@ import pytest
 import memtomem.config as _cfg
 from helpers import StubCtx, isolate_memtomem_env
 from memtomem.config import Mem2MemConfig
-from memtomem.errors import EmbeddingPolicyChangedError
+from memtomem.errors import EmbeddingPolicyChangedError, StorageError
 from memtomem.indexing import engine as engine_mod
 from memtomem.indexing.engine import PrivacyRejection
 from memtomem.models import IndexingStats
@@ -156,7 +161,13 @@ async def test_an_unreadable_target_with_no_error_is_still_reported_not_indexed(
 
     original_read = Path.read_text
     original_index = comp.index_engine.index_file
+    original_list = comp.storage.list_chunks_by_source
     unreadable: list[str] = []
+    listed: list[str] = []
+
+    async def list_chunks_by_source(source_file, *args, **kwargs):
+        listed.append(source_file.name)
+        return await original_list(source_file, *args, **kwargs)
 
     def read_text(self, *args, **kwargs):
         if self.name in unreadable:
@@ -174,6 +185,7 @@ async def test_an_unreadable_target_with_no_error_is_still_reported_not_indexed(
 
     monkeypatch.setattr(Path, "read_text", read_text)
     monkeypatch.setattr(comp.index_engine, "index_file", index_file)
+    monkeypatch.setattr(comp.storage, "list_chunks_by_source", list_chunks_by_source)
     flags = _flag_spy(monkeypatch)
 
     result = await tool(
@@ -188,6 +200,8 @@ async def test_an_unreadable_target_with_no_error_is_still_reported_not_indexed(
     beta = _rows(comp, "Beta.md")
     assert beta and all("b one" in content for content, _ in beta)
     assert all("second" not in json.loads(tags) for _, tags in beta)
+    # A held row would refuse some writes on its own; the tag pass does not even read it.
+    assert listed == ["Alpha.md"]
     alpha = _rows(comp, "Alpha.md")
     assert alpha and all("a two" in content for content, _ in alpha)
     assert all("second" in json.loads(tags) for _, tags in alpha)
@@ -263,6 +277,268 @@ async def test_only_a_scope_hold_is_rendered_as_hidden(
     assert lines[0] == f"{label} import incomplete: 1 of 1 written file(s) were not indexed."
     assert "  - Beta.md: no longer registered — previous chunks hidden from search" in lines
     assert flags == [_SESSION]
+
+
+# ---------------------------------------------------------------------------
+# Tags on a re-import whose content did not change (#3186)
+# ---------------------------------------------------------------------------
+
+
+def _stamped(comp, name: str) -> list[tuple[str, str, set[str]]]:
+    """``(id, updated_at, tags)`` per chunk of the file named *name*."""
+    rows = (
+        comp.storage._get_db()
+        .execute("SELECT source_file, id, updated_at, tags FROM chunks ORDER BY id")
+        .fetchall()
+    )
+    return [
+        (chunk_id, updated, set(json.loads(tags)))
+        for source, chunk_id, updated, tags in rows
+        if Path(source).name == name
+    ]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_tags_first_passed_on_an_unchanged_reimport_are_applied(
+    bm25_only_components, tmp_path, monkeypatch, kind
+):
+    comp, _ = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    tool, label = _tool(kind)
+    flags = _flag_spy(monkeypatch)
+    src = _source(tmp_path, kind, {"Alpha": "alpha body"})
+    await tool(str(src), ctx=ctx)
+    before = _stamped(comp, "Alpha.md")
+    assert before and all(tags == set() for _, _, tags in before)
+    flags.clear()
+
+    result = await tool(str(src), tags=["later"], ctx=ctx)
+
+    lines = _lines(result)
+    assert lines[0] == f"{label} import complete:"
+    assert "- Chunks indexed: 0" in lines
+    after = _stamped(comp, "Alpha.md")
+    assert [row[:2] for row in after] == [row[:2] for row in before]
+    assert all(tags == {"later", kind, "imported"} for _, _, tags in after)
+    # Tags alone do not change the session's chunk set.
+    assert flags == []
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_the_same_tags_passed_again_stay_on_the_chunks(
+    bm25_only_components, tmp_path, monkeypatch, kind
+):
+    """The index pass rewrites tags from the file, so the tag pass has to put them back."""
+    comp, _ = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    tool, _label = _tool(kind)
+    flags = _flag_spy(monkeypatch)
+    src = _source(tmp_path, kind, {"Alpha": "alpha body"})
+    await tool(str(src), tags=["first"], ctx=ctx)
+    before = _stamped(comp, "Alpha.md")
+    assert before and all(tags == {"first", kind, "imported"} for _, _, tags in before)
+    flags.clear()
+
+    result = await tool(str(src), tags=["first"], ctx=ctx)
+
+    assert "- Chunks indexed: 0" in _lines(result)
+    assert _stamped(comp, "Alpha.md") == before
+    # The index pass's own metadata rewrite is what flags the session here.
+    assert flags == [_SESSION]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_every_chunk_of_a_long_note_is_tagged(
+    bm25_only_components, tmp_path, monkeypatch, kind
+):
+    comp, _ = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    tool, _label = _tool(kind)
+    _flag_spy(monkeypatch)
+    body = "\n\n".join(f"## Section {i}\n\n" + f"word{i} " * 300 for i in range(60))
+    src = _source(tmp_path, kind, {"Alpha": body})
+    await tool(str(src), ctx=ctx)
+    assert len(_stamped(comp, "Alpha.md")) > 50
+
+    await tool(str(src), tags=["later"], ctx=ctx)
+
+    rows = _stamped(comp, "Alpha.md")
+    assert len(rows) > 50
+    assert [i for i, (_, _, tags) in enumerate(rows) if "later" not in tags] == []
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_the_tag_pass_reads_and_writes_inside_one_writer_transaction(
+    bm25_only_components, tmp_path, monkeypatch, kind
+):
+    comp, _ = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    tool, label = _tool(kind)
+    _flag_spy(monkeypatch)
+    original_list = comp.storage.list_chunks_by_source
+    original_update = comp.storage.update_chunk_metadata
+    original_transaction = comp.storage.transaction
+    events: list[str] = []
+    owned: list[bool] = []
+
+    def owns_writer() -> bool:
+        return comp.storage._transaction_owner is asyncio.current_task()
+
+    @asynccontextmanager
+    async def transaction(**kwargs):
+        async with original_transaction(**kwargs):
+            events.append("begin")
+            try:
+                yield
+            finally:
+                events.append("end")
+
+    async def list_chunks_by_source(*args, **kwargs):
+        events.append("list")
+        owned.append(owns_writer())
+        return await original_list(*args, **kwargs)
+
+    async def update_chunk_metadata(chunks):
+        events.append("write")
+        owned.append(owns_writer())
+        return await original_update(chunks)
+
+    monkeypatch.setattr(comp.storage, "transaction", transaction)
+    monkeypatch.setattr(comp.storage, "list_chunks_by_source", list_chunks_by_source)
+    monkeypatch.setattr(comp.storage, "update_chunk_metadata", update_chunk_metadata)
+
+    result = await tool(str(_source(tmp_path, kind, {"Alpha": "alpha body"})), tags=["t4"], ctx=ctx)
+
+    assert result.startswith(f"{label} import complete:"), result
+    # The tag pass runs last: one transaction, owned by this task, holds both
+    # its read and its write.
+    assert events.count("list") == 1
+    assert events[-4:] == ["begin", "list", "write", "end"]
+    assert owned[-2:] == [True, True]
+
+
+@pytest.mark.parametrize("failure", ["listing", "after_write"])
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_failing_tag_pass_still_finalizes_the_committed_index_changes(
+    bm25_only_components, tmp_path, monkeypatch, kind, failure
+):
+    comp, _ = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    tool, _label = _tool(kind)
+    flags = _flag_spy(monkeypatch)
+    src = _source(tmp_path, kind, {"Alpha": "alpha body"})
+    await tool(str(src), tags=["first"], ctx=ctx)
+    flags.clear()
+    original_update = comp.storage.update_chunk_metadata
+
+    async def failing_listing(*args, **kwargs):
+        raise StorageError("tag pass listing failed")
+
+    async def failing_update(chunks):
+        written = await original_update(chunks)
+        # The index pass writes through the same method; only the tag pass adds "imported".
+        if any("imported" in c.metadata.tags for c in chunks):
+            raise StorageError("tag pass write failed")
+        return written
+
+    if failure == "listing":
+        monkeypatch.setattr(comp.storage, "list_chunks_by_source", failing_listing)
+    else:
+        monkeypatch.setattr(comp.storage, "update_chunk_metadata", failing_update)
+    invalidations: list[None] = []
+    original_invalidate = comp.search_pipeline.invalidate_cache
+
+    def invalidate_cache():
+        invalidations.append(None)
+        return original_invalidate()
+
+    monkeypatch.setattr(comp.search_pipeline, "invalidate_cache", invalidate_cache)
+
+    result = await tool(str(src), tags=["first"], ctx=ctx)
+
+    assert result.startswith("Error"), result
+    assert "tag pass" in result
+    assert invalidations
+    assert flags == [_SESSION]
+    # The index pass committed its rewrite; the tag pass's own write rolled back.
+    assert [tags for _, _, tags in _stamped(comp, "Alpha.md")] == [set()]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+async def test_a_note_that_carries_every_tag_itself_is_not_rewritten(
+    bm25_only_components, tmp_path, monkeypatch, kind
+):
+    comp, _ = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    tool, _label = _tool(kind)
+    _flag_spy(monkeypatch)
+    original_update = comp.storage.update_chunk_metadata
+    changed: list[int] = []
+
+    async def update_chunk_metadata(chunks):
+        changed.append(await original_update(chunks))
+        return changed[-1]
+
+    monkeypatch.setattr(comp.storage, "update_chunk_metadata", update_chunk_metadata)
+    src = _source(tmp_path, kind, {"Alpha": f"> tags: [own, {kind}, imported]\n\nalpha body"})
+
+    await tool(str(src), tags=["own"], ctx=ctx)
+
+    assert [tags for _, _, tags in _stamped(comp, "Alpha.md")] == [{"own", kind, "imported"}]
+    assert changed == [0]
+
+
+@pytest.mark.requires_symlinks
+@pytest.mark.parametrize("swap", ["after_index", "before_listing"])
+@pytest.mark.parametrize("kind", KINDS)
+async def test_the_tag_pass_does_not_follow_a_target_replaced_by_a_link(
+    bm25_only_components, tmp_path, monkeypatch, kind, swap
+):
+    """``index_file`` reported the file current; the leaf is a link by tag time."""
+    comp, mem_dir = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    tool, label = _tool(kind)
+    _flag_spy(monkeypatch)
+    other = mem_dir / "Other.md"
+    other.write_text("# Other\n\nanother note\n", encoding="utf-8")
+    await comp.index_engine.index_file(other)
+    src = _source(tmp_path, kind, {"Alpha": "alpha body"})
+    await tool(str(src), ctx=ctx)
+    alpha = next(mem_dir.rglob("Alpha.md"))
+    swapped: list[str] = []
+
+    def replace_with_link() -> None:
+        alpha.unlink()
+        alpha.symlink_to(other)
+        swapped.append(swap)
+
+    if swap == "after_index":
+        original_index = comp.index_engine.index_file
+
+        async def index_file(path, *args, **kwargs):
+            stats = await original_index(path, *args, **kwargs)
+            replace_with_link()
+            return stats
+
+        monkeypatch.setattr(comp.index_engine, "index_file", index_file)
+    else:
+        original_list = comp.storage.list_chunks_by_source
+
+        async def list_chunks_by_source(*args, **kwargs):
+            replace_with_link()
+            return await original_list(*args, **kwargs)
+
+        monkeypatch.setattr(comp.storage, "list_chunks_by_source", list_chunks_by_source)
+
+    result = await tool(str(src), tags=["later"], ctx=ctx)
+
+    assert result.startswith(f"{label} import complete:"), result
+    assert swapped == [swap]
+    assert [tags for _, _, tags in _stamped(comp, "Other.md")] == [set()]
+    # A link seen before the lookup gets no tags; one that arrives after it
+    # leaves the tags on the rows of the file that was indexed.
+    expected = set() if swap == "after_index" else {"later", kind, "imported"}
+    assert [tags for _, _, tags in _stamped(comp, "Alpha.md")] == [expected]
 
 
 # ---------------------------------------------------------------------------

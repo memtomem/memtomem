@@ -44,6 +44,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **A Notion or Obsidian re-import applies the tags passed to it when the content did not
+  change (#3186).** The importers tagged only when the call as a whole indexed at least one
+  chunk. On a re-import that indexed none, tags first passed then were never applied, and
+  tags that only an earlier import had supplied (not the note itself) were removed even when
+  passed again: the index pass rewrites a file's tags from its text, and the pass that puts
+  the import's tags back was skipped. Both reported `import complete`. The tags now go on
+  every file the import finds current, on all of its chunks (the pass used to stop at 50).
+  The write changes only the rows that miss a tag and leaves `updated_at` as it was, so it
+  does not reset time decay, and adding tags alone does not mark the session's provenance
+  incomplete. When a tag write fails, the importer still drops the search cache and, if the
+  index pass changed storage, still tries to flag the session. A symlink put at a file's
+  name after it was indexed is not followed, so the link's target does not get the tags.
+
 - **Auto-tag with `overwrite` off keeps tags committed while it was extracting (#3194).**
   The pass judged "already tagged" from the chunk it read before tag extraction (possibly an
   LLM call), then replaced the tags whatever they were by then, so a manual tag edit, an

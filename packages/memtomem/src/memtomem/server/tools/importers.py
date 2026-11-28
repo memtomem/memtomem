@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from memtomem.constants import writable_namespace_arg
@@ -18,6 +18,8 @@ from memtomem.server.tools._provenance import (
     capture_session_for_untracked_write,
     flag_untracked_write,
 )
+from memtomem.storage.base import WRITER_WAIT_S
+from memtomem.storage.sqlite_helpers import leaf_names_own_key, norm_path, own_leaf_key
 
 
 def _mismatch_refusal(app: object, label: str) -> str | None:
@@ -146,30 +148,45 @@ async def _index_imported(
             # On a current file the only error is the post-commit summary refresh.
             outcome.summary_failed += 1
 
-    if tags and outcome.total_chunks > 0:
-        for f in indexed_files:
-            chunks = await app.storage.list_chunks_by_source(f)
-            for c in chunks:
-                merged = set(c.metadata.tags) | set(tags) | {source_tag, "imported"}
-                if merged != set(c.metadata.tags):
-                    c.metadata = c.metadata.__class__(
-                        **{
-                            **{
-                                attr: getattr(c.metadata, attr)
-                                for attr in c.metadata.__dataclass_fields__
-                            },
-                            "tags": tuple(sorted(merged)),
-                        }
-                    )
-            if chunks:
-                await app.storage.upsert_chunks(chunks)
+    # The index pass rewrites a file's tags from its text, so the call's tags go
+    # on every current file, whether or not it indexed a chunk (#3186). A failure
+    # here must not skip what the index pass above already owes.
+    try:
+        if tags:
+            added = {*tags, source_tag, "imported"}
+            for f in indexed_files:
+                await _add_tags(app, f, added)
+    finally:
+        app.search_pipeline.invalidate_cache()
 
-    app.search_pipeline.invalidate_cache()
-
-    # A purge or a hold changes the session's chunk set as much as an index does.
-    if outcome.total_chunks or outcome.purged_chunks or mutated:
-        await flag_untracked_write(app, provenance_session_id)
+        # A purge or a hold changes the session's chunk set as much as an index
+        # does. Adding tags does not, so the tag pass is not counted.
+        if outcome.total_chunks or outcome.purged_chunks or mutated:
+            await flag_untracked_write(app, provenance_session_id)
     return outcome
+
+
+async def _add_tags(app: AppContext, source: Path, added: set[str]) -> None:
+    """Merge *added* into every chunk of *source*.
+
+    Listed and written in one writer transaction, so the merge is onto the rows
+    as they are. ``update_chunk_metadata`` writes only the rows that change and
+    leaves content, ``source_file`` and ``updated_at`` alone: a re-import must
+    not make an unchanged note look newly written to time decay.
+
+    *source* is resolved once, here, and the rows are matched against that
+    string as stored. A leaf that is a symlink by now gets no tags: following it
+    would tag another file's chunks. A parent directory replaced since the index
+    pass is not detected (#3693).
+    """
+    async with app.storage.transaction(wait=WRITER_WAIT_S):
+        resolved = Path(norm_path(source))
+        if not leaf_names_own_key(own_leaf_key(source), resolved):
+            return
+        chunks = await app.storage.list_chunks_by_source(resolved, limit=None, as_stored=True)
+        for c in chunks:
+            c.metadata = replace(c.metadata, tags=tuple(sorted({*c.metadata.tags, *added})))
+        await app.storage.update_chunk_metadata(chunks)
 
 
 def _render_import(

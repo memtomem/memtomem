@@ -3576,7 +3576,9 @@ class SqliteBackend(
                 " AND NOT EXISTS (SELECT 1 FROM chunk_relations r WHERE r.source_id = chunks.id"
                 " AND r.relation_type = 'consolidated_into')"
             )
-        async with self._lease_read_db() as db:
+        # The writer inside this task's own transaction, so a caller that merges
+        # onto these rows there does not merge onto an older snapshot.
+        async with self._lease_txn_read_db() as db:
             rows = db.execute(
                 f"SELECT * FROM chunks WHERE source_file=?{filters} "  # nosec B608
                 "ORDER BY start_line, rowid LIMIT ?",

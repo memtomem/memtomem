@@ -50,9 +50,6 @@ _METADATA_ONLY: dict[tuple[str, str], str] = {
         "search/dedup.py",
         "DedupScanner.merge",
     ): "Unions tags onto the kept chunk; losers are deleted.",
-    ("server/tools/importers.py", "_index_imported"): (
-        "Tag pass after index_file already indexed the written files."
-    ),
     ("server/tools/url_index.py", "mem_fetch"): "Tag pass after index_file.",
     ("cli/memory.py", "_add"): "Tag pass after index_file.",
     ("cli/ingest_cmd.py", "_apply_tags"): "Tag merge helper; content untouched.",
