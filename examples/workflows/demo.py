@@ -13,6 +13,12 @@ import sys
 ROOT = Path(__file__).resolve().parent
 SLATEHARBOR = ROOT.parent / "onboarding" / "slateharbor"
 WORKFLOWS = ("handoff", "decisions", "onboarding")
+# Core 0.7.9+ ``mm index`` takes a detached lock per copied source in the per-user runtime
+# directory, which HOME does not move. Other processes share it, so the lab leaves them.
+RUNTIME_LOCK_NOTE = (
+    "the per-user runtime directory's source-locks/ keeps one empty lock file per indexed copy "
+    "(not checked here; see README)"
+)
 DEMO_QUERIES = {
     "handoff": [
         ("worker lease recovery", "handoff-current.md"),
@@ -219,6 +225,7 @@ def validate():
     if temporary_root.exists() or other_root.exists() or before != source_snapshot():
         raise AssertionError("Original source preservation or temporary cleanup failed")
     print("PASS originals-preserved-and-cleanup", flush=True, file=sys.stderr)
+    print(f"NOTE runtime-lock-files-not-removed: {RUNTIME_LOCK_NOTE}", flush=True, file=sys.stderr)
     return {
         "retrieval_cases_passed": len(checked),
         "workflow_counts": {key: sum(c["workflow"] == key for c in cases) for key in WORKFLOWS},
@@ -230,6 +237,7 @@ def validate():
         "copied_source_reindex": True,
         "separate_store": True,
         "originals_preserved_and_cleanup": True,
+        "runtime_lock_files_removed": False,
         "human_interpretation": "not_evaluated",
         "live_ai_sessions": "not_evaluated",
         "user_pilot": "not_run",
@@ -258,7 +266,10 @@ def main():
                 print(f"\n검색: {query} / 검색 범위: {source_filter or '전체'}", flush=True)
                 for row in retrieve(lab, query, source_filter):
                     print(f"\n출처: {row['source']}\n{row['content']}", flush=True)
-    print("\n임시 저장소 정리 완료. 원문 해석과 실제 AI 세션은 별도로 확인하세요.")
+    print(
+        "\n임시 폴더 정리 완료. 사용자별 런타임 디렉터리의 빈 잠금 파일은 남습니다(README 참고). "
+        "원문 해석과 실제 AI 세션은 별도로 확인하세요."
+    )
 
 
 if __name__ == "__main__":

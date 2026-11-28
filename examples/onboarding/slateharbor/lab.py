@@ -53,7 +53,11 @@ def verify_sources(root=ROOT):
 
 
 class Lab:
-    """Parent HOME/cwd never change. All CLI processes share only this temporary home."""
+    """Parent HOME/cwd never change. CLI processes share this temporary home.
+
+    The per-user runtime directory does not follow HOME: on Core 0.7.9+ ``mm index`` leaves
+    one empty detached lock per indexed copy in its ``source-locks/``, and ``close()`` keeps them.
+    """
 
     def __init__(self, source_root=ROOT):
         self.source_root = Path(source_root)

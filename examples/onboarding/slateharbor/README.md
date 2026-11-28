@@ -86,7 +86,11 @@ uv pip install --python .venv/bin/python -e 'packages/memtomem[code]' jupyterlab
 - `lab.py`는 원본을 임시 홈으로 복사하며, 부모 프로세스의 HOME·환경·작업 경로를 바꾸지 않습니다.
   CLI 자식마다 Python socket의 `connect`, `connect_ex`, `sendto`, `create_connection`을 차단합니다.
   이는 해당 API에 대한 검증이며 모든 네이티브 네트워크 경로를 가로채는 운영체제 방화벽은 아닙니다.
-- 변경 실습은 복사본만 수정합니다. 마지막 셀은 임시 저장소를 정리합니다.
+- 변경 실습은 복사본만 수정합니다. 마지막 셀은 임시 홈(복사본·저장소)을 삭제합니다.
+  Core 0.7.9 이상에서는 색인한 복사본 파일마다 빈 잠금 파일이 사용자별 런타임 디렉터리
+  (`/tmp/memtomem-<euid>/source-locks/`, Windows는 Local AppData 알려진 폴더의
+  `Temp\memtomem-0\source-locks\`)에 남습니다. 문서 내용은 기록되지 않으며, 다른 memtomem 프로세스와
+  함께 쓰는 디렉터리라 실습이 지우지 않습니다.
   실제 AI 도구에서 사용하려면 마지막 안내에 따라 본인이 선택한 저장소에 별도로 색인합니다.
 
 ## 데이터 출처와 유지보수

@@ -17,8 +17,8 @@ notebook execution denied Python socket access and required no API key or model.
 Full `validate.py --json` runs also passed on Python 3.12.11 / Core 0.5.0 and
 Python 3.13.2 / Core 0.6.1: 150 sources, 1,032 chunks, all 18 authored retrieval
 cases at rank 1, 36 policy tests, fresh CLI process, reindex, source preservation,
-negative cases, and cleanup. These are controlled corpus checks, not a search
-quality benchmark. Native Windows execution was not tested.
+negative cases, and cleanup (removal of the temporary lab root). These are controlled
+corpus checks, not a search quality benchmark. Native Windows execution was not tested.
 
 The extracted-bundle regression tests check deterministic ZIP bytes, working
 local entrypoint links, included validation tools, clean notebook outputs,
@@ -124,7 +124,8 @@ startup on this machine and are not a speed promise.
   platform fails there instead of passing and then breaking the manifest hashes.
 - Empty store, unknown query, wrong source/namespace, superseded policy, fresh
   CLI process, copied-file update/reindex, custom user memory, original source
-  preservation, parent environment preservation, and cleanup passed.
+  preservation, parent environment preservation, and cleanup (removal of the temporary lab
+  root) passed.
 
 ### What the guards reject (measured by mutation)
 

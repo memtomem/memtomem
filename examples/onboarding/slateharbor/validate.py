@@ -219,7 +219,7 @@ def validate():
             "custom memory",
             "child socket guard",
             "source integrity",
-            "cleanup",
+            "temporary root cleanup",
         ],
     }
 
