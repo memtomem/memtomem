@@ -52,6 +52,7 @@ from memtomem.models import (
 )
 from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
+    decode_tags_column,
     deserialize_f32,
     fts_source_text,
     match_source_filter_value,
@@ -61,6 +62,7 @@ from memtomem.storage.sqlite_helpers import (
     quote_ident,
     serialize_f32,
     source_namespaces_admit_sql,
+    tags_column_is_empty,
     utc_stamp,
 )
 from memtomem.storage.orphan_gc import (
@@ -395,6 +397,10 @@ class SqliteBackend(
             )
             self._db.create_function(
                 "memtomem_list_admit", 3, source_namespaces_admit_sql, deterministic=True
+            )
+            # Writer only: used by the conditional tag ``UPDATE``.
+            self._db.create_function(
+                "memtomem_tags_empty", 1, tags_column_is_empty, deterministic=True
             )
             # Restrict DB file to owner-only access
             try:
@@ -4203,11 +4209,8 @@ class SqliteBackend(
         # into its keys, so this reader would "carry" tags that the SQL tag
         # filter (which requires ``json_type = 'array'``) excludes (#2191).
         # Both sides degrade the same way — to no tags at all.
-        try:
-            decoded = json.loads(tags)
-        except (json.JSONDecodeError, TypeError):
-            decoded = None
-        if isinstance(decoded, list):
+        decoded = decode_tags_column(tags)
+        if decoded is not None:
             parsed_tags = tuple(decoded)
         else:
             logger.warning("Corrupted tags for chunk %s", chunk_id)
