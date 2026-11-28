@@ -47,8 +47,22 @@ from .web.test_upload_quarantine import (
     TestUploadQuarantineLifecycle,  # noqa: F401
     test_body_limit_without_content_length_exact_and_plus_one,  # noqa: F401
     test_json_body_limit_and_multipart_import_use_separate_budgets,  # noqa: F401
+    test_json_body_limit_covers_fastapi_json_media_types,  # noqa: F401
     test_upload_openapi_keeps_multipart_file_array_contract,  # noqa: F401
 )
+
+
+def test_every_upload_quarantine_case_is_imported() -> None:
+    """The source module sets ``__test__ = False``: an unimported case never runs (#3663)."""
+    from .web import test_upload_quarantine as source
+
+    cases = {
+        name: obj
+        for name, obj in vars(source).items()
+        if name.startswith(("test", "Test")) and getattr(obj, "__module__", None) == source.__name__
+    }
+    assert cases
+    assert [name for name, obj in cases.items() if globals().get(name) is not obj] == []
 
 
 # ---------------------------------------------------------------------------
