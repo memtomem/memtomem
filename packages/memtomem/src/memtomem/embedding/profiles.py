@@ -41,6 +41,14 @@ MINILM_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 # Pinning keeps truncation at 128, as MiniLM behaved before that revision.
 MINILM_REPO = "qdrant/all-MiniLM-L6-v2-onnx"
 MINILM_REVISION = "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079"
+# Every file of that revision FastEmbed reads, checked like the E5 snapshot's.
+MINILM_SHA256 = {
+    "model.onnx": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+    "config.json": "1b4d8e2a3988377ed8b519a31d8d31025a25f1c5f8606998e8014111438efcd7",
+    "tokenizer.json": "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0",  # gitleaks:allow
+    "tokenizer_config.json": "bd2e06a5b20fd1b13ca988bedc8763d332d242381b4fbc98f8fead4524158f79",  # gitleaks:allow
+    "special_tokens_map.json": "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a",  # gitleaks:allow
+}
 
 
 def is_e5(model: str) -> bool:
@@ -93,11 +101,12 @@ def is_minilm(model: str) -> bool:
     return model.lower() in ("all-minilm-l6-v2", MINILM_MODEL.lower())
 
 
-@lru_cache(maxsize=8)
+# Sized for both pinned snapshots in one process: E5 checks five files, MiniLM five.
+@lru_cache(maxsize=16)
 def _verify_file(path: Path, mtime: int, size: int, expected: str) -> None:
     with path.open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != expected:
-            raise ValueError("Pinned E5 artifact checksum mismatch")
+            raise ValueError("Pinned model artifact checksum mismatch")
 
 
 def is_tokenizer_identifier(value: str) -> bool:
@@ -192,7 +201,7 @@ def minilm_snapshot() -> Path:
     cache_dir = resolve_fastembed_cache_dir()
     prepare_hub_locks(cache_dir)
     with hub_telemetry_off():
-        return Path(
+        snapshot = Path(
             snapshot_download(
                 MINILM_REPO,
                 revision=MINILM_REVISION,
@@ -206,6 +215,11 @@ def minilm_snapshot() -> Path:
                 ],
             )
         )
+    for name, expected in MINILM_SHA256.items():
+        path = snapshot / name
+        stat = path.stat()
+        _verify_file(path, stat.st_mtime_ns, stat.st_size, expected)
+    return snapshot
 
 
 def _e5_tokenizer_path(config: Mem2MemConfig) -> str:
