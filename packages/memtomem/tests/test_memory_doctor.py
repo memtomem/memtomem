@@ -3055,10 +3055,17 @@ class TestFrontmatterInvalid:
         _write(mem_dir / "note.md", _fm("description: `x`", "----: metadata"))
         assert _frontmatter_items(config, mem_dir) == ["note.md:2 (ScannerError)"]
 
-    @pytest.mark.parametrize("padding", [" ", "\t"], ids=["space", "tab"])
-    def test_a_closing_line_may_end_in_blanks(self, fm_env, padding):
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param("---\ndescription: `x`\n--- \n\nbody\n", id="space"),
+            pytest.param("---\ndescription: `x`\n---\t\n\nbody\n", id="tab"),
+            pytest.param("---\ndescription: `x`\n--- \t", id="blanks-at-end-of-file"),
+        ],
+    )
+    def test_a_closing_line_may_end_in_blanks(self, fm_env, text):
         config, mem_dir = fm_env
-        _write(mem_dir / "note.md", f"---\ndescription: `x`\n---{padding}\n\nbody\n")
+        _write(mem_dir / "note.md", text)
         assert _frontmatter_items(config, mem_dir) == ["note.md:2 (ScannerError)"]
 
     def test_control_character_reports_its_line(self, fm_env):
