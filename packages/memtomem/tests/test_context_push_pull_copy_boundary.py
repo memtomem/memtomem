@@ -24,17 +24,29 @@ literals or lines is one value. An f-string's interpolations read as ``{}``
 (their own literals are read separately) and its format specs as text.
 Text is classified by where it is published:
 
-* **public** — every ``str`` / ``bytes`` literal and f-string that is not a
-  docstring; the docstring of every function the running app or MCP server
-  publishes, read at test time from the mounted FastAPI routes (``prod`` and
-  ``dev`` modes) and the MCP tool registries (:func:`_published_callables`);
-  and the docstring of any class in ``web/routes/`` (a pydantic model
-  publishes its docstring);
+* **public** — every ``str`` / ``bytes`` literal and f-string that is neither a
+  docstring nor a route path (below); the docstring of every function the running
+  app or MCP server publishes, read at test time from the mounted FastAPI routes
+  (``prod`` and ``dev`` modes) and the MCP tool registries
+  (:func:`_published_callables`); and the docstring of any class in
+  ``web/routes/`` (a pydantic model publishes its docstring);
 * **developer** — module docstrings and every other function or class docstring;
 * **internal** — ``#`` comments, which are not in the AST at all.
 
-Exemptions are spans of a value, never a whole line or literal, because each is
-a place a regression could hide: a QUOTED §-citation title (the words are the
+A route path is a frozen wire identifier, so the node written as one is not
+read: the first positional argument, or else ``path=``, of a
+:data:`_ROUTE_METHODS` call on a bare name that is ``router`` or ends in
+``_router``. This checks the name, not the receiver's type, so any other object
+so named has that argument skipped too (none under the scan roots today). The
+call's other arguments are read. A skipped f-string path takes its format specs
+with it, but string literals in its replacement-field expressions are still
+read. A literal used any other way is read on its own: one assigned to a name,
+an operand of ``+``, ``APIRouter(prefix=…)``, or the path given to a receiver
+not named like a router.
+
+Within public text, exemptions are spans of a value, never a whole line or
+literal, because each is a place a regression could hide: a QUOTED §-citation
+title (the words are the
 identifier), the ``--force-unsafe-import`` flag, the ``Hooks Sync`` feature
 name, and the per-site spans in
 :data:`_SITE_EXEMPTIONS`. A match lying wholly inside an exempt span is
@@ -51,14 +63,15 @@ every compound), ``web/schemas/`` is not walked, a file in
 ``another sync may be in progress`` is not policed — whether "sync" is wrong
 there depends on which lock each site waits on.
 
-Three more limits, none of whose shapes exists in the trees today. A label glued
-by concatenation to a following word (``"Sync" "All"`` reads as ``SyncAll``)
-is not matched: the value has no token boundary, and matching it would also
-match identifiers such as ``SyncPhaseError``. The checks err the other way in
-two places: route path strings are matched as text, and a mounted route's
-whole docstring and every class docstring under ``web/routes/`` count as
-public, though FastAPI publishes less (``include_in_schema=False``, an explicit
-``description=``, text after ``\\f``, classes that are not schema models).
+Two more limits. A label glued by concatenation to a following word
+(``"Sync" "All"`` reads as ``SyncAll``; no such shape in the trees today) is not
+matched: the value has no token boundary, and matching it would also match
+identifiers such as ``SyncPhaseError``. The checks err the other way in one
+place: a mounted route's whole docstring and every class docstring under
+``web/routes/`` count as public, though FastAPI publishes less
+(``include_in_schema=False``, an explicit ``description=``, text after ``\\f``,
+classes that are not schema models). Such docstrings exist; none is flagged
+today.
 
 A function's docstring counts as published only when that function is
 mounted or registered: a route module the app never includes, or a tool the
@@ -365,6 +378,52 @@ def _render(node: ast.Constant | ast.JoinedStr) -> str:
     return "".join(parts)
 
 
+#: The ``APIRouter`` methods whose first parameter is ``path``, as listed from
+#: FastAPI 0.165 (``mount`` is inherited from Starlette).
+_ROUTE_METHODS = frozenset(
+    {
+        "api_route",
+        "delete",
+        "get",
+        "head",
+        "options",
+        "patch",
+        "post",
+        "put",
+        "trace",
+        "websocket",
+        "route",
+        "websocket_route",
+        "add_api_route",
+        "add_api_websocket_route",
+        "add_route",
+        "add_websocket_route",
+        "mount",
+        "frontend",
+    }
+)
+
+
+def _route_path_args(tree: ast.Module) -> set[int]:
+    """``id`` of every node written as a route's path: the first positional
+    argument, or else ``path=``, of a :data:`_ROUTE_METHODS` call on a bare name
+    that is ``router`` or ends in ``_router``, decorator or not."""
+    paths: set[int] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        receiver = node.func.value
+        if not (
+            isinstance(receiver, ast.Name)
+            and (receiver.id == "router" or receiver.id.endswith("_router"))
+            and node.func.attr in _ROUTE_METHODS
+        ):
+            continue
+        args = node.args[:1] or [kw.value for kw in node.keywords if kw.arg == "path"]
+        paths.update(id(arg) for arg in args)
+    return paths
+
+
 def _public_literals(
     relpath: str,
     tree: ast.Module,
@@ -392,6 +451,7 @@ def _public_literals(
                 not_top_level.add(id(part))
                 if isinstance(part, ast.FormattedValue) and part.format_spec is not None:
                     not_top_level.add(id(part.format_spec))
+    route_paths = _route_path_args(tree)
     for node, qual in _walk_with_scope(tree):
         if isinstance(node, _FuncDef):
             defs.add((module, qual))  # the def's own qualname
@@ -402,7 +462,7 @@ def _public_literals(
             continue
         if isinstance(owner, ast.ClassDef) and not relpath.startswith("web/routes/"):
             continue
-        if isinstance(owner, ast.Module) or id(node) in not_top_level:
+        if isinstance(owner, ast.Module) or id(node) in not_top_level or id(node) in route_paths:
             continue
         if isinstance(node, ast.JoinedStr) or (
             isinstance(node, ast.Constant) and isinstance(node.value, str | bytes)
@@ -870,6 +930,145 @@ def test_class_docstrings_are_public_only_under_web_routes(tmp_path: Path) -> No
     assert _found(tmp_path / "a", {_ROUTE: source}) == {(_ROUTE, 2, r"Sync(ed)?(?!\w)")}
     assert _found(tmp_path / "b", {_ENGINE: source}) == set()
     assert _found(tmp_path / "c", {_TOOL: source}) == set()
+
+
+# Every path below carries ``reverse-sync``, so a path that is read is reported.
+_PATH_HIT = r"(?i)\b(re|reverse)[- ]?(sync|import)(ed|s|ing)?\b"
+_LABEL_HIT = r"Sync(ed)?(?!\w)"
+
+
+def test_a_route_path_is_not_read_but_its_summary_is(tmp_path: Path) -> None:
+    source = (
+        '@router.post("/context/reverse-sync", summary="Sync skills")\nasync def x():\n    pass\n'
+    )
+    assert _found(tmp_path, {_ROUTE: source}) == {(_ROUTE, 1, _LABEL_HIT)}
+
+
+# Spelled out rather than taken from ``_ROUTE_METHODS``, so a name dropped from
+# the constant fails here instead of dropping its own case.
+@pytest.mark.parametrize(
+    "method",
+    [
+        "api_route",
+        "delete",
+        "get",
+        "head",
+        "options",
+        "patch",
+        "post",
+        "put",
+        "trace",
+        "websocket",
+        "route",
+        "websocket_route",
+        "add_api_route",
+        "add_api_websocket_route",
+        "add_route",
+        "add_websocket_route",
+        "mount",
+        "frontend",
+    ],
+)
+@pytest.mark.parametrize("keyword", ["", "path="], ids=["positional", "path-keyword"])
+def test_every_router_registration_method_takes_a_path(
+    tmp_path: Path, method: str, keyword: str
+) -> None:
+    source = f'router.{method}({keyword}"/context/reverse-sync")\n'
+    assert _found(tmp_path, {_ROUTE: source}) == set()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param('admin_router.get("/context/reverse-sync")\n', id="admin-router"),
+        pytest.param('preview_router.get("/context/reverse-sync")\n', id="any-suffixed-router"),
+        pytest.param('router.get(f"/context/{kind}/reverse-sync")\n', id="fstring-path"),
+        pytest.param('router.post("/context/reverse-sync")(handler)\n', id="not-a-decorator"),
+        pytest.param('router.post("-reverse-sync")\n', id="no-leading-slash"),
+    ],
+)
+def test_the_path_written_on_a_router_is_not_read(tmp_path: Path, source: str) -> None:
+    assert _found(tmp_path, {_ROUTE: source}) == set()
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param('d.get("/context/reverse-sync")\n', {(1, _PATH_HIT)}, id="dict-get"),
+        pytest.param(
+            '@help_text.get("/reverse-sync instructions")\ndef f():\n    pass\n',
+            {(1, _PATH_HIT)},
+            id="decorator-on-a-non-router",
+        ),
+        pytest.param(
+            'registry.add_api_route("/context/reverse-sync", handler)\n',
+            {(1, _PATH_HIT)},
+            id="add-api-route-on-a-non-router",
+        ),
+        pytest.param(
+            'myrouter.get("/context/reverse-sync")\n',
+            {(1, _PATH_HIT)},
+            id="suffix-without-an-underscore",
+        ),
+        pytest.param(
+            'self.router.get("/context/reverse-sync")\n',
+            {(1, _PATH_HIT)},
+            id="receiver-is-not-a-bare-name",
+        ),
+        pytest.param(
+            'router.include_router("/context/reverse-sync")\n',
+            {(1, _PATH_HIT)},
+            id="method-that-takes-no-path",
+        ),
+        pytest.param(
+            'PATH = "/context/reverse-sync"\nrouter.get(PATH)\n',
+            {(1, _PATH_HIT)},
+            id="path-held-in-a-name",
+        ),
+        pytest.param(
+            'router.add_api_websocket_route("/context/reverse-sync", handler, "Sync skills")\n',
+            {(1, _LABEL_HIT)},
+            id="later-positional",
+        ),
+        pytest.param(
+            'router.add_api_route(path="/context/reverse-sync", summary="Sync skills")\n',
+            {(1, _LABEL_HIT)},
+            id="keyword-beside-path-keyword",
+        ),
+        pytest.param(
+            "router.get(f\"/context/reverse-sync/{label('Sync skills')}\")\n",
+            {(1, _LABEL_HIT)},
+            id="literal-inside-a-path-fstring-field",
+        ),
+    ],
+)
+def test_only_a_routers_path_argument_is_not_read(
+    tmp_path: Path, source: str, expected: set[tuple[int, str]]
+) -> None:
+    assert _found(tmp_path, {_ROUTE: source}) == {(_ROUTE, ln, p) for ln, p in expected}
+
+
+@pytest.mark.parametrize(
+    "opening",
+    ["@router.post(", "router.add_api_route("],
+    ids=["decorator", "add-api-route"],
+)
+def test_the_arguments_beside_a_route_path_are_read(tmp_path: Path, opening: str) -> None:
+    source = (
+        f"{opening}\n"
+        '    "/context/reverse-sync",\n'
+        '    summary="Sync skills",\n'
+        '    description="/context/reverse-sync",\n'
+        '    tags=["Sync skills"],\n'
+        ")\n"
+    )
+    if opening.startswith("@"):
+        source += "async def x():\n    pass\n"
+    assert _found(tmp_path, {_ROUTE: source}) == {
+        (_ROUTE, 3, _LABEL_HIT),
+        (_ROUTE, 4, _PATH_HIT),
+        (_ROUTE, 5, _LABEL_HIT),
+    }
 
 
 @pytest.mark.parametrize(
