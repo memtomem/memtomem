@@ -578,17 +578,30 @@ def test_hash_history_back_forward_keeps_url_tab_and_panel_in_sync(page) -> None
 
 def test_reset_panel_counts_every_stored_chunk(page) -> None:
     """A reset deletes held and pending sources too, so the Reset panel shows
-    ``stored_chunks``, not the listed ``total_chunks`` (#3115)."""
+    ``stored_chunks``, not the listed ``total_chunks`` (#3115). It asks with
+    ``totals_only=true``: one count needs neither the Home source scan nor the
+    histogram. The header's own refresh also sends ``totals_only``, so what is
+    pinned is the absence of a full ``/api/stats`` request once Reset opens."""
     page.set_viewport_size({"width": 1440, "height": 900})
     _install_smoke_stubs(page, "prod")
+    full_requests: list[str] = []
 
     with _web_server("prod") as base_url:
         page.goto(f"{base_url}/#settings", wait_until="domcontentloaded")
+        page.on(
+            "request",
+            lambda request: (
+                full_requests.append(request.url)
+                if urlparse(request.url).path == "/api/stats" and not urlparse(request.url).query
+                else None
+            ),
+        )
         _ensure_nav_visible(page, "#tab-settings", "reset").first.click()
         page.wait_for_function(
             "() => document.querySelector('#reset-chunk-count')?.textContent === '7'",
             timeout=5_000,
         )
+    assert full_requests == []
 
 
 def test_home_sources_tile_counts_the_list_it_sits_above(page) -> None:

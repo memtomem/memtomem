@@ -465,8 +465,9 @@ async def get_stats(
     ),
     totals_only: bool = Query(
         False,
-        description="Return only total_chunks, total_sources and stored_chunks: the header's "
-        "request. Skips the chunk-size distribution as well, so it reads no chunk content. "
+        description="Fill only total_chunks, total_sources and stored_chunks: "
+        "chunk_size_distribution and every home_* field come back empty. Skips the "
+        "per-source scan and the chunk-size distribution, so it reads no chunk content. "
         "Wins over summary_only when both are given.",
     ),
     storage=Depends(get_storage),
