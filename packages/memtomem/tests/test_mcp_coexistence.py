@@ -34,6 +34,28 @@ def host(request, tmp_path, monkeypatch):
     set_home(monkeypatch, home)
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.chdir(project)
+    # Codex inspection checks whether files exist outside HOME and cwd. Point the managed-file
+    # probe into tmp_path, so /etc/codex on the host is never checked.
+    managed = (tmp_path / "etc-codex/requirements.toml", tmp_path / "etc-codex/config.toml")
+    monkeypatch.setattr(checks, "_MANAGED_CODEX_CONFIGS", managed)
+    if client == "codex":
+        # Stop the project-layer walk at tmp_path, so a .codex/config.toml above the pytest temp
+        # dir is never found.
+        (tmp_path / ".git").mkdir()
+    else:
+        # A .git marker cannot bound agy's walk, because a .git above the plugin is what its
+        # check refuses. Hide the .git probes strictly above home instead, so a pytest temp dir
+        # inside a checkout is not read as a Git worktree. A .git at or below home stays
+        # visible: test_agy_installed_plugin_in_git_worktree_is_not_edited creates one there.
+        ceiling = home.resolve()
+        real_exists = Path.exists
+
+        def exists(self, *args, **kwargs):
+            if self.name == ".git" and self.parent in ceiling.parents:
+                return False
+            return real_exists(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", exists)
     root = home / (".codex" if client == "codex" else ".gemini/config")
     plugin = root / (
         "plugins/cache/memtomem/memtomem/0.1.0" if client == "codex" else "plugins/memtomem"
@@ -71,6 +93,7 @@ def host(request, tmp_path, monkeypatch):
         plugin=plugin,
         bundled=bundled,
         config=config,
+        managed=managed,
         rows=[row],
         error=None,
         calls=[],
@@ -200,6 +223,35 @@ def test_symlink_target_refused(host):
     assert target.read_bytes() == before
 
 
+def test_check_before_plugin_install_has_no_bundled_server_to_compare(host):
+    # mcp-clients.md tells Codex and Antigravity users to run this check after
+    # installing the plugin (#3517): before then the same alias that duplicates
+    # the bundled server passes, because there is nothing to compare it with.
+    if host.client == "codex":
+        host.config.write_text(
+            host.config.read_text().replace("mcp_servers.memtomem", "mcp_servers.alias")
+        )
+    else:
+        data = json.loads(host.config.read_text())
+        data["mcpServers"]["alias"] = data["mcpServers"].pop("memtomem")
+        write(host.config, data)
+    installed = host.rows
+    host.rows = []
+
+    before = invoke(host)
+    assert before.exit_code == 0, before.output
+    findings = json.loads(before.output)["findings"]
+    assert {"code": "manual_registration", "state": "configured"}.items() <= next(
+        f for f in findings if f["code"] == "manual_registration"
+    ).items()
+    assert "duplicate_risk" not in {f["code"] for f in findings}
+
+    host.rows = installed
+    after = invoke(host)
+    assert after.exit_code == 1, after.output
+    assert "duplicate_risk" in {f["code"] for f in json.loads(after.output)["findings"]}
+
+
 def test_codex_alias_is_not_name_dedup(host):
     if host.client != "codex":
         return
@@ -285,6 +337,40 @@ def test_codex_project_layer_refuses_reconciliation(host):
     before = host.config.read_bytes()
     assert invoke(host, "--reconcile", "keep-plugin", "--apply").exit_code == 2
     assert host.config.read_bytes() == before
+
+
+def test_managed_codex_paths_are_the_system_layers():
+    # The host fixture redirects these; pin the real values it replaces.
+    assert checks._MANAGED_CODEX_CONFIGS == (
+        Path("/etc/codex/requirements.toml"),
+        Path("/etc/codex/config.toml"),
+    )
+
+
+@pytest.mark.parametrize("host", ["codex"], indirect=True)
+@pytest.mark.parametrize("which", [0, 1])
+def test_managed_codex_configuration_is_incomplete(host, which):
+    host.managed[which].parent.mkdir(exist_ok=True)
+    host.managed[which].write_text('model = "managed"\n')
+    managed = {"code": "incomplete", "message": "Managed Codex configuration needs review."}
+
+    result = invoke(host)
+    assert result.exit_code == 2, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "incomplete"
+    assert managed in payload["findings"]
+
+    before = {p: p.read_bytes() for p in [host.config, host.bundled]}
+    applied = invoke(host, "--reconcile", "keep-plugin", "--apply")
+    assert applied.exit_code == 2, applied.output
+    findings = json.loads(applied.output)["findings"]
+    assert managed in findings
+    assert {
+        "code": "reconcile_refused",
+        "message": "Reconciliation skipped: inspection is incomplete.",
+    } in findings
+    assert all(p.read_bytes() == raw for p, raw in before.items())
+    assert not [b for p in before for b in p.parent.glob(p.name + ".mm-*")]
 
 
 def test_replace_failure_keeps_original_and_backup(host, monkeypatch):
@@ -492,6 +578,15 @@ def test_agy_installed_plugin_in_git_worktree_is_not_edited(host, location, mark
     assert "Git worktree" in result.output
     assert host.bundled.read_bytes() == before
     assert not list(host.plugin.glob("*.mm-*"))
+
+
+@pytest.mark.parametrize("host", ["agy"], indirect=True)
+def test_agy_ignores_git_marker_above_the_plugin_sandbox(host, tmp_path):
+    (tmp_path / ".git").mkdir()
+    result = invoke(host, "--reconcile", "keep-manual", "--apply")
+    assert "Git worktree" not in result.output
+    assert result.exit_code == 0, result.output
+    assert json.loads(host.bundled.read_bytes())["mcpServers"] == {}
 
 
 def test_omitted_manifest_name_uses_agy_directory_only(host):

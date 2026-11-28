@@ -123,14 +123,21 @@ Both write to `~/.claude.json` — no need to edit that file by hand.
 
 These commands reuse the persistent environment that provides `mm`. If you
 intentionally do not install memtomem, replace `memtomem-server` with `uvx
---isolated --from "memtomem[all]==0.7.8" memtomem-server`.
+--python 3.12 --isolated --from "memtomem[all]==0.7.14" memtomem-server`. That
+launch needs a Python 3.12 that uv can find or download. Where uv may not
+download Python on its own (`python-downloads = "never"` or `"manual"` in its
+configuration) and only a newer Python is installed, it stops with `No interpreter
+found for Python 3.12`: install a Python 3.12 first, or install memtomem with
+the Python you have (`uv tool install --python 3.13 'memtomem[all]'`, with your
+version in place of `3.13`) and keep the `memtomem-server` commands above.
 
 For the safe plugin experience (bundled MCP server plus nine focused skills),
 install `/plugin install memtomem@memtomem`. Prompt retrieval and write-time
 indexing are a separate opt-in `/plugin install memtomem-automation@memtomem`.
 Note that both manual commands above differ from the plugin's pinned launch
-command (`uvx --from 'memtomem[onnx]==0.7.8' memtomem-server`), so installing the
-plugin on top of a manual entry runs **two** servers against the same store.
+command (`uvx --python 3.12 --from 'memtomem[onnx]==0.7.14' memtomem-server`), so Claude Code
+does not suppress the plugin's copy: installing the plugin on top of a manual entry can run
+**two** servers against the same store, and `/mcp` shows which are connected.
 The [Claude Code integration guide](integrations/claude-code.md) shows how to
 check for the duplicate and which registration to keep.
 
@@ -362,9 +369,9 @@ Call mem_status to check the memtomem connection status
 
 ## 8. OpenCode
 
-The npm plugin for this core version is `opencode-memtomem@0.3.31` (bundling
-core `0.7.8`). Add it through OpenCode's plugin form —
-`{"plugin": ["opencode-memtomem@0.3.31"]}` in `opencode.json`. The plugin
+The npm plugin for this core version is `opencode-memtomem@0.3.42` (bundling
+core `0.7.14`). Add it through OpenCode's plugin form —
+`{"plugin": ["opencode-memtomem@0.3.42"]}` in `opencode.json`. The plugin
 supplies an exact-pinned MCP server, nine commands, three read-only skills,
 and conservative permissions. Upgrade any pin still on `0.1.3` or older:
 those bundle pre-`0.3.14` cores, whose `mcp` dependency has no `<2` upper
@@ -379,7 +386,7 @@ skills — configure the released MCP server directly instead:
   "mcp": {
     "memtomem": {
       "type": "local",
-      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.7.8", "memtomem-server"],
+      "command": ["uvx", "--python", "3.12", "--isolated", "--from", "memtomem[all]==0.7.14", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
       "environment": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
@@ -387,6 +394,13 @@ skills — configure the released MCP server directly instead:
   }
 }
 ```
+
+That launch needs a Python 3.12 that uv can find or download, as the plugin's
+does. Where uv may not download Python on its own and only a newer Python is
+installed, install a Python 3.12 first, or install memtomem with the Python you
+have (`uv tool install --python 3.13 'memtomem[all]'`, with your version in
+place of `3.13`) and use `"command": ["memtomem-server"]`
+([OpenCode guide](integrations/opencode.md#manual-mcp-alternative)).
 
 See the [OpenCode integration guide](integrations/opencode.md) for precedence,
 permission, platform, and development-install details.
@@ -591,6 +605,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Sessions** | `mem_session_start` (with optional `title`), `mem_session_end`, `mem_session_list`, `mem_project_bind` (pins a stdio server started outside the project to a registered project root) |
 | **Working Memory** | `mem_scratch_set`, `mem_scratch_get`, `mem_scratch_promote` |
 | **Procedures** | `mem_procedure_save`, `mem_procedure_list` |
+| **Decisions** | `mem_decision_record` (one decision point: the options an agent offered, the one it recommended, and the one the user chose; an individual tool only in `full` mode or when `MEMTOMEM_EXTRA_TOOLS` names it, otherwise `mem_do(action="decision_record", params={...})`) |
 | **Multi-Agent** ([experimental](../../README.md#stability)) | `mem_agent_register`, `mem_agent_search`, `mem_agent_share` |
 | **Consolidation** | `mem_consolidate`, `mem_consolidate_apply` |
 | **Reflection** | `mem_reflect`, `mem_reflect_save` |
@@ -603,7 +618,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Schedule** | `mem_schedule_register`, `mem_schedule_list`, `mem_schedule_run_now`, `mem_schedule_delete` (cron-driven compaction, decay, dead-link cleanup, dedup; also reachable as `mem_do` actions) |
 | **Health** | `mem_watchdog`, `mem_cleanup_orphans` |
 | **Import** | `mem_import_notion`, `mem_import_obsidian` |
-| **Maintenance** | `mem_dedup_scan`, `mem_dedup_merge`, `mem_decay_scan`, `mem_decay_expire`, `mem_update_coverage` (which commits the `update` workflow has reviewed for this project; exposed individually to plugin hosts through `MEMTOMEM_EXTRA_TOOLS`) |
+| **Maintenance** | `mem_dedup_scan`, `mem_dedup_merge`, `mem_dedup_remove`, `mem_decay_scan`, `mem_decay_expire`, `mem_update_coverage` (which commits the `update` workflow has reviewed for this project; exposed individually to plugin hosts through `MEMTOMEM_EXTRA_TOOLS`) |
 | **Data** | `mem_export`, `mem_import` |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* |
 | **Evaluation** | `mem_eval` |
@@ -615,7 +630,7 @@ uses, so the output is identical. Useful as a sanity check between
 
 \* Exposed as an individual tool only under `MEMTOMEM_TOOL_MODE=full`. The actions stay reachable in `core` and `standard` mode through the dispatcher — `mem_do(action="config", params={...})`, `mem_do(action="embedding_reset", params={...})`, `mem_do(action="reset", params={...})` — and the CLI equivalents are `mm config`, `mm embedding-reset`, and `mm reset`.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (39 names), or `full` (93 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents. `MEMTOMEM_EXTRA_TOOLS` names registered tools a deployment exposes individually on top of its mode (see [Configuration](configuration.md#tool-mode)).
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (39 names), or `full` (95 names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents. `MEMTOMEM_EXTRA_TOOLS` names registered tools a deployment exposes individually on top of its mode (see [Configuration](configuration.md#tool-mode)).
 
 `mem_candidate_propose(content, source, source_ref, idempotency_key)` lets an
 external agent submit a review candidate without writing durable memory.
@@ -623,6 +638,41 @@ external agent submit a review candidate without writing durable memory.
 `idempotency_key` are required. The content and source reference pass the
 privacy scanner, accepted proposals remain pending for up to 30 days, and a
 reused idempotency key returns the original proposal unless its content differs.
+
+`mem_decision_record(decision_id, project, recorded_by, question, options, chosen, ...)`
+records one decision point at the moment it happens, keeping the agent's judgement
+(`recommended`, `agent_reason`) apart from the user's (`chosen`, `user_words`). The record
+is an ordinary memory entry in the project's `project_local` tier under
+`shared:<project>`: a `## Decision <decision_id>` heading and one JSON object in a `json`
+code fence. `options`, `recommended`, `chosen` and `user_words` are stored exactly as
+given; `question` (one line, at most 120 characters), `agent_reason` (at most 240) and
+`refs` (at most 5) are the agent's own words and are refused when too long, never cut.
+`decided_at` takes an ISO 8601 timestamp with a UTC offset and is stored in UTC to the
+second. The tags are derived and the caller supplies none: `decision-record`,
+`from-<recorded_by>`, and one of `decision-user-taken`, `decision-user-declined` or
+`decision-user-norec`.
+
+- **Refused before anything is written:** a value of the wrong type, an unpaired
+  surrogate, a `project` that is not the slug of the server's project root (the root's
+  directory name with each run of characters outside `[A-Za-z0-9._-]` turned into `-` and
+  leading `-` trimmed), a server with no project context, a project whose
+  `.memtomem/memories.local` is a link, a record over the 100,000-character entry limit,
+  and a record that matches a privacy pattern. The scan covers the strings as they will
+  be read back as well as the rendered entry, and the action has no `force_unsafe`.
+- **Past that point the write is a keyed `mem_add`,** and its outcomes are that tool's:
+  an error from it does not by itself say whether the entry was appended.
+- **`decision_id` is required and is the write's idempotency key.** A repeat is handled as
+  `mem_add` handles a repeated `idempotency_key`, in a ledger of this action's own, so a
+  key used with `mem_add` and a `decision_id` never answer for each other. The key exists
+  to make a lost response safe to retry; it is not uniqueness of records, and a changed
+  decision is a new record with a new id.
+- **A tag finds candidates, the file holds the record.** A chunk's tags are not always
+  one entry's, and the indexed text is not always the file's text, so a reader that needs
+  a value verbatim, or a count of decisions, parses the records from the day files. For a
+  project slug long enough that the day file's name no longer declares its namespace
+  ([ADR-0043](../adr/0043-rebuild-restores-namespace-from-day-file-name.md)), the record
+  is still written and indexed under `shared:<project>`.
+- The record follows ordinary entry eligibility and processing rules.
 
 `mem_candidate_evidence(candidate_id, top_k)` answers the question a reviewer
 cannot answer from the candidate text alone: does the store already say this,
@@ -985,7 +1035,11 @@ listing both pids. Two readings, both real:
 
 - **Multiple editor sessions are open.** One MCP server per session is
   normal — several Claude Code windows against one user store will show
-  this warning, and no action is needed.
+  this warning, and no action is needed. On macOS and Linux the sessions
+  can instead be served by one process: see
+  [Share one server between sessions](shared-daemon.md), an opt-in option.
+  Sessions that joined one shared daemon do not raise the warning; a
+  session beside them that did not join does, in all of them.
 - **One client has two memtomem registrations** (e.g. a manual
   `claude mcp add` entry *and* the plugin — see the client sections
   above). With a single editor session open, this is the likely cause:
@@ -1010,11 +1064,26 @@ not registered and stay invisible to it.
 
 An existing manual MCP registration can supply tools while the host plugin supplies
 workflow skills. Installing a static plugin bundle cannot prompt for this choice.
-Use the coexistence diagnostic before starting a new client session.
+Use the coexistence diagnostic before starting a new client session. When each
+host's check can see a duplicate differs:
+
+- **Claude Code:** run it from the project root. It reads that directory's
+  project and local registrations, and settings in a parent project make the
+  inspection incomplete. Before the plugin is installed it compares your
+  registrations with the launch its own release bundles, so repeat it after
+  installing.
+- **Antigravity CLI and Codex CLI:** run it after installing the plugin and
+  before starting a new session or thread. These checks compare manual entries
+  with the bundled server of an installed, enabled plugin. Before installation
+  there is nothing to compare them with, so a complete inspection with one usable
+  manual registration passes (`0`), and that registration and the plugin's
+  server can both start once the plugin is installed and enabled. For Codex,
+  only a manual entry named `memtomem` takes precedence over the plugin's
+  server; under any other name both can start.
 
 The `--mcp-client`, `--reconcile` and `--apply` options below need memtomem
 0.7.1 or later (`mm --version`). Without `mm` on your `PATH`, as in a uvx-only
-setup, run each command as `uvx --from 'memtomem==0.7.8' mm doctor …`:
+setup, run each command as `uvx --from 'memtomem==0.7.14' mm doctor …`:
 
 ```bash
 mm doctor --mcp-client claude
@@ -1104,7 +1173,7 @@ checks predict configuration behavior; they do not prove process count or store 
 3. Verify the install is reachable: `mm --version` (or `uvx --from memtomem mm --version` for uvx-only setups) — side-effect-free
 4. From inside the editor, ask it to call the `mem_status` tool — a successful response confirms the MCP handshake reached the server
 
-> Running `uvx --isolated --from "memtomem[all]==0.7.8" memtomem-server`
+> Running `uvx --python 3.12 --isolated --from "memtomem[all]==0.7.14" memtomem-server`
 > bare in a terminal prints
 > a setup hint (MCP client configuration plus the network-transport
 > examples from §12) and exits — it is **not** a "does it serve?" smoke

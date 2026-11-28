@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 from dataclasses import dataclass
@@ -21,7 +22,14 @@ _FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 # push the text after ``]]`` to the start of a line, where it can read as a
 # heading, a code fence or a metadata blockquote. A match crossing a newline is
 # left as written (#2696).
+#
+# The grammar :func:`resolve_wikilinks` implements. It is not run with ``sub``:
+# on a line of unmatched ``[[`` openers the regex rescans the rest of the line
+# from each one, quadratic in the line's length (#3618). The resolver gives the
+# same result in one pass, and a test holds it equal to ``_WIKILINK_RE.sub``.
 _WIKILINK_RE = re.compile(r"\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]")
+_WIKILINK_TARGET_END = re.compile(r"[\]|\n]")
+_WIKILINK_ALIAS_END = re.compile(r"[\]\n]")
 # Temporal-validity frontmatter formats (RFC: temporal-validity).
 # Date-only ``YYYY-MM-DD`` and quarter ``YYYY-QN`` (N in 1-4). Anything else
 # parses to ``None`` and the bound is treated as unset (no exception raised —
@@ -86,17 +94,24 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 _BOLD_LABEL_RE = re.compile(r"^[ \t]*\*\*[^*\n]+\*\*", re.MULTILINE)
 
 
-def _fence_line_set(text: str) -> frozenset[int]:
-    """Return 1-indexed line numbers covered by a code fence, opener and closer
-    lines included.
+@dataclass(frozen=True)
+class _FenceSpan:
+    """One code fence: its 0-indexed opener and last line, and its opening run."""
 
-    Including the marker lines keeps a ``# heading``-shaped fence-marker
-    metadata row from being treated as a true markdown heading.
+    start: int
+    end: int
+    run: str
+    closed: bool
 
-    Handles unclosed fences at EOF by treating the rest of the file as fenced.
+
+def _fence_spans(lines: list[str]) -> list[_FenceSpan]:
+    """The code fences in ``lines``, in order.
+
+    A fence closes at the next line holding a run of the same character, at
+    least as long, with nothing after it. One that never closes runs to the
+    last line (``closed`` is False), which is how Markdown reads it.
     """
-    lines = split_source_lines(text)
-    inside: set[int] = set()
+    spans: list[_FenceSpan] = []
     i = 0
     while i < len(lines):
         m = _FENCE_OPEN_RE.match(lines[i])
@@ -106,7 +121,6 @@ def _fence_line_set(text: str) -> frozenset[int]:
         run = m.group(1)
         fence_char = run[0]
         min_len = len(run)
-        start = i
         j = i + 1
         while j < len(lines):
             m2 = _FENCE_OPEN_RE.match(lines[j])
@@ -115,11 +129,79 @@ def _fence_line_set(text: str) -> frozenset[int]:
                 if run2[0] == fence_char and len(run2) >= min_len and not m2.group(2).strip():
                     break
             j += 1
-        end = j if j < len(lines) else len(lines) - 1
-        for k in range(start, end + 1):
-            inside.add(k + 1)  # 1-indexed
+        closed = j < len(lines)
+        end = j if closed else len(lines) - 1
+        spans.append(_FenceSpan(start=i, end=end, run=run, closed=closed))
         i = end + 1
+    return spans
+
+
+def _fence_line_set(text: str) -> frozenset[int]:
+    """Return 1-indexed line numbers covered by a code fence, opener and closer
+    lines included.
+
+    Including the marker lines keeps a ``# heading``-shaped fence-marker
+    metadata row from being treated as a true markdown heading.
+
+    Handles unclosed fences at EOF by treating the rest of the file as fenced.
+    """
+    inside: set[int] = set()
+    for span in _fence_spans(split_source_lines(text)):
+        inside.update(range(span.start + 1, span.end + 2))  # 1-indexed
     return frozenset(inside)
+
+
+def unclosed_fence(text: str) -> str | None:
+    """The opening run of the fence ``text`` ends inside, or ``None``.
+
+    The same reading :func:`_fence_line_set` gives the chunker, so a writer can
+    ask whether the next text appended after ``text`` would be read as code.
+    Only the run is returned (````` ``` `````, ``~~~~``), never the opener's
+    info string. ``text`` is taken as the chunker reads it: a caller holding
+    text before wikilink resolution or newline translation resolves it first.
+    """
+    spans = _fence_spans(split_source_lines(text))
+    if spans and not spans[-1].closed:
+        return spans[-1].run
+    return None
+
+
+def fences_after_edit(before: str, after: str, tail_lines: int) -> str | None:
+    """The run of a fence an edit opens over the text after it, or ``None`` (#3633).
+
+    ``before`` and ``after`` are a whole file before and after an edit of one
+    span, both as the chunker reads them; their last ``tail_lines`` lines are
+    the text after the span, the same lines in both. The edit is refused when
+    it puts a non-blank line of that tail inside a fence that was outside one,
+    or makes the file end inside a fence it did not end inside: the next entry
+    appended would be read as code. The end state alone is not enough, since a
+    fence the edit opens can run to a closer or an open fence further down and
+    swallow every heading on the way. A blank line newly covered is ignored,
+    and tail lines that leave a fence (a repair) are allowed.
+    """
+    old_lines = split_source_lines(before)
+    new_lines = split_source_lines(after)
+    old_spans = _fence_spans(old_lines)
+    new_spans = _fence_spans(new_lines)
+    if tail_lines > 0:
+        # A tail line at ``index`` in ``after`` is at ``index - shift`` in
+        # ``before``; the old fences are compared as intervals, not line sets.
+        shift = len(new_lines) - len(old_lines)
+        old_starts = [span.start for span in old_spans]
+        tail_start = len(new_lines) - tail_lines
+        for span in new_spans:
+            for index in range(max(span.start, tail_start), span.end + 1):
+                if new_lines[index].strip() and not _in_spans(old_spans, old_starts, index - shift):
+                    return span.run
+    if new_spans and not new_spans[-1].closed and not (old_spans and not old_spans[-1].closed):
+        return new_spans[-1].run
+    return None
+
+
+def _in_spans(spans: list[_FenceSpan], starts: list[int], index: int) -> bool:
+    """Whether line ``index`` lies in one of ``spans`` (ordered, disjoint; ``starts`` theirs)."""
+    at = bisect.bisect_right(starts, index) - 1
+    return at >= 0 and index <= spans[at].end
 
 
 def _split_paragraphs_fence_aware(text: str) -> list[str]:
@@ -281,8 +363,54 @@ MARKDOWN_EXTENSIONS = frozenset({".md", ".markdown"})
 
 
 def resolve_wikilinks(text: str) -> str:
-    """The text ``chunk_file`` splits: ``[[target|alias]]`` → alias, ``[[target]]`` → target."""
-    return _WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)
+    """The text ``chunk_file`` splits: ``[[target|alias]]`` → alias, ``[[target]]`` → target.
+
+    Exactly ``_WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)``, in
+    time linear in ``text``. A target runs from ``[[`` to the first ``]``,
+    ``|`` or newline and can end nowhere else, since a shorter one would leave
+    a character neither ``|`` nor ``]]`` can start with; the same holds for an
+    alias, ending at the first ``]`` or newline. So each opener is decided at
+    the first such character after it. The openers are visited left to right,
+    so the position of that character is found once and reused until an opener
+    passes it.
+    """
+    if "[[" not in text:
+        return text
+    size = len(text)
+    target_end = alias_end = -1
+
+    def first(pattern: re.Pattern[str], pos: int, known: int) -> int:
+        # ``known`` is the first match at or after an earlier position: while it
+        # is not behind ``pos`` it is also the first at or after ``pos``.
+        if known >= pos:
+            return known
+        m = pattern.search(text, pos)
+        return m.start() if m else size
+
+    parts: list[str] = []
+    copied = 0
+    i = text.find("[[")
+    while i != -1:
+        start = i + 2
+        target_end = first(_WIKILINK_TARGET_END, start, target_end)
+        end, shown = -1, ""
+        if target_end > start:
+            if text.startswith("]]", target_end):
+                end, shown = target_end + 2, text[start:target_end]
+            elif text.startswith("|", target_end):
+                alias = target_end + 1
+                alias_end = first(_WIKILINK_ALIAS_END, alias, alias_end)
+                if alias_end > alias and text.startswith("]]", alias_end):
+                    end, shown = alias_end + 2, text[alias:alias_end]
+        if end == -1:
+            i = text.find("[[", i + 1)
+            continue
+        parts.append(text[copied:i])
+        parts.append(shown)
+        copied = end
+        i = text.find("[[", end)
+    parts.append(text[copied:])
+    return "".join(parts)
 
 
 def leading_frontmatter(text: str) -> str | None:

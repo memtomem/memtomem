@@ -11,21 +11,23 @@ retrieval and write-time indexing. Install the safe base plugin first.
 The hooks use the memtomem CLI, pinned to the same reviewed core release:
 
 ```sh
-uv tool install 'memtomem==0.7.8'
+uv tool install --python 3.12 memtomem==0.7.14
 ```
 
 That command installs no extras. If your store uses a local ONNX model (the
-`mm init` English and Korean presets do), install `'memtomem[onnx]==0.7.8'`
-or `'memtomem[all]==0.7.8'` instead; a base-only `mm` reports the missing
+`mm init` English and Korean presets do), install `'memtomem[onnx]==0.7.14'`
+or `'memtomem[all]==0.7.14'` instead; a base-only `mm` reports the missing
 ONNX dependencies rather than indexing.
 
-Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.7.8`
+Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.7.14`
 instead of reinstalling; the
 [CLI reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/data-config-cli.md#cli-reference)
 covers what it preserves and stops.
 
 The dispatcher is launched through `uv`, so it does not depend on a
-platform-specific `python3` command alias.
+platform-specific `python3` command alias. It runs on the interpreter uv finds
+first, which may be an older system Python: it needs Python 3.8 or newer, while
+`mm` itself needs Python 3.12 or newer, which its install command asks uv for.
 
 The plugin searches prompts longer than 20 characters, queues changed Write or
 Edit targets for indexing, and flushes that queue when a response stops. It

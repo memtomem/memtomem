@@ -445,6 +445,7 @@ class TestJsonContract:
             "runtime-dir",
             "server-instances",
             "registry-hygiene",
+            "shared-daemons",
         ]
 
 

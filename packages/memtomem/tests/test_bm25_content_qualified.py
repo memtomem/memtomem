@@ -95,6 +95,28 @@ class TestBm25Leg:
         )
 
     @pytest.mark.asyncio
+    async def test_a_chunk_missing_one_term_is_left_out_while_another_has_them_all(self, storage):
+        """The limit ``docs/guides/embeddings.md`` states for BM25-only search (#3662).
+
+        The OR pass runs only when the AND pass finds nothing, so a chunk that
+        lacks one query term is not retrieved while another chunk has them all.
+        Filling a short AND result with OR rows was proposed and closed unmerged
+        (PR #3671: the replay gate's precision fell). This test fails under
+        OR-only retrieval and under filling an AND result with OR rows.
+        """
+        newer = _make_chunk(
+            "CI now pushes container images to the falcon host", source="notes/2026-10-14.md"
+        )
+        older = _make_chunk("CI pushes container images to otter", source="notes/2026-08-04.md")
+        await storage.upsert_chunks([older, newer])
+
+        every_term = await storage.bm25_search("container images host", top_k=10)
+        shared_terms = await storage.bm25_search("container images", top_k=10)
+
+        assert [r.chunk.id for r in every_term] == [newer.id]
+        assert {r.chunk.id for r in shared_terms} == {newer.id, older.id}
+
+    @pytest.mark.asyncio
     async def test_the_path_phase_has_its_own_or_fallback(self, storage):
         """Both phases run the same AND-then-OR ladder."""
         path_only = _make_chunk("nothing relevant here", source="plans/wombat-notes.md")

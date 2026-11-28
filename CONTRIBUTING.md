@@ -8,7 +8,10 @@ Thank you for your interest in contributing to memtomem!
    [`good first issue`](https://github.com/memtomem/memtomem/labels/good%20first%20issue).
    Each one names the files to change, what to test, and the test file to run.
 2. Comment on the issue to claim it. You don't need to be assigned: the
-   comment is the claim. If someone has already claimed it, pick another one.
+   comment is the claim. If someone has already claimed it, or an open pull
+   request will already close it, pick another one. When there is such a pull
+   request, a bot comments on the issue with its number, once per issue, so
+   look for that comment too.
 3. Set up with [Development Setup](#development-setup). While you work,
    running only the test file the issue names is enough; before you open the
    pull request, run the checks in
@@ -62,7 +65,7 @@ uv run mypy packages/memtomem/src packages/langchain-memtomem/src
 - `packages/memtomem-cursor-plugin/` — Cursor plugin (the Antigravity skill set, with the explicit-only workflows marked `disable-model-invocation`; the repo-root `.cursor-plugin/marketplace.json` lists it)
 - `packages/memtomem-openclaw-bundle/` — OpenClaw plugin bundle in the Codex bundle format (the Hermes user-scope skill set and launch line; `openclaw.plugin.json` carries the ClawHub name and category)
 - `packages/langchain-memtomem/` — `langchain-memtomem`: a LangGraph `BaseStore` whose query search runs the memtomem pipeline in an index the store owns (ADR-0042); second workspace member, own version line
-- `packages/memtomem-hermes-memory/` — Hermes Agent memory provider `memtomem-memory` (recall-only, through Hermes's own memtomem MCP connection; standard library, Python 3.11+)
+- `packages/memtomem-hermes-memory/` — Hermes Agent memory provider `memtomem-memory` (recall on eligible user turns, plus optional mirroring of Hermes's built-in memory with `mirror_writes`, through Hermes's own memtomem MCP connection; standard library, Python 3.11+)
 - `packages/memtomem-plugin-assets/` — shared plugin contract (`contract.toml`) and workflow sources rendered into the plugins by `tools/render_plugin_assets.py`
 
 The STM proxy gateway lives in a separate repository: [memtomem/memtomem-stm](https://github.com/memtomem/memtomem-stm).
@@ -133,8 +136,13 @@ uv run pytest packages/memtomem/tests/web/
 # Run everything; tests carrying ``@pytest.mark.browser`` auto-skip when
 # pytest-playwright or Chromium aren't available, so the full suite
 # stays green on contributor laptops that haven't run the install
-# above (see ``packages/memtomem/tests/conftest.py:108``).
+# above (see ``_playwright_browser_unavailable`` in
+# ``packages/memtomem/tests/conftest.py``; the skip reason names the error).
 uv run pytest -m "not ollama"
+
+# Make a Chromium that cannot launch an error instead of a skip, as the
+# CI ``browser`` job does.
+MEMTOMEM_TEST_REQUIRE_BROWSER=1 uv run pytest packages/memtomem/tests/web -m browser
 ```
 
 ### Harness shape
@@ -382,6 +390,21 @@ The CLA does not change the current license of the Work, which remains
 Apache License 2.0.
 
 For questions about the CLA, contact contact@dapada.co.kr.
+
+### AI-assisted contributions
+
+You may use AI tools, such as code assistants or agents, to help write a
+contribution. Using a tool does not change what you represent when you sign:
+[Section 5 of the CLA](CLA.md#5-representations) still applies to each of
+your own contributions. Before you submit tool-assisted work, review all of
+it, make sure you can explain it, and take responsibility for it as if you
+had written it by hand. Work that is not your original creation, for example
+code or text a tool reproduced from someone else's work, is not part of your
+own contribution: leave it out, or follow
+[Section 7 of the CLA](CLA.md#7-submissions-on-behalf-of-others).
+
+Please say in the pull request description which tools you used and for
+what. This is not a gate. It tells the reviewer where to look harder.
 
 ## Reporting Issues
 

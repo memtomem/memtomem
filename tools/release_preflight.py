@@ -31,6 +31,7 @@ _SECURITY_DIRECT_NAMES = {
     "idna",
     "pyjwt",
     "python-multipart",
+    "opentelemetry-api",
 }
 _REQUIRED_URLLIB3_EXTRAS = {"all", "langfuse", "onnx"}
 _TERMINAL_FAILURES = {"action_required", "cancelled", "failure", "stale", "timed_out"}
@@ -58,8 +59,10 @@ _FetchJSON = Callable[[str, float], tuple[int, Any]]
 # Both HTTP boundaries deliberately handle the full protocol-error family.
 # Callers decide whether to retry; persistent protocol/configuration errors
 # must end in a diagnostic refusal, not escape the gate as a raw traceback.
-# Decode errors have separate policies: readiness probes reject malformed
-# metadata immediately; CI polling allows up to three consecutive API errors.
+# Decode errors have separate policies. ``_request_json``, which serves the PyPI
+# metadata checks and the MCP registry version lookup, treats a JSON or Unicode
+# decoding error as terminal; CI polling aborts on the third consecutive API error
+# (two retries).
 _HTTP_TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
 
 
@@ -142,6 +145,23 @@ def _contract_core_requirement(repo_root: Path) -> tuple[str, str]:
     return version, f"memtomem[{','.join(extras)}]=={version}"
 
 
+def _contract_launch_python(repo_root: Path) -> str:
+    """The interpreter every bundle's launch line asks uv for."""
+    hermes = _load_toml(repo_root / "packages/memtomem-plugin-assets/contract.toml").get("hermes")
+    python = hermes.get("python") if isinstance(hermes, dict) else None
+    # A pinned minor only: an open range lets uv pick a Python newer than the classifiers.
+    if not isinstance(python, str) or not re.fullmatch(r"3\.\d+", python):
+        raise ReleaseCheckError("plugin contract has no pinned-minor hermes.python")
+    return python
+
+
+def _contract_launch_args(repo_root: Path) -> tuple[str, list[str]]:
+    """The core version the contract pins, and the launch arguments it renders to."""
+    version, requirement = _contract_core_requirement(repo_root)
+    python = _contract_launch_python(repo_root)
+    return version, ["--python", python, "--from", requirement, "memtomem-server"]
+
+
 def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = None) -> str:
     """Require the core version actually pinned by OpenCode to exist on PyPI."""
     version, requirement = _contract_core_requirement(repo_root)
@@ -152,6 +172,20 @@ def validate_opencode_pypi(repo_root: Path, *, fetch_json: _FetchJSON | None = N
         values = re.findall(rf'^export const {field} = "([^"\n]*)";$', generated, re.MULTILINE)
         if values != [expected]:
             raise ReleaseCheckError(f"OpenCode generated {field} does not match {expected!r}")
+    # The server builds its command from this array, not from MCP_REQUIREMENT, so the
+    # array is what decides which core the published package launches. Only the
+    # renderer's own shape is accepted: the name once, as a one-line export. A copy in a
+    # comment beside a reformatted export would otherwise be the one compared.
+    _, launch = _contract_launch_args(repo_root)
+    arrays = re.findall(
+        r"^export const MCP_LAUNCH_ARGS = (\[[^\n]*\]) as const;$", generated, re.MULTILINE
+    )
+    try:
+        rendered = [json.loads(array) for array in arrays]
+    except ValueError:
+        rendered = []
+    if generated.count("MCP_LAUNCH_ARGS") != 1 or rendered != [launch]:
+        raise ReleaseCheckError(f"OpenCode generated MCP_LAUNCH_ARGS does not match {launch!r}")
     try:
         _probe_pypi_release(version, fetch_json=fetch_json or _request_json)
     except ReleaseCheckError as exc:
@@ -184,8 +218,8 @@ def _claude_launch_pin(repo_root: Path) -> str:
     OpenCode gate already validates it. Comparing the shipped ``.mcp.json``
     with that leaves no requirement syntax to recognise here.
     """
-    version, requirement = _contract_core_requirement(repo_root)
-    expected = {"command": "uvx", "args": ["--from", requirement, "memtomem-server"]}
+    version, args = _contract_launch_args(repo_root)
+    expected = {"command": "uvx", "args": args}
     label = f"{_CLAUDE_PLUGIN}/.mcp.json"
     servers = _load_json_object(repo_root / label, label).get("mcpServers")
     if not isinstance(servers, dict) or list(servers) != ["memtomem"]:
@@ -1168,6 +1202,8 @@ def _request_runs(repository: str, sha: str, token: str) -> list[dict[str, Any]]
     )
     with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
         payload = json.load(response)
+    if not isinstance(payload, dict):
+        raise ReleaseCheckError("GitHub workflow-runs response is not a JSON object")
     runs = payload.get("workflow_runs")
     if not isinstance(runs, list):
         raise ReleaseCheckError("GitHub workflow-runs response has no workflow_runs list")

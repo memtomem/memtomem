@@ -193,7 +193,8 @@ function _buildNsCard(ns, defaultNs) {
 
     const delBtn = document.createElement('button');
     delBtn.className = 'btn-danger btn-xs';
-    delBtn.textContent = 'Delete';
+    delBtn.dataset.i18n = 'common.delete';
+    delBtn.textContent = t('common.delete');
     delBtn.addEventListener('click', () => deleteNamespace(ns.namespace));
 
     actions.appendChild(renameBtn);
@@ -283,27 +284,48 @@ function editNamespaceMeta(ns, card) {
       <button class="btn-ghost btn-xs ns-edit-reset-color">Reset</button>
     </div>
     <div class="ns-edit-actions">
-      <button class="btn-ghost btn-xs ns-edit-cancel">Cancel</button>
-      <button class="btn-primary btn-xs ns-edit-save">Save</button>
+      <button class="btn-ghost btn-xs ns-edit-cancel" data-i18n="common.cancel">${t('common.cancel')}</button>
+      <button class="btn-primary btn-xs ns-edit-save" data-i18n="common.save">${t('common.save')}</button>
     </div>
   `;
+
+  // A color input only holds #rrggbb, so it cannot show every stored color
+  // (#abc reads #aabbcc, a non-hex value reads as the gray fallback). Save
+  // therefore sends `color` only when the user touched the picker or pressed
+  // Reset, never by comparing what the input shows with what it showed first.
+  let colorTouched = false;
+  const markColorTouched = () => { colorTouched = true; };
 
   form.querySelector('.ns-edit-cancel').addEventListener('click', () => form.remove());
   form.querySelector('.ns-edit-reset-color').addEventListener('click', () => {
     form.querySelector('.ns-edit-color').value = '#808080';
+    markColorTouched();
   });
+  form.querySelector('.ns-edit-color').addEventListener('input', markColorTouched);
+  form.querySelector('.ns-edit-color').addEventListener('change', markColorTouched);
   form.querySelector('.ns-edit-save').addEventListener('click', async () => {
     const desc = form.querySelector('.ns-edit-desc').value.trim();
     const colorVal = form.querySelector('.ns-edit-color').value;
     const body = { description: desc };
-    // Only send color if not default gray
-    body.color = colorVal === '#808080' ? '' : colorVal;
+    // Default gray means "no color", so it clears the stored one.
+    if (colorTouched) body.color = colorVal === '#808080' ? '' : colorVal;
     try {
       await api('PATCH', `/api/namespaces/${encodeURIComponent(ns.namespace)}`, body);
       showToast(t('toast.ns_updated'), 'success');
       loadNamespacesTab();
       loadNamespaceDropdowns();
     } catch (err) {
+      // The server scans the description and has no bypass for it (#3352),
+      // so this is a plain refusal: no confirm-and-retry, unlike /api/add.
+      if (err instanceof RedactionBlockedError) {
+        // Label rules also match prose that names a credential without
+        // holding one (#3354), so that refusal says what to reword.
+        const key = err.labelOnly === true
+          ? 'toast.ns_description_redaction_blocked_label'
+          : 'toast.ns_description_redaction_blocked';
+        showToast(t(key, { hits: err.hits }), 'error');
+        return;
+      }
       showToast(t('toast.error', { error: err.message }), 'error');
     }
   });
@@ -456,8 +478,9 @@ function _renderRelatedList() {
 function _showRelatedPreview(r, itemEl) {
   const preview = qs('related-preview');
   const src = r.chunk.source_file || '';
-  const isMarkdown = src.endsWith('.md');
-  const rendered = isMarkdown && typeof marked !== 'undefined'
+  const isMarkdown = _isMarkdownSource(src);
+  const asMarkdown = isMarkdown && typeof marked !== 'undefined';
+  const rendered = asMarkdown
     ? DOMPurify.sanitize(marked.parse(r.chunk.content))
     : `<pre style="white-space:pre-wrap;font-size:0.82rem">${escapeHtml(r.chunk.content)}</pre>`;
 
@@ -487,6 +510,27 @@ function _showRelatedPreview(r, itemEl) {
     hide(preview);
     if (itemEl) itemEl.classList.remove('active');
   });
+
+  if (asMarkdown && _mayOpenWithFrontmatter(r.chunk)) {
+    _boxRelatedFrontmatter(r.chunk, preview.querySelector('.related-preview-content'));
+  }
+}
+
+// Re-renders a preview with the note's frontmatter as metadata once the server
+// certifies it, as the detail view does (#3030). ``contentEl`` is the element
+// of the preview that asked: every preview builds a new one, so an answer for a
+// replaced preview lands in a detached node.
+async function _boxRelatedFrontmatter(chunk, contentEl) {
+  let resp;
+  try {
+    resp = await api('GET', `/api/chunks/${chunk.id}/frontmatter`);
+  } catch (_err) {
+    return;  // A display hint: the note renders as it always has.
+  }
+  if (!(resp && resp.leading)) return;
+  const span = _leadingFrontmatter(chunk.content);
+  if (span === null) return;
+  contentEl.innerHTML = DOMPurify.sanitize(_markdownHtml(chunk.content, span));
 }
 
 // Toggle related list open/close

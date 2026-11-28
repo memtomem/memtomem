@@ -5,6 +5,14 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-11-15
+
+### Changed
+
+- **Requires `memtomem>=0.7.9,<0.8`** (was `>=0.7.4,<0.8`). The store passes the
+  `bm25_path_fallback` and `chunk_source_labels` options to `create_components`, which
+  memtomem 0.7.9 adds; against an earlier memtomem the store would fail to open.
+
 ### Fixed
 
 - BM25 no longer matches every item for a query whose words match no value but name a word of
@@ -14,8 +22,8 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
   `bm25` mode) every item came back, scored as a real match at its rank would be. memtomem 0.7.9
   narrows that fallback to the file's name (#3208), which for the store is the item's encoded
   key. A key can encode to a word (`V` to `sky`), so the store also turns the fallback off, and
-  such a query returns `[]` there. Dense retrieval is unchanged: in `hybrid` or `dense` mode with
-  an embedder, any query still returns the nearest items. Needs
+  such a query returns `[]` there. Turning the fallback off leaves dense retrieval alone: in
+  `hybrid` or `dense` mode with an embedder, any query still returns the nearest items. Needs
   memtomem 0.7.9, which adds the `create_components` keyword the store passes; the dependency
   floor rises with that release.
 - With bounded chunking (on for an E5 embedding model), the words `md`, `file` and `fragment` and
@@ -23,8 +31,20 @@ All notable changes to `langchain-memtomem` are recorded here. The format follow
   memtomem's chunker wrote `File: <encoded key>.md` and `Fragment <i>/<n>` lines into each row's
   embedded and BM25-indexed text, so in BM25 the first three matched every item and the encoded
   key matched its item. The store now opens its components with `chunk_source_labels=False`,
-  which leaves both lines out. Rows indexed before the upgrade keep them until their item is
-  written again. Needs memtomem 0.7.9 as well.
+  which leaves both lines out. The embedded text of those rows changes with it, so dense
+  rankings under bounded chunking can differ from 0.2.0's. Rows indexed before the upgrade keep
+  both lines until their item is written again. Needs memtomem 0.7.9 as well.
+
+### Security
+
+- **The record guard now reads the strings inside a value as they are stored (#3300).**
+  From 0.1.0 through 0.2.0 `put` scanned the value only JSON-serialized, where `"` reads `\"`
+  and a newline reads `\n`, so a rule that needs a literal quote or whitespace missed a
+  string the record keeps verbatim. The projection guard caught it only for a field an
+  `index` selector names. The guard now also scans every key and string of the value raw,
+  and separates every part it scans so a label in one cannot pair with the next.
+  Records written before the upgrade are not re-scanned; a repair still guards only the
+  projection it rewrites.
 
 ## [0.2.0] — 2026-11-10
 

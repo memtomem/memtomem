@@ -42,12 +42,27 @@ from .helpers import (
     set_home,
 )
 from .web.test_upload_quarantine import (
+    TestBodyLimitUnderAPathPrefix,  # noqa: F401
     TestUploadQuarantineBoundaries,  # noqa: F401
     TestUploadQuarantineLifecycle,  # noqa: F401
     test_body_limit_without_content_length_exact_and_plus_one,  # noqa: F401
     test_json_body_limit_and_multipart_import_use_separate_budgets,  # noqa: F401
+    test_json_body_limit_covers_fastapi_json_media_types,  # noqa: F401
     test_upload_openapi_keeps_multipart_file_array_contract,  # noqa: F401
 )
+
+
+def test_every_upload_quarantine_case_is_imported() -> None:
+    """The source module sets ``__test__ = False``: an unimported case never runs (#3663)."""
+    from .web import test_upload_quarantine as source
+
+    cases = {
+        name: obj
+        for name, obj in vars(source).items()
+        if name.startswith(("test", "Test")) and getattr(obj, "__module__", None) == source.__name__
+    }
+    assert cases
+    assert [name for name, obj in cases.items() if globals().get(name) is not obj] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1278,8 +1293,14 @@ class TestSearch:
         run_id = "e38ab6c7-4db4-4d68-8dca-93c1da2dcfe6"
         app.state.search_pipeline.search.return_value[1].query_run_id = run_id
 
-        resp = await client.get("/api/search", params={"q": "hello world"})
+        # Only a search that carries the token is recorded and given a run id.
+        resp = await client.get(
+            "/api/search",
+            params={"q": "hello world"},
+            headers={"X-Memtomem-CSRF": app.state.csrf_token},
+        )
 
+        assert app.state.search_pipeline.search.call_args.kwargs["record"] is True
         assert resp.status_code == 200
         assert resp.json()["query_run_id"] == run_id
         assert resp.json()["retrieval_stats"]["query_run_id"] == run_id

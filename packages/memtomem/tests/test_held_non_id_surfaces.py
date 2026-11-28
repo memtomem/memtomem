@@ -511,8 +511,9 @@ class TestStoredPathHoldChecks:
 
         assert await comp.storage.is_source_held(stored)
         assert await comp.storage.is_source_hidden(stored)
-        chunks = await DedupScanner(comp.storage)._get_all_chunks(100)
-        assert [c.id for c in chunks] == [visible.id]
+        pool = await DedupScanner(comp.storage)._select_pool(100)
+        assert [c.id for c in pool.chunks] == [visible.id]
+        assert pool.visible == 1
 
     @pytest.mark.skipif(sys.platform == "win32", reason="directory symlinks need privilege")
     async def test_raw_read_rechecks_the_file_a_retargeted_parent_reaches(

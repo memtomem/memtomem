@@ -675,9 +675,14 @@ async def test_held_source_hidden_from_consolidation_preview_and_apply(component
         )
 
 
-async def test_mem_export_warns_when_held_sources_are_omitted(components, memory_dir):
+async def test_mem_export_warns_when_held_sources_are_omitted(
+    components, memory_dir, tmp_path, monkeypatch
+):
     from memtomem.server.tools.export_import import mem_export
+    from tests.helpers import set_home
     from tests.test_tools_logic import _fake_ctx
+
+    set_home(monkeypatch, tmp_path / "home")
 
     path = memory_dir / "held-export.md"
     chunk = Chunk(
@@ -687,9 +692,9 @@ async def test_mem_export_warns_when_held_sources_are_omitted(components, memory
     )
     await components.storage.upsert_chunks([chunk])
     await components.storage.hold_source(path, "missing")
-    output = memory_dir / "backup.json"
+    output = tmp_path / "home" / ".memtomem" / "exports" / "backup.json"
 
-    message = await mem_export(str(output), ctx=_fake_ctx(components))
+    message = await mem_export("backup.json", ctx=_fake_ctx(components))
     assert "1 held or pending source(s) omitted" in message
     assert '"omitted_held_sources": 1' in output.read_text(encoding="utf-8")
 

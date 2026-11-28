@@ -124,10 +124,58 @@ class TestExtractEntitiesLlm:
         assert len(entities) == 1
 
     @pytest.mark.anyio
-    async def test_empty_llm_response(self):
+    async def test_none_answer_is_no_entities(self):
         llm = FakeLLM(response="NONE")
         entities = await extract_entities_llm("text", llm)
         assert entities == []
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("answer", ["", "  \n", "```\n```"])
+    async def test_empty_answer_raises(self, answer):
+        # A thinking model that spends its token budget before answering
+        # returns an empty string (#3382). The prompt's answer for "no
+        # entities" is NONE, so an empty string is no answer.
+        llm = FakeLLM(response=answer)
+        with pytest.raises(LLMError, match="empty answer"):
+            await extract_entities_llm("text", llm)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            "I cannot extract entities from this text",
+            "NONE\norganization|Acme|0.9",
+            "NONE\nperson|",
+            "location|Paris|0.8",
+            "person Alice 0.9",
+        ],
+    )
+    async def test_answer_with_no_valid_line_raises(self, answer):
+        # Not NONE and not one usable TYPE|VALUE line: the model did not answer
+        # the prompt, and an empty result here would clear a chunk's rows under
+        # ``overwrite`` (#3383).
+        llm = FakeLLM(response=answer)
+        with pytest.raises(LLMError, match="no usable answer"):
+            await extract_entities_llm("text", llm)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("answer", ["NONE", "none", "```\nNONE\n```", "  NONE  \n"])
+    async def test_none_in_any_wrapping_is_no_entities(self, answer):
+        llm = FakeLLM(response=answer)
+        assert await extract_entities_llm("text", llm) == []
+
+    @pytest.mark.anyio
+    async def test_none_beside_a_valid_line_keeps_the_line(self):
+        llm = FakeLLM(response="NONE\nperson|Alice|0.9")
+        entities = await extract_entities_llm("text", llm)
+        assert [(e.entity_type, e.entity_value) for e in entities] == [("person", "Alice")]
+
+    @pytest.mark.anyio
+    async def test_valid_answer_filtered_to_nothing_is_an_answer(self):
+        # Validity is judged before the ``entity_types`` filter: the model
+        # answered, the caller just asked for other types.
+        llm = FakeLLM(response="technology|Python|0.9")
+        assert await extract_entities_llm("text", llm, entity_types=["person"]) == []
 
     @pytest.mark.anyio
     async def test_type_hint_in_prompt(self):
@@ -145,21 +193,53 @@ class TestExtractEntitiesWithLlm:
     @pytest.mark.anyio
     async def test_uses_llm_when_available(self):
         llm = FakeLLM(response="person|Alice|0.95")
-        entities = await extract_entities_with_llm("Alice joined", llm_provider=llm)
-        assert len(entities) == 1
-        assert entities[0].entity_value == "Alice"
+        result = await extract_entities_with_llm("Alice joined", llm_provider=llm)
+        assert len(result.entities) == 1
+        assert result.entities[0].entity_value == "Alice"
+        assert result.llm_failed is False
 
     @pytest.mark.anyio
     async def test_falls_back_no_llm(self):
+        # No provider: regex is the configured extractor, not a fallback.
         text = "Decision: use Python for the backend"
-        entities = await extract_entities_with_llm(text, llm_provider=None)
-        # Should get heuristic results
-        expected = extract_entities(text)
-        assert entities == expected
+        result = await extract_entities_with_llm(text, llm_provider=None)
+        assert result.entities == extract_entities(text)
+        assert result.llm_failed is False
 
     @pytest.mark.anyio
     async def test_falls_back_on_error(self):
         text = "Decision: use Python for the backend"
-        entities = await extract_entities_with_llm(text, llm_provider=FailingLLM())
+        result = await extract_entities_with_llm(text, llm_provider=FailingLLM())
+        assert result.entities == extract_entities(text)
+        assert result.llm_failed is True
+
+    @pytest.mark.anyio
+    async def test_falls_back_on_empty_answer(self):
+        text = "Decision: use Python for the backend"
         expected = extract_entities(text)
-        assert entities == expected
+        assert expected  # an empty heuristic result would not show the fallback ran
+        llm = FakeLLM(response="")
+        result = await extract_entities_with_llm(text, llm_provider=llm)
+        assert len(llm.calls) == 1
+        assert result.entities == expected
+        assert result.llm_failed is True
+
+    @pytest.mark.anyio
+    async def test_falls_back_on_unparseable_answer(self):
+        text = "Decision: use Python for the backend"
+        llm = FakeLLM(response="I cannot extract entities from this text")
+        result = await extract_entities_with_llm(text, llm_provider=llm)
+        assert result.entities == extract_entities(text)
+        assert result.llm_failed is True
+
+    @pytest.mark.anyio
+    async def test_none_answer_does_not_fall_back(self):
+        # Passes before and after #3382 and #3383: the failed-answer rules stop
+        # short of NONE, which is the model's answer for "no entities" and must
+        # not be overruled by the heuristic.
+        text = "Decision: use Python for the backend"
+        assert extract_entities(text)
+        llm = FakeLLM(response="NONE")
+        result = await extract_entities_with_llm(text, llm_provider=llm)
+        assert result.entities == []
+        assert result.llm_failed is False

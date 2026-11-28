@@ -239,19 +239,128 @@ def format_entry_block(
     bare timestamp — see ``_default_heading`` for why two entries must never
     share one.
     """
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return _render_entry_block(
+        content,
+        title,
+        tags,
+        created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        untitled_heading=lambda: _default_heading(
+            datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        ),
+    )
+
+
+def _render_entry_block(
+    content: str,
+    title: str | None,
+    tags: list[str] | None,
+    *,
+    created: str,
+    untitled_heading: Callable[[], str],
+) -> str:
+    """The block for one entry, with the generated parts supplied by the caller."""
     tag_line = f"\n> tags: {json.dumps(list(tags), ensure_ascii=False)}" if tags else ""
 
     # Skip heading if content already starts with one (e.g., from a template)
     stripped = content.strip()
     if stripped.startswith("## "):
-        return f"\n> created: {now}{tag_line}\n\n{stripped}\n"
-    heading = (
-        f"## {title}"
-        if title
-        else _default_heading(datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
+        return f"\n> created: {created}{tag_line}\n\n{stripped}\n"
+    heading = f"## {title}" if title else untitled_heading()
+    return f"\n{heading}\n\n> created: {created}{tag_line}\n\n{stripped}\n"
+
+
+#: Separates the parts :func:`entry_guard_text` joins. Not whitespace and not a
+#: character any credential pattern accepts, so no match spans two parts that
+#: are not next to each other in the file.
+_GUARD_PART_SEPARATOR = "\n\x00\n"
+
+
+def entry_guard_text(
+    content: str,
+    title: str | None = None,
+    tags: list[str] | None = None,
+) -> str:
+    """The text the write guard scans for an entry ``append_entry`` will write.
+
+    The guard must see what lands in the file, not the body alone: the title
+    becomes the heading and the tags a ``> tags:`` line. So this is the block
+    :func:`format_entry_block` writes for the same arguments, which carries
+    the title exactly when the file does (content that already starts with
+    ``## `` keeps its own heading) and the tags in their written, JSON-escaped
+    form. The generated parts, the creation time and an untitled entry's
+    heading, are fixed, so the text is the same on every call and holds only
+    caller text and fixed markup. Each raw tag follows the block as well: the
+    JSON form adds a level of escaping, and the guard resolves only so many.
+
+    Callers pass the same ``content``, ``title`` and ``tags`` they pass to
+    :func:`append_entry`.
+    """
+    block = _fixed_entry_block(content, title, tags)
+    return _GUARD_PART_SEPARATOR.join([block, *(tags or [])])
+
+
+def _fixed_entry_block(content: str, title: str | None, tags: list[str] | None) -> str:
+    """The block :func:`format_entry_block` writes, with its generated parts held fixed."""
+    return _render_entry_block(
+        content,
+        title,
+        tags,
+        created="1970-01-01T00:00:00+00:00",
+        untitled_heading=lambda: "## Entry",
     )
-    return f"\n{heading}\n\n> created: {now}{tag_line}\n\n{stripped}\n"
+
+
+def entry_open_fence(
+    content: str,
+    title: str | None = None,
+    tags: list[str] | None = None,
+) -> str | None:
+    """The run of the code fence the entry ``append_entry`` writes leaves open, or ``None``.
+
+    The Markdown chunker reads a fence that never closes as running to the end
+    of the file (#3618), so every entry appended after this one would be
+    indexed as code inside it: no chunk, heading or tags of its own. Every
+    entry writer refuses such an entry before its privacy guard and before the
+    entry is appended (:func:`open_fence_refusal` is the shared text). What a
+    writer records ahead of that point stays recorded, as it does when the
+    guard refuses: a Gate B consent line, and for the MCP tools that write
+    through ``_mem_add_core``, what they did before calling it (a candidate
+    claim, released on the refusal; a consolidation run row).
+
+    The entry is read as the chunker will read it once written: the block
+    :func:`entry_guard_text` renders (title and heading as written, a
+    multi-line title included), in the indexer's text view (universal
+    newlines, so a lone ``\\r`` is a line break), with wikilinks resolved, as
+    ``MarkdownChunker.chunk_file`` resolves them before it looks for fences.
+
+    Every destination is judged, whatever its name: the path a writer is given
+    is not the path it resolves to, and a file that holds one entry today can
+    be appended to tomorrow. Refusing an entry whose fences are open in a file
+    no fence reader sees costs a retry; letting one through costs the index of
+    every later entry.
+
+    Callers pass the same ``content``, ``title`` and ``tags`` they pass to
+    :func:`append_entry`, and call this before their privacy guard.
+    """
+    from memtomem.chunking.markdown import resolve_wikilinks, unclosed_fence
+    from memtomem.indexing.redaction_exemption import indexer_text
+
+    block = _fixed_entry_block(content, title, tags)
+    view = indexer_text(block.encode("utf-8", errors="replace"), errors="replace")
+    return unclosed_fence(resolve_wikilinks(view))
+
+
+def open_fence_refusal(run: str) -> str:
+    """The refusal every entry writer gives for :func:`entry_open_fence`.
+
+    It names only the fence run, never caller text: it is shown before the
+    privacy guard has read the entry.
+    """
+    return (
+        f"The entry leaves a {run} code fence open, so every entry written to the file "
+        "after it would be indexed inside that fence. Close the fence and retry; "
+        "the entry was not appended."
+    )
 
 
 def append_blocks(file_path: Path, blocks: Sequence[str], *, judged: JudgedSource) -> Appended:
@@ -840,6 +949,75 @@ class EditBaseMismatchError(StaleSourceProvenanceError):
         self.body_hash = body_hash
 
 
+class OpenFenceEditError(StaleSourceProvenanceError):
+    """The edit would open a code fence over the text after it; nothing was written.
+
+    Raised from inside the rewrite, as :class:`EditBaseMismatchError` is: after
+    every gate in front of it (a Gate B consent line and the privacy guard's
+    audit stay recorded) and before a byte is written. Carries only the fence
+    run, never caller text (#3633).
+    """
+
+    def __init__(self, run: str) -> None:
+        super().__init__("open_fence")
+        self.run = run
+
+
+def open_fence_edit_refusal(run: str) -> str:
+    """The refusal both edit surfaces give for :class:`OpenFenceEditError`."""
+    return (
+        f"The edit leaves a {run} code fence open over the text after it, so the entries "
+        "there would be indexed inside the fence (or the next entry appended to the file "
+        "would be). Close the fence and retry; nothing was written."
+    )
+
+
+def _require_lf_line_breaks(text: str) -> None:
+    """Refuse a source whose ``splitlines()`` rows are not its LF rows.
+
+    The rewrites splice ``splitlines()`` rows, the chunker counts LF rows, and
+    the indexer gives such a snapshot no span hash for that reason
+    (``IndexEngine.chunk_content``). A separator written outside the span
+    after indexing leaves the span's hash valid, so the rewrite asks again:
+    it would turn the separator into a line break and misplace the fence
+    judgement of :func:`_edit_open_fence`.
+    """
+    lf_lines = text.split("\n")
+    if text.endswith("\n"):
+        lf_lines.pop()
+    if text.splitlines() != lf_lines:
+        raise StaleSourceProvenanceError(
+            "Source holds line breaks other than LF; it can no longer be edited by line"
+        )
+
+
+def _edit_open_fence(file_path: Path, before: str, after: str, tail_lines: int) -> None:
+    """Raise :class:`OpenFenceEditError` when the edit fences the text after it.
+
+    Only a file the Markdown chunker reads is judged: the registry picks the
+    chunker by ``file_path.suffix``, and the edit surfaces re-index the path
+    they rewrite. Both texts are taken in the view ``entry_open_fence`` uses,
+    the indexer's newlines with wikilinks resolved.
+    """
+    from memtomem.chunking.markdown import (
+        MARKDOWN_EXTENSIONS,
+        fences_after_edit,
+        resolve_wikilinks,
+    )
+    from memtomem.indexing.redaction_exemption import indexer_text
+
+    if file_path.suffix not in MARKDOWN_EXTENSIONS:
+        return
+
+    def view(text: str) -> str:
+        data = text.encode("utf-8", errors="replace")
+        return resolve_wikilinks(indexer_text(data, errors="replace"))
+
+    run = fences_after_edit(view(before), view(after), tail_lines)
+    if run is not None:
+        raise OpenFenceEditError(run)
+
+
 def _source_region_end(span: list[str]) -> int:
     """Index after the span's last non-blank line: its trailing blanks stay put."""
     end = len(span)
@@ -970,6 +1148,7 @@ def replace_chunk_body(
         trailing_newline = text.endswith("\n")
         lines = text.splitlines()
         _validate_source_span(lines, start_line, end_line, expected_source_span_hash)
+        _require_lf_line_breaks(text)
         span = lines[start_line - 1 : end_line]
         source = chunk_source_text(lines, start_line, end_line)
         source_hash = source_text_hash(source)
@@ -988,6 +1167,7 @@ def replace_chunk_body(
         result = "\n".join(new_lines)
         if trailing_newline:
             result += "\n"
+        _edit_open_fence(file_path, text, result, len(lines) - end_line)
         return result
 
     return _rewrite_in_place(file_path, expected_identity, edit)
@@ -1035,12 +1215,14 @@ def replace_lines(
         trailing_newline = text.endswith("\n")
         lines = text.splitlines()
         _validate_source_span(lines, start_line, end_line, expected_source_span_hash)
+        _require_lf_line_breaks(text)
         before = lines[: start_line - 1]
         after = lines[end_line:]
         new_lines = before + new_content.splitlines() + after
         result = "\n".join(new_lines)
         if trailing_newline:
             result += "\n"
+        _edit_open_fence(file_path, text, result, len(after))
         return result
 
     return _rewrite_in_place(file_path, expected_identity, edit)

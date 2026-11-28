@@ -241,6 +241,44 @@ class ProjectSharedConfirmationRequiredError(ValueError):
     """
 
 
+class RedactionBlockedError(ValueError):
+    """The write guard refused text a storage method was asked to persist.
+
+    Raised where the scan sits below every surface, so no single caller owns
+    the refusal: ``set_namespace_meta`` scans a namespace description for
+    every writer (web, MCP, CLI). Subclasses :class:`ValueError` for the same
+    reason :class:`FeedbackConflictError` does: the MCP ``tool_handler`` and
+    ``raise_cli_error`` already render it as a plain error, and the web app
+    maps this type to the 403 ``redaction_blocked`` payload the SPA parses.
+
+    ``hits`` is the pattern-match count and ``surface`` the surface the guard
+    counted the refusal under. ``label_only`` says every hit came from the
+    two unquoted label rules (``password:``, ``api_key=``), which also match
+    prose that names a credential without holding one; the message then says
+    what to reword. It does not say the text holds no credential: the same
+    rules match ``password=<a real one>``. The message carries the count and
+    fixed examples only, never the matched text.
+    """
+
+    #: Appended to the message when ``label_only``. Fixed text: the examples
+    #: come from the rules, not from the refused input.
+    LABEL_HINT = (
+        "Every match is a credential label before ':' or '=' (such as 'password:' "
+        "or 'api_key='); spaces before the ':' or '=' and a label inside a longer "
+        "word match too. Reword it, for example 'password rotation' instead of "
+        "'password: rotation'. A real credential does not belong in a description."
+    )
+
+    def __init__(self, what: str, *, hits: int, surface: str, label_only: bool = False) -> None:
+        self.hits = hits
+        self.surface = surface
+        self.label_only = label_only
+        message = f"{what} matches {hits} privacy pattern(s); not saved"
+        if label_only:
+            message = f"{message}. {self.LABEL_HINT}"
+        super().__init__(message)
+
+
 class RetryableError(Exception):
     """Error that can be resolved by retrying (e.g., network timeout, rate limit)."""
 
@@ -248,10 +286,12 @@ class RetryableError(Exception):
 class SearchDeadlineExceeded(RetryableError):
     """A search's ``deadline_ms`` processing budget ran out; it returns no results.
 
-    Raised only at safe points — a stage boundary, a wait for a read connection,
-    an embedding slice that had not started — never by cancelling work already
-    running. Every leg that degrades on ``Exception`` re-raises this first, so an
-    expiry never turns into a partial result.
+    Raised where the search detects that the budget has run out: at a stage
+    boundary, at a wait for a read connection, by an ONNX query embedding its
+    worker picks up past the budget, or when the budget-capped reranker timeout
+    fires. That timeout cancels the rerank coroutine; a local inference already
+    running continues on its worker. A SQLite read or embedding slice already
+    running is not interrupted.
     """
 
 

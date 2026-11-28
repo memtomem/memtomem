@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import AsyncIterator, Protocol, Sequence
 from uuid import UUID
 
-from memtomem.models import Chunk, ChunkLink, NamespaceFilter, ScopeFilter, SearchResult
+from memtomem.models import (
+    Chunk,
+    ChunkLink,
+    ChunkTopology,
+    NamespaceFilter,
+    ScopeFilter,
+    SearchResult,
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +92,21 @@ class ChunkKeyRow:
     start_line: int
     scope: str = "user"
     project_root: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VisiblePool:
+    """One bounded read of the visible chunks in ascending id order.
+
+    Returned by :meth:`StorageBackend.list_visible_chunks_by_id`. The three
+    fields describe one snapshot.
+    """
+
+    chunks: list[Chunk]
+    visible: int  # visible chunks in the store
+    # Visible chunks with an id above the cursor the read was given: all of
+    # them without a cursor. Never fewer than ``len(chunks)``.
+    above_cursor: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +347,13 @@ class StorageBackend(Protocol):
     ) -> dict[str, list[ChunkKeyRow]]: ...
     async def get_stats(self) -> dict[str, int]: ...
     async def get_all_source_files(self) -> set[Path]: ...
+    # The first ``limit`` chunks in ascending id order with an id above
+    # ``after`` (the stored id text; from the start without one), and the
+    # counts they were taken from, all under the path-level hold rule and from
+    # one snapshot.
+    async def list_visible_chunks_by_id(
+        self, limit: int, after: str | None = None
+    ) -> VisiblePool: ...
     async def get_orphan_candidate_source_files(self) -> set[Path]: ...
     async def search_source_files_by_content(
         self, query: str, limit: int = 10000
@@ -483,7 +512,9 @@ class StorageBackend(Protocol):
     async def rename_tag(self, old_tag: str, new_tag: str) -> int: ...
     async def delete_tag(self, tag: str) -> int: ...
     async def merge_tags(self, sources: Sequence[str], target: str) -> int: ...
-    async def set_chunk_tags(self, chunk_id: UUID, tags: Sequence[str]) -> bool: ...
+    async def set_chunk_tags(
+        self, chunk_id: UUID, tags: Sequence[str], *, only_if_untagged: bool = False
+    ) -> bool: ...
     async def replace_chunk_tags(
         self,
         chunk_id: UUID,
@@ -518,6 +549,11 @@ class StorageBackend(Protocol):
     ) -> list[tuple[UUID, UUID, str]]: ...
     async def insert_relations(self, edges: Sequence[tuple[UUID, UUID, str]]) -> int: ...
     async def delete_relation(self, source_id: UUID, target_id: UUID) -> bool: ...
+    # The current row and topology of each id a duplicate scan would list now,
+    # in one statement. A hidden path's chunks are absent, as a missing id is.
+    async def get_chunks_with_topology(
+        self, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, tuple[Chunk, ChunkTopology]]: ...
 
     # Share lineage (chunk_links)
     async def add_chunk_link(
@@ -704,7 +740,12 @@ class StorageBackend(Protocol):
     # Namespace metadata
     async def get_namespace_meta(self, namespace: str) -> dict | None: ...
     async def set_namespace_meta(
-        self, namespace: str, description: str | None = None, color: str | None = None
+        self,
+        namespace: str,
+        description: str | None = None,
+        color: str | None = None,
+        *,
+        surface: str = "storage",
     ) -> None: ...
     async def list_namespace_meta(self) -> list[dict]: ...
     async def assign_namespace(

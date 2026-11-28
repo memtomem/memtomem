@@ -33,6 +33,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from _subprocess_env import subprocess_env
+
 from memtomem.cli import cli
 from memtomem.context.generator import GENERATORS
 
@@ -500,7 +502,7 @@ class TestContextInitGenerateSubprocess:
         project.mkdir()
         _seed_project(project)
 
-        env = os.environ.copy()
+        env = subprocess_env()
         # Strip developer ``MEMTOMEM_*`` overrides — ``HOME`` only
         # isolates ``~/.memtomem/config.json`` reads, but
         # pydantic-settings still applies env-var overrides from the
@@ -579,7 +581,7 @@ class TestContextInitGenerateSubprocess:
                 f"---\nname: foo\ndescription: t\n---\n{marker}\n", encoding="utf-8"
             )
 
-        env = os.environ.copy()
+        env = subprocess_env()
         for var in _MEMTOMEM_ENV_VARS:
             env.pop(var, None)
         env["HOME"] = str(home)

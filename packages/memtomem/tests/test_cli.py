@@ -2221,6 +2221,43 @@ class TestHelpEpilog:
         assert "mm index ./notes --recursive" in lines
         assert "mm index ./notes --force --namespace shared" in lines
 
+    def test_config_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["config", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert "mm config show --json" in lines
+        assert "mm config set search.default_top_k 20" in lines
+        assert "mm config unset search.default_top_k" in lines
+
+    def test_session_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["session", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert 'mm session start --agent-id planner --title "Release prep"' in lines
+        assert "mm session end --auto" in lines
+        assert "mm session list --since 2026-10-01 --limit 10" in lines
+
+    def test_pinned_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["pinned", "--help"])
+        assert result.exit_code == 0
+        lines = [line.strip() for line in result.output.splitlines()]
+        assert "Examples:" in lines
+        assert 'mm pinned set style --content "Prefer uv over pip."' in lines
+        assert "mm pinned set review-rules --file review.md --priority 10" in lines
+        assert 'mm pinned set release --content "Freeze on Fridays." -a planner' in lines
+        assert "mm pinned list -a planner" in lines
+        assert 'mm pinned compose "release checklist" -a planner --top-k 5' in lines
+
+        # Click may wrap the prose note, so compare it with whitespace joined.
+        flattened = " ".join(result.output.split())
+        assert (
+            "set takes exactly one of --content or --file. -a NAME stores a block for one "
+            "agent; list and compose with -a draw on that agent's blocks and the general "
+            "ones, and on a shared id the agent's block wins."
+        ) in flattened
+
     def test_tags_help_shows_examples(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["tags", "--help"])
         assert result.exit_code == 0
@@ -2245,7 +2282,7 @@ class TestHelpEpilog:
         left for the terminal to soft-wrap, which breaks it mid-flag on screen.
         Nothing else in the help output can regress this, so pin it here.
         """
-        for command in ("search", "add", "recall", "index", "tags"):
+        for command in ("search", "add", "recall", "index", "config", "session", "pinned", "tags"):
             result = runner.invoke(cli, [command, "--help"])
             assert result.exit_code == 0
             examples = [

@@ -23,6 +23,7 @@ These guards protect invariants that code cannot enforce directly:
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
@@ -656,8 +657,15 @@ class TestOptionalClaudeAutomationDocs:
             for rule in rules:
                 for handler in rule["hooks"]:
                     assert handler["command"] == "uv"
-                    assert handler["args"][:3] == ["run", "--no-project", "python"]
-                    assert handler["args"][-1] == event
+                    # The whole list: the dispatcher takes exactly one argument, so anything
+                    # between the script and the event makes it exit without doing anything.
+                    assert handler["args"] == [
+                        "run",
+                        "--no-project",
+                        "python",
+                        "${CLAUDE_PLUGIN_ROOT}/bin/hook_dispatch.py",
+                        event,
+                    ]
                     assert 0 < handler["timeout"] <= 120
 
 
@@ -669,7 +677,7 @@ class TestPluginManualCoexistenceCallout:
     (measured on 2.1.218: env vars are not compared; suppression logs
     ``Suppressing plugin MCP server ... duplicates manually-configured``).
     The manual registrations our own guides teach (bare ``memtomem-server``,
-    ``uvx --isolated --from "memtomem[all]==<ver>"``) use a *different*
+    ``uvx --python 3.12 --isolated --from "memtomem[all]==<ver>"``) use a *different*
     command, so plugin-on-top-of-manual runs two servers against one store.
     An unconditional "nothing runs twice" promise was wrong for exactly the
     users who followed our docs — keep both cases and the migration
@@ -727,7 +735,10 @@ class TestPluginManualCoexistenceCallout:
             # ``test_plugin_readme_fresh_env_blocks_have_no_bare_mm`` holds.
             # Compared whole rather than by substring, because the pinned line
             # itself ends in "mm doctor --claude-mcp".
-            assert f'uvx --from "memtomem[all]=={version}" mm doctor --claude-mcp' in fenced
+            assert (
+                f'uvx --python 3.12 --from "memtomem[all]=={version}" mm doctor --claude-mcp'
+                in fenced
+            )
             assert "mm doctor --claude-mcp" not in fenced
             # The shorthand still has to be mentioned, in prose, for readers
             # who do have the CLI.
@@ -754,8 +765,36 @@ class TestPluginManualCoexistenceCallout:
         # Collapse prose wrapping so the phrase pins don't depend on line breaks.
         flat = " ".join(mcp_clients.split())
         assert "differ from the plugin's pinned launch command" in flat
-        assert "runs **two** servers against the same store" in flat
+        assert "can run **two** servers against the same store" in flat
+        assert "`/mcp` shows which are connected" in flat
         assert "integrations/claude-code.md" in flat
+
+    def test_displayed_plugin_launch_is_the_one_the_plugin_ships(self) -> None:
+        # Both guides show the plugin's launch so a reader can compare a manual entry
+        # with it; a command the plugin no longer runs makes that comparison wrong.
+        manifest = json.loads(_read(_REPO_ROOT / "packages/memtomem-claude-plugin/.mcp.json"))
+        server = manifest["mcpServers"]["memtomem"]
+        words = [f"'{arg}'" if "[" in arg else arg for arg in server["args"]]
+        launch = f"`{server['command']} {' '.join(words)}`"
+        for path in (_GUIDES / "mcp-clients.md", _INTEGRATIONS / "claude-code.md"):
+            flat = " ".join(_read(path).split())
+            assert launch in flat, f"{path.name} does not show the shipped launch {launch}"
+
+    def test_preinstall_diagnostic_is_a_prediction_to_repeat_after_installing(self) -> None:
+        # Before installation the check knows only the launch its own release bundles;
+        # the marketplace plugin can be newer (#3488), so every surface that offers the
+        # check says to run it again once the plugin is installed.
+        workflows = _REPO_ROOT / "packages" / "memtomem-plugin-assets" / "workflows"
+        for path, phrase in (
+            (_PLUGIN_QUICKSTART, "Run the diagnostic again after installing"),
+            (_VIBE_GUIDE, "설치 후에 진단을 한 번 더 실행하세요"),
+            (_PLUGIN_README, "repeat the check after installing"),
+            (_INTEGRATIONS / "claude-code.md", "repeat the diagnostic after installing"),
+            (workflows / "setup.claude.md", "repeat the diagnostic after installation"),
+            (workflows / "status.claude.md", "repeat the diagnostic after installation"),
+        ):
+            flat = " ".join(_read(path).split())
+            assert phrase in flat, f"{path.relative_to(_REPO_ROOT)} lost the post-install repeat"
 
 
 class TestNoJsoncFenceInPublicGuides:
@@ -1256,6 +1295,90 @@ class TestPublicReadmeAndExamples:
                 offenders.append(target)
         assert not offenders, f"PyPI README has relative Markdown links: {offenders}"
 
+    @staticmethod
+    def _install_section(text: str) -> str:
+        # Parsed, not matched: a `## ` shell comment inside a fence is not a heading.
+        return _heading_section(text, "## Install")
+
+    @staticmethod
+    def _h2_headings(text: str) -> list[str]:
+        """The text of each level-2 heading, as markdown-it parses them."""
+        from markdown_it import MarkdownIt
+
+        lines = text.splitlines()
+        return [
+            lines[token.map[0]].rstrip().removeprefix("## ")
+            for token in MarkdownIt("commonmark").parse(text)
+            if token.type == "heading_open" and token.tag == "h2" and token.map
+        ]
+
+    @staticmethod
+    def _bash_lines(text: str, pattern: str) -> list[str]:
+        """Every fenced Bash line matching ``pattern``, in order, duplicates kept."""
+        wanted = re.compile(pattern)
+        return [
+            line.strip()
+            for block in _fenced_blocks(text, "bash")
+            for line in block.splitlines()
+            if wanted.search(line.strip())
+        ]
+
+    _PLUGIN_INSTALL = (
+        r"^(claude plugin (marketplace add|install)|codex plugin (marketplace add|add)) "
+    )
+
+    @pytest.mark.parametrize("readme", [_README, _PYPI_README])
+    def test_install_section_plugin_commands_match_the_quickstart(self, readme: Path) -> None:
+        # The quickstart installs Claude Code at project scope; the README's first screen
+        # installs at the CLI's default scope and links there for one project only.
+        readme_lines = self._bash_lines(self._install_section(_read(readme)), self._PLUGIN_INSTALL)
+        guide = _read(_GUIDES / "plugin-quickstart.md")
+        guide_lines: list[str] = []
+        for line in self._bash_lines(guide, self._PLUGIN_INSTALL):
+            line = line.replace(" --scope project", "")
+            if line not in guide_lines:
+                guide_lines.append(line)
+        assert len(guide_lines) == 4, guide_lines
+        assert readme_lines == guide_lines
+
+    @pytest.mark.parametrize("readme", [_README, _PYPI_README])
+    def test_install_section_leaves_store_setup_to_the_plugin_quickstart(
+        self, readme: Path
+    ) -> None:
+        # Whether a reader already has a store (config.json, config.d fragments, env) is the
+        # quickstart's call; the first screen links its store step instead of running init.
+        section = self._install_section(_read(readme))
+        # Any user-store init, in a fence of any language or inline, bare or through uvx;
+        # `mm mem init` registers a tier instead.
+        assert re.findall(r".*\bmm\s+init\b.*", section) == []
+        guide = _read(_GUIDES / "plugin-quickstart.md")
+        store_steps = [
+            heading
+            for heading in self._h2_headings(guide)
+            if " mm init " in _heading_section(guide, f"## {heading}")
+        ]
+        assert len(store_steps) == 1, store_steps
+        anchors = re.findall(r"plugin-quickstart\.md#([\w-]+)\)", section)
+        assert _slug(store_steps[0]) in anchors, (store_steps, anchors)
+        # When to run each host's coexistence check differs (Codex reports a duplicate only
+        # once the plugin is installed), so the section links the guide's section for it,
+        # ahead of both hosts' plugin commands, instead of naming the checks itself.
+        assert "mm doctor" not in section
+        coexistence = "## Keep manual MCP and plugin skills"
+        assert coexistence in _read(_GUIDES / "mcp-clients.md").splitlines()
+        link = f"mcp-clients.md#{_slug(coexistence.removeprefix('## '))})"
+        assert section.count(link) == 1, link
+        for host_command in ("claude plugin marketplace add", "codex plugin marketplace add"):
+            assert section.index(link) < section.index(host_command), host_command
+        # The brief stops until the project tier exists, so the fenced tier command comes
+        # before each host's brief.
+        bash = self._bash_lines(section, r".")
+        assert bash.count("mm mem init --scope project_local") == 1, bash
+        tier = section.index("```bash\nmm mem init --scope project_local\n```")
+        for brief in ("`/memtomem:brief`", "`$memtomem-brief`"):
+            assert brief in section, brief
+            assert tier < section.index(brief), brief
+
     def test_normal_mcp_examples_do_not_override_saved_memory_dirs(self) -> None:
         mcp_clients = _read(_GUIDES / "mcp-clients.md")
         ordinary, marker, overrides = mcp_clients.partition("## 11. Environment Variable Overrides")
@@ -1450,10 +1573,11 @@ class TestPluginQuickstarts:
     def test_fresh_store_bootstrap_is_shared_and_precedes_client_branches(self) -> None:
         version = _plugin_contract()["core"]["version"]
         bootstrap = (
-            f"uvx --from 'memtomem[onnx]=={version}' mm init "
+            f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm init "
             "--preset minimal --non-interactive --mcp skip"
         )
-        status = f"uvx --from 'memtomem[onnx]=={version}' mm status"
+        status = f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm status"
+        project_store = f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm mem init --scope project_local"
 
         guides = tuple(locale.path for locale in _QUICKSTARTS)
         for path in (*guides, _PLUGIN_README, _CODEX_PLUGIN_README):
@@ -1461,6 +1585,11 @@ class TestPluginQuickstarts:
             name = path.relative_to(_REPO_ROOT)
             assert text.count(bootstrap) == 1, f"{name} must keep exactly one shared bootstrap"
             assert status in text, f"{name} lost the bootstrap status check"
+            assert project_store in text, f"{name} lost the project store command"
+            # uv resolves a requirement that names an extra against the first Python it
+            # finds and stops when that one is older than 3.12 (#3488), so no command
+            # in these four files runs uvx without the interpreter request.
+            assert "uvx --from" not in text, f"{name} runs uvx without `--python 3.12`"
             # Every documented `mm init` (as opposed to `mm mem init`) must carry
             # `--mcp skip` — the plugin supplies the MCP server, so a bootstrap
             # variant without it would register a second server.
@@ -1641,8 +1770,35 @@ _PRIOR_RELEASE_MENTIONS: tuple[tuple[str, str | None, str], ...] = (
     ),
     (
         "packages/langchain-memtomem/README.md",
-        "`memtomem>=0.7.4,<0.8`",
-        "langchain-memtomem's floor: first release with the ADR-0042 public names",
+        "`memtomem>=0.7.9,<0.8`",
+        "langchain-memtomem's floor: first release whose create_components takes its options",
+    ),
+    # The langchain package's own release log, on the same floor.
+    *(
+        ("packages/langchain-memtomem/CHANGELOG.md", fragment, reason)
+        for fragment, reason in (
+            ("`memtomem>=0.7.9,<0.8`", "the floor its next release declares"),
+            ("memtomem 0.7.9 adds; against", "first release with the create_components options"),
+            (
+                "would be. memtomem 0.7.9",
+                "release that narrowed the BM25 path fallback (#3208)",
+            ),
+            (
+                "memtomem 0.7.9, which adds the `create_components` keyword",
+                "first release with bm25_path_fallback",
+            ),
+            ("Needs memtomem 0.7.9 as well", "first release with chunk_source_labels"),
+        )
+    ),
+    (
+        "packages/memtomem-hermes-memory/README.md",
+        "memtomem 0.7.8 or newer",
+        "floor for Hermes mirroring: first release with hermes_mirror_apply",
+    ),
+    (
+        "packages/memtomem-hermes-plugin/README.md",
+        "0.7.8 and earlier also offered them",
+        "last release with the context write tools on MCP",
     ),
     # The update workflow's tool-absent stop, in its source and every rendered skill.
     *(
@@ -1718,7 +1874,7 @@ class TestRegistryAndInstallDocs:
             f"MCP table drifted; missing={sorted(current - documented)}, "
             f"extra={sorted(documented - current)}"
         )
-        assert len(current) == 93
+        assert len(current) == 95
         assert len(_CORE_TOOLS) == 9
         standard = set(_CORE_TOOLS) | {
             f"mem_{name}" for name, info in ACTIONS.items() if info.category in _STANDARD_PACKS
@@ -1976,6 +2132,329 @@ class TestRegistryAndInstallDocs:
         assert "<code>claude mcp add memtomem -- memtomem-server</code>" not in portal
         assert '"command": "memtomem-server"' not in portal
         assert 'command = "memtomem-server"' not in portal
+
+
+# A ``uvx`` example that names ``memtomem[<extra>]`` can stop before the server starts when uv
+# picks a Python older than 3.12, so each one asks for 3.12 the way the plugins' own launch
+# does. The scan reads code units -- every fence, indented block and inline code span
+# markdown-it-py finds, and the Web UI guide's ``<code>`` bodies -- rather than parsing argv,
+# so a respelt ``--from`` or a reordered option cannot slip past it. A unit has to carry one
+# ``--python 3.12`` per extra-naming requirement: a second launch pasted into a block that
+# already has one flag fails. A shell fence is read one line at a time (``\`` continuations
+# joined, comments dropped by ``shlex``), so a flag on one line, or in a comment, cannot cover
+# another line; commands chained on one line with ``&&``, ``;`` or ``|`` stay one unit.
+# Markdown's raw-HTML ``<code>`` and comments in non-shell fences are not handled: no tracked
+# doc has either around these launches. The count does not check where the flag sits either:
+# ``--python 3.12`` passed to the launched program (``memtomem-server --python 3.12``, or
+# inside a ``python -c`` string) counts as well. Telling uv's options from the program's would
+# mean parsing ``uvx`` argv, which this scan deliberately does not do.
+#
+# Not scanned here: the generated plugin launches, which ``tools/render_plugin_assets.py``
+# writes from ``contract.toml`` and its ``--check`` pins; ``mm init``'s own command
+# (``test_init_cmd.py``); and the server's printed example, compared whole in
+# ``test_server_cli.py``. ``CHANGELOG.md`` quotes earlier commands on purpose.
+_UVX = re.compile(r"(?<![\w-])uvx(?![\w-])")
+_EXTRA_REQUIREMENT = re.compile(r"memtomem\[[A-Za-z0-9_,\s-]+\]")
+# ``--python 3.12``, ``--python=3.12``, and a JSON/TOML array's ``"--python", "3.12"``. The
+# value has to end there: ``3.12-dev`` or ``3.12x`` is a different request.
+_PYTHON_312 = re.compile(r"--python(?:=|\s+|[\"']\s*,\s*[\"'])3\.12(?=[\"'\s,\]]|$)")
+_SHELL_FENCES = frozenset({"bash", "sh", "shell", "zsh", "console"})
+
+
+def _shell_words(command: str) -> str:
+    """*command* as shell words joined by spaces, comments dropped by ``shlex``.
+
+    ``shlex`` knows quoting, so a ``#`` inside a quoted argument stays; a command it cannot
+    split (an unbalanced quote) is kept as written."""
+    try:
+        return " ".join(shlex.split(command, comments=True))
+    except ValueError:
+        return command
+
+
+def _shell_commands(block: str, first_line: int) -> list[tuple[int, str]]:
+    """``(line, command)`` for each command in a shell block, continuations joined."""
+    commands: list[tuple[int, str]] = []
+    parts: list[str] = []
+    start = first_line
+    for offset, raw in enumerate(block.splitlines()):
+        if not parts:
+            start = first_line + offset
+        line = raw.rstrip()
+        if line.endswith("\\"):
+            parts.append(line[:-1])
+            continue
+        parts.append(line)
+        commands.append((start, _shell_words(" ".join(parts))))
+        parts = []
+    if parts:
+        commands.append((start, _shell_words(" ".join(parts))))
+    return commands
+
+
+def _markdown_code_units(text: str) -> list[tuple[int, str]]:
+    """``(line, text)`` of each code unit markdown-it-py finds in *text*, lines 1-based.
+
+    A block's line is its first content line; an inline span's is the first line of the
+    paragraph that holds it, since the parser keeps no line map for spans."""
+    from markdown_it import MarkdownIt
+
+    units: list[tuple[int, str]] = []
+    for token in MarkdownIt("commonmark").parse(text):
+        line = token.map[0] + 1 if token.map else 0
+        if token.type == "fence":
+            info = token.info.split()
+            if info and info[0].lower() in _SHELL_FENCES:
+                units.extend(_shell_commands(token.content, line + 1))
+            else:
+                units.append((line + 1, token.content))
+        elif token.type == "code_block":
+            units.append((line, token.content))
+        elif token.type == "inline":
+            units.extend(
+                (line, child.content)
+                for child in token.children or []
+                if child.type == "code_inline"
+            )
+    return units
+
+
+def _uvx_extra_launch_units() -> list[tuple[str, int, str]]:
+    """``(path, line, unit)`` for each code unit running ``uvx`` on ``memtomem[<extra>]``."""
+    # Named as well as enumerated: without Git metadata ``_tracked_markdown()`` falls back to
+    # the contractual docs, which leave the OpenCode package README out.
+    markdown = {*_tracked_markdown(), _REPO_ROOT / "packages" / "opencode-memtomem" / "README.md"}
+    sources: list[tuple[Path, list[tuple[int, str]]]] = [
+        (path, _markdown_code_units(_read(path)))
+        for path in sorted(markdown)
+        if path != _REPO_ROOT / "CHANGELOG.md"
+    ]
+    portal = _read(_PORTAL_JS)
+    sources.append(
+        (
+            _PORTAL_JS,
+            [
+                (portal.count("\n", 0, match.start()) + 1, match.group(1))
+                for match in _PORTAL_CODE.finditer(portal)
+            ],
+        )
+    )
+    return [
+        (path.relative_to(_REPO_ROOT).as_posix(), line, unit)
+        for path, units in sources
+        for line, unit in units
+        if _UVX.search(unit) and _EXTRA_REQUIREMENT.search(unit)
+    ]
+
+
+class TestUvxExtraLaunchesAskForPython312:
+    # The files whose examples #3493 changed. Each has to stay visible to the scan, or a
+    # broken unit extractor would pass by finding nothing.
+    _EXPECTED_FILES = frozenset(
+        {
+            "README.md",
+            "docs/guides/anyio-security-update.md",
+            "docs/guides/getting-started.md",
+            "docs/guides/integrations/claude-code.md",
+            "docs/guides/integrations/kimi-code.md",
+            "docs/guides/integrations/opencode.md",
+            "docs/guides/mcp-clients.md",
+            "packages/memtomem/src/memtomem/web/static/context-portal.js",
+            "packages/opencode-memtomem/README.md",
+        }
+    )
+
+    def test_every_extra_naming_uvx_example_asks_for_python_312(self) -> None:
+        offenders = [
+            f"{path}:{line}: {' '.join(unit.split())[:120]}"
+            for path, line, unit in _uvx_extra_launch_units()
+            if len(_PYTHON_312.findall(unit)) < len(_EXTRA_REQUIREMENT.findall(unit))
+        ]
+        assert not offenders, (
+            "uvx examples naming a memtomem extra without `--python 3.12` (#3493): such a "
+            "launch can stop before the server starts when uv picks a Python older than 3.12. "
+            'Put `--python 3.12` (array form `"--python", "3.12"`) right after `uvx`:\n  '
+            + "\n  ".join(offenders)
+        )
+
+    def test_the_scan_sees_every_file_it_guards(self) -> None:
+        seen = {path for path, _, _ in _uvx_extra_launch_units()}
+        assert self._EXPECTED_FILES <= seen, sorted(self._EXPECTED_FILES - seen)
+
+
+def _heading_section(text: str, heading: str) -> str:
+    """Body under the one heading line equal to *heading*, up to the next heading of the
+    same or a higher level. Headings come from markdown-it-py's parse, so a shell comment
+    (``# User scope``) inside any fence is not one."""
+    from markdown_it import MarkdownIt
+
+    lines = text.splitlines()
+    headings = [
+        (token.map[0], int(token.tag[1:]))
+        for token in MarkdownIt("commonmark").parse(text)
+        if token.type == "heading_open" and token.map
+    ]
+    starts = [(i, level) for i, level in headings if lines[i].rstrip() == heading]
+    assert len(starts) == 1, f"{len(starts)} headings equal to {heading!r}; expected exactly one"
+    start, level = starts[0]
+    end = next((i for i, other in headings if i > start and other <= level), len(lines))
+    return "\n".join(lines[start + 1 : end])
+
+
+_PY312_NEEDS = "a Python 3.12 that uv can find or download"
+_PY312_NEEDS_KO = "uv가 찾거나 내려받을 수 있는 Python 3.12"
+_PY312_INSTALL = "install a Python 3.12"
+_PY312_INSTALL_KO = "Python 3.12를 설치"
+_PY313_TOOL_INSTALL = "uv tool install --python 3.13"
+# 3.13 is an example: a machine that has only 3.14 needs its own version there.
+_PY313_REMEDY = (_PY313_TOOL_INSTALL, "with your version in place of `3.13`")
+_PY312_OFFLINE = "an offline uv cannot download"
+_PY312_OFFLINE_KO = "오프라인인 uv도 Python을 내려받을"
+
+
+class TestPython312CommandsSayWhatTheyNeed:
+    """Each guide that teaches a ``--python 3.12`` command says, in the section where the
+    reader first copies one, that uv has to find or download Python 3.12, and what to do when
+    it cannot (#3498): where uv may not download Python on its own, a machine with only a
+    newer Python stops with ``No interpreter found for Python 3.12``.
+
+    The table is the placement claim, read against the docs in review; the guard checks each
+    row's section exists, holds a ``uvx`` or ``uv tool install`` command passing
+    ``--python 3.12`` (the caveat's own mention of the flag does not count, so a row cannot
+    pass on a section whose commands are gone), and carries both the requirement and every
+    part of the remedy, links included."""
+
+    _ROWS = (
+        (
+            "README.md",
+            "### 1. Install",
+            (_PY312_NEEDS, _PY312_OFFLINE, _PY312_INSTALL, *_PY313_REMEDY),
+        ),
+        # The first screen's install points at the plugin quickstart's store step for the
+        # remedy, since installing the CLI with another Python leaves the plugin's server
+        # still asking for 3.12.
+        (
+            "README.md",
+            "## Install",
+            (_PY312_NEEDS, "(docs/guides/plugin-quickstart.md#2-shared-setup-"),
+        ),
+        (
+            "packages/memtomem/README.md",
+            "## Install",
+            (_PY312_NEEDS, "/docs/guides/plugin-quickstart.md#2-shared-setup-"),
+        ),
+        # The "No install" registration sits in the collapsed install options under § 5.
+        (
+            "README.md",
+            "### 5. Open the Web UI (optional)",
+            (_PY312_NEEDS, "(#1-install)", "(docs/guides/mcp-clients.md#1-claude-code)"),
+        ),
+        (
+            "docs/guides/getting-started.md",
+            "## Quickstart",
+            (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY),
+        ),
+        (
+            "docs/guides/getting-started.md",
+            "## Connect to your AI editor (manual)",
+            (_PY312_NEEDS, "(#prerequisites)"),
+        ),
+        (
+            "docs/guides/mcp-clients.md",
+            "### Add via command (`local` / `user`)",
+            (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY),
+        ),
+        (
+            "docs/guides/mcp-clients.md",
+            "## 8. OpenCode",
+            (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY, '"command": ["memtomem-server"]'),
+        ),
+        (
+            "docs/guides/integrations/claude-code.md",
+            "### Option A: Install the safe base plugin",
+            (_PY312_NEEDS, _PY312_INSTALL, "(#option-b-register-the-mcp-server-manually)"),
+        ),
+        (
+            "docs/guides/integrations/claude-code.md",
+            "#### Add via command (`local` / `user`)",
+            (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY),
+        ),
+        (
+            "docs/guides/integrations/kimi-code.md",
+            "## Register the MCP server",
+            (
+                _PY312_NEEDS,
+                _PY312_INSTALL,
+                *_PY313_REMEDY,
+                '`"command": "memtomem-server"` with no `args`',
+            ),
+        ),
+        (
+            "docs/guides/integrations/opencode.md",
+            "### Manual MCP alternative",
+            (_PY312_NEEDS, _PY312_INSTALL, *_PY313_REMEDY, '"command": ["memtomem-server"]'),
+        ),
+        # The plugin path's fallback points at the Getting Started Quickstart (install, store
+        # setup, and the other-version remedy) and the manual registration instead of
+        # restating their steps here.
+        (
+            "docs/guides/plugin-quickstart.md",
+            "## 2. Shared setup: initialize your user memory store once",
+            (
+                _PY312_NEEDS,
+                _PY312_OFFLINE,
+                _PY312_INSTALL,
+                "(getting-started.md#quickstart)",
+                "register `memtomem-server`",
+                "(mcp-clients.md)",
+            ),
+        ),
+        (
+            "docs/guides/vibe-coding-getting-started-ko.md",
+            "## 2. 공통 준비: 사용자 기억 저장소를 한 번 초기화",
+            (
+                _PY312_NEEDS_KO,
+                _PY312_OFFLINE_KO,
+                _PY312_INSTALL_KO,
+                "(getting-started.md#quickstart)",
+                "`memtomem-server`를 등록",
+                "(mcp-clients.md)",
+            ),
+        ),
+    )
+
+    @pytest.mark.parametrize(
+        ("path", "heading", "phrases"),
+        _ROWS,
+        ids=[f"{path}::{heading}" for path, heading, _ in _ROWS],
+    )
+    def test_section_states_requirement_and_remedy(
+        self, path: str, heading: str, phrases: tuple[str, ...]
+    ) -> None:
+        section = _heading_section(_read(_REPO_ROOT / path), heading)
+        assert any(
+            _PYTHON_312.search(unit) and (_UVX.search(unit) or "uv tool install" in unit)
+            for _, unit in _markdown_code_units(section)
+        ), f"{path} {heading!r} teaches no `--python 3.12` command; move the row"
+        prose = _unwrapped(section).casefold()  # a phrase may open a sentence
+        missing = [phrase for phrase in phrases if phrase.casefold() not in prose]
+        assert not missing, f"{path} {heading!r} lacks {missing}"
+
+    def test_getting_started_prerequisite_names_python_312(self) -> None:
+        section = _heading_section(_read(_GUIDES / "getting-started.md"), "## Prerequisites")
+        assert [_plain(cell) for cell in _table_row(section, "Python 3.12")] == [
+            "Python 3.12",
+            "[python.org](https://python.org), or let uv download it",
+            # ``--system``: without it uv also reports a project ``.venv``'s 3.12, which the
+            # ``uvx`` launch does not search.
+            "uv python find --system 3.12",
+        ]
+        assert _PY312_NEEDS in _unwrapped(section)
+        assert _PY312_OFFLINE in _unwrapped(section).casefold()
+        assert "change `3.12` in the install command to the Python you have" in (
+            _unwrapped(section)
+        )
+        assert _PY313_TOOL_INSTALL in _unwrapped(section)
 
 
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -2863,11 +3342,20 @@ def _stdio_help_registrations(expected: str) -> list[_Registration]:
     return _number("stdio-help", items)
 
 
+# Markdown outside the contractual docs that holds a manual registration. Named as well as
+# enumerated: without Git metadata ``_tracked_markdown()`` falls back to the contractual docs
+# and would skip these. A checkout test keeps the list complete.
+_REGISTRATION_README_FALLBACK = (
+    _REPO_ROOT / "packages" / "memtomem-antigravity-plugin" / "README.md",
+    _REPO_ROOT / "packages" / "opencode-memtomem" / "README.md",
+)
+
+
 def _all_registrations() -> list[_Registration]:
     expected = _expected_extra_tools()
     docs = [
         p
-        for p in _tracked_markdown()
+        for p in sorted({*_tracked_markdown(), *_REGISTRATION_README_FALLBACK})
         if p.name != "CHANGELOG.md" and "docs/adr/" not in p.as_posix()
     ]
     found: list[_Registration] = []
@@ -2970,6 +3458,40 @@ class TestManualRegistrationsExposeTheUpdateTool:
         assert [(r.kind, r.valid) for r in registrations if r.source == "stdio-help"] == [
             ("cli", True)
         ]
+
+    def test_the_export_fallback_finds_every_tracked_registration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tree without Git metadata scans every registration a checkout scans (#3499).
+
+        Without a repository ``_tracked_markdown()`` falls back to the contractual docs, so a
+        registration outside them and outside ``_REGISTRATION_README_FALLBACK`` goes unchecked in
+        a source export, where it can also bring a count in the test above below its floor. The
+        fallback may find more (a local untracked guide), never less.
+        """
+        if _tracked_files("*.md") is None:
+            pytest.skip("no Git metadata: there is no tracked list to compare the fallback with")
+
+        def key(r: _Registration) -> tuple[str, str, str, int, bool | None]:
+            return (r.source, r.section, r.kind, r.ordinal, r.valid)
+
+        tracked = {key(r) for r in _all_registrations()}
+        calls: list[tuple[str, ...]] = []
+
+        def no_repository(*pathspecs: str, root: Path = _REPO_ROOT) -> None:
+            calls.append(pathspecs)
+            return None
+
+        monkeypatch.setitem(globals(), "_tracked_files", no_repository)
+        fallback = {key(r) for r in _all_registrations()}
+        assert any("*.md" in pathspecs for pathspecs in calls), (
+            "the scan did not enumerate Markdown through _tracked_files; this check is vacuous"
+        )
+        missing = sorted(tracked - fallback)
+        assert not missing, (
+            "Registrations a checkout scans but a tree without Git metadata does not; add their "
+            "file to _REGISTRATION_README_FALLBACK:\n  " + "\n  ".join(map(str, missing))
+        )
 
     @pytest.mark.parametrize(
         ("command", "expected"),
@@ -3081,3 +3603,569 @@ class TestRecallUntilBoundaryDocs:
         doc = mem_recall.__doc__ or ""
         lines = [line.strip() for line in doc.splitlines() if line.strip().startswith("until:")]
         assert lines == ["until: Date-only includes UTC period; full datetime exclusive"]
+
+
+# ── shared daemon guide ↔ source (#3381) ─────────────────────────────────────
+
+_SHARED_GUIDE = _GUIDES / "shared-daemon.md"
+_ANY = ".+"
+
+
+def _source_tree(relative: str) -> ast.Module:
+    return ast.parse(_read(_SRC / relative))
+
+
+def _evaluated(node: ast.expr) -> object:
+    """A literal, a tuple of literals or a product of numbers; ``ValueError`` otherwise."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float, str)):
+        return node.value
+    if isinstance(node, ast.Tuple):
+        return tuple(_evaluated(element) for element in node.elts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        left, right = _evaluated(node.left), _evaluated(node.right)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            return left * right
+    raise ValueError(ast.dump(node))
+
+
+def _constant(tree: ast.Module, name: str) -> object:
+    """The value of the one module-level ``name = <literal>`` assignment."""
+    values = [
+        _evaluated(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and [t.id for t in node.targets if isinstance(t, ast.Name)] == [name]
+    ]
+    assert len(values) == 1, f"{len(values)} module-level assignments to {name}"
+    return values[0]
+
+
+def _numbers(tree: ast.Module) -> dict[str, int | float]:
+    found: dict[str, int | float] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                try:
+                    value = _evaluated(node.value)
+                except ValueError:
+                    continue
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    found[target.id] = value
+    return found
+
+
+def _pattern(node: ast.expr, numbers: dict[str, int | float]) -> str:
+    """A regex for the text *node* builds: literal parts escaped, the rest ``.+``.
+
+    A placeholder that formats a module-level number is rendered with its
+    value, so a documented ``10 s`` is compared, not waved through.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return re.escape(node.value)
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant):
+                parts.append(re.escape(str(value.value)))
+                continue
+            assert isinstance(value, ast.FormattedValue)
+            inner = value.value
+            if isinstance(inner, ast.Name) and inner.id.isupper():
+                # A constant the message formats has to be one this module
+                # assigns as a number; anything else would match any text.
+                assert inner.id in numbers, f"{inner.id} is not a module-level number"
+                spec = ""
+                if isinstance(value.format_spec, ast.JoinedStr):
+                    spec = "".join(
+                        str(p.value)
+                        for p in value.format_spec.values
+                        if isinstance(p, ast.Constant)
+                    )
+                parts.append(re.escape(format(numbers[inner.id], spec)))
+            else:
+                parts.append(_ANY)
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _pattern(node.left, numbers) + _pattern(node.right, numbers)
+    return _ANY
+
+
+def _fstring_pattern(tree: ast.Module, anchor: str) -> str:
+    """The pattern of the one f-string in *tree* whose literal text contains *anchor*."""
+    numbers = _numbers(tree)
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            literal = "".join(str(v.value) for v in node.values if isinstance(v, ast.Constant))
+            if anchor in literal:
+                found.add(_pattern(node, numbers))
+    assert len(found) == 1, f"{len(found)} f-strings contain {anchor!r}"
+    return found.pop()
+
+
+def _guide_section(heading: str) -> str:
+    text = _read(_SHARED_GUIDE)
+    start = text.index(f"\n## {heading}\n")
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end != -1 else len(text)]
+
+
+def _first_cells(section: str) -> list[str]:
+    """The first cell of every body row of the one table in *section*."""
+    rows = [line for line in section.splitlines() if line.startswith("|")]
+    assert len(rows) >= 3, "no table with a body row"
+    assert set(rows[1].replace("|", "").strip()) <= {"-", " ", ":"}, rows[1]
+    return [row.strip().strip("|").split("|")[0].strip() for row in rows[2:]]
+
+
+def _code_span(cell: str) -> str:
+    assert cell.startswith("`") and cell.endswith("`") and cell.count("`") == 2, cell
+    return cell[1:-1]
+
+
+def _unmatched(patterns: list[str], texts: list[str]) -> tuple[list[str], list[str]]:
+    """Patterns no text matches, and texts no pattern matches."""
+    no_text = [p for p in patterns if not any(re.fullmatch(p, t) for t in texts)]
+    no_pattern = [t for t in texts if not any(re.fullmatch(p, t) for p in patterns)]
+    return no_text, no_pattern
+
+
+def _option_keyword(tree: ast.Module, option: str, keyword: str) -> list[ast.expr]:
+    """The *keyword* argument of every ``add_argument(option, ...)`` call in *tree*."""
+    return [
+        kw.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == option
+        for kw in node.keywords
+        if kw.arg == keyword
+    ]
+
+
+class TestSharedDaemonGuideMatchesSource:
+    """``docs/guides/shared-daemon.md`` quotes numbers, field names and messages.
+
+    Each is read out of the guide and compared with the value the source
+    holds, taken from the source text so the comparison does not depend on
+    what the platform can import. Messages are compared as templates: the
+    literal text must agree, and a formatted value may be anything unless it
+    is a module-level number, which is rendered.
+    """
+
+    def test_every_reason_a_session_does_not_join_has_a_row_and_the_reverse(self) -> None:
+        bridge = _source_tree("_bridge.py")
+        numbers = _numbers(bridge)
+        produced: list[ast.expr] = [
+            node.args[0]
+            for node in ast.walk(bridge)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_Fallback"
+        ]
+        for function in bridge.body:
+            if isinstance(function, ast.FunctionDef) and function.name in (
+                "run_bridge",
+                "_config_error",
+            ):
+                produced.extend(
+                    node.value
+                    for node in ast.walk(function)
+                    if isinstance(node, ast.Return) and node.value is not None
+                )
+        patterns = [_pattern(node, numbers) for node in produced]
+        # Reasons built elsewhere and passed on. Each is accounted for below;
+        # a new one has to be classified here before the guide can be right.
+        passed_on = {ast.unparse(n) for n, p in zip(produced, patterns) if p == _ANY}
+        assert passed_on == {"exc.summary", "_config_error(exc)", "str(exc)"}
+        direct = [p for p in patterns if p != _ANY]
+        assert len(direct) >= 12, "the collection found too few reasons to be right"
+
+        store = _source_tree("_store_identity.py")
+        raised = [
+            node
+            for node in ast.walk(store)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "StoreNotShareable"
+        ]
+        summaries = [_pattern(call.args[1], {}) for call in raised if len(call.args) == 2]
+        assert len(summaries) == 3
+        assert _ANY not in summaries, "a summary that is not a literal would match any row"
+        # The one call without a summary re-raises a relative-path refusal that
+        # only a daemon turns on; a bridge checks relative paths itself, first.
+        assert [len(call.args) for call in raised].count(1) == 1
+
+        expected = direct + summaries
+        section = _guide_section("Why a session did not join")
+        rows = [_code_span(cell) for cell in _first_cells(section)]
+        no_row, no_source = _unmatched(expected, rows)
+        assert not no_row, f"reasons with no row in the guide: {no_row}"
+        assert not no_source, f"guide rows no source produces: {no_source}"
+        assert len(rows) == len(expected)
+
+    def test_the_compared_fields_are_the_admission_fields(self) -> None:
+        admission = _source_tree("_admission.py")
+        section = _guide_section("What has to match")
+        cells = _first_cells(section)
+        assert tuple(_code_span(cell) for cell in cells) == _constant(admission, "FIELDS")
+        env_row = _table_row(section, "env")[1]
+        prefixes = _constant(admission, "_ENV_PREFIXES")
+        assert isinstance(prefixes, tuple) and prefixes
+        assert re.findall(r"`([A-Z]+_)\*`", env_row) == [str(p).upper() for p in prefixes]
+
+    def test_the_idle_timeout_is_the_daemons_default(self) -> None:
+        daemon = _source_tree("server/daemon.py")
+        default = _constant(daemon, "DEFAULT_IDLE_TIMEOUT_S")
+        assert isinstance(default, float) and default == int(default)
+        seconds = str(int(default))
+        bound = _option_keyword(daemon, "--idle-timeout", "default")
+        assert [ast.unparse(node) for node in bound] == ["DEFAULT_IDLE_TIMEOUT_S"]
+
+        stated = re.findall(r"(?i)after (\d+) seconds with no connection", _read(_SHARED_GUIDE))
+        assert stated and set(stated) == {seconds}
+        reference = " ".join(_read(_GUIDES / "reference" / "data-config-cli.md").split())
+        assert re.findall(r"idle timeout (\d+) s by default", reference) == [seconds]
+        helps = _option_keyword(_source_tree("_server_entry.py"), "--idle-timeout", "help")
+        assert len(helps) == 1 and isinstance(helps[0], ast.Constant)
+        assert re.findall(r"default (\d+);", str(helps[0].value)) == [seconds]
+
+    def test_the_two_size_limits_are_the_bridges_and_the_daemons(self) -> None:
+        limits = _guide_section("Limits")
+        mib = 1024 * 1024
+        buffer_limit = _constant(_source_tree("_bridge.py"), "BUFFER_LIMIT")
+        frame_limit = _constant(_source_tree("server/daemon.py"), "FRAME_LIMIT")
+        assert isinstance(buffer_limit, int) and buffer_limit % mib == 0
+        assert isinstance(frame_limit, int) and frame_limit % mib == 0
+        assert re.findall(r"\*\*More than (\d+) MiB waiting in either direction", limits) == [
+            str(buffer_limit // mib)
+        ]
+        assert re.findall(r"One message from the client larger than (\d+) MiB", limits) == [
+            str(frame_limit // mib)
+        ]
+
+    def test_the_name_rule_is_the_name_pattern(self) -> None:
+        compiled = [
+            node.value.args[0].value
+            for node in _source_tree("_daemon_paths.py").body
+            if isinstance(node, ast.Assign)
+            and [t.id for t in node.targets if isinstance(t, ast.Name)] == ["NAME_PATTERN"]
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.args[0], ast.Constant)
+        ]
+        assert len(compiled) == 1
+        shape = re.fullmatch(r"\[a-z0-9\]\[a-z0-9-\]\{0,(\d+)\}", compiled[0])
+        assert shape is not None, compiled[0]
+        stated = re.findall(
+            r"is 1 to (\d+) characters from `a-z`, `0-9` and `-`, starting with a letter or\s+"
+            r"digit",
+            _read(_SHARED_GUIDE),
+        )
+        assert stated == [str(1 + int(shape.group(1)))]
+
+    def test_the_status_lines_have_the_shapes_mem_status_prints(self) -> None:
+        status = _source_tree("server/tools/status_config.py")
+        templates = [
+            _fstring_pattern(status, " connection(s))"),
+            _fstring_pattern(status, " not joined ("),
+        ]
+        # Both lines open with the daemon's name; the guide's daemon is ``main``,
+        # so the name is compared too instead of matching any text.
+        assert all(template.startswith(_ANY) for template in templates)
+        shapes = [template.replace(_ANY, "main", 1) for template in templates]
+        widths = {
+            node.args[0].value
+            for node in ast.walk(status)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "ljust"
+            and isinstance(node.func.value, ast.Constant)
+            and node.func.value.value == "Shared daemon:"
+            and isinstance(node.args[0], ast.Constant)
+        }
+        assert len(widths) == 1
+        key = "Shared daemon:".ljust(widths.pop())
+        lines = [
+            line
+            for line in _guide_section("Check that a session joined").splitlines()
+            if line.startswith("Shared daemon:")
+        ]
+        assert len(lines) == 2 and all(line.startswith(key) for line in lines)
+        no_line, no_shape = _unmatched(shapes, [line[len(key) :] for line in lines])
+        assert not no_line and not no_shape, (no_line, no_shape)
+
+    @pytest.mark.parametrize(
+        ("module", "anchor", "quotation"),
+        [
+            (
+                "cli/doctor_cmd.py",
+                " shared daemon(s) running: ",
+                r"`(\d+ shared daemon\(s\) running: [^`]+)`",
+            ),
+            (
+                "cli/doctor_cmd.py",
+                " bridge(s))",
+                r"running: (main \(pid \d+, \d+ bridge\(s\)\))`",
+            ),
+            ("cli/daemon_cmd.py", "stopped  pid=", r"prints `(stopped [^`]+)`"),
+            ("cli/daemon_cmd.py", "  started=", r"\n(main  running  pid=\S+  started=\S+)\n"),
+            (
+                "cli/_liveness.py",
+                " is running; stop it with ",
+                r"\n  (Shared daemon .+ is running; stop it with .+)\n",
+            ),
+        ],
+    )
+    def test_quoted_command_output_has_the_shape_the_command_prints(
+        self, module: str, anchor: str, quotation: str
+    ) -> None:
+        found = re.findall(quotation, _read(_SHARED_GUIDE))
+        assert len(found) == 1, f"{len(found)} quotations in the guide"
+        shape = _fstring_pattern(_source_tree(module), anchor)
+        assert re.fullmatch(shape, found[0]), (shape, found[0])
+
+    def test_the_grace_default_is_the_commands(self) -> None:
+        daemon = _CLI.commands["daemon"]
+        assert isinstance(daemon, click.Group)
+        defaults = [p.default for p in daemon.commands["stop"].params if p.name == "grace"]
+        assert len(defaults) == 1 and defaults[0] == int(defaults[0])
+        stated = re.findall(r"after `--grace` seconds \(default (\d+)\)", _read(_SHARED_GUIDE))
+        assert stated == [str(int(defaults[0]))]
+
+    def test_the_usage_errors_are_the_parsers(self) -> None:
+        entry = _source_tree("_server_entry.py")
+        errors = [
+            _pattern(node.args[0], {})
+            for node in ast.walk(entry)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "error"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "parser"
+        ]
+        about_sharing = [
+            p for p in errors if any(o in p for o in ("shared", "daemon", "idle\\-timeout"))
+        ]
+        assert len(about_sharing) == 4
+        section = _guide_section("Usage errors")
+        bullets = re.findall(r"^- `(--[^`]+)`$", section, flags=re.MULTILINE)
+        no_bullet, no_error = _unmatched(about_sharing, bullets)
+        assert not no_bullet and not no_error, (no_bullet, no_error)
+        quoted = re.findall(r"^- a name that .*\(`([^`]+)`\)$", section, flags=re.MULTILINE)
+        assert len(quoted) == 1
+        # The quoted words are part of the one message the name check raises.
+        assert _fstring_pattern(entry, f" {quoted[0]}: ")
+
+    def test_every_server_command_line_in_the_guide_parses(self) -> None:
+        from memtomem._server_entry import parse_server_args
+
+        blocks = re.findall(r"```bash\n(.*?)```", _read(_SHARED_GUIDE), flags=re.DOTALL)
+        parsed = []
+        for line in "".join(blocks).splitlines():
+            words = shlex.split(line, comments=True)
+            if "memtomem-server" in words:
+                parsed.append(parse_server_args(words[words.index("memtomem-server") + 1 :]))
+        assert [(args.shared, args.daemon, args.idle_timeout) for args in parsed] == [
+            ("main", None, None),
+            (None, "main", 0.0),
+        ]
+
+
+class TestExistingStoreIsNotReinitialized:
+    """A store set up only through ``config.d`` or ``MEMTOMEM_*`` has no ``config.json``,
+    so ``mm status`` calls it not configured, and the ``config.json`` that ``mm init``
+    writes replaces what the fragments set (#3517). Both quickstarts send that reader to
+    a preview and to the connected plugin's status check instead of to init.
+    ``test_cli_status_without_config_json.py`` pins the behaviour this advice relies on.
+    """
+
+    _LOCALES = {
+        _PLUGIN_QUICKSTART: {
+            "step": "## 2. Shared setup: initialize your user memory store once",
+            "json_branch": "In `~/.memtomem/config.json`",
+            "fragment_branch": "Only in `~/.memtomem/config.d/`",
+            "row": "| The store is reported as not initialized |",
+            "no_init": "run neither command",
+            "row_no_init": "do not initialize",
+            "row_fresh": "On a new store,",
+            "confirm": "the plugin's status check",
+            "confirm_what": "confirm that its database path is the one your settings name",
+            "unverifiable": "memory directories",
+            "checklist": "or an existing store's database path was confirmed",
+        },
+        _VIBE_GUIDE: {
+            "step": "## 2. 공통 준비: 사용자 기억 저장소를 한 번 초기화",
+            "json_branch": "예전 초기화가 쓴 `~/.memtomem/config.json`",
+            "fragment_branch": "`~/.memtomem/config.d/` fragment나 `MEMTOMEM_*` 환경 변수에만",
+            "row": "| 저장소가 초기화되지 않았다고 나옴 |",
+            "no_init": "두 명령 모두 실행하지 않습니다",
+            "row_no_init": "초기화하지 마세요",
+            "row_fresh": "새 저장소라면",
+            "confirm": "플러그인 status 확인",
+            "confirm_what": "database path가 설정에 적은 값인지 확인하세요",
+            "unverifiable": "기억 디렉터리가",
+            "checklist": "초기화했거나, 기존 저장소의 database path를 확인했다",
+        },
+    }
+
+    @staticmethod
+    def _preview() -> str:
+        version = _plugin_contract()["core"]["version"]
+        return f"uvx --python 3.12 --from 'memtomem[onnx]=={version}' mm config show"
+
+    @pytest.mark.parametrize("path", list(_LOCALES), ids=lambda p: p.name)
+    def test_shared_setup_names_fragment_and_env_stores(self, path: Path) -> None:
+        words = self._LOCALES[path]
+        section = _heading_section(_read(path), words["step"])
+        flat = " ".join(section.split())
+        # The final check is the connected server's status. It may ask only for what that
+        # check shows: the status workflow reports the database path, and `mem_status`
+        # lists memory directories only up to a row limit, so a sentence asking the reader
+        # to confirm the memory directories there cannot be followed.
+        for phrase in (words["confirm"], words["confirm_what"]):
+            assert phrase in flat, f"{path.name} step 2 lost {phrase!r}"
+        preview_onward = flat[flat.index("mm config show") :]
+        assert words["unverifiable"] not in preview_onward, (
+            f"{path.name} asks the status check to confirm memory directories it does not show"
+        )
+        assert self._preview() in _fenced_commands(section), f"{path.name} lost the preview"
+        # The refusal has to sit in the fragment/variable branch, not anywhere in the step:
+        # moved to the config.json branch, it would leave fragment stores told nothing.
+        bullets = re.findall(r"^- (.*?)(?=^- |\n\n|\Z)", section, re.MULTILINE | re.DOTALL)
+        by_lead = {
+            lead: [" ".join(b.split()) for b in bullets if b.startswith(words[lead])]
+            for lead in ("json_branch", "fragment_branch")
+        }
+        assert [len(found) for found in by_lead.values()] == [1, 1], by_lead
+        fragment = by_lead["fragment_branch"][0]
+        for phrase in ("MEMTOMEM_", words["no_init"], "memtomem is not configured"):
+            assert phrase in fragment, f"{path.name} fragment branch lost {phrase!r}"
+        assert words["no_init"] not in by_lead["json_branch"][0]
+
+    @pytest.mark.parametrize("path", list(_LOCALES), ids=lambda p: p.name)
+    def test_troubleshooting_row_sends_existing_stores_away_from_init(self, path: Path) -> None:
+        words = self._LOCALES[path]
+        rows = [line for line in _read(path).splitlines() if line.startswith(words["row"])]
+        assert len(rows) == 1, f"{path.name}: {len(rows)} not-initialized rows"
+        # Split at the fresh-store marker: init may appear only after it, and the
+        # existing-store branch before it must carry the preview and the refusal.
+        assert rows[0].count(words["row_fresh"]) == 1, f"{path.name} lost the fresh-store branch"
+        existing, fresh = rows[0].split(words["row_fresh"])
+        for phrase in (
+            "config.d/",
+            "MEMTOMEM_",
+            words["row_no_init"],
+            "mm config show",
+            "(#2-",
+            words["confirm"],
+        ):
+            assert phrase in existing, f"{path.name} existing-store branch lost {phrase!r}"
+        assert "mm init" not in existing, f"{path.name} offers init to an existing store"
+        assert "mm init ... --mcp skip" in fresh, f"{path.name} lost the fresh-store init"
+
+    @pytest.mark.parametrize("path", list(_LOCALES), ids=lambda p: p.name)
+    def test_checklist_accepts_a_confirmed_existing_store(self, path: Path) -> None:
+        items = [
+            line
+            for line in _read(path).splitlines()
+            if line.startswith("- [ ] ") and "--mcp skip" in line
+        ]
+        assert len(items) == 1, f"{path.name}: {len(items)} store checklist items"
+        assert self._LOCALES[path]["checklist"] in items[0]
+
+
+class TestCoexistenceCheckTimingPerHost:
+    """The Codex and Antigravity checks compare manual entries with the installed plugin's
+    bundled server, so before installation they have nothing to compare; the Claude check
+    reads the current directory's registrations (#3517).
+    ``test_mcp_coexistence.py::test_check_before_plugin_install_has_no_bundled_server_to_compare``
+    pins the first half."""
+
+    @staticmethod
+    def _bullet(section: str, lead: str) -> str:
+        matches = re.findall(
+            rf"^- {re.escape(lead)}(.*?)(?=^- |\n\n|\Z)", section, re.MULTILINE | re.DOTALL
+        )
+        assert len(matches) == 1, f"{len(matches)} bullets start with {lead!r}"
+        return " ".join(matches[0].split())
+
+    def test_each_host_says_when_its_check_is_meaningful(self) -> None:
+        section = _heading_section(
+            _read(_GUIDES / "mcp-clients.md"), "## Keep manual MCP and plugin skills"
+        )
+        claude = self._bullet(section, "**Claude Code:**")
+        assert "from the project root" in claude
+        assert "repeat it after installing" in claude
+        hosts = self._bullet(section, "**Antigravity CLI and Codex CLI:**")
+        assert "after installing the plugin" in hosts
+        assert "before starting a new session or thread" in hosts
+        assert "only a manual entry named `memtomem`" in hosts
+
+
+class TestExternalEditsGuideStatesTheOutcomePerLayer:
+    """A rejected section is not handled alike by every layer the Web UI re-reads (#3591).
+
+    ``GET /api/config`` re-reads strictly for ``config.json`` and tolerantly for
+    ``config.d`` fragments, so the guide must not file it with the loads that
+    tolerate a rejected section, and must give each layer its own outcome.
+    ``test_web_config_load_diagnostics.py`` measures both outcomes; this pins the
+    wording that states them. Every lookup asserts it found its target first, so
+    a deleted bullet fails instead of passing the content checks vacuously.
+    """
+
+    _HEADING = "### External edits while the Web UI is running"
+
+    @classmethod
+    def _section(cls) -> str:
+        return _heading_section(_read(_CONFIGURATION_GUIDE), cls._HEADING)
+
+    @staticmethod
+    def _sub_bullet(section: str, lead: str) -> str:
+        # The lead may wrap anywhere a space is, so it is matched on the raw text
+        # with ``\s+`` between its words and only then collapsed.
+        lead_pattern = r"\s+".join(re.escape(word) for word in lead.split())
+        matches = re.findall(
+            rf"^[ \t]+- {lead_pattern}(.*?)(?=^\s*- |\n\n|\Z)", section, re.MULTILINE | re.DOTALL
+        )
+        assert len(matches) == 1, f"{len(matches)} sub-bullets start with {lead!r}"
+        return " ".join(matches[0].split())
+
+    def test_get_api_config_is_not_filed_with_the_tolerant_loads(self) -> None:
+        bullets = re.findall(
+            r"^- (Other loads \(.*?)(?=^- |\n\n|\Z)", self._section(), re.MULTILINE | re.DOTALL
+        )
+        assert len(bullets) == 1, f"{len(bullets)} bullets start with 'Other loads ('"
+        bullet = _unwrapped(bullets[0])
+        match = re.match(r"Other loads \(([^)]*)\)", bullet)
+        assert match, "the guide lost its 'Other loads (...)' list"
+        assert "GET /api/config" not in match.group(1)
+        # The parenthetical alone survives a reversed claim about what those loads do.
+        assert "keep running on the values the section would have replaced" in bullet
+        assert "report the rejected section and its reason" in bullet
+
+    def test_a_config_json_section_fails_the_reread(self) -> None:
+        bullet = self._sub_bullet(self._section(), "**`config.json`**")
+        assert "the re-read fails" in bullet
+        assert "returns the section and the reason as `config_reload_error`" in bullet
+        assert "saves are refused (HTTP 409)" in bullet
+        assert "`config_load_warnings`" not in bullet
+
+    def test_a_fragment_section_is_skipped_when_the_reread_otherwise_succeeds(self) -> None:
+        bullet = self._sub_bullet(self._section(), "**`config.d` fragment**")
+        # The claim is conditional: a fragment edit also re-reads a still-invalid
+        # ``config.json``, and the loader is fatal for a read-only protection request.
+        # Each outcome is pinned as the clause that states it, so a bullet that keeps
+        # the field names but reverses what they report fails.
+        assert "When the re-read otherwise succeeds" in bullet
+        assert "lists the section and the reason in `config_load_warnings`" in bullet
+        clause = "the rejection by itself leaves `config_reload_error` empty and saves not refused"
+        assert clause in bullet
+        assert "so one that is still invalid has the outcome of the `config.json` item" in bullet
+        # The exception's own outcome, not just the link that names it.
+        assert "describes, which is fatal in a fragment too" in bullet
+        link = re.search(r"\(#([^)]+)\)", bullet)
+        assert link, "the fragment bullet lost its link to the read_only_memory_dirs exception"
+        assert link.group(1) in _anchors(_read(_CONFIGURATION_GUIDE))
+        assert "read_only_memory_dirs" in link.group(1)

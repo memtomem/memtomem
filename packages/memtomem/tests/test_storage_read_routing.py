@@ -23,12 +23,17 @@ async def _reads(storage) -> tuple[set[str], dict[str, int], int]:
 
     The mixin read (importance factors, one row per chunk) must agree with the
     namespace count, so a surface left on a different connection shows up as
-    a mismatch.
+    a mismatch. The same goes for the duplicate scan's pool read: no source is
+    held here, so its rows must name exactly the sources listed and both of
+    its counts must be its row count.
     """
     sources = {p.name for p in await storage.get_all_source_files()}
     namespaces = dict(await storage.list_namespaces())
     in_ns = namespaces.get("routed", 0)
     assert len(await storage.get_chunk_factors(namespace="routed")) == in_ns
+    pool = await storage.list_visible_chunks_by_id(10_000)
+    assert {c.metadata.source_file.name for c in pool.chunks} == sources
+    assert pool.visible == pool.above_cursor == len(pool.chunks)
     return sources, namespaces, in_ns
 
 

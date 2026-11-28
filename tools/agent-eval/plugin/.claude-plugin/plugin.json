@@ -1,0 +1,5 @@
+{
+  "name": "memtomem-agent-eval",
+  "version": "0.0.0",
+  "description": "Eval-only plugin: runs memtomem's core MCP tools against an isolated store per eval run. Not for installation."
+}

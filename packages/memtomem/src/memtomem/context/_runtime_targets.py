@@ -40,16 +40,44 @@ Design rules:
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from pathlib import Path
 
 from memtomem.config import TargetScope
+from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._host_homes import host_kimi_home, pin_expanduser
 from memtomem.context._names import InvalidNameError, is_internal_artifact_dir, validate_name
 from memtomem.context.scope_resolver import ArtifactKind
+from memtomem.memory_scope import ProjectEntryRelinked, refuse_relinked_project_entry
 
 logger = logging.getLogger(__name__)
+
+
+# Set only inside :func:`linked_runtime_reads`. While it is False (the
+# default), a project-tier fan-out root that is, or sits under, a link inside
+# the project is refused. ``asyncio.to_thread`` copies the context, so a
+# worker started inside the block keeps it; a thread that does not copy it
+# falls back to the refusal, never to the permission.
+_LINKED_READS_ALLOWED: ContextVar[bool] = ContextVar("linked_runtime_reads", default=False)
+
+
+@contextlib.contextmanager
+def linked_runtime_reads() -> Iterator[None]:
+    """Let :func:`runtime_fanout_root` resolve a linked project root, for display.
+
+    For the diff, listing and preview bodies only: they show what a runtime
+    directory holds and write nothing. A push, a pull or an import must not
+    run inside this block; through a link those would write outside the
+    project, or copy the link target's files into the canonical store.
+    """
+    token = _LINKED_READS_ALLOWED.set(True)
+    try:
+        yield
+    finally:
+        _LINKED_READS_ALLOWED.reset(token)
 
 
 # Sentinel for "no fan-out by design — caller should emit
@@ -137,6 +165,13 @@ RUNTIME_FANOUT_TABLE: dict[
     ("commands", "kimi", "project_shared"): NO_FANOUT,
     ("commands", "kimi", "project_local"): NO_FANOUT,
 }
+
+
+def relinked_skip(
+    item: str, runtime: str, exc: ProjectEntryRelinked
+) -> tuple[str, str, skip_codes.SkipCode]:
+    """The skip row for one item, or one runtime, refused by a linked project root."""
+    return (item, f"runtime {runtime}: {exc}", skip_codes.PROJECT_ENTRY_RELINKED)
 
 
 # Closed set of runtime keys this module knows about. Callers can use
@@ -264,6 +299,10 @@ def runtime_fanout_root(
             f"runtime_fanout_root({artifact!r}, {runtime!r}, {scope!r}) "
             "requires project_root for a project-tier scope."
         )
+    if not _LINKED_READS_ALLOWED.get():
+        # ``.claude`` -> somewhere else would carry every push, pull and import
+        # for this runtime there; the root itself (``.claude/skills``) counts.
+        refuse_relinked_project_entry(project_root, entry, judge_leaf=True)
     return (project_root / entry).resolve()
 
 

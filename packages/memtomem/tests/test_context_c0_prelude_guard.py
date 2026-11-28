@@ -787,6 +787,12 @@ C0_SITES: dict[tuple[str, str, int, str], tuple[str, str, str]] = {
         "",
         "Memory file (L2): the derived Hermes mirror file, rewritten and re-indexed under it.",
     ),
+    ("server/tools/session.py", "_write_summary_archive", 0, "async_file_lock"): (
+        MEMORY_L2,
+        "",
+        "Memory file (L2): the session summary archive, written and indexed under one "
+        "hold so no other indexer reaches it first (#3340).",
+    ),
     ("tools/memory_mutation.py", "locked_source_chunk", 0, "async_memory_file_lock"): (
         MEMORY_L2,
         "",

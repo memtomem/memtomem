@@ -61,9 +61,11 @@ def _ascii_boundary(pattern: str) -> re.Pattern[str]:
     return re.compile(_with_word_boundaries(pattern).replace(r"\b", r"(?a:\b)"))
 
 
-_REWRITTEN = tuple(
-    i for i, p in enumerate(privacy.DEFAULT_PATTERNS) if _with_word_boundaries(p) != p
-)
+#: The rules #3298 rewrote were among the first 20; later additions (GHSA-h6g8
+#: and on) were written with ASCII boundaries from the start.
+_RULES_AT_3298 = privacy.DEFAULT_PATTERNS[:20]
+
+_REWRITTEN = tuple(i for i, p in enumerate(_RULES_AT_3298) if _with_word_boundaries(p) != p)
 
 
 def _rule_with(fragment: str) -> int:
@@ -123,7 +125,7 @@ def _boundary_assertions(pattern: str) -> int:
 
 
 def test_the_set_differs_from_the_one_before_3298_only_in_how_boundaries_are_spelled():
-    as_before = [_with_word_boundaries(p) for p in privacy.DEFAULT_PATTERNS]
+    as_before = [_with_word_boundaries(p) for p in _RULES_AT_3298]
     joined = "\n".join(as_before).encode()
     assert hashlib.sha256(joined).hexdigest() == _SET_BEFORE_3298_SHA256
     assert len(_REWRITTEN) == 10

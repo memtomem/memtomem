@@ -92,10 +92,17 @@ def test_stdio_direct_terminal_prints_help_and_exits(
     extra_tools = _contract_extra_tools()
     lines = out.splitlines()
     assert f'  env: {{"MEMTOMEM_EXTRA_TOOLS": "{extra_tools}"}}' in lines
+    # Both launch forms ask uv for Python 3.12: without it the launch can stop before the
+    # server starts when uv picks an older Python (#3493).
+    pin = f"memtomem[all]=={server_mod._memtomem_version}"
+    args_lines = [line for line in lines if line.startswith("  args: ")]
+    assert args_lines == [
+        f'  args: ["--python", "3.12", "--isolated", "--from", "{pin}", "memtomem-server"]'
+    ]
     examples = [line for line in lines if "claude mcp add" in line]
     assert examples == [
         f"  claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS={extra_tools} "
-        f"-- uvx --isolated --from 'memtomem[all]=={server_mod._memtomem_version}' memtomem-server"
+        f"-- uvx --python 3.12 --isolated --from '{pin}' memtomem-server"
     ]
     assert "-- memtomem-server\n" not in out
     # Direct server launches should point users to MCP setup/network transports.
@@ -565,3 +572,36 @@ def test_disable_dns_rebinding_protection_pins_empty_allow_lists(
     assert kwargs["enable_dns_rebinding_protection"] is False
     assert kwargs["allowed_hosts"] == []
     assert kwargs["allowed_origins"] == []
+
+
+class TestHostPatternsAndSsePathHelpers:
+    """Direct coverage for the helpers that shape SSE/HTTP Host allow-lists (#2993)."""
+
+    @pytest.mark.parametrize(
+        ("host", "expected"),
+        [
+            ("0.0.0.0", []),
+            ("::", []),
+            (None, []),
+            ("::1", ["[::1]", "[::1]:*"]),
+            ("[::1]", ["[::1]", "[::1]:*"]),
+            ("example.com", ["example.com", "example.com:*"]),
+        ],
+    )
+    def test_host_patterns(self, host: str | None, expected: list[str]) -> None:
+        from memtomem import server as server_mod
+
+        assert server_mod._host_patterns(host) == expected
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("/mcp/sse", ("/mcp", "/sse")),
+            ("/a/b/sse/", ("/a/b", "/sse")),
+            ("/sse", (None, "/sse")),
+        ],
+    )
+    def test_split_sse_url_path(self, path: str, expected: tuple[str | None, str]) -> None:
+        from memtomem import server as server_mod
+
+        assert server_mod._split_sse_url_path(path) == expected

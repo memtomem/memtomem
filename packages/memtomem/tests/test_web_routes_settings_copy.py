@@ -31,6 +31,7 @@ from memtomem.context.settings import CANONICAL_SETTINGS_FILE
 from memtomem.web.app import create_app
 
 from .helpers import set_home
+from .test_web_routes_context_transfer import _no_store_message
 
 SECRET = "api_key=AKIA1234567890ABCDEF"
 
@@ -139,6 +140,31 @@ def _body(scope_id: str, **overrides) -> dict:
 COPY_URL = "/api/context/settings/hooks/copy"
 
 
+def _strings(value: object) -> list[str]:
+    """Every key and string value of a decoded JSON body, recursively."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for k, v in value.items() for s in (*_strings(k), *_strings(v))]
+    if isinstance(value, list):
+        return [s for item in value for s in _strings(item)]
+    return []
+
+
+def _assert_path_free(body: object, *leaky: Path) -> None:
+    """No decoded string carries a leaky path (given or resolved form) or ``$HOME``.
+
+    Walks the decoded body rather than ``json.dumps`` of it: serialized, a
+    Windows path's backslashes are doubled and the raw path never matches.
+    """
+    forbidden = {str(Path.home())}
+    for p in leaky:
+        forbidden |= {str(p), str(p.resolve())}
+    for s in _strings(body):
+        for f in forbidden:
+            assert f not in s, (f, s)
+
+
 # ── destination resolution ───────────────────────────────────────────
 
 
@@ -166,28 +192,50 @@ async def test_paused_destination_409_for_private_tier_too(client, tmp_path) -> 
 
 
 @pytest.mark.asyncio
-async def test_destination_without_store_409(client, tmp_path) -> None:
-    other = _other_project(tmp_path, store=False)
+async def test_destination_without_store_409(client, home, cwd_root) -> None:
+    """The 409 names the destination by its scope id, not its path (#2489).
+
+    Under the sandbox ``$HOME``, with a space in the name. The expected text
+    is the transfer route test's own helper, so a change to either route's
+    wording fails one of the two files unless both routes change together.
+    """
+    other = _other_project(home, "proj b", store=False)
     scope_id = await _register(client, other)
     resp = await client.post(COPY_URL, json=_body(scope_id))
     assert resp.status_code == 409
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "no_memtomem_store"
-    assert "mm context init" in detail["message"]
+    assert detail["message"] == _no_store_message(scope_id)
+    _assert_path_free(resp.json(), other, cwd_root)
 
 
 # ── selector errors ──────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_unmatched_selector_404_lists_labels(client, tmp_path) -> None:
+async def test_unmatched_selector_404_lists_labels(client, tmp_path, cwd_root) -> None:
     other = _other_project(tmp_path)
     scope_id = await _register(client, other)
     resp = await client.post(COPY_URL, json=_body(scope_id, event="SessionStart", matcher=""))
     assert resp.status_code == 404
+    # The engine names the source canonical by its absolute path (#3302).
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "missing"
     assert "available: PostToolUse:Edit|Write" in detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_source_without_canonical_404_is_path_free(client, tmp_path, cwd_root) -> None:
+    (cwd_root / CANONICAL_SETTINGS_FILE).unlink()
+    other = _other_project(tmp_path)
+    scope_id = await _register(client, other)
+    resp = await client.post(COPY_URL, json=_body(scope_id))
+    assert resp.status_code == 404
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "missing"
+    assert "nothing to copy from" in detail["message"]
 
 
 @pytest.mark.asyncio

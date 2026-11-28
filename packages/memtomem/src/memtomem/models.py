@@ -108,7 +108,7 @@ def _like_glob_matches(pattern: str, value: str) -> bool:
     ``_`` and turning ``*`` into ``%``, then compare with
     ``LIKE ? ESCAPE '\\'`` (:func:`memtomem.storage.sqlite_helpers.
     namespace_sql`, :func:`memtomem.storage.sqlite_scope._scopes_glob_clause`).
-    Three consequences of that contract are easy to get wrong in Python and
+    Four consequences of that contract are easy to get wrong in Python and
     are pinned by the parity tests:
 
     - A literal ``%`` the user typed is **not** escaped by the emitter, so it
@@ -117,11 +117,19 @@ def _like_glob_matches(pattern: str, value: str) -> bool:
       would also read ``?`` and ``[…]`` as wildcards. Never use ``fnmatch``.
     - SQLite's default ``LIKE`` folds case for **ASCII only**, so ``Ü`` does
       not match ``ü``.
+    - Once SQLite accepts a pattern, its ``LIKE`` reads both the pattern and
+      the value only up to their first NUL, so whatever follows one takes no
+      part in the match. Both are cut there before matching. (Accepting comes
+      first: SQLite checks the length of the whole bound pattern, the part
+      after a NUL included, and refuses one that is too long with an error.)
 
     A pattern ending in a lone escape character has nothing to escape and
     matches nothing in SQLite, so it returns ``False`` here rather than
-    falling back to a literal backslash.
+    falling back to a literal backslash. That holds for an escape right
+    before a NUL too, since the pattern ends there.
     """
+    pattern = pattern.split("\x00", 1)[0]
+    value = value.split("\x00", 1)[0]
     sql_pattern = _ascii_fold(pattern.replace("_", r"\_").replace("*", "%"))
 
     # Tokenized and matched with the two-pointer LIKE algorithm rather than
@@ -515,6 +523,32 @@ class ChunkLink:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkTopology:
+    """Where a chunk sits in its source and what points at it.
+
+    Facts as stored, for a reader deciding whether two chunks with the same
+    body are the same record. None of them is a verdict on what may be removed.
+
+    A line span is *recorded* when ``start_line >= 1`` and ``end_line >=
+    start_line``; the structured chunker stores ``0, 0`` for values it cannot
+    place. The two span fields are ``None`` for a chunk without a recorded
+    span, and a sibling without one takes no part in either.
+    """
+
+    only_in_source: bool  # no other stored chunk has this source_file
+    at_source_start: bool | None  # no sibling starts on an earlier line
+    span_shared: bool | None  # a sibling's line span overlaps this one's
+    consolidated_into: int  # summaries covering this chunk (outgoing edges)
+    consolidates: int  # chunks this one summarises (incoming edges)
+    other_relations: int  # edges of any other type, either direction
+    # ``chunk_links`` rows this chunk is the source of, as (link_type, count)
+    # sorted by type. The source of a ``shared`` row is the chunk a copy was
+    # made from; the source of a ``summarizes`` row is the summary.
+    links_out: tuple[tuple[str, int], ...]
+    links_in: tuple[str, ...]  # link types of rows this chunk is the target of
+
+
+@dataclass(frozen=True, slots=True)
 class IndexingStats:
     total_files: int
     total_chunks: int
@@ -651,12 +685,11 @@ class IndexingStats:
     # append's alone, judged from the text the call chunked, and they include a
     # chunk that kept an existing id because its content matched. In file
     # order. ``appended_attribution`` says how cleanly: ``"exact"`` when every
-    # one's span starts within the appended lines, ``"merged"`` when one starts
-    # before them (a short entry merged into the previous section), and
-    # ``"unverified"`` with no ids wherever a span cannot say what a chunk
+    # one's span starts on a line the append wrote, ``"merged"`` when one starts
+    # on a line from before it (a short entry merged into the previous section),
+    # and ``"unverified"`` with no ids wherever a span cannot say what a chunk
     # holds or the file was not the text the caller expected (see
     # ``memtomem.indexing.append_attribution.attribute_append``), and when the
-    # call did not ask. Appended last for positional construction
-    # compatibility.
+    # call did not ask. Appended last for positional construction compatibility.
     appended_chunk_ids: tuple[UUID, ...] = ()
     appended_attribution: Literal["exact", "merged", "unverified"] = "unverified"

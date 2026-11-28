@@ -31,11 +31,12 @@ from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.generation import ComponentGeneration
 from memtomem.runtime.components import prune_settled_generations
 from memtomem.server import mcp
+from memtomem.server.client_paths import client_cwd_of
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.background import track_task
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
-from memtomem.server.helpers import _set_config_key
+from memtomem.server.helpers import _set_config_key, mcp_saved_fields
 from memtomem.secret_masking import is_secret_key, mask_secrets
 from memtomem.storage.orphan_detect import RetainRule, orphan_candidate_sources, source_state
 
@@ -323,16 +324,54 @@ def _tokenizer_fallback_warning(configured: str, storage: SqliteBackend) -> dict
         "detail": f"search.tokenizer=kiwipiepy but {state}. Rows it indexes are "
         "tokenized differently from kiwipiepy rows, so Korean keyword search misses "
         "notes across the two.",
-        # The rebuild runs under the CLI's own tokenizer and config, so it has to
-        # run where the server does: a bare ``mm`` may lack the extra (and rebuild
-        # as unicode61), be absent on a uvx-only install, or resolve another
-        # store. Naming the launcher, not a pinned command, covers all three.
+        # The rebuild goes through the server: it rebuilds the store that server
+        # has open, with that server's tokenizer. A shell ``mm`` may lack the
+        # extra (and rebuild as unicode61), be absent on a uvx-only install, or
+        # open another store — a plugin launcher passes the server only some
+        # environment variables, and a relative store path resolves against the
+        # shell's working directory, not the server's. Any process still running
+        # without the extra, or configured with another tokenizer, writes
+        # unicode61 rows into the rebuilt index, so the restart is stated as a
+        # rule; the writers named are examples, not a list. Only MCP servers can
+        # be checked from here: the store does not record which tokenizer built
+        # its keyword index.
+        # The status check comes before the rebuild: the rebuild's reply names
+        # the tokenizer it used, but only after it has rewritten the whole index
+        # with it. The check asks for the tokenizer as well as a clean warning:
+        # a kiwipiepy setting made at runtime and never saved is gone after the
+        # restart, which clears the warning too, and a rebuild from that state
+        # would switch one server while the others keep writing unicode61.
         "fix": "install the korean extra wherever memtomem runs (launch "
-        "memtomem[onnx,korean] instead of memtomem[onnx]), restart every memtomem "
-        "server on this store, then rebuild its keyword index with the server's own "
-        "launcher and environment, running `mm config set search.tokenizer "
-        "kiwipiepy` in place of `memtomem-server`",
+        "memtomem[onnx,korean] instead of memtomem[onnx]). Let running indexing "
+        "commands finish, then restart every process that uses this store, each with "
+        "`search.tokenizer` set to kiwipiepy — MCP servers, `mm web`, `mm shell` and "
+        "applications embedding memtomem, for example. Check `mem_status()` on each "
+        "MCP server and continue only once it shows `search.tokenizer` as kiwipiepy "
+        "and this warning is gone there (a kiwipiepy setting that was never saved is "
+        "lost on restart, and the warning with it). Then rebuild the keyword index "
+        "once, from one of those servers through an MCP client connected to it: "
+        '`mem_do(action="config", params={"key": "search.tokenizer", "value": '
+        '"kiwipiepy"})`; its reply should say `FTS index rebuilt with kiwipiepy`. '
+        "`mm config set search.tokenizer kiwipiepy` does the same only where that "
+        "`mm` has the korean extra and opens the same store (same config, environment "
+        "and working directory)",
     }
+
+
+def _shared_daemon_runtime() -> dict[str, object]:
+    """``{"shared_daemon": {...}}`` inside a shared daemon (#3381), else ``{}``.
+
+    A standalone server has no daemon, and the key is then absent, not null.
+    A standalone server that a ``--shared NAME`` session fell back to carries
+    ``{"shared_fallback": {"name", "reason"}}`` instead.
+    """
+    from memtomem.server.context import shared_daemon_summary, shared_fallback
+
+    summary = shared_daemon_summary()
+    if summary is not None:
+        return {"shared_daemon": summary}
+    fallback = shared_fallback()
+    return {"shared_fallback": fallback} if fallback is not None else {}
 
 
 async def collect_status_report(app: AppContext) -> dict:
@@ -349,7 +388,8 @@ async def collect_status_report(app: AppContext) -> dict:
     stats = await app.storage.get_stats()
     config = app.config
     try:
-        cwd = Path(os.getcwd()).resolve()
+        client_cwd = client_cwd_of(app)
+        cwd = (client_cwd if client_cwd is not None else Path(os.getcwd())).resolve()
     except OSError:
         cwd = None
     from memtomem.server.tools.search import (
@@ -563,9 +603,11 @@ async def collect_status_report(app: AppContext) -> dict:
                     # content is unchanged bucket as ``unchanged``, never
                     # ``to_upsert``, so no chunk is rewritten and no entity is
                     # extracted. ``--force`` is what re-writes them.
-                    "fix": 'run mem_do(action="entity_scan") to populate entities, or '
-                    "re-index with mm index --force <path> (with "
-                    "indexing.extract_entities on, the default)",
+                    "fix": 'run mem_do(action="entity_scan") to populate entities (with '
+                    "an LLM provider configured it must be reachable: a chunk whose LLM "
+                    "call fails is left as it is; with llm.enabled=false the scan uses "
+                    "the regex extractor), or re-index with mm index --force "
+                    "<path> (with indexing.extract_entities on, the default)",
                 }
             )
 
@@ -621,6 +663,7 @@ async def collect_status_report(app: AppContext) -> dict:
             "cwd": str(cwd) if cwd is not None else None,
             "project_context_root": str(project_root) if project_root is not None else None,
             "project_context_source": "bound" if bound_root is not None else "cwd",
+            **_shared_daemon_runtime(),
         },
         "index": {
             "total_chunks": stats["total_chunks"],
@@ -1001,6 +1044,24 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             ),
         ),
     ]
+    if shared := runtime.get("shared_daemon"):
+        lines.append(
+            StatusLine(
+                "kv",
+                key="Shared daemon:".ljust(17),
+                value=(
+                    f"{shared['name']} (pid {shared['pid']}, {shared['connections']} connection(s))"
+                ),
+            )
+        )
+    elif fallback := runtime.get("shared_fallback"):
+        lines.append(
+            StatusLine(
+                "kv",
+                key="Shared daemon:".ljust(17),
+                value=f"{fallback['name']} not joined ({fallback['reason']})",
+            )
+        )
     lines.extend(
         _status_source_lines(
             "User sources",
@@ -1365,9 +1426,25 @@ async def mem_config(
                 publish_onnx_batch_size(app.embedder, app.config.embedding.onnx_batch_size)
             # Rebuild FTS index when tokenizer changes.
             if key == "search.tokenizer":
-                app.storage.set_fts_tokenizer(app.config.search.tokenizer)
+                requested = app.config.search.tokenizer
+                app.storage.set_fts_tokenizer(requested)
                 count = await app.storage.rebuild_fts()
-                result += f"\nFTS index rebuilt ({count} chunks)."
+                # ``set_fts_tokenizer`` is not the last word: a kiwipiepy
+                # rebuild in a process where the extra cannot be imported
+                # silently falls back to unicode61 mid-pass. Name the
+                # tokenizer the rows were actually built with, and say so when
+                # it is not the one that was asked for — otherwise a fallback
+                # rebuild reports success in the same words as a real one
+                # (mirrors ``mm config set``; #3385).
+                built = app.storage.fts_tokenizer_effective
+                result += f"\nFTS index rebuilt with {built} ({count} chunks)."
+                if built != requested:
+                    result += (
+                        f"\nwarning: {requested} is unavailable (not installed), so this "
+                        f"rebuild and every query in this process fall back to {built}. "
+                        f"Install it, restart the server, and rebuild for a {requested} "
+                        f"index."
+                    )
 
             suffix = _persistence_suffix(key, receipt)
             result += suffix
@@ -1410,13 +1487,16 @@ class _PersistRefused(Exception):
 def _save_or_restore(config: Mem2MemConfig, snapshot: _ConfigSectionSnapshot | None) -> SaveReceipt:
     """Save the runtime config, restoring *snapshot* if the save fails.
 
+    Writes only the sections MCP may change (:func:`mcp_saved_fields`), so the
+    file keeps its own ``session_trace`` settings.
+
     Timeouts and validation failures become :class:`_PersistRefused` with the
     message ``mem_config`` returns; anything else propagates after the restore.
     """
     from memtomem.config import save_config_overrides
 
     try:
-        return save_config_overrides(config)
+        return save_config_overrides(config, mcp_saved_fields())
     except Exception as e:
         if snapshot is not None:
             snapshot.restore()

@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _subprocess_env import subprocess_env
 
 from memtomem.config_signature import build_fresh_config
 from .helpers import (
@@ -326,9 +327,8 @@ _INHERITED_PYTEST_ENV = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_CURRENT_TES
 
 
 def _child_env(**overrides: str) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in _INHERITED_PYTEST_ENV}
-    env.update(overrides)
-    return env
+    base = {k: v for k, v in os.environ.items() if k not in _INHERITED_PYTEST_ENV}
+    return subprocess_env(base, **overrides)
 
 
 class TestChildProcess:

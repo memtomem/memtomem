@@ -1586,6 +1586,9 @@ async function _saveSection(section) {
       _syncConfigToUI();
       // Check if changed fields need reindex/FTS rebuild
       _showReindexWarning(resp.applied);
+      if (resp.fts_rebuild?.warning) {
+        showToast(resp.fts_rebuild.warning, 'warning');
+      }
       // Surface the supported_extensions reindex nudge as a toast — the
       // ``applied`` list already filters to actual changes, so no extra
       // diff-tracking needed.
@@ -1653,7 +1656,12 @@ function _showReindexWarning(applied) {
       btnLoading(btn, true);
       try {
         const res = await api('POST', '/api/fts-rebuild', undefined, { timeout: 120_000 });
-        showToast(res.message || t('toast.fts_rebuilt', { count: res.rebuilt_rows }), 'success');
+        // ``warning`` is set when the rebuild fell back to another tokenizer;
+        // ``message`` already says so (#3395).
+        showToast(
+          res.message || t('toast.fts_rebuilt', { count: res.rebuilt_rows }),
+          res.warning ? 'warning' : 'success',
+        );
         btn.textContent = t('common.done');
         btn.disabled = true;
       } catch (err) {

@@ -35,9 +35,13 @@ pytestmark = pytest.mark.asyncio
 
 REFUSAL = "nothing was written"
 TIER_TEXT = "# Shared\n\nA note in the git-tracked tier.\n"
-# The namespaces the appenders in ``APPENDERS`` write under: the default for
-# every add, and the target namespace ``_append`` gives ``mm agent share``.
-NAMESPACES = (None, "shared")
+# The namespace the appenders in ``DAY_FILE_APPENDERS`` write under: the default.
+NAMESPACES = (None,)
+
+
+# ``mm agent share`` writes each copy to a file of its own, not the day file
+# (#3324); test_agent_share_links_its_own_copy.py gates a link at its directory.
+DAY_FILE_APPENDERS = [s for s in APPENDERS if s not in ("langgraph_add", "cli_agent_share")]
 
 
 def _today() -> str:
@@ -85,7 +89,7 @@ def _assert_refused(surface: str, result) -> None:
 
 
 @pytest.mark.parametrize("where", ["outside", "nested"])
-@pytest.mark.parametrize("surface", [s for s in APPENDERS if s != "langgraph_add"])
+@pytest.mark.parametrize("surface", DAY_FILE_APPENDERS)
 async def test_a_linked_day_file_is_refused_before_writing(
     seeded, tmp_path, monkeypatch, capsys, surface, where
 ):
@@ -111,7 +115,7 @@ async def test_a_linked_day_file_is_refused_before_writing(
     assert not memory_lock_path(note).exists()
 
 
-@pytest.mark.parametrize("surface", [s for s in APPENDERS if s != "langgraph_add"])
+@pytest.mark.parametrize("surface", DAY_FILE_APPENDERS)
 async def test_a_day_file_linked_inside_its_own_tier_still_writes(
     seeded, monkeypatch, capsys, surface
 ):

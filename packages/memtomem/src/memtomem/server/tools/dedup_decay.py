@@ -1,19 +1,42 @@
-"""Tools: mem_dedup_scan, mem_dedup_merge, mem_decay_scan, mem_decay_expire, mem_cleanup_orphans."""
+"""Tools: mem_dedup_scan, mem_dedup_merge, mem_dedup_remove, mem_decay_scan, mem_decay_expire,
+mem_cleanup_orphans."""
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
+from memtomem.errors import RetryableError, StorageError
+from memtomem.indexing.engine import StoredSourceRead, read_stored_source
+from memtomem.models import ORIGIN_CONSOLIDATION_POLICY
+from memtomem.search.dedup import DIFFERING_FIELDS, differing_fields, parse_scan_cursor
 from memtomem.server import mcp
-from memtomem.server.context import CtxType, _get_app_initialized
+from memtomem.server.client_paths import anchor_client_path, client_cwd_of
+from memtomem.server.context import AppContext, CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.server.tools._id_access import caller_boundary, in_boundary
 from memtomem.server.tools._provenance import (
     capture_session_for_untracked_write,
     flag_untracked_write,
 )
 from memtomem.storage.orphan_detect import RetainRule, group_orphans, scan_orphans, source_state
+from memtomem.storage.sqlite_backend import SqliteBackend
+from memtomem.storage.sqlite_errors import is_writer_busy
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
+
+    from memtomem.models import Chunk, ChunkTopology
+    from memtomem.search.dedup import DedupCandidate, DedupCoverage
+
+
+#: The most pairs one ``mem_dedup_scan`` call returns.
+_DEDUP_LIMIT_MAX = 500
 
 
 @mcp.tool()
@@ -23,6 +46,8 @@ async def mem_dedup_scan(
     threshold: float = 0.92,
     limit: int = 50,
     max_scan: int = 500,
+    after: str | None = None,
+    offset: int = 0,
     ctx: CtxType = None,
 ) -> str:
     """Scan for duplicate chunk candidates (dry-run, no mutations).
@@ -30,52 +55,312 @@ async def mem_dedup_scan(
     Args:
         threshold: Dense score 1/(1+L2) threshold (0-1, default 0.92)
         limit: Maximum number of candidate pairs to return
-        max_scan: Maximum chunks to inspect for near-duplicate search
+        max_scan: Maximum chunks to scan, taken in chunk-id order
+        after: Chunk id to scan after; the last scan's result names the next one
+        offset: Pairs of the scanned pool to skip; a result names the next offset when it
+            offers one. Pages line up only while every scan gives the same list
     """
     if not 0.0 <= threshold <= 1.0:
         return f"Error: threshold must be between 0 and 1, got {threshold}."
-    if not 1 <= limit <= 500:
-        return f"Error: limit must be between 1 and 500, got {limit}."
+    if not 1 <= limit <= _DEDUP_LIMIT_MAX:
+        return f"Error: limit must be between 1 and {_DEDUP_LIMIT_MAX}, got {limit}."
     if max_scan < 1:
         return f"Error: max_scan must be at least 1, got {max_scan}."
+    # ``mem_do`` hands raw values over and checks only booleans, so the type
+    # is checked here: a ``True`` or ``1.5`` would otherwise reach the slice.
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        return f"Error: offset must be a whole number of at least 0, got {offset!r}."
+    try:
+        cursor = parse_scan_cursor(after)
+    except ValueError as exc:
+        return f"Error: {exc}."
 
     app = await _get_app_initialized(ctx)
     if app.dedup_scanner is None:
         return "DedupScanner not initialized."
     candidates, coverage = await app.dedup_scanner.scan_with_coverage(
-        threshold=threshold, limit=limit, max_scan=max_scan
+        threshold=threshold, limit=limit, max_scan=max_scan, after=cursor, offset=offset
     )
-    footer = _dedup_coverage_line(coverage)
+    footer = _dedup_coverage_line(coverage, limit, offset)
 
+    if candidates and app.config.maintenance.experimental_duplicate_brief:
+        evidence = await app.dedup_scanner.member_evidence(candidates)
+        return _duplicate_brief(candidates, evidence, threshold, footer)
+
+    if not candidates and coverage.pairs_found:
+        # The pool has pairs and this page is past them: "no duplicates"
+        # would read as a clean pool.
+        return f"No duplicate pairs at offset={offset} (threshold={threshold}).\n{footer}"
     if not candidates:
         return f"No duplicate chunks found (threshold={threshold}).\n{footer}"
 
     parts: list[str] = [f"Duplicate candidates: {len(candidates)} pairs (threshold={threshold}):\n"]
     for i, c in enumerate(candidates, 1):
         kind = "exact duplicate" if c.exact else f"score={c.score:.4f}"
-        meta_a = c.chunk_a.metadata
-        meta_b = c.chunk_b.metadata
-        preview_a = c.chunk_a.content[:80].replace("\n", " ")
-        preview_b = c.chunk_b.content[:80].replace("\n", " ")
         parts.append(
-            f"[{i}] {kind}\n"
-            f'  A ({c.chunk_a.id}): {meta_a.source_file}:{meta_a.start_line} — "{preview_a}"\n'
-            f'  B ({c.chunk_b.id}): {meta_b.source_file}:{meta_b.start_line} — "{preview_b}"'
+            f"[{i}] {kind}\n{_scan_member('A', c.chunk_a)}\n{_scan_member('B', c.chunk_b)}"
         )
 
     parts.append(footer)
     return "\n".join(parts)
 
 
-def _dedup_coverage_line(coverage) -> str:
-    """Say what the scan looked at, so an empty result is not read as a clean store."""
-    line = f"Scanned {coverage.pool} chunks"
+def _scan_member(label: str, chunk: Chunk) -> str:
+    """One member's line in the default rendering.
+
+    The body is quoted as the brief quotes it. The path keeps its unquoted
+    ``path:line`` shape for callers that read it, with only its non-printable
+    characters escaped: neither value can end the line or start another.
+    """
+    meta = chunk.metadata
+    preview = _quoted(chunk.content[:80].replace("\n", " "))
+    return (
+        f"  {label} ({chunk.id}): {_escaped(str(meta.source_file))}:{meta.start_line} — {preview}"
+    )
+
+
+def _dedup_coverage_line(coverage: DedupCoverage, limit: int | None = None, offset: int = 0) -> str:
+    """Say what the scan looked at, so an empty result is not read as a clean store.
+
+    The first clause is about pool selection only: "all" means no scannable
+    chunk was left out of the pool, not that every duplicate was looked for.
+    The last clauses say how to see what this call did not show: the pairs
+    *offset* and *limit* left out, then the chunks after the pool.
+    """
+    if coverage.after is not None:
+        # The rule, not what the subset is like: id order promises neither a
+        # spread over files nor anything about age.
+        which = f"the {coverage.pool}" if coverage.pool else "none"
+        line = (
+            f"Scanned {coverage.pool} of {coverage.eligible} scannable chunks "
+            f"({which} after {coverage.after} in chunk-id order)"
+        )
+    elif coverage.pool < coverage.eligible:
+        line = (
+            f"Scanned {coverage.pool} of {coverage.eligible} scannable chunks "
+            f"(the first {coverage.pool} in chunk-id order)"
+        )
+    else:
+        noun = "chunk" if coverage.pool == 1 else "chunks"
+        line = f"Scanned all {coverage.pool} scannable {noun}"
     if not coverage.near_search_enabled:
-        return f"{line}; near-duplicate search is off (BM25-only store)."
-    line += f"; near-duplicate search probed {coverage.probed}"
-    if coverage.without_vector:
-        line += f", {coverage.without_vector} had no usable stored vector and were not probed"
+        line += "; near-duplicate search is off (BM25-only store)"
+    else:
+        line += f"; near-duplicate search probed {coverage.probed}"
+        if coverage.without_vector:
+            line += f", {coverage.without_vector} had no usable stored vector and were not probed"
+    if coverage.same_source_read_only:
+        n = coverage.same_source_read_only
+        noun = "pair" if n == 1 else "pairs"
+        line += (
+            f"; left out {n} {noun} of read-only chunks from the same file "
+            "(neither member can be removed)"
+        )
+    if limit is not None:
+        line += _pair_page_clause(coverage.pairs_found, limit, offset)
+    if coverage.next_after is not None:
+        verb = "remains" if coverage.remaining == 1 else "remain"
+        line += f'; {coverage.remaining} {verb}: continue with after="{coverage.next_after}"'
+        if offset:
+            # The next pool's pairs start at 0; a kept offset would skip them.
+            line += " and no offset"
+    elif coverage.after is not None:
+        line += "; reached the end of the store"
     return f"{line}."
+
+
+def _pair_page_clause(found: int, limit: int, offset: int) -> str:
+    """Which of the pool's *found* pairs this page holds, and how to see the next ones.
+
+    Counts what the scan selected, not what is displayed: the brief can leave
+    out further pairs when it renders, and says so on its own line. Moving the
+    cursor on never reaches the pairs left out here. A higher ``limit`` over
+    the same pool lists the same pairs and more of them, so it is named from
+    the start while it can list them all; otherwise the next ``offset`` is.
+    A smaller ``max_scan`` is never named: the exact phase pairs each copy with
+    the oldest copy in its pool, so a smaller pool can report other pairs.
+    """
+    # ``end`` is computed from ``offset``, an ``int``, so the offset named
+    # below is one this tool accepts even when ``limit`` arrived as ``True``.
+    shown = max(0, min(limit, found - offset))
+    end = offset + shown
+    if offset == 0:
+        if found <= limit:
+            return ""
+        clause = f"; limit={limit} kept {limit} of {found} pairs: "
+        if found <= _DEDUP_LIMIT_MAX:
+            return clause + "to see the rest, scan again from the same position with a higher limit"
+        clause += f"one call lists at most {_DEDUP_LIMIT_MAX}; "
+    elif shown == 0:
+        return f"; offset={offset} is past the last pair ({found} found)"
+    else:
+        clause = f"; offset={offset} kept pairs {offset + 1} to {end} of {found}"
+        if end == found:
+            return clause
+        clause += ": "
+    return clause + f"to see the next ones, scan again from the same position with offset={end}"
+
+
+#: Says what was compared: two members can still differ in what is not, such
+#: as the body of a near pair or the read-only flag printed on the line above.
+_NO_DIFFERENCE = f"none (compared: {', '.join(DIFFERING_FIELDS)})"
+
+
+def _duplicate_brief(
+    candidates: Sequence[DedupCandidate],
+    evidence: dict[UUID, tuple[Chunk, ChunkTopology]],
+    threshold: float,
+    footer: str,
+) -> str:
+    """The scan's pairs with what the store holds about each member.
+
+    Every member line is rendered from *evidence*, the read made after the
+    scan, so a member's facts describe one moment. A pair is left out when
+    that read does not return one of its members, or when an exact pair's
+    members do not hash the same. The scan supplies the pairing, its order
+    and a near pair's score, which is not recomputed.
+    """
+    pairs = []
+    for candidate in candidates:
+        a = evidence.get(candidate.chunk_a.id)
+        b = evidence.get(candidate.chunk_b.id)
+        if a is None or b is None:
+            continue
+        if candidate.exact and a[0].content_hash != b[0].content_hash:
+            continue
+        pairs.append((candidate, a, b))
+
+    tail = [footer]
+    omitted = len(candidates) - len(pairs)
+    if omitted:
+        tail.insert(
+            0,
+            # Present tense, not "since the scan": a pair can be dropped with
+            # nothing having changed. The scan's near phase takes neighbours
+            # under the search's row-level hold rule, and the evidence read
+            # uses the listing's path-level one, which also hides an ordinary
+            # chunk filed on a hidden policy summary's path.
+            f"{omitted} pair{'' if omitted == 1 else 's'} omitted: a member is not stored "
+            "now, its source is unavailable, or the bodies of an exact pair do not match.",
+        )
+    if not pairs:
+        return "\n".join([f"No duplicate chunks found (threshold={threshold}).", *tail])
+
+    parts = [f"Duplicate candidates: {len(pairs)} pairs (threshold={threshold}):\n"]
+    for i, (candidate, a, b) in enumerate(pairs, 1):
+        kind = "exact duplicate" if candidate.exact else f"score={candidate.score:.4f}"
+        differs = differing_fields(a[0].metadata, b[0].metadata)
+        parts.append(
+            f"[{i}] {kind}\n"
+            f"{_brief_member('A', *a)}\n"
+            f"{_brief_member('B', *b)}\n"
+            f"  differs: {', '.join(differs) or _NO_DIFFERENCE}"
+        )
+    return "\n".join([*parts, *tail])
+
+
+def _brief_member(label: str, chunk: Chunk, topology: ChunkTopology) -> str:
+    meta = chunk.metadata
+    preview = _quoted(chunk.content[:80].replace("\n", " "))
+    scope = _quoted(meta.scope)
+    if meta.project_root:
+        scope += f" ({_quoted(str(meta.project_root))})"
+    record = [
+        f"heading={' > '.join(map(_quoted, meta.heading_hierarchy)) or '(none)'}",
+        f"namespace={_quoted(meta.namespace)}",
+        f"scope={scope}",
+        f"tags={', '.join(map(_quoted, meta.tags)) or '(none)'}",
+        f"valid={_brief_validity(meta.valid_from_unix, meta.valid_to_unix)}",
+    ]
+
+    # "stored flag": what the index recorded, not what the configuration says
+    # now. ``mem_delete`` asks the configuration itself.
+    source = ["read-only (stored flag)" if meta.source_read_only else "writable (stored flag)"]
+    if meta.redaction_count:
+        source.append("masked projection")
+    if topology.at_source_start is None:
+        source.append("line span not recorded")
+    else:
+        if topology.at_source_start:
+            source.append("no sibling starts on an earlier line")
+        if topology.span_shared:
+            source.append("line span overlaps a sibling chunk")
+    if topology.only_in_source:
+        source.append("only chunk of its source")
+
+    links = []
+    if meta.origin == ORIGIN_CONSOLIDATION_POLICY:
+        links.append("policy summary")
+    if topology.consolidated_into:
+        links.append(f"covered by {_count(topology.consolidated_into, 'summary', 'summaries')}")
+    if topology.consolidates:
+        links.append(f"summary of {_count(topology.consolidates, 'chunk', 'chunks')}")
+    if topology.other_relations:
+        links.append(_count(topology.other_relations, "other relation", "other relations"))
+    if topology.links_out:
+        links.append(
+            "link source: " + ", ".join(f"{_quoted(kind)} x{n}" for kind, n in topology.links_out)
+        )
+    if topology.links_in:
+        links.append("link target: " + ", ".join(map(_quoted, topology.links_in)))
+
+    return (
+        f"  {label} ({chunk.id}): {_quoted(str(meta.source_file))}:{meta.start_line} — {preview}\n"
+        f"     record: {' | '.join(record)}\n"
+        f"     source: {' | '.join(source)}\n"
+        f"     links: {' | '.join(links) or 'none'}"
+    )
+
+
+def _count(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def _quoted(text: str) -> str:
+    """*text* in double quotes, on one line.
+
+    Headings, tags, namespaces, paths and bodies are whatever a file or a
+    caller stored. Quoted, with the quote, the backslash and every
+    non-printable character escaped, such a value cannot end its own field,
+    pass for the next one, or start a line that reads as evidence.
+    ``str.isprintable`` is false for the line breaks ``splitlines`` honours
+    beyond ``\\n`` (U+0085, U+2028) as well as for control characters.
+    """
+    return f'"{_escaped(text, chr(34) + chr(92))}"'
+
+
+def _escaped(text: str, specials: str = "") -> str:
+    """*text* with every non-printable character, and each of *specials*, escaped."""
+    return "".join(
+        "\\" + ch
+        if ch in specials
+        else ch
+        if ch.isprintable()
+        else ch.encode("unicode_escape").decode("ascii")
+        for ch in text
+    )
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _brief_validity(valid_from: int | None, valid_to: int | None) -> str:
+    def instant(unix: int) -> str:
+        # To the second: two bounds a day apart or ten seconds apart must not
+        # read the same. A stored bound is any signed 64-bit integer (a bundle
+        # import accepts the full range), most of which no calendar reaches;
+        # ``fromtimestamp`` would also refuse a negative one on Windows.
+        try:
+            return (_EPOCH + timedelta(seconds=unix)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except OverflowError:
+            return f"unix {unix}"
+
+    bounds = []
+    if valid_from is not None:
+        bounds.append(f"from {instant(valid_from)}")
+    if valid_to is not None:
+        bounds.append(f"until {instant(valid_to)}")
+    return " ".join(bounds) or "always"
 
 
 @mcp.tool()
@@ -133,6 +418,211 @@ async def mem_dedup_merge(
     if would_or_did:
         await flag_untracked_write(app, provenance_session_id)
     return f"Merge complete: {would_or_did} chunks deleted, keep_id={keep_id}"
+
+
+_REINDEX_REMEDY = (
+    "Run `mm index <file>` on it (plain, not `--force`, which records no receipt), "
+    "then mem_dedup_scan again."
+)
+_JUDGE_REMEDY = "Read the file(s) and remove the copy with mem_delete."
+_HELD_REMEDY = (
+    "Clear the hold first: a file whose project tier is no longer registered needs that tier "
+    "restored, or the file moved where it belongs; otherwise a plain `mm index <file>` checks "
+    "it again. Then mem_dedup_scan again."
+)
+_WRITER_BUSY = "the store's writer is busy; no lines were removed. Retry."
+
+
+@asynccontextmanager
+async def _busy_is_retryable() -> AsyncIterator[None]:
+    """A busy writer refuses retryably, worded for this tool rather than ``mem_delete``."""
+    try:
+        yield
+    except StorageError as exc:
+        if not is_writer_busy(exc):
+            raise
+        raise RetryableError(_WRITER_BUSY) from exc
+
+
+def _refusal(role: str, key: str, problem: str, remedy: str) -> str:
+    return f"Error: the {role} member's file {key} {problem}; no lines were removed. {remedy}"
+
+
+def _read_members(keys: list[tuple[str, str]]) -> list[StoredSourceRead] | str:
+    """Read each member's file as the indexer would, or return the first refusal."""
+    from memtomem.storage.sqlite_helpers import stored_key_moved
+
+    reads: list[StoredSourceRead] = []
+    for role, key in keys:
+        if stored_key_moved(key):
+            return _refusal(role, key, "now resolves to another file", _JUDGE_REMEDY)
+        read = read_stored_source(key)
+        if isinstance(read, str):
+            return _refusal(role, key, read, _REINDEX_REMEDY)
+        if read["inode"] == 0:
+            return _refusal(
+                role,
+                key,
+                "is on a filesystem that reports no file identity, so it cannot be checked",
+                _JUDGE_REMEDY,
+            )
+        if read["links"] > 1:
+            return _refusal(
+                role,
+                key,
+                "has another hard-linked name, through which it can change unchecked",
+                _JUDGE_REMEDY,
+            )
+        reads.append(read)
+    return reads
+
+
+async def _check_pair(app: AppContext, keep_uuid: UUID, keep_id: str, removed: Chunk) -> str | None:
+    """Refuse unless both members' files and rows still match their index receipts.
+
+    Runs under the removed file's locks (``_delete_chunk``'s precheck). The kept
+    file is read, not locked: a change to it after this check is not seen. The
+    files, holds, receipts and rows are all read inside one writer transaction,
+    so no commit lands between them and the check describes one moment. The
+    file reads run in a thread, as other awaits inside a transaction do.
+    """
+    from memtomem.indexing.source_receipt import receipt_as_stored, state_as_stored
+    from memtomem.storage.base import WRITER_WAIT_S
+
+    boundary = caller_boundary(app)
+    async with _busy_is_retryable():
+        keeper = await app.storage.get_chunk(keep_uuid, exclude_withheld=True, read_writer=True)
+    if keeper is None or not in_boundary(keeper, boundary):
+        return f"Error: chunk {keep_id} not found."
+    if await asyncio.to_thread(_one_file, removed, keeper):
+        return _same_file_refusal(removed, keeper)
+    keys = [
+        ("removed", str(removed.metadata.source_file)),
+        ("kept", str(keeper.metadata.source_file)),
+    ]
+    indexing = app.config.indexing
+    # Under either setting an index pass records no receipt, so reindexing
+    # cannot clear any refusal that compares against one.
+    receipt_remedy = (
+        "Index passes with indexing.enrich_chunk_context or indexing.auto_summarize on "
+        "record no receipt, so this file cannot be checked here. " + _JUDGE_REMEDY
+        if indexing.enrich_chunk_context or indexing.auto_summarize
+        else _REINDEX_REMEDY
+    )
+    storage = cast("SqliteBackend", app.storage)
+    dimension = app.embedder.dimension
+    async with _busy_is_retryable(), app.storage.transaction(wait=WRITER_WAIT_S):
+        current = await app.storage.get_chunk(keep_uuid, exclude_withheld=True, read_writer=True)
+        if current is None or not in_boundary(current, boundary):
+            return f"Error: chunk {keep_id} not found."
+        if str(current.metadata.source_file) != keys[1][1]:
+            raise RetryableError(
+                "the kept member moved while it was checked; no lines were removed. Retry."
+            )
+        reads = await asyncio.to_thread(_read_members, keys)
+        if isinstance(reads, str):
+            return reads
+        if (reads[0]["device"], reads[0]["inode"]) == (reads[1]["device"], reads[1]["inode"]):
+            return _same_file_refusal(removed, keeper)
+        db = storage._get_db()
+        for (role, key), read in zip(keys, reads, strict=True):
+            if await app.storage.is_source_held(Path(key)):
+                return _refusal(role, key, "is held by the index", _HELD_REMEDY)
+            receipt = receipt_as_stored(db, key)
+            if receipt is None:
+                return _refusal(role, key, "has no index receipt", receipt_remedy)
+            if read["content_hash"] != receipt[0]:
+                return _refusal(role, key, "changed since it was indexed", receipt_remedy)
+            rows = state_as_stored(db, key, dimension)
+            if rows is None or rows[0] != receipt[1]:
+                return _refusal(
+                    role, key, "has stored rows that differ from its last index", receipt_remedy
+                )
+    return None
+
+
+def _one_file(a: Chunk, b: Chunk) -> bool:
+    """One stored key, or two spellings of one file judged by its identity (#3408).
+
+    Not by the lock key: that folds case unconditionally, and on a case-sensitive
+    volume ``A.md`` and ``a.md`` are two files. Stats files; run it in a thread.
+    """
+    from memtomem.storage.sqlite_helpers import source_twins
+
+    a_key, b_key = str(a.metadata.source_file), str(b.metadata.source_file)
+    return a_key == b_key or bool(source_twins(a_key, [b_key]))
+
+
+def _same_file_refusal(removed: Chunk, keeper: Chunk) -> str:
+    """Two members in one file; under two stored keys, the twin remedy of #3408."""
+    removed_key, kept_key = str(removed.metadata.source_file), str(keeper.metadata.source_file)
+    if removed_key != kept_key:
+        from memtomem.indexing.scope_guard import twin_detail
+
+        return "Error: " + twin_detail(removed_key, kept_key, op="mem_dedup_remove", surface="mcp")
+    return (
+        f"Error: both members are in one file ({kept_key}); no lines were removed. {_JUDGE_REMEDY}"
+    )
+
+
+@mcp.tool()
+@tool_handler
+@register("maintenance")
+async def mem_dedup_remove(
+    remove_id: str,
+    keep_id: str,
+    confirm_project_shared: bool = False,
+    ctx: CtxType = None,
+) -> str:
+    """Remove one member of a duplicate pair from its file, after checking both.
+
+    Removes remove_id's lines from its file and re-indexes it, as mem_delete does
+    for a file on disk, only when both members' files and rows still match what was
+    last indexed, the two are in different files, and neither file has another
+    hard-linked name. A member whose file is missing is refused.
+    It does not judge whether the two say the same thing: read both first. A change
+    to the kept file after the check is not seen.
+
+    Args:
+        remove_id: UUID of the chunk whose lines are removed
+        keep_id: UUID of the duplicate that stays
+        confirm_project_shared: Required when remove_id is a project_shared chunk
+    """
+    from memtomem.server.tools.memory_crud import _delete_chunk
+
+    app = await _get_app_initialized(ctx)
+    try:
+        remove_uuid = UUID(remove_id)
+        keep_uuid = UUID(keep_id)
+    except ValueError as exc:
+        return f"Error: invalid chunk ID format: {exc}"
+    if remove_uuid == keep_uuid:
+        return "Error: remove_id and keep_id are the same chunk; no lines were removed."
+    if not isinstance(app.storage, SqliteBackend):
+        return "Error: mem_dedup_remove needs the SQLite storage backend."
+    boundary = caller_boundary(app)
+    keeper = await app.storage.get_chunk(keep_uuid, exclude_withheld=True)
+    if keeper is None or not in_boundary(keeper, boundary):
+        return f"Error: chunk {keep_id} not found."
+    removed = await app.storage.get_chunk(remove_uuid, exclude_withheld=True)
+    if (
+        removed is not None
+        and in_boundary(removed, boundary)
+        and await asyncio.to_thread(_one_file, removed, keeper)
+    ):
+        return _same_file_refusal(removed, keeper)
+
+    async def precheck(chunk: Chunk) -> str | None:
+        return await _check_pair(app, keep_uuid, keep_id, chunk)
+
+    return await _delete_chunk(
+        app,
+        remove_uuid,
+        remove_id,
+        confirm_project_shared,
+        surface="mem_dedup_remove",
+        precheck=precheck,
+    )
 
 
 @mcp.tool()
@@ -247,6 +737,10 @@ async def mem_cleanup_orphans(
     """
     under_dirs = _under_dirs(under)
     app = await _get_app_initialized(ctx)
+    if client_cwd_of(app) is not None:
+        # Anchored, not resolved: ``group_orphans`` resolves each entry once,
+        # in its own way, and resolving twice is not always resolving once.
+        under_dirs = [str(anchor_client_path(app, d)) for d in under_dirs]
     # Two-pass scan keeps transient absence out of the explicit purge list.
     # A mass ratio cannot prove deletion or availability (#2498).
     result = await scan_orphans(app.storage)

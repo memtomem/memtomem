@@ -242,10 +242,14 @@ async def _run_register(agent_id: str, description: str | None, color: str | Non
 
     namespace = f"{_CURRENT_PREFIX}{agent_id}"
     async with cli_components() as comp:
-        await comp.storage.set_namespace_meta(namespace, description=description, color=color)
+        await comp.storage.set_namespace_meta(
+            namespace, description=description, color=color, surface="cli_agent_register"
+        )
         if await comp.storage.get_namespace_meta(SHARED_NAMESPACE) is None:
             await comp.storage.set_namespace_meta(
-                SHARED_NAMESPACE, description="Shared knowledge base for all agents"
+                SHARED_NAMESPACE,
+                description="Shared knowledge base for all agents",
+                surface="cli_agent_register",
             )
     click.echo(f"Agent registered: {agent_id}")
     click.echo(f"- Namespace: {namespace}")
@@ -406,24 +410,35 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         if chunk is None:
             raise click.ClickException(f"Chunk {chunk_id} not found.")
 
-        # Build the copy's tags using the same dedup contract as the MCP
-        # tool — keep them in lock-step via the helper so future tweaks
+        # Build the copy's tags and title using the same contract as the MCP
+        # tool — keep them in lock-step via the helpers so future tweaks
         # stay in one place.
-        try:
-            from memtomem.server.tools.multi_agent import _build_shared_tags
+        from memtomem.server.tools.multi_agent import _build_shared_tags, _build_shared_title
 
-            tags = _build_shared_tags(chunk.metadata.tags, chunk_id)
-        except ImportError:
-            # Fallback for branches that pre-date PR-3 — append the bare
-            # audit tag without dedup. The CLI must keep working even
-            # before the helper lands.
-            tags = list(chunk.metadata.tags) + [f"shared-from={chunk_id}"]
+        tags = _build_shared_tags(chunk.metadata.tags, chunk_id)
+        title = _build_shared_title(
+            chunk.metadata.heading_hierarchy,
+            chunk_type=chunk.metadata.chunk_type,
+        )
 
         from memtomem import privacy
-        from memtomem.tools.memory_writer import append_entry
+        from memtomem.tools.memory_writer import (
+            append_entry,
+            entry_guard_text,
+            entry_open_fence,
+            open_fence_refusal,
+        )
 
+        # A copy that leaves a fence open would make anything later appended to
+        # its file code inside it (#3618): refused like every other entry.
+        fence = entry_open_fence(chunk.content, title, tags)
+        if fence is not None:
+            raise click.ClickException(open_fence_refusal(fence))
+
+        # The copy as it is written: the heading path becomes its title and
+        # the source's tags go with it.
         guard = privacy.enforce_write_guard(
-            chunk.content,
+            entry_guard_text(chunk.content, title, tags),
             surface="cli_agent_share",
             force_unsafe=force_unsafe,
             audit_context={"chunk_id": chunk_id, "target": target},
@@ -434,22 +449,16 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 "Retry with --force-unsafe to bypass (audit-logged)."
             )
 
-        title = (
-            "Shared: " + " > ".join(chunk.metadata.heading_hierarchy)
-            if chunk.metadata.heading_hierarchy
-            else "Shared: memory"
-        )
-
         from datetime import datetime, timezone
 
         from memtomem.cli._errors import raise_cli_error
         from memtomem.errors import ConfigError
         from memtomem.memory_scope import (
             MemoryScopeError,
-            day_file_name,
             namespace_mix_refusal,
             require_user_base,
             resolve_scope_target,
+            share_copy_file_name,
         )
 
         try:
@@ -460,18 +469,18 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         except ConfigError as exc:
             raise_cli_error(exc)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        # Issue #2005: this write indexes with ``namespace=target``, so it has
-        # the same restamping hazard as ``mm add`` — the shared entry landing
-        # in the plain day file would move that day's other entries into
-        # ``target`` as soon as chunk merging joined them.
+        # A file of its own, as ``mem_agent_share`` writes (#3324): in the
+        # namespace's day file a short copy merges into the entry before it,
+        # and when that entry is a linked copy the re-index refuses. The name
+        # carries ``target`` the way a day file's does (#2005, ADR-0043).
         default_ns = comp.config.namespace.default_namespace
         # Judged where it resolves (#2807): this write takes no scope and no
-        # confirmation, so a link at the day file must not carry it out of
+        # confirmation, so a link at the copy's file must not carry it out of
         # the user tier.
         try:
             path = resolve_scope_target(
                 base,
-                day_file_name(target, default_ns, date_str=date_str),
+                share_copy_file_name(target, default_ns, date_str=date_str),
                 scope="user",
                 project_memory_dirs=comp.config.indexing.project_memory_dirs,
             )
@@ -490,7 +499,7 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         # (#1587). Checking outside the lock would let another writer change
         # the file's namespace in between and turn the guard into decoration.
         # ``lock_held=True`` skips the nested engine acquire.
-        # Before the sidecar acquire: ``memory_lock_path`` RESOLVES the target, so a day file that is a symlink into a protected root gets its ``.lock`` created inside that root — a write into the directory we are about to refuse to write. The in-lock gate stays authoritative for the final target.
+        # Before the sidecar acquire: ``memory_lock_path`` RESOLVES the target, so a file that is a symlink into a protected root gets its ``.lock`` created inside that root — a write into the directory we are about to refuse to write. The in-lock gate stays authoritative for the final target.
         if comp.index_engine.is_read_only_source(path):
             from memtomem.source_provenance import READ_ONLY_TARGET_DETAIL
 
@@ -536,6 +545,13 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
                 )
                 if refusal is not None:
                     raise click.ClickException(refusal.removeprefix("Error: "))
+                if judged.existed:
+                    # The copy must be the file's only entry; a file created
+                    # after this check is refused by the writer's exclusive
+                    # create.
+                    raise click.ClickException(
+                        f"{path} already exists; nothing was written. Retry to write to a new file."
+                    )
                 try:
                     appended = append_entry(
                         path, chunk.content, title=title, tags=tags, judged=judged

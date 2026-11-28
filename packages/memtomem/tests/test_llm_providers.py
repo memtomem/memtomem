@@ -161,6 +161,22 @@ class TestOllamaLLM:
         assert payload["system"] == "sys"
 
     @pytest.mark.anyio
+    async def test_request_turns_thinking_off(self):
+        # Thinking is counted against num_predict and comes back in a field
+        # the provider does not read, so the default model answered with an
+        # empty response (#3382).
+        llm = OllamaLLM(_ollama_llm_config())
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = _make_httpx_response(json_data={"response": "ok"})
+        llm._client = mock_client
+
+        await llm.generate("test prompt", max_tokens=256)
+
+        payload = mock_client.post.call_args[1]["json"]
+        assert payload["think"] is False
+        assert payload["options"] == {"num_predict": 256}
+
+    @pytest.mark.anyio
     async def test_connection_error_raises_llm_error(self):
         config = _ollama_llm_config()
         llm = OllamaLLM(config)

@@ -28,6 +28,8 @@ from memtomem.errors import TransactionOwnedError
 from memtomem.indexing.summarizer import regenerate_for_paths
 from memtomem.storage.sqlite_helpers import norm_path
 
+from ._writer_overlap import CEILING_S, queued_on_writer, until_queued
+
 _NOTE = "# Note\n\n## Plans\n\nalpha falcon body\n"
 
 
@@ -46,17 +48,12 @@ class _Owner:
 
     async def start(self) -> None:
         self.task = asyncio.create_task(self._run())
-        await asyncio.wait_for(self.entered.wait(), 5)
+        await asyncio.wait_for(self.entered.wait(), CEILING_S)
 
     async def finish(self) -> None:
         self._release.set()
         if self.task is not None:
             await self.task
-
-
-def _queued(storage) -> bool:
-    """Whether a task is queued on the writer lock (test-only peek at asyncio)."""
-    return any(not w.cancelled() for w in (storage._writer_lock._waiters or ()))
 
 
 async def _overlap(storage, owner: _Owner, call, *, while_queued=None):
@@ -68,18 +65,12 @@ async def _overlap(storage, owner: _Owner, call, *, while_queued=None):
     test with its own error and no transaction stays open.
     """
     task = asyncio.ensure_future(call)
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 5
-    while not (owner.entered.is_set() and _queued(storage)) and not task.done():
-        if loop.time() > deadline:
-            break
-        await asyncio.sleep(0.005)
-    queued = owner.entered.is_set() and _queued(storage) and not task.done()
+    queued = await until_queued(storage, owner, task)
     if queued and while_queued is not None:
         while_queued()
     await owner.finish()
-    result = await asyncio.wait_for(task, 10)
-    assert queued, "the call never queued on the writer while the owner held it"
+    result = await asyncio.wait_for(task, CEILING_S)
+    assert queued, str(queued)
     return result
 
 
@@ -176,13 +167,13 @@ async def test_rewrite_preflight_times_out_as_a_refusal(components, memory_dir, 
     task = asyncio.ensure_future(engine.rewrite_refusal(norm_path(path), op="edit"))
     try:
         for _ in range(100):
-            if _queued(storage) or task.done():
+            if queued_on_writer(storage) or task.done():
                 break
             await asyncio.sleep(0.005)
-        assert _queued(storage) and not task.done(), "refused without waiting"
+        assert queued_on_writer(storage) and not task.done(), "refused without waiting"
         with pytest.raises(TransactionOwnedError, match="timed out"):
             await task
-        assert not _queued(storage)
+        assert not queued_on_writer(storage)
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

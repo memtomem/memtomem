@@ -108,7 +108,7 @@ from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.visibility import chunk_valid_at, neighbor_visible
 from memtomem.search.reranker.base import close_reranker_safely
 from memtomem.storage.base import ContextWindowRows, SearchMetadataFilter, parse_tag_filter
-from memtomem.storage.sqlite_helpers import match_source_filter_value, norm_path
+from memtomem.storage.sqlite_helpers import match_source_filter_value, norm_path, resolve_path
 
 logger = logging.getLogger(__name__)
 
@@ -420,16 +420,33 @@ def _matches_metadata(
     return True
 
 
+def _comparison_path(path: Path | str) -> Path:
+    """``path`` resolved for comparing a source with an exclusion root.
+
+    Python 3.12's ``resolve()`` raises ``RuntimeError`` for a symlink loop
+    (3.13+ returns a path instead). :func:`resolve_path` returns
+    ``os.path.realpath`` there, which keeps the links resolved before the
+    loop, so a pinned root whose tier loops still excludes a hit the index
+    recorded under it (#3670). An ``OSError`` from resolving leaves the
+    spelled absolute path as the key, so the comparison never raises.
+    """
+    path = Path(path).expanduser()
+    try:
+        return resolve_path(path)
+    except OSError:
+        return path.absolute()
+
+
 def _normalize_source_roots(roots: tuple[Path, ...] | None) -> tuple[Path, ...]:
     if not roots:
         return ()
-    return tuple(sorted({root.expanduser().resolve(strict=False) for root in roots}, key=str))
+    return tuple(sorted({_comparison_path(root) for root in roots}, key=str))
 
 
 def _source_is_excluded(source_file: Path, roots: tuple[Path, ...]) -> bool:
     if not roots:
         return False
-    source = Path(source_file).expanduser().resolve(strict=False)
+    source = _comparison_path(source_file)
     return any(source == root or source.is_relative_to(root) for root in roots)
 
 
@@ -1085,7 +1102,8 @@ class SearchPipeline:
         Returns an empty set when the feature is disabled, the lookup
         fails, no summary scores above threshold, or no surviving
         ``summarizes`` link points at any source. The caller treats an
-        empty set as "skip the rescue leg".
+        empty set as "skip the rescue leg". A ``SearchDeadlineExceeded``
+        from any of its three reads propagates instead.
         """
         cfg = self._session_summary_config
         if cfg is None or cfg.expansion_lookup_top_k <= 0:
@@ -1123,6 +1141,8 @@ class SearchPipeline:
             links_by_source = await self._storage.get_chunks_shared_from_batch(
                 [r.chunk.id for r in candidate_summaries], link_type="summarizes"
             )
+        except SearchDeadlineExceeded:
+            raise
         except Exception:
             _log_rescue_failure(
                 "links_walk",
@@ -1147,6 +1167,8 @@ class SearchPipeline:
                 scope_filter=scope_filter,
                 project_context_root=project_context_root,
             )
+        except SearchDeadlineExceeded:
+            raise
         except Exception:
             _log_rescue_failure("chunks_batch", "target hydration failed for rescue targets")
             if report_failure is not None:
@@ -1591,10 +1613,12 @@ class SearchPipeline:
         deadline_ms: int | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         # ``deadline_ms``: a processing budget for the ranked search (see
-        # ``search/deadline.py``). It bounds the waits for a read connection and
-        # a still-queued query embedding, and is checked at stage boundaries;
-        # on expiry the search raises ``SearchDeadlineExceeded`` and records
-        # nothing. ``None`` runs exactly the search without it.
+        # ``search/deadline.py``). It bounds the wait for a read connection,
+        # caps the reranker timeout, and is checked at stage boundaries; it does
+        # not bound the wait for a query embedding (an ONNX slice its worker
+        # picks up after the budget has run out does not run). An expiry the
+        # search detects raises ``SearchDeadlineExceeded``. ``None`` runs
+        # exactly the search without it.
         #
         # Two independent axes (#1802, split by #2671).
         #

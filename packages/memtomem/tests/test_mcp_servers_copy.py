@@ -29,7 +29,11 @@ from memtomem.context.mcp_servers_copy import (
     _promote_no_clobber,
     copy_mcp_server,
 )
-from memtomem.context.migrate import ArtifactNotFoundError, StagingClaim
+from memtomem.context.migrate import (
+    ArtifactNotFoundError,
+    PathNamingClickException,
+    StagingClaim,
+)
 from memtomem.context.privacy_scan import PrivacyBlockedError
 from memtomem.context.projects import compute_scope_id
 from memtomem.context.transfer import TransferCollisionError, TransferResult
@@ -165,7 +169,7 @@ def test_collision_pre_flight_hard_fails(roots) -> None:
 
 def test_same_project_refused(roots) -> None:
     _seed_server(roots["a"])
-    with pytest.raises(click.ClickException) as exc_info:
+    with pytest.raises(PathNamingClickException) as exc_info:
         copy_mcp_server(
             "pg",
             src_project_root=roots["a"],
@@ -177,6 +181,12 @@ def test_same_project_refused(roots) -> None:
         f"mcp-servers copy is cross-project only — the canonical is "
         f"single-tier, so within one project there is nothing to copy to."
     )
+    # The web route pre-checks this case, but resolves the roots separately (#3543).
+    assert exc_info.value.safe_message == (
+        "source and destination are the same project; "
+        "mcp-servers copy is cross-project only — the canonical is "
+        "single-tier, so within one project there is nothing to copy to."
+    )
 
 
 def test_missing_source_typed_not_found(roots) -> None:
@@ -184,6 +194,23 @@ def test_missing_source_typed_not_found(roots) -> None:
         _copy(roots, apply_=False)
     expected = roots["a"] / ".memtomem" / "mcp-servers" / "pg.json"
     assert exc_info.value.message == (f"mcp-servers/pg not found at the source project: {expected}")
+    # The path-free twin a web caller gets (#3532): the logical location.
+    assert exc_info.value.safe_message == (
+        "mcp-servers/pg not found at the source project: .memtomem/mcp-servers/pg.json"
+    )
+
+
+def test_not_found_safe_message_survives_copy_and_pickle() -> None:
+    """``copy`` and ``pickle`` rebuild an exception from ``args``; the keyword must not break that."""
+    import copy
+    import pickle
+
+    exc = ArtifactNotFoundError("full /abs/path", safe_message="path-free")
+    for clone in (copy.copy(exc), copy.deepcopy(exc), pickle.loads(pickle.dumps(exc))):
+        assert type(clone) is ArtifactNotFoundError
+        assert clone.message == "full /abs/path"
+        assert clone.safe_message == "path-free"
+    assert ArtifactNotFoundError("plain").safe_message is None
 
 
 def test_invalid_source_definition_refused(roots) -> None:
@@ -238,6 +265,7 @@ def test_symlinked_source_refused_pre_flight(roots, tmp_path: Path) -> None:
     assert not _dst_path(roots).exists()
 
 
+@pytest.mark.requires_symlinks
 def test_staging_turned_symlink_refused_in_lock(roots, monkeypatch: pytest.MonkeyPatch) -> None:
     """A source that becomes a symlink between pre-flight and staging is
     caught by the in-lock regular-file guard; staging is cleaned and the
@@ -258,11 +286,68 @@ def test_staging_turned_symlink_refused_in_lock(roots, monkeypatch: pytest.Monke
         return StagingClaim.capture(claimed.path)
 
     monkeypatch.setattr(mod, "_stage_copy", symlinking_stage)
-    with pytest.raises(click.ClickException, match="refuses symlinked canonicals"):
+    with pytest.raises(PathNamingClickException) as exc_info:
         _copy(roots, apply_=True)
+    src = roots["a"] / ".memtomem" / "mcp-servers" / "pg.json"
+    assert exc_info.value.message == f"{src} is a symlink; {_SYMLINK_REMEDY}"
+    assert exc_info.value.safe_message == (
+        f"mcp-servers/pg: the source .memtomem/mcp-servers/pg.json is a symlink; {_SYMLINK_REMEDY}"
+    )
     dst = _dst_path(roots)
     assert not dst.exists()
     assert not list(dst.parent.glob(".migrate-*"))
+
+
+#: The CLI text's remediation for a symlinked canonical, unchanged by #3543.
+_SYMLINK_REMEDY = (
+    "mcp-servers copy refuses symlinked canonicals — the destination must be a regular "
+    "git-tracked file. Replace the symlink with a regular file holding the definition, then "
+    "re-run the copy."
+)
+_NOT_UTF8_REMEDY = "fix the source definition before copying."
+
+
+def test_staging_turned_non_utf8_refused_in_lock(roots, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The in-lock decode of the staged bytes carries the path-free form too (#3543)."""
+    src = _seed_server(roots["a"])
+    real_read_bytes = Path.read_bytes
+    fired: list[Path] = []
+
+    def staged_read(self: Path) -> bytes:
+        if self.name.startswith(".migrate-"):
+            fired.append(self)
+            return b'{"command": "\xff"}\n'
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", staged_read)
+    with pytest.raises(PathNamingClickException) as exc_info:
+        _copy(roots, apply_=True)
+    assert fired, "the staging read hook never fired"
+    assert exc_info.value.message == f"{src} is not valid UTF-8; {_NOT_UTF8_REMEDY}"
+    assert exc_info.value.safe_message == (
+        f"the source .memtomem/mcp-servers/pg.json is not valid UTF-8; {_NOT_UTF8_REMEDY}"
+    )
+    assert not _dst_path(roots).exists()
+
+
+def test_unreadable_source_keeps_cli_text(roots, monkeypatch: pytest.MonkeyPatch) -> None:
+    src = _seed_server(roots["a"])
+    err = PermissionError(13, "Permission denied", str(src))
+    real_read_bytes = Path.read_bytes
+
+    def failing_read(self: Path) -> bytes:
+        if self == src:
+            raise err
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", failing_read)
+    with pytest.raises(PathNamingClickException) as exc_info:
+        _copy(roots, apply_=False)
+    assert exc_info.value.message == f"cannot read {src}: {err}"
+    assert exc_info.value.safe_message == (
+        "cannot read the source .memtomem/mcp-servers/pg.json; check that it exists and that "
+        "the server can read it."
+    )
 
 
 # ── Gate A (issue acceptance 1) ──────────────────────────────────────
@@ -295,6 +380,20 @@ def test_gate_a_env_secret_blocks_with_standard_envelope(roots) -> None:
     assert not list(dst.parent.glob(".migrate-*"))
     assert not list(dst.parent.glob("*.json"))
     assert src.is_file()  # source never consumed
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['{"password": "synthetic-example"}', "BEGIN\nRSA\nPRIVATE\nKEY"],
+    ids=["quoted-label", "pem"],
+)
+def test_gate_a_env_secret_hidden_by_json_escaping_blocks(roots, value) -> None:
+    # On disk the env value is JSON-escaped; the MCP client decodes it (#3300).
+    src = _seed_server(roots["a"], definition={"command": "npx", "env": {"CONFIG": value}})
+    with pytest.raises(PrivacyBlockedError):
+        _copy(roots, apply_=True)
+    assert not _dst_path(roots).exists()
+    assert src.is_file()
 
 
 # ── concurrency: in-lock re-check, no-clobber promote, lock budget ───

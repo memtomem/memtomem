@@ -796,6 +796,81 @@ class TestAutoTag:
         stats = await auto_tag_storage(storage, overwrite=True)
         assert stats.tagged_chunks == 1
 
+    @pytest.mark.parametrize(
+        ("overwrite", "expected_tags", "expected_counts"),
+        [(False, ("manual",), (0, 0, 1)), (True, ("falcon",), (1, 1, 0))],
+    )
+    async def test_auto_tag_storage_tags_committed_during_extraction(
+        self, storage, monkeypatch, overwrite, expected_tags, expected_counts
+    ):
+        """#3194: tags committed to an untagged chunk while its tags are being
+        extracted are kept unless the pass was asked to overwrite."""
+        from types import SimpleNamespace
+
+        from memtomem.tools import auto_tag
+
+        chunk = _chunk("Python programming language for data", source="late.md")
+        await storage.upsert_chunks([chunk])
+
+        async def tag_then_extract(*_args, **_kwargs):
+            await storage.set_chunk_tags(chunk.id, ["manual"])
+            return ["falcon"]
+
+        monkeypatch.setattr(auto_tag, "_extract_tags_with_fallback", tag_then_extract)
+        calls = []
+        pipeline = SimpleNamespace(invalidate_cache=lambda: calls.append(1))
+
+        stats = await auto_tag_storage(
+            storage, overwrite=overwrite, search_pipeline=pipeline, sample_limit=1
+        )
+
+        [reloaded] = await storage.list_chunks_by_source(Path("/tmp/late.md"))
+        assert reloaded.metadata.tags == expected_tags
+        assert (stats.total_chunks, stats.tagged_chunks, stats.skipped_chunks) == expected_counts
+        assert len(stats.samples) == stats.tagged_chunks
+        assert len(calls) == stats.tagged_chunks
+
+    @pytest.mark.parametrize(
+        ("raw", "written"),
+        [
+            ("[]", True),
+            ("[ ]", True),
+            ("", True),
+            ("null", True),
+            ('"a"', True),
+            ('{"a": 1}', True),
+            ("not json", True),
+            ('["a"]', False),
+            ('[""]', False),
+            ("[NaN]", False),
+            ("[Infinity]", False),
+            ("[-Infinity]", False),
+        ],
+    )
+    async def test_set_chunk_tags_only_if_untagged_judges_the_column_as_the_reader_does(
+        self, storage, raw, written
+    ):
+        chunk = _chunk(source="raw.md")
+        await storage.upsert_chunks([chunk])
+        db = storage._get_db()
+        db.execute("UPDATE chunks SET tags = ? WHERE id = ?", (raw, str(chunk.id)))
+        db.commit()
+        [before] = await storage.list_chunks_by_source(Path("/tmp/raw.md"))
+        assert bool(before.metadata.tags) is not written
+
+        assert await storage.set_chunk_tags(chunk.id, ["new"], only_if_untagged=True) is written
+
+        [stored] = db.execute("SELECT tags FROM chunks WHERE id = ?", (str(chunk.id),)).fetchone()
+        assert stored == ('["new"]' if written else raw)
+
+    async def test_set_chunk_tags_only_if_untagged_keeps_a_non_finite_tag_it_wrote(self, storage):
+        """``json.dumps`` writes ``NaN``, which SQLite's ``json_valid()`` rejects."""
+        chunk = _chunk(source="nan.md")
+        await storage.upsert_chunks([chunk])
+        assert await storage.set_chunk_tags(chunk.id, [float("nan")])
+
+        assert not await storage.set_chunk_tags(chunk.id, ["new"], only_if_untagged=True)
+
     async def test_auto_tag_storage_invalidates_when_it_writes(self, storage):
         """#2141: the pass rewrites exactly the column a tag-filtered search
         keys on, so a caller that owns a live pipeline must see its cache
@@ -845,11 +920,11 @@ class TestAutoTag:
         real_set = storage.set_chunk_tags
         seen = {"n": 0}
 
-        async def flaky_set(chunk_id, tags):
+        async def flaky_set(chunk_id, tags, **kwargs):
             seen["n"] += 1
             if seen["n"] > 1:
                 raise RuntimeError("store blip")
-            return await real_set(chunk_id, tags)
+            return await real_set(chunk_id, tags, **kwargs)
 
         storage.set_chunk_tags = flaky_set
         try:
@@ -1028,9 +1103,9 @@ class TestDedup:
         scanner = DedupScanner(storage=storage)
         # Only the exact phase: these rows carry vectors of a width the
         # fixture store may not share, which the near phase would search with.
-        all_chunks = await scanner._get_all_chunks(max_count=100)
+        all_chunks = (await scanner._select_pool(100)).chunks
         seen: set[frozenset] = set()
-        exact = scanner._find_exact_duplicates(all_chunks, seen)
+        exact = scanner._find_exact_duplicates(all_chunks, seen, set())
 
         assert len(exact) == 1
         assert exact[0].exact is True
@@ -1045,7 +1120,7 @@ class TestDedup:
         await storage.upsert_chunks([c1, c2])
 
         scanner = DedupScanner(storage=storage)
-        all_chunks = await scanner._get_all_chunks(max_count=100)
+        all_chunks = (await scanner._select_pool(100)).chunks
         seen: set[frozenset] = set()
-        exact = scanner._find_exact_duplicates(all_chunks, seen)
+        exact = scanner._find_exact_duplicates(all_chunks, seen, set())
         assert len(exact) == 0

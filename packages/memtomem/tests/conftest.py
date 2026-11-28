@@ -280,9 +280,14 @@ def _hermetic_dotenv(
         if upper in _BARE_LANGFUSE_ENV_VARS or upper.startswith(_SESSION_TRACE_ENV_PREFIX):
             monkeypatch.delenv(key, raising=False)
     if request.node.get_closest_marker("real_dotenv") is None:
+        from memtomem import _dotenv
         from memtomem.server import lifespan as lifespan_mod
 
+        # Both: the lifespan's seam is what server code and existing tests
+        # replace, the light module is what a caller outside the server
+        # package reaches directly.
         monkeypatch.setattr(lifespan_mod, "_load_dotenv", lambda: None)
+        monkeypatch.setattr(_dotenv, "load_dotenv", lambda: [])
 
 
 def _ollama_available() -> bool:
@@ -335,9 +340,19 @@ def _can_create_symlink() -> bool:
     return True
 
 
-def _playwright_browser_available() -> bool:
-    """Probe whether ``pytest-playwright`` *and* a usable Chromium are
-    present.
+# Playwright's own default. The launch is a one-off per session, so the budget
+# only matters when it is exceeded: a first launch on a cold CI runner missed the
+# 2 s this used to allow and skipped the whole browser suite (#3453).
+_PLAYWRIGHT_LAUNCH_TIMEOUT_MS = 30_000
+
+# Set to ``1`` where the browser suite is the point of the run (the CI
+# ``test-browser`` job): a failed probe is then a usage error, not 389 skips
+# that pytest reports as a pass (#3453).
+REQUIRE_BROWSER_ENV = "MEMTOMEM_TEST_REQUIRE_BROWSER"
+
+
+def _playwright_browser_unavailable() -> str | None:
+    """Return why ``@pytest.mark.browser`` tests cannot run, or ``None``.
 
     Two failure modes are folded together because the symptom — a
     ``@pytest.mark.browser`` test exploding in fixture setup — is the
@@ -346,27 +361,65 @@ def _playwright_browser_available() -> bool:
     never run (the binary download is ~150 MB and is opt-in for that
     reason). Either way, auto-skipping is the right behaviour.
 
-    The probe imports the sync API and launches headless chromium with
-    a short timeout; any failure means the marker should skip. Result
-    is cached in ``_PLAYWRIGHT_OK`` so the launch cost (a few hundred
-    ms) is paid once per session, not per item.
+    The probe imports the sync API and launches headless chromium. The
+    reason names the exception (see ``_launch_error_summary``), so the skip
+    reason and the required-browser error say what actually failed. The
+    result is cached in
+    ``_PLAYWRIGHT_UNAVAILABLE`` so the launch is paid once per session, not
+    per item.
     """
     try:
         from playwright.sync_api import sync_playwright
-    except ImportError:
-        return False
+    except ImportError as exc:
+        return f"pytest-playwright is not installed ({exc})"
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, timeout=2_000)
+            browser = p.chromium.launch(headless=True, timeout=_PLAYWRIGHT_LAUNCH_TIMEOUT_MS)
             browser.close()
-        return True
-    except Exception:
-        return False
+    except Exception as exc:
+        return f"Chromium did not launch: {type(exc).__name__}: {_launch_error_summary(exc)}"
+    return None
+
+
+# Playwright frames its launch diagnostics in a box drawn with these characters.
+_BOX_DRAWING = "\u2550\u2551\u2554\u2557\u255a\u255d"
+_LAUNCH_ERROR_SUMMARY_CHARS = 400
+
+
+def _launch_error_summary(exc: BaseException) -> str:
+    """One line from a Playwright launch error, box drawing removed.
+
+    The first line alone is not enough: a host missing system libraries gets
+    ``BrowserType.launch: `` followed by a newline and the box that names the
+    cause. So every non-empty line is kept, joined by spaces, and capped.
+    """
+    lines = (line.strip().strip(_BOX_DRAWING).strip() for line in str(exc).splitlines())
+    summary = " ".join(line for line in lines if line)
+    if len(summary) > _LAUNCH_ERROR_SUMMARY_CHARS:
+        summary = summary[: _LAUNCH_ERROR_SUMMARY_CHARS - 1].rstrip() + "\u2026"
+    return summary
+
+
+def _browser_requirement_error(unavailable: str | None, required: str | None) -> str | None:
+    """Return the usage error for a run that requires the browser suite, or ``None``.
+
+    ``required`` is the raw ``MEMTOMEM_TEST_REQUIRE_BROWSER`` value. Only
+    ``1`` and ``0`` (or unset/empty) are accepted: a value such as ``true``
+    that silently meant "not required" would bring back the false green this
+    switch exists to remove.
+    """
+    if required in (None, "", "0"):
+        return None
+    if required != "1":
+        return f"{REQUIRE_BROWSER_ENV} must be 1 or 0, got {required!r}"
+    if unavailable is None:
+        return None
+    return f"{REQUIRE_BROWSER_ENV}=1 but the browser tests cannot run: {unavailable}"
 
 
 _OLLAMA_UP = _ollama_available()
 _CAN_SYMLINK = _can_create_symlink()
-_PLAYWRIGHT_OK = _playwright_browser_available()
+_PLAYWRIGHT_UNAVAILABLE = _playwright_browser_unavailable()
 # The opt-in ``hermes`` contract tests import the real Hermes modules from this checkout.
 _HERMES_SRC_OK = (
     bool(os.environ.get("HERMES_SRC"))
@@ -381,7 +434,8 @@ def pytest_collection_modifyitems(config, items):
     - ``@pytest.mark.requires_symlinks`` when the filesystem can't make
       symlinks (Windows without Developer Mode / admin shell).
     - ``@pytest.mark.browser`` when ``pytest-playwright`` or Chromium
-      isn't installed (the harness in ``tests/web/`` needs both).
+      isn't installed (the harness in ``tests/web/`` needs both) — unless
+      ``MEMTOMEM_TEST_REQUIRE_BROWSER=1``, which makes that a usage error.
     - ``@pytest.mark.hermes`` when ``HERMES_SRC`` does not name a Hermes Agent
       checkout (one with ``agent/memory_provider.py``).
     """
@@ -389,8 +443,13 @@ def pytest_collection_modifyitems(config, items):
     skip_symlink = pytest.mark.skip(
         reason="Filesystem cannot create symlinks (Windows without Developer Mode/admin)"
     )
+    browser_error = _browser_requirement_error(
+        _PLAYWRIGHT_UNAVAILABLE, os.environ.get(REQUIRE_BROWSER_ENV)
+    )
+    if browser_error is not None:
+        raise pytest.UsageError(browser_error)
     skip_browser = pytest.mark.skip(
-        reason="pytest-playwright + Chromium not available "
+        reason=f"{_PLAYWRIGHT_UNAVAILABLE} "
         "(install via `uv sync && uv run playwright install chromium`)"
     )
     skip_hermes = pytest.mark.skip(
@@ -401,7 +460,7 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_ollama)
         if not _CAN_SYMLINK and "requires_symlinks" in item.keywords:
             item.add_marker(skip_symlink)
-        if not _PLAYWRIGHT_OK and "browser" in item.keywords:
+        if _PLAYWRIGHT_UNAVAILABLE is not None and "browser" in item.keywords:
             item.add_marker(skip_browser)
         if not _HERMES_SRC_OK and item.get_closest_marker("hermes") is not None:
             item.add_marker(skip_hermes)
@@ -619,6 +678,34 @@ def _isolate_claude_projects_scan(
     monkeypatch.setattr(_proj, "_CLAUDE_PROJECTS_DIR", tmp_path / "no-claude-projects")
 
 
+@pytest.fixture(autouse=True)
+def _uv_workspace_root_is_the_directory(
+    _real_home_write_guard: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Answer ``uv workspace dir`` as uv does for a project in no workspace:
+    the directory itself.
+
+    ``mm init`` / ``mm uninstall`` ask the host's ``uv`` which environment a
+    source/project install uses. Unstubbed, every test that builds a
+    ``RuntimeProfile`` would depend on whether uv is installed, its version,
+    and whether it accepts the fixture's ``pyproject.toml`` (a manifest
+    without ``version`` is an error there). Tests of workspace membership or
+    of uv failing replace this with their own answer; the real-uv tests in
+    ``test_init_cmd.py`` call the function captured at import.
+
+    ``UV_PROJECT_ENVIRONMENT`` from the developer's shell would move the
+    environment those profiles name, and ``UV_NO_PROJECT`` / ``UV_ISOLATED``
+    make the real function answer unknown; tests that exercise them set them.
+    """
+    for name in ("UV_PROJECT_ENVIRONMENT", "UV_NO_PROJECT", "UV_ISOLATED"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        "memtomem.cli.init_cmd._uv_workspace_root",
+        lambda directory: (directory, None),
+    )
+
+
 @pytest.fixture
 def folds_unicode_forms(monkeypatch):
     """Key paths as macOS does: NFC and NFD spellings fold to one (#235).
@@ -633,10 +720,9 @@ def folds_unicode_forms(monkeypatch):
 
 
 @pytest.fixture
-async def components(tmp_path):
+async def components(tmp_path, monkeypatch):
     """Create components with a temporary DB for isolated testing."""
     import json
-    import os
 
     db_path = str(tmp_path / "test.db")
     mem_dir = str(tmp_path / "memories")
@@ -645,36 +731,23 @@ async def components(tmp_path):
     # See #206.
     (tmp_path / "memories").mkdir(exist_ok=True)
 
-    os.environ["MEMTOMEM_STORAGE__SQLITE_PATH"] = db_path
-    os.environ["MEMTOMEM_INDEXING__MEMORY_DIRS"] = json.dumps([mem_dir])
-    os.environ["MEMTOMEM_EMBEDDING__MODEL"] = "bge-m3"
-    os.environ["MEMTOMEM_EMBEDDING__DIMENSION"] = "1024"
+    monkeypatch.setenv("MEMTOMEM_STORAGE__SQLITE_PATH", db_path)
+    monkeypatch.setenv("MEMTOMEM_INDEXING__MEMORY_DIRS", json.dumps([mem_dir]))
+    monkeypatch.setenv("MEMTOMEM_EMBEDDING__MODEL", "bge-m3")
+    monkeypatch.setenv("MEMTOMEM_EMBEDDING__DIMENSION", "1024")
 
-    # Prevent ~/.memtomem/config.json from overriding test settings
     config = Mem2MemConfig()
-    # Apply env vars directly (bypass load_config_overrides)
     config.storage.sqlite_path = Path(db_path)
     config.embedding.model = "bge-m3"
     config.embedding.dimension = 1024
     config.indexing.memory_dirs = [Path(mem_dir)]
 
-    # Monkey-patch to skip config.json loading
-    import memtomem.config as _cfg
-
-    _orig = _cfg.load_config_overrides
-    _cfg.load_config_overrides = lambda c: None
-    comp = await create_components(config)
-    _cfg.load_config_overrides = _orig
+    # load_ambient_config=False: neither ~/.memtomem/config.d nor config.json is
+    # layered onto this config (the config.d half is pinned by
+    # test_component_fixture_hermeticity.py).
+    comp = await create_components(config, load_ambient_config=False)
     yield comp
     await close_components(comp)
-
-    for key in (
-        "MEMTOMEM_STORAGE__SQLITE_PATH",
-        "MEMTOMEM_INDEXING__MEMORY_DIRS",
-        "MEMTOMEM_EMBEDDING__MODEL",
-        "MEMTOMEM_EMBEDDING__DIMENSION",
-    ):
-        os.environ.pop(key, None)
 
 
 @pytest.fixture
@@ -701,8 +774,9 @@ def memory_dir(components: Components):
 async def bm25_only_components(tmp_path, monkeypatch):
     """Real BM25-only component stack with a tmp DB + memory_dir.
 
-    Hermetic against ``~/.memtomem/config.json`` and developer
-    ``MEMTOMEM_*`` env vars. Dense search is off so we don't pull an
+    Hermetic against ``~/.memtomem/config.json``, ``~/.memtomem/config.d``
+    (pinned by ``test_component_fixture_hermeticity.py``) and the environment
+    variables that bind ``Mem2MemConfig``. Dense search is off so we don't pull an
     embedder; ``chunks_vec`` still needs a non-zero dimension to satisfy
     ``upsert_chunks``. Yields ``(components, memory_dir)``.
 
@@ -725,7 +799,7 @@ async def bm25_only_components(tmp_path, monkeypatch):
     config.embedding.dimension = 1024
     config.search.enable_dense = False  # BM25-only — no embedder needed
 
-    comp = await create_components(config)
+    comp = await create_components(config, load_ambient_config=False)
     try:
         yield comp, mem_dir
     finally:
@@ -736,12 +810,13 @@ async def bm25_only_components(tmp_path, monkeypatch):
 async def onnx_components(tmp_path, monkeypatch):
     """Component stack with ONNX multilingual MiniLM-L12 against a tmp DB.
 
-    Hermetic — bypasses ``~/.memtomem/config.json`` and any developer-set
-    ``MEMTOMEM_EMBEDDING__*`` / ``MEMTOMEM_STORAGE__*`` env vars.
+    Hermetic against ``~/.memtomem/config.json``, ``~/.memtomem/config.d`` and
+    the environment variables that bind ``Mem2MemConfig``.
 
-    Shared between ``test_golden_path.py`` (2-chunk sanity) and
-    ``test_multilingual_regression.py`` (~80-chunk quality floors).  Both files
-    expect the fastembed model to be cached by the ``test-golden-path`` CI job.
+    Used by ``test_golden_path.py``, which expects the fastembed model to be
+    cached by the ``test-golden-path`` CI job, and by
+    ``test_component_fixture_hermeticity.py``, which checks its config without
+    loading the model.
     Determinism env vars (``PYTHONHASHSEED``, ``OMP_NUM_THREADS``) are set at
     the CI job level; this fixture does not re-set them in-process.
     """
@@ -769,12 +844,66 @@ async def onnx_components(tmp_path, monkeypatch):
     # limit so the test proves memtomem actively narrows the tokenizer.
     config.embedding.max_sequence_tokens = 64
 
-    import memtomem.config as _cfg
-
-    monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
-
-    comp = await create_components(config)
+    comp = await create_components(config, load_ambient_config=False)
     try:
         yield comp, mem_dir
     finally:
         await close_components(comp)
+
+
+_FASTEMBED_CACHE_ENV = ("MEMTOMEM_FASTEMBED_CACHE", "FASTEMBED_CACHE_PATH")
+
+
+def _verified_cached_e5_tokenizer() -> str | None:
+    """A copy of the pinned tokenizer already in a fastembed cache, read only.
+
+    Looks where the product would (the non-empty overrides, then the default
+    ``~/.memtomem/cache/fastembed``) without creating or writing anything, and
+    returns a file only when its checksum is the pinned one.
+    """
+    import hashlib
+    from pathlib import Path
+
+    from memtomem.embedding.profiles import E5_MODEL, E5_REVISION, E5_TOKENIZER_SHA256
+
+    roots = [os.environ[name] for name in _FASTEMBED_CACHE_ENV if os.environ.get(name)]
+    roots.append(str(Path.home() / ".memtomem" / "cache" / "fastembed"))
+    snapshot = Path("models--" + E5_MODEL.replace("/", "--"), "snapshots", E5_REVISION)
+    for root in roots:
+        candidate = Path(root).expanduser() / snapshot / "tokenizer.json"
+        if not candidate.is_file():
+            continue
+        with candidate.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() == E5_TOKENIZER_SHA256:
+                return str(candidate)
+    return None
+
+
+@pytest.fixture(scope="session")
+def _e5_tokenizer_file(tmp_path_factory) -> str:
+    """The pinned E5 ``tokenizer.json``, checksum-verified, as a plain path.
+
+    Reuses a verified copy from an existing cache without writing to it;
+    otherwise downloads into a temporary cache, never the developer's. Skips
+    only when the file cannot be fetched. A checksum mismatch on the download
+    (``ValueError``) is a real failure and propagates.
+    """
+    pytest.importorskip("tokenizers")
+    pytest.importorskip("huggingface_hub")
+    httpx = pytest.importorskip("httpx")
+    from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+
+    from memtomem.embedding.profiles import E5_TOKENIZER, resolve_tokenizer
+
+    cached = _verified_cached_e5_tokenizer()
+    if cached is not None:
+        return cached
+    with pytest.MonkeyPatch.context() as mp:
+        # ``MEMTOMEM_FASTEMBED_CACHE`` outranks ``FASTEMBED_CACHE_PATH``, so
+        # this alone keeps the download out of any cache the developer uses.
+        mp.setenv("MEMTOMEM_FASTEMBED_CACHE", str(tmp_path_factory.mktemp("fastembed")))
+        try:
+            path = resolve_tokenizer(E5_TOKENIZER)
+        except (HfHubHTTPError, LocalEntryNotFoundError, OSError, httpx.TransportError) as exc:
+            pytest.skip(f"pinned E5 tokenizer unavailable: {type(exc).__name__}: {exc}")
+    return str(path)

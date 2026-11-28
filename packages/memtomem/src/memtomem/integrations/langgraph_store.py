@@ -46,7 +46,11 @@ from memtomem.context._atomic import (
 )
 from memtomem.embedding.base import EmbeddingProvider
 from memtomem.embedding.factory import create_embedder
-from memtomem.memory_scope import require_user_base, resolve_memory_scope_dir
+from memtomem.memory_scope import (
+    require_user_base,
+    resolve_memory_scope_dir,
+    resolve_project_tier_write_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -385,12 +389,18 @@ class MemtomemBaseStore(BaseStore):
                 audit_context={"scope_inferred_from_root": scope != effective_scope},
             )
         if root is None:
+            project = Path(project_root).expanduser().resolve() if project_root else None
+            if scope != "user":
+                # This store mkdirs and writes under the tier, so a linked
+                # tier is refused (#3623) — before the configuration loads
+                # below, whose migration would otherwise rewrite
+                # ~/.memtomem/config.json for a store that then raises.
+                base = resolve_project_tier_write_dir(scope, project)
             # Unchanged from before #2321: the derived-root branch loads the
             # real configuration into ``config`` (migration included), and an
             # explicit-root store keeps seeing defaults here.
             load_config_d(config)
             load_config_overrides(config)
-            project = Path(project_root).expanduser().resolve() if project_root else None
             if scope == "user":
                 # Raises ConfigError on empty ``memory_dirs`` — this store
                 # mkdirs its root, so it needs a real write target (#1768) —
@@ -404,8 +414,6 @@ class MemtomemBaseStore(BaseStore):
                         config.indexing.memory_dirs, config.indexing.project_memory_dirs
                     ),
                 )
-            else:
-                base = resolve_memory_scope_dir(scope, project)
             root = base / "langgraph-store"
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -614,7 +622,8 @@ class MemtomemBaseStore(BaseStore):
         """Write the record for ``(namespace, key)`` and return what was written.
 
         Runs the same privacy guard and ``project_shared`` refusal as ``put``,
-        over the serialized value, the namespace, the key and the selectors.
+        over the serialized value and every key and string inside it, the
+        namespace, the key and the selectors.
         ``generation`` is a caller-owned non-negative integer persisted beside
         the value; this store never reads it. An overwrite that omits it drops
         the key, because the caller owns it. ``created_at`` is preserved across
@@ -669,8 +678,17 @@ class MemtomemBaseStore(BaseStore):
             and not (isinstance(index, list) and all(isinstance(x, str) for x in index))
         ):
             raise ValueError("index must be a boolean, None, or string selectors")
-        scan_text = "\n".join(
-            [serialized, *namespace, key, *(index if isinstance(index, list) else [])]
+        # Raw strings beside the serialized value: JSON escaping hides a quoted
+        # credential inside a value string or an identifier. The separator is
+        # not whitespace, so a label in one part cannot pair with the next.
+        scan_text = "\n---\n".join(
+            [
+                serialized,
+                *privacy.value_scan_parts(value),
+                *namespace,
+                key,
+                *(index if isinstance(index, list) else []),
+            ]
         )
         guard = privacy.enforce_write_guard(
             scan_text,

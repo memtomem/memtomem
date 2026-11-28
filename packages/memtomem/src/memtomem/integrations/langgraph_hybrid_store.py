@@ -339,9 +339,10 @@ class MemtomemHybridStore(BaseStore):
         return normalized
 
     def _guard(self, parts: list[str], *, surface: str, message: str) -> None:
-        # Scan raw identifiers too: JSON escaping can hide a quoted credential
-        # inside a key/selector. Non-whitespace separators keep label patterns
-        # from accidentally spanning two independent fields (#2374).
+        # Callers pass raw strings beside the serialized value: JSON escaping
+        # can hide a quoted credential inside an identifier or a value string.
+        # Non-whitespace separators keep label patterns from accidentally
+        # spanning two independent parts (#2374, #3300).
         guard = privacy.enforce_write_guard(
             "\n---\n".join(parts),
             surface=surface,
@@ -388,6 +389,7 @@ class MemtomemHybridStore(BaseStore):
         self._guard(
             [
                 serialized,
+                *privacy.value_scan_parts(record["value"]),
                 *record["namespace"],
                 record["key"],
                 *(record["index"] if isinstance(record["index"], list) else []),

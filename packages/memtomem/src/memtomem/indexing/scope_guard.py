@@ -118,6 +118,36 @@ def relinked_detail(name: str, *, op: str) -> str:
     )
 
 
+def twin_detail(key: str, twin: str, *, op: str, surface: RemedySurface = "neutral") -> str:
+    """The refusal for a rewrite through a key whose file is also stored as ``twin`` (#3408).
+
+    Removing lines through one spelling would leave the other spelling's rows
+    serving them, which is how deleting "the duplicate" removed the only copy.
+    The way out is the Sources tab's delete, which removes one stored key's
+    rows and does not touch the file. That tab does not list every source (it
+    hides held and pending ones and a project's ``memories.local`` tier), so
+    the text names the tab conditionally and says what to do when it lists
+    neither spelling, rather than predicting what the tab shows. As in
+    :func:`scope_change_detail`, only ``mcp`` names host paths and commands.
+    """
+    name = Path(key).name
+    if surface == "mcp":
+        what = (
+            f"{op} refused: the store holds {name} under two spellings of its path, "
+            f"{key} and {twin}"
+        )
+        tab = "the Sources tab of the web UI (mm web)"
+    else:
+        what = f"{op} refused: {name} is indexed under two spellings of its path"
+        tab = "the Sources tab"
+    return (
+        f"{what}; removing lines through one would leave the other's rows serving them, "
+        f"and nothing was written. If {tab} lists either spelling, delete the stale one's "
+        "rows there, which removes index rows only and does not change the file, then retry; "
+        "if it lists neither, edit the file directly instead."
+    )
+
+
 def scope_held_notice(op: str) -> str:
     """What a by-id rewrite tells its caller when its re-index held the source instead.
 

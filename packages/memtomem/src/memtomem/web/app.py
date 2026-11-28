@@ -187,13 +187,16 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     if mode not in _VALID_WEB_MODES:
         raise ValueError(f"Invalid web mode {mode!r}; expected one of {sorted(_VALID_WEB_MODES)}")
 
-    # docs_url=None disables FastAPI's default ``/api/docs`` page so we can
-    # serve a Swagger UI built against the locally vendored
-    # ``swagger-ui-dist`` (web/static/vendor/swagger/) instead of the
-    # jsdelivr CDN. The redoc default is dropped entirely — it duplicates
+    # docs_url=None disables FastAPI's default ``/docs`` page so we can
+    # serve our own ``/api/docs`` Swagger UI, built against the locally
+    # vendored ``swagger-ui-dist`` (web/static/vendor/swagger/) instead of
+    # the jsdelivr CDN. The redoc default is dropped entirely — it duplicates
     # Swagger's purpose, also pulled from jsdelivr, and nothing in the SPA
     # links to it. Re-introduce it the same way as ``/api/docs`` if a
-    # consumer asks for it.
+    # consumer asks for it. The schema lives under ``/api/`` rather than at
+    # FastAPI's default ``/openapi.json`` because ``CSRFGuardMiddleware``
+    # checks Host and Origin only on that prefix; ``swagger-init.js``
+    # fetches it from the same URL.
     app = FastAPI(
         title="memtomem Web UI",
         description="Web UI for memtomem, long-term memory for AI coding agents",
@@ -201,6 +204,7 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
+        openapi_url="/api/openapi.json",
     )
     app.state.web_mode = mode
     app.state.startup_state = "not_started"
@@ -253,7 +257,7 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
         "<body>\n"
         '  <div id="swagger-ui"></div>\n'
         '  <script src="/vendor/swagger/swagger-ui-bundle.js?v=1"></script>\n'
-        '  <script src="/vendor/swagger/swagger-init.js?v=1"></script>\n'
+        '  <script src="/vendor/swagger/swagger-init.js?v=2"></script>\n'
         "</body>\n"
         "</html>\n"
     )
@@ -279,6 +283,50 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
 
         msg = re.sub(r"(?:[A-Za-z]:)?(?:[/\\][\w.\-]+){2,}", "<path>", str(exc))
         return JSONResponse(status_code=400, content={"detail": msg})
+
+    # A project runtime path that is a link inside the project (GHSA-ffh4
+    # follow-up): an operational conflict the user resolves by replacing the
+    # link. More specific than ``ValueError`` (its base), so this handler is
+    # the one Starlette picks. The message carries only the project-relative
+    # entry, never where the link points.
+    from memtomem.memory_scope import ProjectEntryRelinked
+
+    @app.exception_handler(ProjectEntryRelinked)
+    async def project_entry_relinked_handler(
+        request: Request, exc: ProjectEntryRelinked
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": str(exc),
+                "entry": exc.entry,
+                "reason_code": "project_entry_relinked",
+            },
+        )
+
+    # A storage-level write-guard refusal (#3352): the same 403 payload the
+    # in-route guards return, so the SPA's ``api()`` raises its
+    # ``RedactionBlockedError``. Without this handler the ``ValueError`` one
+    # above would still refuse, as a 400 the SPA cannot tell apart.
+    from memtomem.errors import RedactionBlockedError
+
+    @app.exception_handler(RedactionBlockedError)
+    async def redaction_blocked_handler(
+        request: Request, exc: RedactionBlockedError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": {
+                    "detail": "redaction_blocked",
+                    "hits": exc.hits,
+                    "surface": exc.surface,
+                    # Picks the wording only: true means every hit was a
+                    # label rule, not that the text holds no credential.
+                    "label_only": exc.label_only,
+                }
+            },
+        )
 
     # An unusable-but-loadable configuration (e.g. empty
     # ``indexing.memory_dirs``, #1768) is an operational conflict, not an

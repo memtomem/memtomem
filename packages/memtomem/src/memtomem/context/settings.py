@@ -69,6 +69,7 @@ from memtomem.context._host_homes import (
     pinned_host_homes,
 )
 from memtomem.context.error_redact import redact_secret_value
+from memtomem.context.privacy_scan import FileScan, PrivacyBlockedError, scan_text_content
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,9 @@ class SettingsSyncResult:
     reason: str = ""
     warnings: list[str] = field(default_factory=list)
     target: Path | None = None
+    #: Machine-readable cause for a refusal row, so a surface can localize it
+    #: without parsing ``reason``. Only ``"privacy_blocked"`` is set today.
+    reason_code: str | None = None
 
 
 # ── Generators ──────────────────────────────────────────────────────
@@ -1425,6 +1429,74 @@ def _safe_load_json(path: Path) -> dict | object:
     return raw if isinstance(raw, dict) else _MALFORMED
 
 
+def _load_canonical_settings(path: Path) -> tuple[str, dict] | object:
+    """Read the canonical once, returning its text and the object parsed from it.
+
+    Same failure contract as :func:`_safe_load_json` (:data:`_MALFORMED`), but
+    the text is kept so Gate A scans the exact buffer that was parsed. A scan
+    of a re-serialized value would miss what parsing drops, such as a secret in
+    a duplicate key that a later key of the same name shadows.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+        raw = json.loads(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _MALFORMED
+    return (text, raw) if isinstance(raw, dict) else _MALFORMED
+
+
+def _scan_canonical_settings(
+    text: str,
+    *,
+    canonical_path: Path,
+    project_root: Path,
+    surface: str,
+) -> FileScan | None:
+    """Gate A over the canonical's text; return the blocking scan, or ``None``.
+
+    The scope is ``project_shared`` whatever ``hooks.target_scope`` is: the
+    canonical is tracked by git for every target tier, so the fan-out is a
+    backstop for that file, like the skills / commands / agents and MCP server
+    fan-outs (ADR-0011 §5). There is no ``force_unsafe`` valve.
+    """
+    scan = scan_text_content(
+        text,
+        source_path=canonical_path,
+        surface=surface,
+        scope="project_shared",
+        project_root=project_root,
+    )
+    if scan.decision in ("blocked", "blocked_project_shared"):
+        return scan
+    return None
+
+
+def _settings_privacy_block_message(hits: int) -> str:
+    """Path-free refusal text for a canonical that Gate A blocked before any write."""
+    return (
+        f"Gate A: {CANONICAL_SETTINGS_FILE} contains {hits} privacy pattern hit(s); the "
+        f"settings fan-out was refused and no runtime settings file was written. The "
+        f"canonical is tracked by git, so there is no force bypass at any target tier "
+        f"(ADR-0011 §5).\n"
+        f"  Remove the secret from {CANONICAL_SETTINGS_FILE}, then re-run "
+        f"`mm context sync --include=settings`."
+    )
+
+
+def _settings_privacy_refusal_row(hits: int) -> SettingsSyncResult:
+    """Result row for a target refused because the canonical changed mid-sync to a blocked one."""
+    return SettingsSyncResult(
+        status="error",
+        reason=(
+            f"Gate A: {CANONICAL_SETTINGS_FILE} changed during this sync and now contains "
+            f"{hits} privacy pattern hit(s); this target was not written. There is no force "
+            f"bypass (ADR-0011 §5). Remove the secret from {CANONICAL_SETTINGS_FILE}, then "
+            f"re-run `mm context sync --include=settings`."
+        ),
+        reason_code="privacy_blocked",
+    )
+
+
 def _read_with_mtime(path: Path) -> tuple[dict | None | object, int]:
     """Read JSON + capture mtime in nanoseconds for concurrent-write guard.
 
@@ -1539,6 +1611,7 @@ def generate_all_settings(
     *,
     scope: str,
     allow_host_writes: bool = False,
+    surface: str = "cli_context_sync",
 ) -> dict[str, SettingsSyncResult]:
     """Fan out ``.memtomem/settings.json`` to registered runtimes.
 
@@ -1568,8 +1641,24 @@ def generate_all_settings(
     target still short of that last check comes back ``status="aborted"``
     rather than being written behind the failed response (#2218). At most one
     target — the one already past its check — can still write.
+
+    Gate A scans the canonical's text (ADR-0011 §5, #3343) at two points.
+    Before the first target that would take a lock, a hit raises
+    :class:`~memtomem.context.privacy_scan.PrivacyBlockedError`: nothing has
+    been written and no sidecar lock created, and every surface translates it
+    (*surface* names the caller in the privacy audit record). The canonical is
+    re-read under each target's lock (#1281) and that text is scanned again,
+    since it is what gets merged; a hit there means the canonical changed
+    mid-sync, so targets already written stay written and this target and
+    every later one come back ``status="error"`` with
+    ``reason_code="privacy_blocked"``. This is fail-fast on the initial state,
+    not a transaction across concurrent edits.
     """
     results: dict[str, SettingsSyncResult] = {}
+    # Hit count of the first under-lock Gate A block; every later target is
+    # refused with it, without scanning or locking again.
+    privacy_refused_hits: int | None = None
+    preflight_done = False
 
     def _abandoned() -> SettingsSyncResult:
         return SettingsSyncResult(
@@ -1602,6 +1691,9 @@ def generate_all_settings(
         if _sync_is_abandoned():
             results[name] = _abandoned()
             continue
+        if privacy_refused_hits is not None:
+            results[name] = _settings_privacy_refusal_row(privacy_refused_hits)
+            continue
 
         if not gen.is_available(project_root):
             results[name] = SettingsSyncResult(
@@ -1618,15 +1710,15 @@ def generate_all_settings(
             )
             continue
 
-        raw = _safe_load_json(canonical_path)
-        if raw is _MALFORMED:
+        loaded = _load_canonical_settings(canonical_path)
+        if loaded is _MALFORMED:
             results[name] = SettingsSyncResult(
                 status="error",
                 reason=f"{canonical_path} is not valid JSON (or not a JSON object). "
                 f"Fix the file manually.",
             )
             continue
-        contributions: dict = raw  # type: ignore[assignment]
+        canonical_text, contributions = loaded  # type: ignore[misc]
 
         target_path = gen.target_file(project_root, scope)
         if target_path is None:
@@ -1653,6 +1745,27 @@ def generate_all_settings(
                 target=target_path,
             )
             continue
+
+        # Gate A preflight, once, on the first target that gets this far: every
+        # earlier target took an early exit above, so raising here leaves every
+        # settings file untouched and no sidecar created. It scans the same text
+        # this iteration parsed.
+        if not preflight_done:
+            blocked = _scan_canonical_settings(
+                canonical_text,
+                canonical_path=canonical_path,
+                project_root=project_root,
+                surface=surface,
+            )
+            if blocked is not None:
+                raise PrivacyBlockedError(
+                    _settings_privacy_block_message(blocked.hits_count),
+                    blocked=blocked,
+                    scope="project_shared",
+                    kind="hook rule",
+                    artifact_name=None,
+                )
+            preflight_done = True
 
         # Steps 0-4 run under cross-process sidecar locks so a separate
         # process (a CLI ``mm context sync`` / the MCP server) or the Web UI
@@ -1706,15 +1819,27 @@ def generate_all_settings(
                         reason="no canonical source (.memtomem/settings.json)",
                     )
                     continue
-                raw_locked = _safe_load_json(canonical_path)
-                if raw_locked is _MALFORMED:
+                loaded_locked = _load_canonical_settings(canonical_path)
+                if loaded_locked is _MALFORMED:
                     results[name] = SettingsSyncResult(
                         status="error",
                         reason=f"{canonical_path} is not valid JSON (or not a JSON object). "
                         f"Fix the file manually.",
                     )
                     continue
-                contributions = raw_locked  # type: ignore[assignment]
+                canonical_text, contributions = loaded_locked  # type: ignore[misc]
+                # Gate A on the text this target merges. The preflight passed,
+                # so a hit means the canonical changed while this sync ran.
+                blocked = _scan_canonical_settings(
+                    canonical_text,
+                    canonical_path=canonical_path,
+                    project_root=project_root,
+                    surface=surface,
+                )
+                if blocked is not None:
+                    privacy_refused_hits = blocked.hits_count
+                    results[name] = _settings_privacy_refusal_row(privacy_refused_hits)
+                    continue
 
                 # The file Steps 1-4 read, recheck and write, taken again
                 # under the locks: a link repointed while this sync waited

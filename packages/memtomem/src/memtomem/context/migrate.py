@@ -50,6 +50,7 @@ from typing import Any, Callable, Iterator, Literal, NamedTuple
 import click
 
 from memtomem.config import TargetScope
+from memtomem.memory_scope import ProjectEntryRelinked
 from memtomem.context import override as _override
 from memtomem.context._atomic import (
     _file_lock,
@@ -152,9 +153,35 @@ class ArtifactNotFoundError(click.ClickException):
     ``except ClickException`` / ``str(exc)`` consumer (CLI verbs, MCP
     actions, the ``migrate_scope`` wrapper contract) is untouched.
     Raised only by the :func:`_detect_source_scope` not-found branches;
-    the multi-scope ambiguity raise stays a plain ``ClickException``
-    (the artifact exists — the selector is what's wrong).
+    the multi-scope ambiguity raise is a :class:`PathNamingClickException`
+    instead (the artifact exists — the selector is what's wrong).
+
+    ``safe_message`` is the same statement without a host path, for a surface
+    that answers a remote caller (#3532). ``None`` when ``message`` already
+    names no path. Keyword-only with a default, so ``type(exc)(*exc.args)`` —
+    what ``copy`` and ``pickle`` do — still rebuilds the exception.
     """
+
+    def __init__(self, message: str, *, safe_message: str | None = None) -> None:
+        super().__init__(message)
+        self.safe_message = safe_message
+
+
+class PathNamingClickException(click.ClickException):
+    """An engine refusal whose CLI text names a host path (#3543).
+
+    ``message`` is the text the CLI prints, unchanged. ``safe_message`` says
+    the same thing with the path replaced by request vocabulary or the logical
+    location, for a surface that answers a remote caller: the web transfer
+    route sends it from its 400 arm instead of ``message``. Every raise site
+    passes one; it defaults to ``None`` only so that ``type(exc)(*exc.args)``
+    — what ``copy`` and ``pickle`` do — still rebuilds the exception, and the
+    route has a path-free fallback for that case.
+    """
+
+    def __init__(self, message: str, *, safe_message: str | None = None) -> None:
+        super().__init__(message)
+        self.safe_message = safe_message
 
 
 MigrateState = Literal[
@@ -907,19 +934,90 @@ StagingIdentity = tuple[int, int]
 
 
 class StagingIdentityLostError(OSError):
-    """The staging pathname no longer names the object we claimed (#2314).
+    """This transfer cannot establish that an entry is the object it claimed (#2314).
 
-    Raised only by :meth:`StagingClaim.assert_still_ours`, immediately before
-    an operation that would CONSUME the entry (promote, rename-back, hard-link
-    promote). It means the pathname was re-pointed at something we did not
-    create, so consuming it would move a stranger's bytes into a canonical
-    name — bytes Gate A never scanned.
+    Raised by :meth:`StagingClaim.assert_still_ours`, immediately before an
+    operation that would CONSUME the entry (promote, rename-back, hard-link
+    promote). Either the pathname was re-pointed at something we did not
+    create — so consuming it would move a stranger's bytes into a canonical
+    name, bytes Gate A never scanned — or the entry's identity could not be
+    established at all, which the check cannot tell apart from that.
+
+    Also raised by :func:`_refuse_an_unverifiable_source` before a move renames
+    anything, when the source has no identity to carry into staging (#3545).
+    Nothing was consumed then.
 
     A separate class from :class:`TransferStagingBusyError` because the
-    remediation differs: a busy name is retried with a fresh suffix, while a
-    lost identity is an unexplained mutation of a private path and stops the
-    operation.
+    remediation differs: a busy name is retried with a fresh suffix, while an
+    entry whose ownership cannot be established — replaced, or unverifiable on
+    this filesystem — stops the operation.
+
+    :attr:`cause` says which of the three refusals this is (#3608), so a
+    surface that cannot print the engine's text — the web route sends a fixed,
+    path-free sentence — still says the right thing: ``"replaced"`` (a
+    different object answers to the name), ``"unverifiable"`` (the entry's
+    identity cannot be read now, or was never captured), or
+    ``"source_unverifiable"`` (the move's source preflight; nothing moved).
     """
+
+    def __init__(self, *args: object, cause: IdentityLossCause = "replaced") -> None:
+        super().__init__(*args)
+        self.cause: IdentityLossCause = cause
+
+
+#: Why an identity refusal happened; see :attr:`StagingIdentityLostError.cause`.
+IdentityLossCause = Literal["replaced", "unverifiable", "source_unverifiable"]
+
+
+class EntryProbe(Enum):
+    """What one ``lstat`` of a pathname showed (#3608).
+
+    ``os.path.lexists`` answers ``False`` for every ``OSError``, so an entry it
+    cannot read — a parent that lost search permission — reads as absent, and
+    the rollback ladder told the operator bytes were gone that were sitting
+    right there. ``UNREADABLE`` keeps that case apart.
+    """
+
+    ABSENT = "absent"
+    PRESENT = "present"
+    UNREADABLE = "unreadable"
+
+
+class ClaimState(Enum):
+    """What one ``lstat`` of a claim's pathname says about the claim (#3608).
+
+    Four answers, because the predecessor's two (``lexists`` and
+    ``still_ours``) folded "cannot read it now" into both "absent" and
+    "replaced". Only ``OURS`` licenses consuming or removing the entry.
+    """
+
+    ABSENT = "absent"
+    OURS = "ours"
+    REPLACED = "replaced"
+    UNVERIFIABLE = "unverifiable"
+
+
+def _lstat_or_absent(path: Path) -> os.stat_result | None:
+    """``path.lstat()``, or ``None`` when the path does not exist.
+
+    ``NotADirectoryError`` is absence too: an ancestor that is a file means the
+    path cannot exist — the mapping ``bundle._collides`` uses. Every other
+    ``OSError`` propagates, because a probe that could not look has not seen
+    absence.
+    """
+    try:
+        return path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def _probe(path: Path) -> tuple[EntryProbe, OSError | None]:
+    """Presence of *path* in three answers, with the error when it could not look."""
+    try:
+        info = _lstat_or_absent(path)
+    except OSError as exc:
+        return EntryProbe.UNREADABLE, exc
+    return (EntryProbe.ABSENT if info is None else EntryProbe.PRESENT), None
 
 
 @dataclass(slots=True)
@@ -1004,47 +1102,105 @@ class StagingClaim:
         """
         self.identity = placed
 
+    def check(self) -> ClaimState:
+        """Say, from ONE ``lstat``, what now answers to :attr:`path` (#3608).
+
+        One syscall answers both "is it there" and "is it ours", so the two
+        cannot disagree about a pathname that changed between them. An identity
+        that was never captured, a probe that failed for anything but absence,
+        and a zero inode now are all ``UNVERIFIABLE`` — not ``REPLACED``: nothing
+        was seen replacing the entry, and the recovery text must not say so.
+        """
+        try:
+            info = _lstat_or_absent(self.path)
+        except OSError as exc:
+            logger.warning("could not re-read the identity of staging %s: %s", self.path, exc)
+            return ClaimState.UNVERIFIABLE
+        if info is None:
+            return ClaimState.ABSENT
+        current = _identity_of(info)
+        if self.identity is None or current is None:
+            return ClaimState.UNVERIFIABLE
+        return ClaimState.OURS if current == self.identity else ClaimState.REPLACED
+
     def still_ours(self) -> bool:
         """Whether the pathname still names the object this claim created."""
-        if self.identity is None:
-            return False
-        return _staging_identity(self.path) == self.identity
+        return self.check() is ClaimState.OURS
 
     def assert_still_ours(self, action: str) -> None:
         """Refuse *action* when the pathname now names something else.
 
-        *action* is a short verb phrase and must not carry a path: both wires
-        that render this (``error_redact`` for MCP, the web route's twin)
-        hard-truncate an engine reason at 200 characters, so a remediation
-        written after the paths reaches a remote caller as a promise with no
-        instruction attached. Instruction FIRST, paths LAST — the same shape
-        :class:`TransferStagingBusyError` uses, pinned by a surface test on
-        each wire.
+        *action* is a short verb phrase and must not carry a path: the MCP wire
+        (``error_redact``) hard-truncates an engine reason at 200 characters,
+        so a remediation written after the paths reaches a remote caller as a
+        promise with no instruction attached. Instruction FIRST, paths LAST —
+        the same shape :class:`TransferStagingBusyError` uses. The web
+        transfer route sends its own fixed sentence instead and puts this text
+        in its server log line (#3532).
 
-        An ABSENT entry is not a mismatch and is deliberately allowed through:
-        there is nothing there to consume, and the operation's own ``ENOENT``
-        is the honest error for it — for a move, "staging vanished" is a
-        different emergency from "something is in the way", and only the
-        syscall can tell the caller which one happened (the classification
-        :func:`~memtomem.context._atomic.rename_refused_by_occupant` performs).
-        The check fires only for the state it exists to catch: an entry that IS
-        there and is not ours.
+        The text speaks only for the refused step. Callers can run cleanup or a
+        rollback after this raise, and either can remove the staging entry once
+        a later identity read succeeds, so it must not say what is left on disk
+        (#3609).
+
+        An ABSENT entry is not a mismatch, and it raises the ``ENOENT`` the
+        consuming syscall would have raised — a :class:`FileNotFoundError`, not
+        this class: for a move, "staging vanished" is a different emergency
+        from "something is in the way". It is raised HERE rather than left to
+        the syscall (#3608): a consumer acts only on an entry this check has
+        shown to be ours, and passing an absent one through let an entry that
+        appeared after the probe be consumed without its identity ever being
+        compared.
+
+        The identity refusal fires for the states it exists to catch: an entry
+        that IS there and is not ours, and one whose identity cannot be read.
+        The second used to pass through, because ``os.path.lexists`` calls an
+        unreadable entry absent; it is refused now, by what it is (#3608).
         """
-        if not os.path.lexists(self.path) or self.still_ours():
-            return
-        if self.identity is None:
+        state = self.check()
+        if state is ClaimState.ABSENT:
+            raise FileNotFoundError(
+                errno.ENOENT, f"transfer staging is gone; refused: {action}", str(self.path)
+            )
+        refusal = self.refusal_for(state, action)
+        if refusal is not None:
+            raise refusal
+
+    def refusal_for(self, state: ClaimState, action: str) -> StagingIdentityLostError | None:
+        """The refusal :meth:`assert_still_ours` raises for *state*, or ``None``.
+
+        Separate so a caller that already asked :meth:`check` — and must act on
+        THAT answer, not on a second ``lstat`` that may say something else —
+        raises the same text without probing again.
+        """
+        if state is ClaimState.ABSENT or state is ClaimState.OURS:
+            return None
+        if state is ClaimState.REPLACED:
             reason = (
-                "transfer staging cannot be verified: this filesystem does not "
-                "report file identity, so nothing was promoted and nothing was "
-                "removed. Stage on a filesystem that reports it, then retry."
+                "transfer staging was replaced out of band: it no longer names "
+                "the entry this transfer created, so this step was refused. "
+                "Inspect it by hand, then retry."
+            )
+        elif self.identity is None:
+            # Never captured: the capture ``lstat`` failed or reported a zero
+            # inode, and ``_staging_identity`` logged which. Name both rather
+            # than prescribe the filesystem remedy for a permission problem.
+            reason = (
+                "transfer staging cannot be verified: its file identity could not "
+                "be read, or this filesystem does not report file identity, so "
+                "this step was refused. Fix access to it, or stage on a filesystem "
+                "that reports it, then retry."
             )
         else:
             reason = (
-                "transfer staging was replaced out of band: it no longer names "
-                "the entry this transfer created, so nothing was promoted and "
-                "nothing was removed. Inspect it by hand, then retry."
+                "transfer staging cannot be verified: its file identity was "
+                "recorded but could not be re-read, so this step was refused. Fix "
+                "access to it, then retry."
             )
-        raise StagingIdentityLostError(f"{reason} Refused: {action}. Staging: {self.path}")
+        return StagingIdentityLostError(
+            f"{reason} Refused: {action}. Staging: {self.path}",
+            cause="replaced" if state is ClaimState.REPLACED else "unverifiable",
+        )
 
 
 def _staging_identity(path: Path) -> StagingIdentity | None:
@@ -1074,7 +1230,8 @@ def _staging_identity(path: Path) -> StagingIdentity | None:
         # fix the wrong thing.
         logger.warning("could not read the identity of staging %s: %s", path, exc)
         return None
-    if info.st_ino == 0:
+    identity = _identity_of(info)
+    if identity is None:
         logger.warning(
             "filesystem holding %s does not report file identity (st_ino is 0), "
             "so this transfer cannot prove a staging entry is still its own; it "
@@ -1083,7 +1240,57 @@ def _staging_identity(path: Path) -> StagingIdentity | None:
             path,
         )
         return None
+    return identity
+
+
+def _identity_of(info: os.stat_result) -> StagingIdentity | None:
+    """``(st_dev, st_ino)`` of an ``lstat`` result, or ``None`` for a zero inode.
+
+    The one place the zero-inode rule lives (see :func:`_staging_identity` for
+    why zero is not an identity), so the move's source preflight and every
+    staging probe cannot come to disagree about what counts as one.
+    """
+    if info.st_ino == 0:
+        return None
     return (info.st_dev, info.st_ino)
+
+
+def _refuse_an_unverifiable_source(src: Path) -> None:
+    """Refuse a move whose source has no identity this process can read (#3545).
+
+    One ``lstat``, answered four ways. Absent: nothing to refuse — the move's
+    own rename reports it as it always has. Unreadable for permission: refused,
+    because ``os.path.lexists`` would have called that "absent" and waved the
+    move through. A zero inode: refused, the filesystem cannot answer. Any
+    other ``OSError`` propagates as raised: nothing has been renamed yet, so
+    it is a refusal as it stands.
+
+    ``lstat``, as :func:`_staging_identity` uses: a source that is a symlink is
+    moved as the link, so the link is what needs an identity.
+
+    No log line of its own: the exception carries the whole diagnosis, and each
+    surface already reports it — the web route through its secret-scanned,
+    control-escaped refusal line, the CLI as its error. A second, raw record
+    of the same path here would bypass that scrubbing.
+    """
+    try:
+        info = src.lstat()
+    except FileNotFoundError:
+        return
+    except PermissionError as exc:
+        raise StagingIdentityLostError(
+            "transfer source cannot be verified: its file identity could not be "
+            "read, so nothing was moved. Fix access to the source, then retry. "
+            f"Refused: move the source into staging. Source: {src}",
+            cause="source_unverifiable",
+        ) from exc
+    if _identity_of(info) is None:
+        raise StagingIdentityLostError(
+            "transfer source cannot be verified: this filesystem does not report "
+            "file identity, so nothing was moved. Transfer on a filesystem that "
+            f"reports it, then retry. Refused: move the source into staging. Source: {src}",
+            cause="source_unverifiable",
+        )
 
 
 def _remove_staging_entry(staging: Path) -> None:
@@ -1132,13 +1339,24 @@ def _discard_claimed_staging(claim: StagingClaim) -> None:
     sweeping a previous run's leftovers — have no claim to compare against and
     use :func:`_remove_staging_entry` directly.
     """
-    if not os.path.lexists(claim.path):
+    state = claim.check()
+    if state is ClaimState.ABSENT:
         return
-    if not claim.still_ours():
+    if state is ClaimState.REPLACED:
         logger.warning(
             "leaving staging %s in place: it no longer names the entry this "
             "transfer created (identity changed out of band), so removing it "
             "would delete an object we did not make. Inspect it by hand.",
+            claim.path,
+        )
+        return
+    if state is ClaimState.UNVERIFIABLE:
+        # Not seen replaced — its identity could not be read (#3608). It may
+        # well be ours; it is kept because that cannot be shown.
+        logger.warning(
+            "leaving staging %s in place: it could not be verified as the entry "
+            "this transfer created (its file identity could not be read), so it "
+            "was not removed. Inspect it by hand.",
             claim.path,
         )
         return
@@ -1215,13 +1433,12 @@ def _claim_transfer_staging(
         # -collision tests do exactly that), where naming one path twice
         # would read as a bug in the message rather than in the world.
         occupied = " and ".join(dict.fromkeys((str(first), str(second))))
-        # Instruction FIRST, inside 188 characters, paths LAST. Both wires
-        # (``error_redact`` for MCP, the web route's twin) hard-truncate an
-        # engine reason to 200 characters, so a remediation written after the
-        # paths reaches a remote caller as a promise with no instruction
-        # attached. The CLI prints this string whole, which is where the paths
-        # are worth having; on the wire they are what gets cut. A surface test
-        # on each wire pins that the instruction survives.
+        # Instruction FIRST, inside 188 characters, paths LAST. The MCP wire
+        # (``error_redact``) hard-truncates an engine reason to 200 characters,
+        # so a remediation written after the paths reaches a remote caller as
+        # a promise with no instruction attached. The CLI prints this string
+        # whole, which is where the paths are worth having. The web transfer
+        # route sends its own fixed sentence and logs this one (#3532).
         raise TransferStagingBusyError(
             "transfer staging is blocked: a name it needs is already taken and "
             "was NOT removed, because that entry can be an interrupted move's "
@@ -1495,19 +1712,24 @@ class StagedMove(NamedTuple):
 class RestoreOutcome(Enum):
     """What :func:`_restore_source` was able to do (#2313 + #2314).
 
-    Three answers, not two. ``REFUSED`` and ``IDENTITY_LOST`` both leave the
-    bytes where they are, but they are different events with different
-    remediations: a refused rename means something occupies the source name
-    and the entry we hold is still ours to move, while a lost identity means
-    the entry itself is no longer the object we parked — the artifact is
-    somewhere we can no longer name, and the operator has to go looking rather
-    than retry. Collapsing them into one boolean is what made the caller
+    ``REFUSED`` and the two identity answers all leave the bytes where they
+    are, but they are different events with different remediations: a refused
+    rename means the rename could not be done (or there was nothing to rename),
+    while a lost identity means the entry itself cannot be shown to be the
+    object we parked. Collapsing them into one boolean is what made the caller
     report a Gate A block for a state where the artifact had gone missing.
+
+    The identity answer is two, not one (#3608). ``IDENTITY_REPLACED``: a
+    different object answers to the name, so the artifact is somewhere we can
+    no longer name and the operator has to go looking. ``IDENTITY_UNVERIFIABLE``:
+    the entry's identity could not be read, or was never captured — nothing
+    was seen replacing it, and the entry is the place to look.
     """
 
     RESTORED = "restored"
     REFUSED = "refused"
-    IDENTITY_LOST = "identity_lost"
+    IDENTITY_REPLACED = "identity_replaced"
+    IDENTITY_UNVERIFIABLE = "identity_unverifiable"
 
 
 def _restore_source(entry: StagingClaim, src: Path, *, allow_cross_parent: bool) -> RestoreOutcome:
@@ -1541,7 +1763,7 @@ def _restore_source(entry: StagingClaim, src: Path, *, allow_cross_parent: bool)
     bytes that are not ours to delete. Which message to log is decided by
     LOOKING rather than by the errno — "something is at src" is a claim about
     the world, and the errno spellings for an occupied rename target differ
-    per platform. ``lexists`` on both probes, so a dangling symlink counts:
+    per platform. ``lstat`` on both probes, so a dangling symlink counts:
     at *src* it occupies the name, at *entry* it is still the parked
     artifact's only name.
 
@@ -1565,70 +1787,136 @@ def _restore_source(entry: StagingClaim, src: Path, *, allow_cross_parent: bool)
     someone replaced our entry there, that is their object being published
     under our name while the artifact we parked stays lost under theirs
     (#2314). A lost identity leaves everything where it is, like a refused
-    rename, but reports :attr:`RestoreOutcome.IDENTITY_LOST` so the caller can
-    say the artifact is unaccounted for instead of blaming whatever failure
-    sent it here.
+    rename, but reports :attr:`RestoreOutcome.IDENTITY_REPLACED` or
+    :attr:`RestoreOutcome.IDENTITY_UNVERIFIABLE` so the caller can say the
+    artifact is unaccounted for instead of blaming whatever failure sent it
+    here — and say which of the two it is (#3608).
+
+    **Only an entry shown to be ours is renamed** (#3608). One
+    :meth:`StagingClaim.check` decides; an absent entry is reported without a
+    rename, so nothing that appears in its place afterwards is moved.
     """
-    if os.path.lexists(entry.path) and not entry.still_ours():
-        # Only for an entry that IS there and is not ours. An ABSENT one is a
-        # different event — nothing was substituted, the bytes simply are not
-        # here — and it belongs to the rename below, whose ``ENOENT`` says so
-        # in the caller's own vocabulary. Same rule as
-        # :meth:`StagingClaim.assert_still_ours`.
+    state = entry.check()
+    if state is ClaimState.REPLACED:
         logger.error(
             "transfer rollback: %s no longer names the entry this transfer "
-            "created (replaced out of band, or this filesystem cannot report "
-            "file identity); neither renaming it back to %s nor removing it. "
-            "The source bytes may survive under another name in that store — "
-            "manual reconciliation required.",
+            "created (replaced out of band); neither renaming it back to %s nor "
+            "removing it. The source bytes may survive under another name in that "
+            "store — manual reconciliation required.",
             entry.path,
             src,
         )
-        return RestoreOutcome.IDENTITY_LOST
+        return RestoreOutcome.IDENTITY_REPLACED
+    if state is ClaimState.UNVERIFIABLE:
+        # Not seen replaced: its identity could not be read, or was never
+        # captured (#3608). The entry may well hold the bytes, so it is named as
+        # the place to look — and it is not renamed, because a consumer acts
+        # only on an entry it has shown to be ours.
+        logger.error(
+            "transfer rollback: %s could not be verified as the entry this "
+            "transfer created (its file identity could not be read); neither "
+            "renaming it back to %s nor removing it. It may still hold the "
+            "pre-move bytes — inspect it; manual reconciliation required.",
+            entry.path,
+            src,
+        )
+        return RestoreOutcome.IDENTITY_UNVERIFIABLE
+    if state is ClaimState.ABSENT:
+        # Nothing to rename. Asked before the rename rather than read off its
+        # ``ENOENT``: an entry that appears between this probe and a rename
+        # would be a stranger's, moved onto the canonical source path and
+        # reported as restored (#3608). Rename-back runs only on OURS.
+        logger.error(
+            "transfer rollback: %s, which held the pre-move bytes, is gone — "
+            "nothing left to put back at %s.",
+            entry.path,
+            src,
+        )
+        return RestoreOutcome.REFUSED
     try:
         rename_no_replace(entry.path, src, allow_cross_parent=allow_cross_parent)
     except OSError as exc:
-        preserved = os.path.lexists(entry.path)
-        if os.path.lexists(src):
-            if preserved:
-                logger.error(
-                    "transfer rollback: rename-back refused (%s) — an entry we "
-                    "did not create occupies src %s; preserving the pre-move "
-                    "bytes at %s — manual reconciliation required.",
-                    exc,
-                    src,
-                    entry.path,
-                )
-            else:
-                logger.error(
-                    "transfer rollback: rename-back refused (%s) — an entry we "
-                    "did not create occupies src %s, and %s, which held the "
-                    "pre-move bytes, is gone too — manual reconciliation "
-                    "required.",
-                    exc,
-                    src,
-                    entry.path,
-                )
-        elif preserved:
-            logger.error(
-                "transfer rollback: rename-back failed (%s); the pre-move bytes "
-                "are preserved at %s — manual recovery required (mv it back to "
-                "%s).",
-                exc,
-                entry.path,
-                src,
-            )
-        else:
-            logger.error(
-                "transfer rollback: rename-back failed (%s) and %s, which held "
-                "the pre-move bytes, is gone too — nothing left to put back at "
-                "%s.",
-                exc,
-                entry.path,
-                src,
-            )
+        _log_refused_restore(exc, entry, src)
         return RestoreOutcome.REFUSED
     return RestoreOutcome.RESTORED
+
+
+def _log_refused_restore(exc: OSError, entry: StagingClaim, src: Path) -> None:
+    """Say why a rename-back of *entry* onto *src* failed, and where the bytes are.
+
+    Both halves come from a probe made AFTER the failure (#2327): *entry* is
+    asked with :meth:`StagingClaim.check`, because presence alone only proves a
+    name is occupied, and *src* with :func:`_probe`, because ``lexists`` calls
+    an unreadable path absent (#3608). Move-back advice — the instruction to
+    write *src* — is given only when *src* was seen absent and *entry* seen
+    ours; any other combination asks for reconciliation of both paths, since
+    *src* may hold somebody else's entry.
+    """
+    held = entry.check()
+    at_src, src_error = _probe(src)
+    if held is ClaimState.OURS:
+        where = f"the pre-move bytes are preserved at {entry.path}"
+    elif held is ClaimState.REPLACED:
+        where = (
+            f"{entry.path}, which held the pre-move bytes, now names an entry this "
+            "transfer did not create — the bytes may survive under another name "
+            "in that store"
+        )
+    elif held is ClaimState.UNVERIFIABLE:
+        where = (
+            f"{entry.path}, which held the pre-move bytes, could not be verified "
+            "(its file identity could not be read) — it may still hold them, "
+            "inspect it"
+        )
+    else:
+        where = f"{entry.path}, which held the pre-move bytes, is gone too"
+    if at_src is EntryProbe.PRESENT and held is ClaimState.OURS:
+        logger.error(
+            "transfer rollback: rename-back refused (%s) — an entry we did not "
+            "create occupies src %s; preserving the pre-move bytes at %s — manual "
+            "reconciliation required.",
+            exc,
+            src,
+            entry.path,
+        )
+    elif at_src is EntryProbe.PRESENT:
+        logger.error(
+            "transfer rollback: rename-back refused (%s) — an entry we did not "
+            "create occupies src %s, and %s — manual reconciliation required.",
+            exc,
+            src,
+            where,
+        )
+    elif at_src is EntryProbe.UNREADABLE:
+        logger.error(
+            "transfer rollback: rename-back failed (%s) and src %s could not be "
+            "checked (%s); %s — reconcile both paths by hand.",
+            exc,
+            src,
+            src_error,
+            where,
+        )
+    elif held is ClaimState.OURS:
+        logger.error(
+            "transfer rollback: rename-back failed (%s); %s — manual recovery "
+            "required (mv it back to %s, without replacing anything there).",
+            exc,
+            where,
+            src,
+        )
+    elif held is ClaimState.ABSENT:
+        logger.error(
+            "transfer rollback: rename-back failed (%s) and %s — nothing left to put back at %s.",
+            exc,
+            where,
+            src,
+        )
+    else:
+        logger.error(
+            "transfer rollback: rename-back failed (%s); %s — manual reconciliation required.",
+            exc,
+            where,
+        )
 
 
 def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
@@ -1679,7 +1967,14 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
     a failure after the holding rename renames it back, and preserves it
     loudly if that is refused, so the source bytes always exist somewhere this
     function names.
+
+    **The source's identity is asked for first (#3545).** On both paths the
+    entry a failure has to be rolled back from is the source's own inode after
+    a rename, so a source with no readable identity leaves a rollback that
+    cannot vouch for anything — a refusal found after the rename is a partial
+    commit. :func:`_refuse_an_unverifiable_source` refuses before either rename.
     """
+    _refuse_an_unverifiable_source(src)
     dst_parent.mkdir(parents=True, exist_ok=True)
     try:
         staging = _claim_transfer_staging(
@@ -1717,19 +2012,35 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
                 _stage_copy_into(holding.path, dst_parent, name_hint, src_claim=holding),
                 holding,
             )
-        except BaseException:
+        except BaseException as exc:
             # The source is renamed away at this point, so unwinding is this
             # function's job: the caller's rollback ladder never sees a stage
             # that failed. ``_restore_source`` preserves the holding entry and
             # logs when it cannot put it back, so the bytes are never dropped
             # to make a failure tidy.
             outcome = _restore_source(holding, src, allow_cross_parent=False)
-            if outcome is RestoreOutcome.IDENTITY_LOST:
-                # The parked source is not where we parked it any more, and
-                # the canonical name is empty: the artifact is unaccounted
-                # for. Replacing the in-flight failure with that fact is the
-                # honest report — whatever made the stage fail matters less
-                # than an artifact nobody can name (#2314).
+            if outcome is RestoreOutcome.IDENTITY_UNVERIFIABLE:
+                # The entry at the holding path cannot be shown to be the
+                # source we parked: the artifact is unaccounted for. Replacing
+                # the in-flight failure with that fact is the honest report —
+                # whatever made the stage fail matters less than an artifact
+                # nobody can name (#2314). Nothing was observed replacing it:
+                # its identity could not be read, or was never captured
+                # (#3545, #3608). Name it as the place to look, without
+                # claiming what is in it.
+                raise MigratePartialError(
+                    f"transfer left {src.name} unaccounted for: the move parked "
+                    f"the source, and the entry at the holding path could not "
+                    f"be verified as this transfer's (its file identity was "
+                    f"not available), so nothing was put back. Do NOT retry. "
+                    f"Inspect the entry at the holding path; if it holds the "
+                    f"artifact, reconcile anything now at the canonical path "
+                    f"and restore it there by hand. Holding path: "
+                    f"{holding.path}. Canonical path: {src}.",
+                    src_path=src,
+                    dst_path=dst_parent,
+                )
+            if outcome is RestoreOutcome.IDENTITY_REPLACED:
                 raise MigratePartialError(
                     f"transfer left {src.name} unaccounted for: the move parked "
                     f"the source and that entry was replaced out of band, so it "
@@ -1740,8 +2051,56 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> StagedMove:
                     src_path=src,
                     dst_path=dst_parent,
                 )
+            if outcome is not RestoreOutcome.RESTORED and isinstance(exc, StagingIdentityLostError):
+                # The refusal says "this step was refused… then retry", which
+                # invites a retry that is safe only while the source is home.
+                # It is not home (#3608).
+                raise identity_refusal_not_restored(src.name, src, dst_parent, (holding,)) from exc
             raise
     return StagedMove(staging, None)
+
+
+def identity_refusal_not_restored(
+    label: str, src: Path, dst_path: Path, candidates: tuple[StagingClaim, ...]
+) -> MigratePartialError:
+    """The partial commit an identity refusal becomes once the source is consumed (#3608).
+
+    :class:`StagingIdentityLostError` reads as a retryable refusal — "this step
+    was refused… then retry" — and every surface maps it to one (the web
+    route's 409). That is honest only while the source is
+    still at its canonical path. A move consumes the source by a rename before
+    it can refuse on staging, so when the rename-back did not happen as well —
+    a writer recreated the source meanwhile, or the entry cannot be read — a
+    retry would move whatever now answers to the canonical path.
+
+    The text names each entry this transfer created by what a probe of it
+    shows NOW — ours (holds the bytes) or unverifiable (inspect it) — and
+    leaves out the absent and the replaced, rather than calling any of them
+    "parked" on the strength of having created it. Shared by
+    :func:`_stage_move`'s unwind and the rollback ladder in
+    ``transfer.transfer_artifact``, which reach the state the same way.
+    """
+    unique = {claim.path: claim for claim in candidates}.values()
+    states = [(claim.path, claim.check()) for claim in unique]
+    ours = [str(path) for path, state in states if state is ClaimState.OURS]
+    unverified = [str(path) for path, state in states if state is ClaimState.UNVERIFIABLE]
+    found = []
+    if ours:
+        found.append(f"Holding the pre-move bytes: {', '.join(ours)}.")
+    if unverified:
+        found.append(f"Could not be verified, inspect by hand: {', '.join(unverified)}.")
+    if not found:
+        found.append("No entry this transfer created could be found holding them.")
+    return MigratePartialError(
+        f"transfer of {label} did not complete and the source was not restored: the "
+        f"move consumed the source, then refused on a file-identity check, and the "
+        f"pre-move bytes could not be put back. Do NOT retry — a retry would act on "
+        f"whatever is now at the canonical path. {' '.join(found)} Reconcile anything "
+        f"now at the canonical path and restore the artifact there by hand. "
+        f"Canonical path: {src}.",
+        src_path=src,
+        dst_path=dst_path,
+    )
 
 
 def _promote_move(staging: StagingClaim, dst: Path) -> None:
@@ -1884,6 +2243,12 @@ def _existing_fanout_targets(
                 runtime,
                 scope,
             )
+            continue
+        except ProjectEntryRelinked as exc:
+            # The runtime directory is a link inside the project: removing
+            # through it would delete outside the project. Left in place, as a
+            # linked target is below.
+            logger.warning("fanout cleanup: %s; leaving %s's copy in place", exc, runtime)
             continue
         if root is None:
             continue
@@ -2212,9 +2577,14 @@ def _detect_source_scope(
         )
     if len(candidates) > 1:
         listed = ", ".join(f"{s} ({p})" for s, p, _ in candidates)
-        raise click.ClickException(
+        scopes = ", ".join(s for s, _, _ in candidates)
+        raise PathNamingClickException(
             f"{kind}/{name} exists in multiple scopes: {listed}. "
-            f"Pass --from <scope> to disambiguate."
+            f"Pass --from <scope> to disambiguate.",
+            safe_message=(
+                f"{kind}/{name} exists in multiple scopes: {scopes}. "
+                "Set from_scope to one of these scopes."
+            ),
         )
     return candidates[0]
 

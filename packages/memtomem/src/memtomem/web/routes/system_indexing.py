@@ -803,8 +803,25 @@ async def add_memory(
     # on project_shared writes fire on the Web path too (ADR-0011 PR-D
     # round 7 parity — same fix as the chunks PATCH path at
     # ``chunks.py:73-86``).
+    from memtomem.tools.memory_writer import entry_guard_text, entry_open_fence, open_fence_refusal
+
+    # An entry that leaves a fence open makes every later entry in the file
+    # code inside it (#3618).
+    fence = entry_open_fence(req.content, req.title, req.tags)
+    if fence is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "detail": "unclosed_code_fence",
+                "fence": fence,
+                "surface": "web_api_add",
+                "message": open_fence_refusal(fence),
+            },
+        )
+
+    # The entry as it is written: the title and tags go into the file too.
     guard = privacy.enforce_write_guard(
-        req.content,
+        entry_guard_text(req.content, req.title, req.tags),
         surface="web_api_add",
         force_unsafe=req.force_unsafe,
         scope=req.scope,
@@ -846,8 +863,8 @@ async def add_memory(
     # falling back to the historical ``~/.memtomem/memories`` — the
     # "index nothing" state must not silently write into a directory the
     # active config disabled (#1768). Project tiers route through
-    # ``resolve_memory_scope_dir`` against the server's project root so
-    # writes land in ``<proj>/.memtomem/memories[/.local]/`` — the same
+    # ``resolve_project_tier_write_dir`` against the server's project root so
+    # writes land in ``<proj>/.memtomem/memories[.local]/`` — the same
     # path the MCP ``mem_add(scope=...)`` flow uses. Refuses unregistered
     # project-tier dirs upfront so the row's persisted scope cannot
     # diverge from what the read surface / watcher can actually see.
@@ -860,7 +877,7 @@ async def add_memory(
             MemoryScopeError,
             is_project_tier_registered,
             project_tier_registration_error,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
         )
         from memtomem.runtime.project_context import _resolve_project_context_from_dirs
 
@@ -870,7 +887,7 @@ async def add_memory(
         # ``app.state.project_root`` was set to ``Path.cwd()`` in the
         # lifespan; if the server is launched from a subdirectory of a
         # registered project, the raw cwd has no ``.memtomem/memories``
-        # tree, so ``resolve_memory_scope_dir`` would land on the wrong
+        # tree, so ``resolve_project_tier_write_dir`` would land on the wrong
         # directory and ``is_project_tier_registered`` would 422 — while
         # MCP correctly writes under the project root. Falls back to
         # the lifespan cwd only if no registered tier covers the cwd
@@ -881,7 +898,9 @@ async def add_memory(
         if project_root is None:
             project_root = Path(server_project_root)
         try:
-            base = resolve_memory_scope_dir(req.scope, project_root)
+            # A linked tier is refused before the registration check, which
+            # would accept another project's tier it leads to (#3623).
+            base = resolve_project_tier_write_dir(req.scope, project_root)
         except MemoryScopeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if not is_project_tier_registered(base, pmdirs):
@@ -1013,6 +1032,7 @@ async def add_memory(
             # file whose content may not be indexed before anything is written,
             # and let the valve cover this entry only in a file with nothing
             # flagged or masked in it.
+            from memtomem.chunking.base import split_source_lines
             from memtomem.indexing.engine import PrivacyRejection
             from memtomem.indexing.redaction_exemption import indexer_text
             from memtomem.tools.memory_mutation import (
@@ -1041,8 +1061,10 @@ async def add_memory(
             if blocker is not None:
                 raise index_blocked_http(blocker)
             # Counted from the bytes the preflight judged, not a later read that
-            # would follow a link put at the path since (#3289).
-            pre_lines = len(indexer_text(judged.data, errors="replace").splitlines())
+            # would follow a link put at the path since (#3289), and in the lines
+            # a chunk's start_line counts: str.splitlines also breaks at \x0c
+            # and the like, which pushed the boundary past the new entry (#2765).
+            pre_lines = len(split_source_lines(indexer_text(judged.data, errors="replace")))
             try:
                 appended = await _asyncio.to_thread(
                     _sys.append_entry,

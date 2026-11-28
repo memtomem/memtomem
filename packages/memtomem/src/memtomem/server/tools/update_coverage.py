@@ -65,10 +65,10 @@ async def mem_update_coverage(
     """Report or record which commits the update workflow has reviewed for this project.
 
     Coverage is a per-project set of commit SHAs. With record=false the
-    result lists the given SHAs that no earlier run recorded, in the order
-    given. With record=true the given SHAs are recorded as reviewed; pass
-    only commits whose full message was read, after the run's last mem_add.
-    Rows older than 90 days are pruned on record.
+    result lists, in the given order, the SHAs with no review record or a
+    record older than 90 days. With record=true the tool prunes rows older
+    than 90 days before recording the given SHAs as reviewed. Pass only
+    commits whose full message was read, after the run's last mem_add.
 
     Args:
         shas: Full 40-character lowercase commit SHAs from `git log -n 10`; at most 10, no duplicates.

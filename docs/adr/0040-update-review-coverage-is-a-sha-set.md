@@ -39,7 +39,7 @@ resolved project root `chunks.project_root` carries. `mem_update_coverage`
 (`storage/mixins/update_coverage.py`, `server/tools/update_coverage.py`):
 
 - `record=false` returns, in the order given, the SHAs the caller passed that
-  have no row.
+  have no row or have a row older than 90 days.
 - `record=true` prunes rows older than 90 days, then `INSERT OR IGNORE`s each
   SHA with the run's UUID. Prune-before-insert matters: the other order would
   let a re-review of an expired SHA hit the ignore branch and then delete the
@@ -48,6 +48,18 @@ resolved project root `chunks.project_root` carries. `mem_update_coverage`
 The workflow passes only the SHAs whose full commit message it read, and
 records after its last `mem_add` returned. The server never runs `git` and
 validates SHAs for shape only (40 lowercase hex, at most 10, no duplicates).
+
+**Amendment (2026-11-24, #3579).** The rule above now binds the *record* call
+only. The `backfill` mode checks SHAs it has listed but not yet read: it takes a
+SHA-only inventory of the latest 100 commits, checks it ten at a time, and reads
+the unreviewed commits of a slice one commit per read, reviewing the first slice
+in which at least one such read can be used.
+A check only reads, so passing an unread SHA to it can mark nothing. A record
+still passes only SHAs whose full message was read, and `backfill` records
+exactly the commits it read and reviewed, never the whole slice. With #3581,
+a check treats a row older than 90 days as unreviewed even before a record call
+prunes it. Every reasoning step below that depends on "neither can pass a SHA
+it did not read" is about the record call.
 
 Why a set answers every requirement in #2918: a first run marks exactly what it
 saw and implies nothing older; a `topic` run simply does not record; a commit
@@ -120,10 +132,14 @@ misconfiguration is reported where it is felt.
   release that ships the workflow change adds that line to the guides.
 - Rows are provenance. Namespace merges and re-indexing do not touch them, and
   nothing references them.
+- (#3579) The opt-in `backfill` mode reaches commits 11–100 without changing the
+  server: each call still carries at most ten SHAs. Its per-commit reads are
+  exact Claude grants, one per inventory position, rather than a wildcard.
 
 ## References
 
 - #2918 — update workflow: track reviewed commit coverage in deterministic code
 - #2935 — the update workflow reads the latest 10 commits' full messages
+- #3579 — an opt-in `backfill` mode reviews commits older than the latest 10
 - #2920 — `mem_project_bind`, the binding this tool honours for a server
   started outside the project

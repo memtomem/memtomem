@@ -21,7 +21,7 @@ from `packages/memtomem-plugin-assets/`; edit the sources there, not the files h
   extra to Hermes's environment to fix it.
 - Git on `PATH`, for the commit lookup under [Install](#install).
 - `uv` on `PATH`. The server is started with
-  `uvx --python 3.12 --from 'memtomem[onnx]==0.7.8' memtomem-server`.
+  `uvx --python 3.12 --from 'memtomem[onnx]==0.7.14' --with 'huggingface-hub>=1.20' memtomem-server`.
   Without `uv` the plugin still installs and enables, and the server fails at start with
   `missing executable 'uvx'`.
 - Python 3.12. uv uses a 3.12 it can find; if there is none, it downloads one (about 70 MiB)
@@ -51,6 +51,12 @@ hermes plugins install "https://github.com/memtomem/memtomem#packages/memtomem-h
 
 At a release commit, `mcp.json` pins that same memtomem version, so the server installs
 the release you picked. Hermes marks a direct Git install as a custom (unreviewed) source.
+
+This package's own version, in `plugin.json`, can change between memtomem releases, so a
+commit on `main` that no release tag points at can carry a newer package than the latest
+tag does. Such a commit installs the same way, with its 40-character SHA. Check first that
+the memtomem release its `mcp.json` pins is listed on PyPI: the server does not start
+until it is.
 
 Hermes records that commit as the plugin's pin. To move to a later release, look up its
 commit the same way and reinstall with `--force --ref <new-commit-sha>`. A `--force`
@@ -95,11 +101,80 @@ files directly. An entry of your own without that variable restores the search, 
 example below sets it. Before this package's 0.1.15, the nearest `.env` was read and its
 `MEMTOMEM_*` keys were applied.
 
+**A saved Hugging Face login is not used.** memtomem downloads a model or a tokenizer from
+Hugging Face when its configuration uses one hosted there, as ONNX embedding and the local
+reranker do. This package's server entry
+sets `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` and holds `huggingface-hub` at 1.20 or later
+(`--with` in its launch line), so those downloads do not open the login that
+`hf auth login` saved (normally `~/.cache/huggingface/token`) and use neither it nor an
+`HF_TOKEN` variable. Hermes's plugin catalog rules say a plugin never reads another
+tool's login. The floor is part of it: `huggingface-hub` 1.19 and older read the saved
+login even with the variable set. For a gated or private model, add your own
+`mcp_servers.memtomem` entry (see "Scope" below) without that variable and with `HF_TOKEN`
+under `env:`. Before this package's 0.1.23, a saved login was sent with model downloads.
+
+## Korean keyword search
+
+This package starts memtomem with the `onnx` extra only, not the `korean` one, so its
+server has no Kiwi morphological tokenizer. If your store is set to
+`search.tokenizer: kiwipiepy` (the `mm init` Korean-optimized preset sets it), this server
+falls back to `unicode61` and keeps indexing. One keyword index then holds two token
+forms, and a Korean query with a particle or an ending, such as `예산을` or `결정했다`,
+misses the notes that were indexed the other way. A bare stem such as `예산` still finds
+both, so a quick test can look fine. Ask Hermes for memtomem status: a
+`tokenizer_fallback` warning means this server is affected.
+
+The steps below are for a store that is already set to `kiwipiepy`: memtomem status shows
+`search.tokenizer:    kiwipiepy`. They do not switch a `unicode61` store, and the rebuild
+in step 2 is not saved to `config.json`, so on a `unicode61` store the servers go back to
+`unicode61` at their next start and mix the index again.
+
+Keep this package enabled for its skills and add your own server entry with the same name
+to `config.yaml`. Hermes uses your entry instead of this package's:
+
+```yaml
+mcp_servers:
+  memtomem:
+    command: uvx
+    args: ["--python", "3.12", "--from", "memtomem[onnx,korean]==0.7.14", "--with", "huggingface-hub>=1.20", "memtomem-server"]
+    env:
+      MEMTOMEM_TOOL_MODE: core
+      MEMTOMEM_EXTRA_TOOLS: mem_update_coverage
+      ORT_DISABLE_TELEMETRY: "1"
+      PYTHON_DOTENV_DISABLED: "1"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+    cwd: /absolute/path/outside/your/projects
+```
+
+Without `cwd`, the server starts in Hermes's working directory, so a project registered
+there gets project scope (see "Scope" below). Point `cwd` at a directory outside your
+projects to keep the user scope this package runs at. The `env:` rules after the example
+in "Scope" below apply here too.
+
+Then repair the index, in this order:
+
+1. Give the `korean` extra to every memtomem process that opens this store, including the
+   ones you only search from: a search tokenizes the query the same way, and every server
+   and `mm web` re-indexes the files it sees change. That means this entry, your other
+   agents' memtomem plugins, which leave the `korean` extra out as well, and any `mm`
+   install you use with this store. Then restart the servers, Hermes included. Ask for
+   memtomem status: the `tokenizer_fallback` warning should be gone. It does not report
+   notes that were indexed during the fallback, which is why the next step is needed.
+2. Ask Hermes to rebuild the keyword index through the server, so that it is the store
+   and the tokenizer the server uses:
+   `mem_do(action="config", params={"key": "search.tokenizer", "value": "kiwipiepy"})`.
+   It rebuilds even when the value is already `kiwipiepy`, and its reply includes
+   `FTS index rebuilt with <tokenizer> (N chunks).` The tokenizer it names is the one
+   the rows were built with: a server without Kiwi reports `unicode61` there, plus a
+   warning that the rebuild fell back. That fallback still rewrites every note as
+   `unicode61`, so do this only once step 1 shows no warning.
+
 ## Scope
 
 This package runs memtomem at **user scope**. The server starts in the plugin directory,
 so it starts with no project context: there is no per-project (`project_local`) memory,
-and paths given to indexing must be absolute. Notes are shared with your other agents
+and a relative path given to indexing resolves against the plugin directory, so give
+absolute paths. Notes are shared with your other agents
 through the user-scope store. The six skills are written for that scope, and the handoff
 workflow of the other memtomem plugins is not included, because it needs a project.
 
@@ -130,19 +205,23 @@ your own server entry to `config.yaml`:
 mcp_servers:
   memtomem:
     command: uvx
-    args: ["--python", "3.12", "--from", "memtomem[onnx]==0.7.8", "memtomem-server"]
+    args: ["--python", "3.12", "--from", "memtomem[onnx]==0.7.14", "--with", "huggingface-hub>=1.20", "memtomem-server"]
     env:
       MEMTOMEM_TOOL_MODE: core
       MEMTOMEM_EXTRA_TOOLS: mem_update_coverage
       ORT_DISABLE_TELEMETRY: "1"
       PYTHON_DOTENV_DISABLED: "1"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
       # copy any MEMTOMEM_* settings you rely on here
     cwd: /path/to/project
 ```
 
 Keep the quotes around `"1"`: Hermes accepts only string values under `env:` and does not
 start a server whose value is the number `1`. Without `PYTHON_DOTENV_DISABLED`, memtomem
-reads the nearest `.env` again (see "First run" above).
+reads the nearest `.env` again (see "First run" above). Without
+`HF_HUB_DISABLE_IMPLICIT_TOKEN`, model downloads use a saved Hugging Face login or
+`HF_TOKEN` again; without the `--with` floor, uv can resolve an older `huggingface-hub`,
+which reads the saved login even with the variable set.
 
 ## Files outside memtomem's own data
 
@@ -153,22 +232,30 @@ runs as your user, and some of its `mem_do` actions read and write files whereve
   sub-agents, commands, hook settings and MCP server lists in step with a canonical copy
   under `.memtomem/`, in projects and in the agents' own configuration, for example
   `~/.claude.json`, `~/.claude/`, `~/.codex/`, `~/.gemini/` and `~/.kimi-code/`. In
-  memtomem 0.7.8, the version this package runs, all of them are `mem_do` actions:
-  `context_detect` and `context_diff` read those files, and `context_init`,
-  `context_generate`, `context_sync`, `context_pull`, `context_version`, `context_promote`,
-  `context_memory_migrate`, `context_artifact_migrate` and `context_artifact_transfer`
-  write them. Releases after 0.7.8 keep only the two reads on MCP; the writes run from the
-  `mm context` CLI.
+  memtomem 0.7.14, the version this package runs, only the two reads are `mem_do` actions:
+  `context_detect` and `context_diff`. The writes (`context_init`, `context_generate`,
+  `context_sync`, `context_pull`, `context_version`, `context_promote`,
+  `context_memory_migrate`, `context_artifact_migrate` and `context_artifact_transfer`)
+  run from the `mm context` CLI and are not on MCP; 0.7.8 and earlier also offered them as
+  `mem_do` actions.
 - Actions that take a path from the caller, such as indexing, `ingest` (which imports other
-  agents' instruction files and native memory), export and import, read or write that path.
+  agents' instruction files and native memory) and import, read that path. Export takes a
+  file name, not a path, and writes it to `~/.memtomem/exports/`.
+- `dedup_remove` takes two chunk ids, not paths. It re-reads both chunks' whole source
+  files, including a kept file that was indexed from outside the configured memory
+  directories, and when both still match what was indexed, removes the duplicate's lines from
+  its own file, which must be one memtomem manages, and re-indexes it.
 - While the server runs, a file watcher watches memtomem's configured index roots (its
   memory directories and registered project memory directories) and re-indexes files that
   change there, and an existing configuration can enable scheduled maintenance jobs.
+  With lifecycle policies enabled (`policy.enabled`), they run on a timer without a tool
+  call, and an `auto_consolidate` policy sends the chunks it summarizes to the configured
+  LLM provider when one is set.
 
 Those files can hold other tools' credentials, and hooks are commands those agents run.
-In 0.7.8 some of these actions ask for confirmation through a parameter
-(`allow_host_writes`, `confirm_project_shared`) before certain writes; the model sets that
-parameter itself, and this package adds no limit of its own.
+Some of these actions ask for confirmation through a parameter (`confirm_project_shared`)
+before certain writes; the model sets that parameter itself, and this package adds no limit
+of its own.
 The six skills call none of the context-gateway actions or `ingest`; they run only when the
 model passes them to `mem_do`.
 
@@ -176,11 +263,16 @@ model passes them to `mem_do`.
 
 Memory is stored locally in `~/.memtomem`. The server is downloaded from PyPI on first
 start, and uv downloads Python 3.12 then too if it cannot find one. With a fresh BM25-only
-configuration nothing else leaves the machine on its own. One action reaches the network
-on request: `mem_do(action="fetch", params={"url": ...})` downloads the page at the URL it
-is given and indexes it; the skills never call it. An existing memtomem configuration may
-enable its own network paths: model downloads from Hugging Face (ONNX embedding or local
-reranker), a remote embedding or LLM provider, Cohere reranking (sends the query and
+configuration nothing else leaves the machine on its own, and two calls reach the network
+on request there; the skills make neither: `mem_do(action="fetch", params={"url": ...})`
+downloads the page at the URL it is given and indexes it, and turning reranking on with
+`mem_do(action="config", params={"key": "rerank.enabled", "value": "true"})` loads the
+configured reranker at once, so the default local reranker downloads its model from Hugging
+Face then when it is not cached. An existing memtomem configuration may enable its own
+network paths: model downloads from Hugging Face (ONNX embedding or local
+reranker; a saved Hugging Face login and `HF_TOKEN` are not used, see "First run"), a
+remote embedding or LLM provider (which `mem_do` actions such as `auto_tag` and
+`policy_run` then send chunk text to), Cohere reranking (sends the query and
 candidate chunks), or search webhooks (send events including the query).
 
 ## License

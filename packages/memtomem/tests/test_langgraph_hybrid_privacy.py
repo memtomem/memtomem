@@ -338,3 +338,62 @@ def test_configuration_outcome_is_separate_from_record_outcome(tmp_path):
     assert after["blocked"] - before.get("blocked", 0) == 1
     assert after["pass"] == before.get("pass", 0)
     assert privacy.snapshot()["by_tool"].get("langgraph_hybridstore_put", {}) == record_before
+
+
+def spellings(secret):
+    """The raw and the JSON-escaped bytes of ``secret``, as a store could persist them."""
+    escaped = json.dumps(secret, ensure_ascii=False)[1:-1]
+    return {secret.encode(), escaped.encode()}
+
+
+VALUE_SHAPES = {
+    "string": lambda secret: {"text": secret},
+    "dict-key": lambda secret: {secret: "apple"},
+    "nested-list": lambda secret: {"notes": [{"body": ["apple", secret]}]},
+}
+
+
+@pytest.mark.parametrize("api", ["put", "aput", "batch", "import_json"])
+@pytest.mark.parametrize("shape", sorted(VALUE_SHAPES))
+@pytest.mark.parametrize("secret", RAW_SECRETS)
+@pytest.mark.parametrize("scope", ["user", "project_shared"])
+async def test_value_strings_scan_raw(scoped_path, caplog, api, shape, secret, scope):
+    path = scoped_path[scope]
+    op = PutOp(("docs",), "key", VALUE_SHAPES[shape](secret), index=None)
+    with MemtomemHybridStore(
+        path, confirm_project_shared=True, index={"fields": ["text"]}
+    ) as store:
+        with pytest.raises(ValueError, match="Store write blocked by privacy guard") as error:
+            await write(store, api, op)
+        assert secret not in str(error.value)
+        assert store.export_json()["records"] == []
+        assert all(not database_state(path)[t] for t in ("items", "item_fts", "vectors"))
+    assert secret not in caplog.text
+    persisted = b"".join(p.read_bytes() for p in path.parent.glob(path.name + "*"))
+    assert not any(spelling in persisted for spelling in spellings(secret))
+
+
+@pytest.mark.parametrize("secret", RAW_SECRETS)
+@pytest.mark.parametrize("scope", ["user", "project_local", "project_shared"])
+def test_value_strings_force_unsafe(scoped_path, secret, scope):
+    path = scoped_path[scope]
+    with MemtomemHybridStore(path, confirm_project_shared=True, force_unsafe=True) as store:
+        if scope == "project_shared":
+            with pytest.raises(ValueError, match="privacy"):
+                store.put(("docs",), "key", {"text": secret})
+            assert store.export_json()["records"] == []
+        else:
+            store.put(("docs",), "key", {"text": secret})
+            assert store.get(("docs",), "key").value == {"text": secret}
+
+
+@pytest.mark.parametrize(
+    "words", [["password", "= synthetic-example"], ["= synthetic-example", "password"]]
+)
+def test_scan_does_not_join_adjacent_value_strings(scoped_path, words):
+    # "password\n= synthetic-example" is a label hit; the separator must keep
+    # two list items from forming it.
+    assert privacy.scan("\n".join(["password", "= synthetic-example"]))
+    with MemtomemHybridStore(scoped_path["project_shared"], confirm_project_shared=True) as store:
+        store.put(("docs",), "key", {"t": words})
+        assert store.get(("docs",), "key").value == {"t": words}

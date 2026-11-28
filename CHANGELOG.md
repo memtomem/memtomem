@@ -5,7 +5,1900 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm memory doctor` reports memory files whose frontmatter PyYAML cannot read as a mapping
+  (#2719).**
+  memtomem reads frontmatter line by line, so a `description:` that starts with a backtick or
+  holds `: ` still indexes while a YAML reader of the same file gets no `name` or
+  `description`. The new `frontmatter_invalid` warning lists the path, the line when the parser
+  gives one, and the error class, never the line text. `frontmatter_truncated` (info) lists a
+  `name` or `description` written as a plain scalar that a `#` comment directly follows, in
+  blocks that use no YAML alias. Syntax and the root shape are checked; values are not built, so
+  an unknown tag or an impossible date is not reported.
+- **`mem_decision_record` records a decision point with the agent's recommendation and the
+  user's choice kept apart (#3620).** memtomem recorded where a memory came from but not
+  whose judgement it holds. The new action, reached as
+  `mem_do(action="decision_record", params={...})`, writes one JSON record per decision:
+  the options offered, the one recommended and why (the agent's), and the one chosen with
+  the user's own words (the user's), stored verbatim. It is an ordinary memory entry in
+  the project's `project_local` tier under `shared:<project>`, tagged
+  `decision-record`, `from-<runtime>` and one of `decision-user-taken`,
+  `decision-user-declined` or `decision-user-norec`. The action validates every type
+  itself, refuses a `project` that is not the server's or whose local tier is a link,
+  scans the decoded strings as well as the rendered entry and offers no `force_unsafe`,
+  and keys its retries by a required `decision_id` in a ledger of its own, so an ordinary
+  `mem_add` key cannot replay a decision. New category `decisions`: the `core` (9) and
+  `standard` (39) tool sets are unchanged and `full` is 95. No workflow calls the action
+  yet and nothing reads the records back; both are later work.
+- **`update` gains an opt-in `backfill` mode that reaches commits older than the latest ten
+  (#3579).** Every mode read only the latest ten commits, so when more than ten landed
+  between two runs, `incremental` never saw the excess. `backfill` (shorthand `b`, only as
+  the whole first word, so `topic backfill plan` stays a `topic` run) lists the latest 100
+  SHAs, asks `mem_update_coverage` ten at a time which no run has recorded, and reads a
+  slice's unreviewed commits one commit per call, so no message is split out of a
+  multi-commit listing. A read counts only when its first line is the SHA asked for and the
+  result came back inline with no sign of truncation (a host that clips output without
+  saying so cannot be detected from inside the workflow); the first slice with a read that
+  counts is the one reviewed, and a slice none of whose reads count is reported and passed
+  over. The mode reviews at most one slice per run, records exactly the commits it read and
+  reviewed, and reports the positions it checked, the ones left unchecked, and every commit
+  it could not read; commits deeper than 100 stay out of reach. A coverage check reply for
+  another project root, or one whose counts do not add up, stops the run before it writes.
+  The Claude skill pre-approves each read as an exact
+  command, one per position, not a wildcard. No server change: the plugins need memtomem
+  0.7.2 or later with `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`, as the other two
+  recording modes do. Plugins: `claude` 0.5.46, `codex` 0.3.44, `opencode` 0.3.42,
+  `kimi` 0.2.32, `antigravity` 0.2.23.
+
+### Fixed
+
+- **The related-chunks preview shows a note's YAML frontmatter as metadata (#3093).** The
+  web UI's detail view got this in #3030; the preview under **Related** still drew the
+  opening `---` as a rule and the `key: value` lines above the closing `---` as a heading.
+  It now asks the same `GET /api/chunks/{id}/frontmatter` question and shows a certified
+  block above the rendered note. It also renders `.markdown` sources as Markdown, which it
+  had shown as plain text.
+
+- **Swap recovery warnings list competing marker files or both paths of a failed recovery
+  rename (#3544).** The transfer response still tells callers to see the server log.
+
+- **Auto-tag with `overwrite` off keeps tags committed while it was extracting (#3194).**
+  The pass judged "already tagged" from the chunk it read before tag extraction (possibly an
+  LLM call), then replaced the tags whatever they were by then, so a manual tag edit, an
+  import or a re-index that committed tags during the extraction, or while the pass waited
+  for the writer, was overwritten. The write now checks "untagged" inside the same `UPDATE`,
+  with the chunk reader's own reading of the column. A chunk that gained tags meanwhile is
+  left as it is and counted like a hidden or deleted one: skipped, and not in the total.
+  `overwrite` on writes as before.
+
+- **Web `POST /api/add` tags the entry it appended when an earlier entry holds a form feed
+  or a similar break (#2765).** The route found the new entry's chunks by counting the
+  file's lines before the append with `str.splitlines`, which also breaks at `\x0b`,
+  `\x0c`, `\x1c`–`\x1e`, `\x85`, U+2028 and U+2029; chunk line numbers break at `\n` only
+  (a lone `\r` is read as `\n` before either count). Enough of them in an earlier entry
+  pushed the boundary past every chunk of the new entry, and an entry that opens with its
+  own `##` heading was then left without its tags. The count now
+  uses the same line rule as chunk line numbers, as `mm add` has since #2726.
+
+- **The E5 embedding model's `config.json`, `tokenizer_config.json` and
+  `special_tokens_map.json` are checked against sha256 pins (#2465).** The pinned E5
+  snapshot verified only `onnx/model.onnx` and `tokenizer.json`; the three other files
+  FastEmbed reads from it were pinned by revision alone, so a cached copy that no longer
+  matched the pinned revision was loaded as is. Each is now hashed the way the model and
+  tokenizer are, and a mismatch stops the load with the same
+  `Pinned E5 artifact checksum mismatch` error. As for those two, a check that passed is
+  reused within one process while the file's size and modification time stay the same.
+
+- **A chunk edit that would put the entries after it inside a code fence is refused (#3633).**
+  `mem_edit` and the web `PATCH /api/chunks/{id}` wrote a body that left a fence open, and
+  every later entry in the file then dropped out of the index (no chunk, heading or tags of
+  its own), though they had been indexed correctly before. The edit reported success.
+  Both surfaces now refuse such an edit before writing (web: 409). For a Markdown source, the
+  whole file is compared before and after the edit under the chunker's fence rules: the
+  edit is refused when it puts a previously unfenced, non-blank line after the edited span
+  inside a fence, or makes a file that ended outside a fence end inside one. A file that
+  already ended inside a fence can still be edited and repaired. Deleting a chunk can still
+  open a fence the same way (#3669).
+
+- **The Web Hooks panel reports the settings files it could not check (#2644).** The CLI
+  (`mm context settings-doctor`, the `sync`/`diff --include=settings` warnings) and the MCP
+  context branches already reported a settings file that exists but could not be read; the
+  Web panel did not, so a tier the duplicate check skipped — invalid JSON, not a JSON object,
+  or, since #2476, a parent directory without search permission — disappeared from it without
+  a trace. `GET /api/settings-sync` (and `GET /api/context/settings`) now returns
+  `unscanned_settings` rows (`source`, `tier`, `path`, `reason`, the keys of
+  `settings-doctor --json`); a row's `path` is the tier's fixed location
+  (`.claude/settings.local.json`, `~/.claude/settings.json`, …), never the file's host path.
+  The panel shows one "was not checked" row per file. `POST /api/settings-sync` and the
+  `/context/sync-all*` rows are unchanged. The settings reader behind these checks now treats
+  a file nested deep enough to raise `RecursionError` in the JSON decoder, or holding an
+  integer past Python's digit limit, as unreadable: the duplicate, matcher and command checks
+  skip it and the unscanned report lists it as `invalid JSON`, where before the checks
+  crashed. The Web route's own comparison of the canonical and selected target files does
+  not use that reader and is unchanged. A tier linked to another tier that does not exist
+  (`.claude/settings.local.json` → a missing `.claude/settings.json`), or two tiers linked to
+  the same missing file, are now reported as broken symlinks on every surface; before, the
+  missing destination counted as seen and the later link was skipped as its alias.
+
+- **A search whose `deadline_ms` budget runs out during the session-summary rescue no longer
+  logs and counts the expiry as a rescue failure (#3637).** The rescue's links walk and its
+  target hydration caught `SearchDeadlineExceeded` from their read-connection lease as a
+  storage failure: each logged it (a WARNING with a traceback the first time in a process) and
+  set the rescue-failed flag, though the search still raised the expiry at its next stage
+  boundary and returned no results. Both now let the expiry through, as the summary lookup
+  already did; any other storage failure still degrades the rescue as before.
+
+- **An entry that leaves a code fence open is refused instead of swallowing every later entry
+  in its file (#3618).** The Markdown chunker reads a fence that never closes as running to
+  the end of the file, so after one such entry every entry appended to the same file was
+  indexed as code inside it: no chunk of its own, no heading, no tags, and a `tag_filter`
+  search for it found nothing. `mem_add` (and the MCP tools that write through it, such as
+  `mem_agent_share`), `mem_batch_add` (the whole batch, with the indices of the open items),
+  web `POST /api/add` and scratch promote (422 `unclosed_code_fence`), `mm add`,
+  `mm agent share`, the shell `add`, `mm review approve` (a daily-file entry; a pinned
+  candidate is not appended to a file) and the LangGraph store now refuse such an entry
+  before it is appended to any file. The entry is judged as the chunker will read it, title
+  included, after newline translation and wikilink resolution. A file that already ends
+  inside an open fence is not repaired. Wikilink resolution, which the chunker also runs on
+  every Markdown file it indexes, is now linear in the text: a line of unmatched `[[`
+  openers made it quadratic (about 36 s for 96 KB).
+
+- **A project-tier write refuses a tier reached through a link (#3623).** A write with
+  `scope="project_local"` or `"project_shared"` derived its directory from the project root,
+  resolved it, and asked only whether the result was registered, so when project A's
+  `.memtomem/memories.local` was a link to project B's registered tier, a note written from
+  A landed in B, indexed as B's and invisible from A. The tier directory, and the `.memtomem`
+  holding it, are now judged with the predicate the indexer already uses to leave such a
+  tier out: a link, a junction or an entry that cannot be inspected is refused before
+  anything is written to the tier, and the message names only the relative entry. This
+  covers MCP `mem_add` and `mem_batch_add` (including a relative `file=` with a project
+  scope), `mm add`, web `POST /api/add`, `mm context memory-migrate`'s destination, `mm mem
+  init` (before its `.gitignore` block and registration) and the LangGraph store's derived
+  root (before it loads configuration). Not covered: a target the caller spells itself
+  through the link (an absolute `file=`, a relative `file=` with `..`), and links below a
+  regular tier.
+
+- **The web transfer route's Gate A 422 stops naming the offending file (#3605).** The
+  privacy block answered with the engine's CLI text, which names the offending file by its
+  absolute path, so the decoded `detail` carried the host path to the project, plus whatever
+  characters the file's name held, control characters included. The `detail` is still the
+  standard string envelope, now built from the blocked file's hit count alone: `Gate A: a
+  file in the artifact contains <n> privacy pattern hit(s); write to scope='project_shared'
+  rejected. …`. The remedy names both the source artifact and a new name the request gives
+  it, since the scan reads the staged bytes, which carry an `as_name`. Any other
+  `PrivacyScanError`, such as a file the scan could not read or a directory it could not
+  list, gets a fixed sentence. The engine's text goes to the server's warning line, through
+  the same secret scan as the route's other refusal lines, and the CLI message is unchanged.
+
+- **A failed transfer move reports the entries it can actually see (#3608).** The rollback
+  read an entry it could not `lstat` (for example, a parent without search permission) as
+  absent, and an identity it could no longer read as replaced. It then logged "no copy of
+  them survives — nothing left to recover" with the staging copy on disk, called the entry
+  it had just failed to rename back "gone", and on a cross-filesystem move told the operator
+  to look for a renamed copy and delete it while the copy sat at the path it named. Each
+  entry is now judged from one `lstat` as absent, ours, replaced or unverifiable, and only
+  an entry shown to be ours is renamed back or removed. A move that refuses on a file
+  identity after its source was consumed, and cannot put it back, is reported as a partial
+  commit (web 500, "Do NOT retry") instead of the retryable 409, since a retry would move
+  whatever is now at the canonical path. The 409 `transfer_staging_replaced` message
+  starts by saying what the engine refused on (a replaced staging entry, an unverifiable
+  one, or the source, in which case nothing was moved) and keeps #3609's account of what
+  may be left on disk. The reason code is unchanged.
+
+- **A transfer refused for an unverifiable file identity stops saying nothing was removed
+  (#3609).** When a cleanup or rollback follows the refusal, it can delete the staging copy if
+  a later identity read succeeds (reproduced by failing one `lstat` in tests, for a `copy`
+  and for a cross-filesystem `move`). The web route's 409 `transfer_staging_replaced`
+  message now says that the artifact was not published to the destination, and that a
+  staging copy may have been removed and a moved source may not be back in place; the server
+  log keeps the engine's diagnosis. (Its opening names the cause again since #3608.) The
+  engine's two refusal texts, which the CLI prints, say that the step was refused. The reason
+  code is unchanged.
+
+- **The web `no_memtomem_store` 409 names the destination by its scope id, not its path
+  (#2489).** The artifact transfer route and the settings hook-copy route answered a
+  destination without a `.memtomem/` store with its absolute root in the prose and again,
+  unquoted, in a `cd <root> && mm context init` hint, so the response carried a host path
+  (a control character in the directory name included) and the hint broke on a space. Both
+  now say `destination project '<scope id>' has no .memtomem/ store` and point to
+  `mm context init` without a path; the dashboard already showed its own localized text for
+  this reason code. The CLI refusal is unchanged.
+
+- **The web UI's Host, Origin and CSRF token checks apply when `create_app()` is mounted under a
+  path prefix (#3550).** The guard decided whether a request was an `/api/*` call from the
+  request path, which keeps a mount's prefix, so under `Mount("/mm", app=create_app())` every
+  `/api/*` route was served without the checks: `GET /mm/api/session` with a hostile `Host`
+  answered 200. The guard now also judges the path the router matches, so every route a mounted
+  app serves under `/api/` gets the checks; every request the guard gated before is still
+  gated, which under a mount whose own prefix starts with `/api/` includes the app's non-API
+  paths. `mm web` serves the app at the root and was not affected. The `web.csrf.observe` log
+  line still records the request path.
+
+- **The web UI's request-body limits apply when `create_app()` is mounted under a path prefix
+  (#3607).** The limiter chose the JSON (4 MiB) or upload (201 MiB) limit from the request
+  path, which keeps a mount's prefix, so under `Mount("/mm", app=create_app())` (or a server
+  `root_path`) `/mm/api/*` requests read as non-API paths and had no body limit at all. The
+  limiter now also classifies the path the router matches and applies the tighter of the
+  limits the two paths select, so no request gets a looser limit than before: under a mount
+  whose own prefix starts with `/api/`, the upload routes keep the JSON limit they had. `mm web`
+  serves the app at the root and was not affected.
+
+- **A context transfer `move` refuses before it moves anything when the source has no file
+  identity it can read (#3545).** On a filesystem that reports `st_ino == 0` (reproduced by
+  simulating one in tests) the move would rename the source into staging, then refuse to
+  promote the entry it could not vouch for, and the web route would answer a 500
+  partial-commit error saying that entry "was replaced out of band", which nothing had done.
+  The move now reads the source's identity first: a zero inode or a permission error refuses
+  with nothing renamed (web: the same 409 `transfer_staging_replaced` a copy gives; CLI: the
+  same refusal), and an absent source is still reported by the rename. If a rollback later
+  meets an entry whose identity was never captured, its partial-commit text says the entry
+  could not be verified and names it as the place to inspect, instead of calling it replaced.
+
+- **A `mem_update_coverage` check reports a commit whose record is older than 90 days as
+  unreviewed (#3581).** The check matched rows by project and SHA with no age limit, so a row
+  past its 90-day retention still read as reviewed until a record call pruned it. Because
+  `incremental` and `full` record the whole list the check received, that record then
+  re-inserted the expired row with a fresh timestamp although the run had not reviewed the
+  commit. The check now applies the same cutoff as the prune, so an expired commit is
+  reviewed again.
+
+- **A write refuses a namespace containing a NUL character (#3589).** SQLite's `LIKE` reads
+  a value only up to its first NUL, so a chunk stored under `arc\x00z` was matched by the
+  default-search exclusion and by namespace globs as if it were `arc`, while the Python
+  prefix checks compared the whole string. The `namespace` argument of `mem_add`,
+  `mem_batch_add`, `mem_fetch`, `mem_index`, the importers, the web add and index routes,
+  `mm index --namespace` and the Python adapter, and a new `namespace.default_namespace`,
+  now refuse such a name with `invalid namespace`, the same narrowing #3554 applied to
+  `search.system_namespace_prefixes`; tab and DEL are still accepted. Rows already stored
+  under a NUL namespace are not migrated. A saved archive, promotion or consolidation policy
+  whose destination contains a NUL now refuses to run until its destination is changed.
+
+- **The web transfer route's 400 `validation` stops naming host paths (#3543).** In
+  `POST /api/context/{kind}/{name}/transfer`, an engine refusal that no other arm caught went
+  out with the engine's text, and several of those texts named absolute paths: an artifact
+  found in more than one scope listed each copy's path; a transfer whose source and
+  destination resolve to one store named that store, the user tier's included; and an
+  `mcp-servers` copy whose source is a symlink, cannot be read, or is not valid UTF-8 named
+  the source file. Each now names the scopes or the logical location instead (`agents/foo
+  exists in multiple scopes: project_shared, project_local. Set from_scope to one of these
+  scopes.`, `mcp-servers/pg: the source .memtomem/mcp-servers/pg.json is a symlink;` …). The
+  other 400 texts name no path and keep their wording; like the 404's, every 400 message from
+  this arm now passes the secret scan, so a message carrying a secret-shaped value (an artifact
+  name shaped like an AWS key ID, say) goes out as `<redacted: secret-shape>`. The CLI
+  messages are unchanged.
+
+- **`mm memory doctor` measures the `MEMORY.md` budget in UTF-16 code units, the unit Claude
+  Code caps it in (#3578).** The file total was UTF-8 bytes against 24,400, so a Korean,
+  Japanese or Chinese index warned well under the real 25,000-unit cap (about 70% of it on
+  one Korean-heavy index) and curators folded index lines they did not need to. The total is
+  now the UTF-16 length of the text trimmed as JavaScript `trim()` does, read with its
+  newlines intact (Claude Code does not fold CRLF before measuring); the 24,400 threshold, the 200-line cap and the per-line
+  character cap are unchanged. The `budget` finding reads `N UTF-16 units (cap 24400)`
+  instead of `N bytes (cap 24400)`.
+- **`mm index --reassign-namespaces` names a move out of a system namespace spelled in another
+  ASCII case (#3590).** The report matched `search.system_namespace_prefixes` case-sensitively,
+  while a default search folds ASCII case when it hides those namespaces. A move from
+  `Archive:x` to `default` exposed its rows without the warning, and a move from an agent
+  scope into `ARCHIVE:y` was reported as exposing rows that stay hidden. The report now uses
+  the same prefix check as search.
+
+- **`search.system_namespace_prefixes` refuses a prefix containing a NUL character (#3554).**
+  SQLite's `LIKE` reads a bound pattern only up to its first NUL, so the default-search
+  exclusion compared such a prefix with the text before the NUL exactly, while its Python twin
+  `has_namespace_prefix` (behind `NamespaceFilter.matches`) compared the whole prefix: with
+  `"arc\u0000"` configured, SQL hid the namespace `arc` and `matches` admitted it. The
+  validator now rejects the entry, naming its index. When a `config.json` or `config.d` file
+  supplies such a prefix, a tolerant load ignores that file's whole `[search]` section and keeps
+  the lower layers' values, and a strict load fails; when
+  `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` itself holds one, building the config fails. (An
+  environment value for the field wins over the files, so a file's prefix list is then skipped
+  and its other `[search]` settings still apply.) Tab and DEL are still accepted: namespaces can
+  hold them, and SQL and Python agree on them.
+
+### Documentation
+
+- **The embeddings guide says what BM25-only search leaves out (#3662).** BM25-only search
+  looks first for chunks that match every term of a query; when it finds any, chunks that
+  match only some of the terms are left out of its keyword results, so a related note that
+  lacks one query word, such as an older decision a newer note replaced, can be missing.
+  Search behaviour is unchanged. On the agent eval's registry-host sample, hybrid search with
+  ONNX `multilingual-e5-small` returned both notes for all four queries tried.
+
+## [0.7.14] — 2026-11-24
+
+A patch of fixes, most of them in `mm init` for source checkouts and uv workspaces: it checks
+extras in the environment `uv run --directory` uses, calls a directory a source checkout only
+when it is a workspace that installs memtomem from a member, names the directory to sync, and
+lets `--mcp` decide the connect step in every interactive path (see Fixed). Also fixed:
+`mem_entity_scan` leaves a chunk's entities alone when its LLM call fails, the automation
+plugin's hooks start on Python 3.8, more web error responses stop naming host paths, the web
+OpenAPI schema moves under the Host-checked `/api/` prefix, and `mem_dedup_scan`'s output and
+`GET /api/dedup/candidates`'s inputs are checked. `mem_dedup_scan` gains `offset` (see Added),
+`mem_delete` removes a chunk whose source file is gone, and the `handoff` workflow aims its
+records at a size that splits into fewer chunks (see Changed).
+
 ### Upgrading
+
+- **The plugins move their pin to 0.7.14 in the same release; a plugin from 0.7.13 that
+  starts the server and is not updated keeps launching 0.7.13.** This release delivers Claude
+  `0.5.45`, Codex `0.3.43`, `memtomem-automation` `0.3.28`, OpenCode `0.3.41`, Hermes
+  `0.1.29`, Antigravity `0.2.22`, OpenClaw `0.1.6` and Kimi `0.2.31`, a skills bundle that
+  starts no server (its Kimi Code MCP entry is covered below). Cursor keeps the version
+  `0.1.0`; its files in this release launch 0.7.14 and carry the same handoff skill change.
+  The Hermes memory provider stays `0.2.2`. The Hermes catalog entries install a pinned
+  commit, which today carries plugin `0.1.27` (its server launches 0.7.12) and provider
+  `0.2.2`, so `hermes plugins install` keeps installing those until the catalog moves its pin.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.28 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.14;
+  updating the plugins does not upgrade that CLI. For a `uv tool` install run
+  `mm upgrade --version 0.7.14`; otherwise upgrade memtomem in the environment that
+  supplies that `mm`. Confirm with `mm --version`, then start a new Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new pin.** The
+  plugin now launches `uvx --python 3.12 --from 'memtomem[onnx]==0.7.14' memtomem-server`. A
+  manual entry that launches anything else no longer matches the plugin's launch, so Claude
+  cannot deduplicate the two and may expose duplicate tools. Run `mm doctor --claude-mcp`
+  (with no `mm` on `PATH`, as a plugin-only install has none:
+  `uvx --python 3.12 --from "memtomem[all]==0.7.14" mm doctor --claude-mcp`) and follow the
+  Claude Code guide's "Already registered via `claude mcp add`?" note.
+- **Any other MCP entry that launches an exact release keeps serving that release: move its
+  pin to 0.7.14.** Updating a plugin or the `mm` CLI does not touch it. That covers an entry
+  copied from the guides, one `mm init --mcp` wrote while `mm` ran through `uvx`, a Kimi Code
+  `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section and an OpenCode `mcp.memtomem`
+  entry. Change the release it pins (`==0.7.13`, or an older one) to `==0.7.14` in place,
+  keep the rest of its launch as it is, and restart the client. For an entry that pinned
+  0.7.12 or older, whatever release the CLI runs, read 0.7.13's Upgrading notes as well.
+- **A script or client generator that fetched `mm web`'s OpenAPI schema from `/openapi.json`
+  needs `/api/openapi.json`.** The old URL now returns 404 (#3272, see Fixed).
+
+### Added
+
+- **`mem_dedup_scan` lists a pool's duplicate pairs past the 500th (#3433).** The tool
+  refuses a `limit` above 500, so when one pool held more pairs than that, no call listed the
+  rest: continuing with `after` scans other chunks, and a smaller `max_scan` is another pool
+  whose exact phase can report other pairs. The tool and `GET /api/dedup/candidates` now take
+  `offset`, the number of the pool's pairs to skip, and the tool's last line names the next
+  one (`limit=500 kept 500 of 501 pairs: one call lists at most 500; to see the next ones,
+  scan again from the same position with offset=500`, then
+  `offset=500 kept pairs 501 to 501 of 501`). A page past the last of a pool's pairs says so
+  instead of `No duplicate chunks found`, which still opens a pool that has no pairs. Each
+  page scans the pool again, so pages line up only when
+  both scans produce the same list: exact pairs come first and depend on the pool alone, while
+  the near pairs after them depend on which of several equally distant neighbours the vector
+  search keeps at its cut, an order it does not promise. The scheduled `dedup_scan` job is
+  unchanged; its result holds counts, not pairs.
+
+### Changed
+
+- **`mem_delete(chunk_id=)` removes an indexed chunk whose source file is missing from disk, as
+  the web UI's chunk delete already did (#2842).** It used to refuse: `source_missing` when
+  the file was gone, or "source directory has been removed" when its directory was. So an
+  archived chunk under `indexing.retain_missing_dirs` could not be dropped through MCP at
+  all. It now removes that one chunk's row and leaves the source file untouched; the other
+  chunks of the file stay. The `project_shared` confirmation still applies, and a file under
+  `indexing.read_only_memory_dirs` is still refused. A path that exists but cannot be read,
+  or holds something other than a regular file, is refused without deleting. A file removed
+  after the delete checked it and before it read it still gets `source_missing`, and a retry
+  removes the row. When the deleted chunk was the file's last one, the file's policy
+  consolidation summary goes with it unless that summary is held, as in the web delete.
+  `mem_edit` and `mem_dedup_remove` refuse a missing file as before.
+
+- **The `handoff` workflow aims a saved record at a size the E5 token budget can hold in one
+  chunk (#3399).** A record could run to 1,200 characters, but a store indexing under
+  `multilingual-e5-small` with its default budget splits any chunk over 384 tokens, so a
+  record near that limit was almost always split across rows that rank on their own in search
+  and take separate slots in brief's recall window. Of 399 stored records, 270 of the 336
+  within 1,200 weighted characters had split. Save now aims for at
+  most 850 characters for the whole record, fence lines included, with each Korean, Japanese,
+  or Chinese character counted as two, and the per-field caps are lower: `objective` 80,
+  `completed` 160, `changed_files` 120 with at most 8 paths, `validation` 90, `blockers` 60,
+  and `artifacts` now takes its 4-path limit while its paths are added. `next_action` keeps
+  its 120. Only prose gives way, and whole `changed_files` paths move into its omitted count:
+  ids, the root, the commit, `worktree_state` and `artifacts` are never changed, and a
+  verbatim path, symbol, command, GitHub reference or quote is kept whole or left out whole,
+  except in `next_action`, where none is left out, so the next agent can act on it (one that
+  does not fit its cap or one line stops Save). A record
+  that cannot meet the caps and the 1,200-character maximum (counted plainly) that way is not
+  saved: Save stops and names the value in the way. One that meets them but stays over the
+  target is saved and reported with its weighted count. The 240-character root limit is unchanged.
+  In an experiment that applied the new caps to every stored record and then cut its prose
+  from the end until it was at or below 850 (which can cut a verbatim string, so it
+  measures token density, not compliant records), none exceeded 384 tokens (the largest was
+  383); at or below 900, 15 did. The target is
+  not a guarantee: a long root or many artifact paths can still split a record. Resume is
+  unchanged: it combines the rows it reads and rejects a torn or incomplete record. The
+  delivery versions move with that text: Claude `0.5.45`, Codex `0.3.43`, OpenCode `0.3.41`,
+  Kimi `0.2.31`, Antigravity `0.2.22`. Cursor stays `0.1.0` while its first marketplace
+  review is open, but its rendered skill changes too.
+
+### Fixed
+
+- **`mm init` shows a checkout's directory with control characters escaped (#3512).** The
+  `Source directory:` / `Project directory:` lines, the source and project recoveries for a
+  missing extra (inline, in the summary's `[!] Missing extras` warning and in the
+  `--non-interactive` refusal's `Install first:`), the `.venv not found` lines, and the hooks
+  step's `Merged →` target and skipped or error reasons printed the path as it was. A newline in
+  a directory name split those lines, and an escape sequence would act on the terminal. They now
+  go through `scrub_text`, which escapes non-printable characters (as `\xNN` escapes of their
+  filesystem bytes) and leaves printable text, non-ASCII included, as it is. The MCP command
+  written to the config keeps the path unchanged.
+
+- **A namespace or scope glob containing a NUL character is matched in Python the way SQLite
+  matches it (#3281).** Once SQLite accepts a pattern (it checks the length of the whole bound
+  pattern first), its `LIKE` reads the pattern and the value only up to their first NUL;
+  the Python twin of the SQL filter compared the whole strings. Context-window expansion could
+  therefore drop a neighbour the search had admitted, and `GET /api/chunks/{id}/similar` with
+  `namespace=default*%00suffix` could return one neighbour fewer than asked. Both now cut at
+  the NUL, as SQLite does. A `scope` value containing a NUL is still refused rather than read
+  as the glob before it; when the value is otherwise well-formed, the message now names the
+  NUL (a comma list mixed with a glob still gets that syntax error).
+
+- **A stored path or chunk body can no longer add a line to `mem_dedup_scan`'s output (#3391).**
+  The default rendering turned only line feeds in a member's preview into spaces and printed its
+  source path as stored, so a carriage return, U+0085, U+2028 or another line break in the first
+  80 characters of a chunk, or a line break in its path, started a line that read like one the
+  tool wrote, such as a `B (<id>): …` member line whose id `mem_dedup_merge` takes; a `"` in the
+  preview closed its quotes early. The preview is now quoted the way the duplicate brief quotes
+  it (`"`, `\` and every non-printable character escaped; a line feed still becomes a space), and
+  the path keeps its unquoted `path:line` shape with only its non-printable characters escaped.
+  Ordinary values print as before; a preview containing `"` or `\` now shows it escaped.
+
+- **`mm schedule add` and `mem_schedule_register` refuse a cron expression for a date that
+  never occurs (#3461).** Both checked only that croniter could parse the expression, so
+  `0 0 30 2 *` was stored and then skipped by the dispatcher on every tick. An expression of
+  five fields written with only digits, `* , - / ? # L W` and three-letter month and day names
+  is now refused when croniter finds no date for it:
+  `invalid cron expression: '0 0 30 2 *' matches no date croniter can find: …`. Any other
+  expression croniter parses — with a random `R` field, six or seven fields, or other
+  characters — is stored without that lookup, because a failed lookup there does not
+  show that no date exists; when the listing's own check finds no date for such a row,
+  `mm schedule list` marks it `cron check failed`. Schedules already stored are not changed.
+
+- **`GET /api/dedup/candidates` refuses a `limit` below 1 (#3435) and a `threshold` outside 0 to
+  1 (#3562).** The route passed both to the scanner unchecked, and the scanner cut its pair list
+  with a Python slice, so `limit=0` answered `200` with no pairs on a store that has them and a
+  negative `limit` dropped up to that many pairs from the end of the list. `threshold=NaN` turned
+  off the near phase's score cutoff, as `0.0` does. These are now a `422`, as `max_scan=0`
+  already was; `mem_dedup_scan` and the scheduled `dedup_scan` job already refused them. The
+  route still takes a `limit` above 500. `DedupScanner.scan_with_coverage` raises `ValueError`
+  for the same values before reading anything.
+
+- **`mm web` serves its OpenAPI schema at `/api/openapi.json` instead of `/openapi.json`
+  (#3272). The new URL is covered by the Host and Origin checks that cover `/api/*`.** FastAPI
+  served the schema at its default `/openapi.json`, outside the prefix the `mm web` guard
+  checks, so it answered a request whose `Host` was a rebound hostname with the full route
+  list. With the guard enforcing (the default), such a request now gets the same 403 as the
+  other `/api/*` routes, and `/openapi.json` returns 404. The `/api/docs` page fetches the new
+  URL; a client generator or script that fetched the schema by the old URL needs the new one.
+
+- **Saving a tokenizer change in the web settings says when the FTS rebuild fell back to
+  `unicode61` (#3405).** `PATCH /api/config` rebuilds the FTS index when `search.tokenizer`
+  changes. When `kiwipiepy` could not be imported, that rebuild used `unicode61` and still
+  succeeded, and only the server log said so. The response now carries `fts_rebuild`
+  (`tokenizer`, `rebuilt_rows`, `warning`) whenever the request ran a rebuild, and the settings
+  page shows `warning` as a toast. The warning is the text `POST /api/fts-rebuild` already
+  returned, and it is shown in English in either UI language.
+
+- **The namespace card's Delete button and its edit form's Cancel and Save buttons follow the
+  UI language (#2851).** They were written in English, so they stayed English in the Korean
+  UI. They now use the existing `common.delete`, `common.cancel` and `common.save` strings, and
+  switching the language with the edit form open relabels them without discarding the edit.
+
+- **The interactive `mm init` wizard's Local ONNX and Korean tokenizer steps report the extra for
+  the environment a source checkout or a project runs memtomem in (#3508).** Both steps imported
+  `fastembed` or `kiwipiepy` in `mm init`'s own interpreter. A global `mm` (for example a
+  `uv tool` install without the extras), run in a checkout whose environment already had
+  fastembed, printed `fastembed not installed.` and sent the user to sync something that was
+  already there. A `mm` that had fastembed, run in a checkout that lacked it, announced the
+  model download instead. The steps now ask that environment's interpreter, the one the
+  summary probes. An environment with no interpreter yet counts as missing. When the
+  environment cannot be checked, the step prints no status line. A wizard that already runs
+  in the checkout's own environment, and every other install, still imports the module
+  in-process. Going back from a Local ONNX choice that warned no longer keeps the summary from
+  reporting `onnx`, which a fastembed reranker still needs after switching provider.
+
+- **`mm init --mcp <mode>` no longer asks the Connect to AI Editor step in the interactive
+  wizard and then discards the answer (#3515).** Without `--preset`, the picker path applied
+  `--mcp` only after its steps had run, so the step asked and the flag then overwrote what was
+  picked; after picking Advanced, and with `--advanced`, `--mcp` was not applied at all and the
+  answer to the step was used instead. `--mcp` now decides that step in every interactive path,
+  as it already did with `--preset`: the step is not shown. The flags that override a preset's
+  fields (`--provider`, `--model`, `--tokenizer`, …) are still not applied in the Advanced paths.
+
+- **`mem_entity_scan` no longer replaces or clears a chunk's entities when the LLM call for it
+  fails (#3383).** The scan took the regex fallback's result as the chunk's new extraction, so
+  one `overwrite=True` scan while the provider was unreachable, timing out or refusing the key
+  replaced LLM-found rows such as `person|Alice` with regex rows, or deleted them and reported
+  `Chunks cleared` when the regex found nothing. A chunk whose LLM call fails is now left as it
+  is and counted as `Chunks left unchanged (LLM extraction failed)`. A reply that is neither
+  exactly `NONE` nor contains at least one valid `TYPE|VALUE` line (for example `I cannot
+  extract entities…`) now counts as a failed call too; `NONE` still clears. A chunk without
+  rows no longer gets the regex fallback's rows on a failed call; it stays without rows. The
+  `entity_boost_no_entities` advisory in `mem_status` says the provider must be reachable, and
+  that a scan with `llm.enabled=false` uses the regex extractor.
+
+- **The automation plugin's hooks start on Python 3.8 and later (#3484).** The hooks run
+  `uv run --no-project python .../hook_dispatch.py`, which uses the first interpreter uv
+  finds, such as the Python 3.9 that macOS Command Line Tools installs. The dispatcher
+  imported `datetime.UTC`, which Python 3.11 added, so on an older interpreter it exited with
+  an `ImportError` before handling any event: no hook ran, and the SessionStart hint that says
+  how to install `mm` was never shown. It now uses `datetime.timezone.utc`, and a CI job runs
+  every hook event through it on Python 3.8. The plugin README and the Claude Code guide state
+  that floor. `mm` itself still needs Python 3.12 or newer.
+
+- **Two web error responses no longer name the project's settings file or the transfer
+  destination by an absolute host path (#3302).** The hook copy's 404
+  (`POST /api/context/settings/hooks/copy`, when the selector matches no hook or the source
+  has no readable canonical settings) named the source project's `.memtomem/settings.json` by
+  its absolute path; it now strips the project roots the same way the 400 next to it does. The
+  transfer's 409 `destination_exists` (`POST /api/context/{kind}/{name}/transfer`) passed on the
+  engine's text, which named the destination by its resolved absolute path; it now says which
+  artifact and which tier collided (`destination already exists: agents 'foo' in the
+  project_shared tier of the destination. …`). The CLI messages are unchanged.
+
+- **Five more web transfer responses no longer name a host path, wherever the project or
+  store sits (#3532).** In `POST /api/context/{kind}/{name}/transfer`: the 404 for a missing
+  `mcp-servers` source passed on the engine's text with the source's absolute path; it now
+  names the logical location (`… not found at the source project:
+  .memtomem/mcp-servers/<name>.json`), also when the store is linked out of the project. The
+  409 `swap_recovery_pending` and the 500 for an unexpected failure passed engine text through
+  a redaction that only shortened paths under the server's `$HOME`. The 409 now says which
+  side and tier is wedged (`… skills/foo in the destination project_shared tier could not be
+  recovered automatically …`) instead of the swap's sentence, which named the trees and, for
+  a malformed marker, values read from it; the 500 says only that the server log has the
+  details. The 409 `transfer_staging_busy` and `transfer_staging_replaced` passed the engine's
+  text, whose staging paths come last, and only the 200-character cut kept them off the wire;
+  a `$HOME` collapse inside the prose could move the cut past them. Both now send a fixed
+  remediation sentence. The server log now gets one warning line for each staging or swap
+  refusal, with the paths the engine's error carries; the line is secret-scanned and never
+  carries the swap's sentence. The CLI messages are unchanged.
+
+- **`mm init` checks for missing extras in the environment `uv run --directory <dir>` uses,
+  which for a project at a uv workspace member is the workspace root's (#3514).** The MCP
+  command `mm init` writes for a source checkout or a project,
+  `uv run --directory <dir> memtomem-server`, runs in the environment uv picks for that
+  directory, but `mm init` probed `<dir>/.venv`. At a member without a `.venv` of its own it
+  said `Project .venv not found` in a workspace that was already synced; at a member with
+  one it checked an environment the server would not use. `mm init` now asks
+  `uv workspace dir --offline --directory <dir>` for the root (uv decides membership,
+  `exclude` included, and needs no lockfile) and uses `UV_PROJECT_ENVIRONMENT` or
+  `<root>/.venv`, as seen from the shell `mm init` runs in. When that cannot be told — uv not
+  on `PATH`, the command failing, or `UV_NO_PROJECT` / `UV_ISOLATED` set to a value uv reads
+  as true or refuses — or the environment's interpreter cannot be probed, the summary says
+  `Extras not checked` with the reason instead of checking `mm init`'s own interpreter, and
+  `mm init --non-interactive` refuses a configuration that needs `onnx` or `korean` before
+  writing anything. The probe no longer counts a same-named module in the current directory
+  as an installed extra; the server does not import from there. A
+  `.venv` symlink whose target the user cannot access no longer stops `mm init` or
+  `mm uninstall` with a `PermissionError` (Python 3.12 and 3.13), and `mm init` reports it
+  the same way rather than as an environment to sync (on 3.14 the check answered "absent").
+  When `mm uninstall` runs from that environment, its hint names the interpreter,
+  `uv pip uninstall --python <interpreter> memtomem`, and no longer suggests `rm -rf` of the
+  environment, which at a workspace root serves every member.
+
+- **The plugin quickstarts no longer tell a store configured only through `config.d/` or
+  `MEMTOMEM_*` variables to run `mm init`, and the coexistence guide says when each host's
+  check can see a duplicate (#3517).** `mm status` reports `memtomem is not configured`
+  whenever `~/.memtomem/config.json` is absent, and the troubleshooting row for that message
+  said to rerun init. The `config.json` init writes replaces the database path, memory
+  directories and embedding model a fragment sets, so the existing store could look empty.
+  The English and Korean quickstarts now treat fragments and variables as an existing setup,
+  preview it with `mm config show` and confirm the database path with the plugin's status
+  check. In `docs/guides/mcp-clients.md`, the Antigravity and Codex checks
+  are to be run after installing the plugin: before then there is no bundled server to compare
+  with, so a complete check with one usable manual entry under another name passes, and both
+  can start once the plugin is installed and enabled. The Claude check runs from the project
+  root.
+
+- **`mm init` no longer treats every monorepo with a `pyproject.toml` and a `packages/`
+  directory as a memtomem source checkout (#3510).** Inside one, it wrote
+  `uv run --directory <root> memtomem-server` as the MCP command, printed `uv run` next
+  steps and told the user to run `uv sync --dev` in that root. A directory now counts as a
+  source checkout when its `pyproject.toml` has a `[tool.uv.workspace]` table, a
+  `[tool.uv.sources]` entry `memtomem = { workspace = true }`, and memtomem in
+  `[project] dependencies`, the `dev` dependency group or `[tool.uv] dev-dependencies`.
+  Any other monorepo is a project when `mm init` finds a `pyproject.toml` that depends on
+  memtomem in the current directory or up to four levels above it (before, a directory with
+  `packages/` never counted), and otherwise a PyPI install. A `pyproject.toml`
+  that is not valid UTF-8, or that is a symlink whose target the user cannot access, no
+  longer stops `mm init` and `mm uninstall` with a `UnicodeDecodeError` or
+  `PermissionError`, and one that is not a regular file (a FIFO would block) is not opened;
+  all three are skipped like malformed TOML.
+
+- **`mm init` in a source checkout or a project that depends on memtomem no longer hints or
+  runs `uv sync --extra <name>` for a missing extra (#3500).** That flag selects an extra of
+  the project uv finds, not of memtomem. The hint printed `uv sync --extra <name>` (`--extra
+  all` for two or more), the install the wizard offered ran it, and the
+  `Workspace .venv not found — run uv sync --extra all first` line suggested it. At the source
+  root, `memtomem-workspace` defines no extras: with uv 0.12.13, dry runs of
+  `uv sync --extra onnx` and `--extra all` there both stopped with ``Extra `…` is not
+  defined``. In a downstream project the flag selected that project's own extra. A source
+  checkout is now told to run `uv sync --dev` in its root, both for a missing extra and for a
+  missing `.venv`. The root's `dev` group installs `memtomem[all]`; `--dev` keeps it selected
+  under an inherited `UV_NO_DEV=1`, where a dry run of plain `uv sync` would have uninstalled
+  memtomem (#3507). The hint names the root because the checkout is detected from up to four
+  levels below it. A dry run of a bare `uv sync` in `packages/memtomem` would have removed
+  `fastembed` and `kiwipiepy`. A project is told to add the extras to its memtomem requirement
+  in its `pyproject.toml`, then run its usual `uv sync`, with all its options, in its root.
+  Both name the directory instead of putting it inside a command, so a path holding `&` or `$`
+  is not read as shell syntax, and the inline ONNX line for either leads with `To enable it:`
+  instead of `Get it with:`. The wizard no longer offers to install extras in either case. It
+  still offers the `uv tool` reinstall.
+
+- **The guides that teach a `--python 3.12` command say what it needs when uv cannot
+  download Python (#3498).** The README, the getting-started, MCP clients, Claude Code, Kimi
+  Code and OpenCode guides and the plugin quickstart (English and Korean) now say, beside
+  their install or launch commands (the README's beside its Quick Start install, which its
+  setup prompt links to, and beside its "No install" registration; the MCP clients guide's
+  in its Claude Code and OpenCode sections), that such a command needs a Python 3.12 uv can
+  find or download, and what to do where uv may not download Python on its own
+  (`python-downloads = "never"` or `"manual"`): install a Python 3.12 first, or install
+  memtomem with the Python you have, putting its version in place of the `3.13` the
+  example command names, and register `memtomem-server` (the plugin quickstart points to
+  the getting-started Quickstart for that install and the store setup, then to the manual
+  registration). The
+  README, the getting-started prerequisite and the plugin quickstart add that an offline uv
+  cannot download Python either, so a Python 3.12 has to be installed beforehand. The
+  getting-started prerequisite read "Python 3.12+"; it is now "Python 3.12", checked with
+  `uv python find --system 3.12` rather than `python3 --version`. Without `--system` the
+  check also reports a project `.venv`'s Python: with a 3.12 visible only through `.venv`,
+  `uv python find 3.12` exited 0 while `uv python find --system 3.12` and the `uvx` launch
+  each exited 2, and with a Homebrew 3.12 on `PATH` the `--system` check exited 0. Measured
+  with uv 0.12.13 on macOS, with only Python 3.13.7 and 3.14.4 visible to uv and
+  `python-downloads = "never"`:
+  `uvx --python 3.12 --isolated --from 'memtomem[all]==0.7.12' memtomem-server --help` and
+  `uv tool install --python 3.12 'memtomem[all]==0.7.12'` each exited 2 with
+  `No interpreter found for Python 3.12 in managed installations or search path`, and
+  `uv python install 3.12` exited 1 ("Python downloads are not allowed"). Under
+  `python-downloads = "manual"` the launch exited 2 with the same error, and
+  `uv python install 3.12` installed 3.12.14, after which the launch printed the help. The
+  same launch with `--python 3.13`, and `uv tool install --python 3.13
+  'memtomem[all]==0.7.12'` followed by the installed `memtomem-server --help`, each exited 0
+  under `"never"`. Offline (`UV_OFFLINE=1`) with the packages cached, the launch exited 2
+  with the same error without a Python 3.12 and printed the help with one. Re-measured for
+  the getting-started example after 0.7.13: with Python 3.13 available and
+  `UV_PYTHON_DOWNLOADS=never`, `uv tool install --python 3.13 'memtomem[all]==0.7.13'` and
+  the installed `memtomem-server --help` each exited 0.
+
+### Documentation
+
+- **The README and the PyPI page open with how to install.** A new Install section, right
+  under the title, gathers the setup steps both pages already gave further down (the CLI
+  install, `mm mem init --scope project_local` and the first `brief`) and adds the Claude
+  Code and Codex CLI plugin commands, which neither page gave before. It names the agent to
+  have installed and signed in, says that its `uv tool install --python 3.12` command and
+  the plugin's server need a Python 3.12, links the MCP clients guide's coexistence section,
+  with each host's read-only check, for a reader who registered memtomem by hand, and says
+  to start the session from the Git root where the project tier was registered. For creating
+  the memory store it links step 2 of the plugin quickstart, which says when to skip that
+  step and what to do when uv cannot get Python 3.12, instead of running `mm init` on the
+  first screen: on a machine that already has memtomem settings, a re-run writes a
+  `config.json` that replaces the store's embedding provider, database path and memory
+  directories, except for fields a `MEMTOMEM_*` variable sets, which still win. The Beta
+  banner is now a badge linking to Stability, which states the same commitment, now says
+  experimental features can change without an `Upgrading` note as well as without a window,
+  and holds the feedback links. memtomem is still beta.
+
+## [0.7.13] — 2026-11-22
+
+A patch whose main change is the Python the plugins ask for: the Claude Code, Codex and
+OpenCode plugins now ask uv for Python 3.12 when they start the server, as the Cursor,
+Antigravity, Hermes and OpenClaw bundles already did, so on a machine whose first Python is
+older than 3.12 uv no longer resolves their launch against it and stops with
+`No solution found`; it uses a Python 3.12 it finds or downloads. `mm init`
+run from `uvx` outside a workspace asks for 3.12 in the MCP launch it writes, and its hints
+and the guides' manual registrations ask for it as well (see Fixed). Also fixed: one schedule
+whose stored JSON or timestamp memtomem cannot read no longer stops every other schedule, a
+second short share into the same
+namespace on the same day is indexed, share titles drop Markdown heading markers, a
+consolidation summary never appends to an existing file, a contended pid-file probe withholds
+the pid when its two reads differ, and handoff resume refuses a newest row without exactly
+one id tag. `handoff list` is new, and the PyPI project page and summary line change.
+
+### Upgrading
+
+- **The plugins move their pin to 0.7.13 in the same release; a plugin from 0.7.12 that
+  starts the server and is not updated keeps launching 0.7.12.** For Claude Code, Codex and
+  OpenCode that older launch also lacks `--python 3.12`. This release delivers Claude
+  `0.5.44`, Codex `0.3.42`, `memtomem-automation` `0.3.27`, OpenCode `0.3.40`, Hermes
+  `0.1.28`, Antigravity `0.2.21`,
+  OpenClaw `0.1.5` and Kimi `0.2.30` (its handoff skill gains `list` and resume's tag rule).
+  Cursor keeps the version `0.1.0`; its files in this release launch 0.7.13 and carry the
+  same handoff skill changes. The Hermes memory provider stays `0.2.2`. The Hermes catalog
+  entries install a pinned commit, which today carries plugin `0.1.27` (its server launches
+  0.7.12) and provider `0.2.2`, so `hermes plugins install` keeps installing those until the
+  catalog moves its pin; the Docs entry below describes that 0.1.27 update.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.27 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.13;
+  updating the plugins does not upgrade that CLI. For a `uv tool` install run
+  `mm upgrade --version 0.7.13`; otherwise upgrade memtomem in the environment that
+  supplies that `mm`. Confirm with `mm --version`, then start a new Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  launch.** The plugin now launches `uvx --python 3.12 --from 'memtomem[onnx]==0.7.13'
+  memtomem-server`. A manual entry that launches anything else, an earlier release or the
+  same release without `--python 3.12`, no longer matches the plugin's launch, so Claude
+  cannot deduplicate the two and may expose duplicate tools. Run `mm doctor --claude-mcp`
+  (with no `mm` on `PATH`, as a plugin-only install has none:
+  `uvx --python 3.12 --from "memtomem[all]==0.7.13" mm doctor --claude-mcp`)
+  and follow the Claude Code guide's "Already registered via `claude mcp add`?" note,
+  which says which registration wins in each case and how to keep a manual entry.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.13, and make a `uvx` entry ask for Python 3.12.**
+  Updating a plugin or the `mm` CLI does not touch it. That covers an entry copied
+  from the guides (`uvx --isolated --from "memtomem[all]==0.7.12" memtomem-server`),
+  one `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Edit the entry in place: change
+  `==0.7.12` to `==0.7.13`, and in an entry that runs `uvx` with a requirement naming an
+  extra and asks for no Python, put `--python 3.12` right after `uvx` (`"--python", "3.12"`
+  first in a JSON or TOML `args` array, right after `"uvx"` in OpenCode's `command`
+  array), so the copied guide entry becomes
+  `uvx --python 3.12 --isolated --from "memtomem[all]==0.7.13" memtomem-server`. An entry
+  that already asks for 3.12 needs only the pin. Changing only the pin of one that does not
+  keeps the failure #3493 describes on a machine whose first Python is older than 3.12;
+  where uv is configured never to download Python, the entry then needs a Python 3.12 on
+  the machine. Restart the client afterwards. For Kimi Code too, edit the entry:
+  `mm init --mcp kimi` is a reconfiguration, not an upgrade, and replaces the whole
+  `mcpServers.memtomem` entry, environment variables you added included.
+  An entry that launches an installed interpreter (`… -m memtomem.server`) runs
+  whatever memtomem that interpreter's environment has: `mm upgrade --version 0.7.13`
+  covers it when the interpreter belongs to the `uv tool` install; for any other
+  environment, upgrade memtomem there.
+
+### Added
+
+- **`handoff list` shows which handoffs resume can load (#3477).** `handoff` accepted only
+  `save` and `resume`, and a plain `resume` silently took the newest record addressed to the
+  current runtime, so loading an older one meant already knowing its UUID. `list` (shorthand
+  `l`) is read-only: it reads the newest 30 rows with resume's own filter, says which record a
+  plain `resume` would select, and groups the rows by their `handoff-id-<id>` tag. Each entry
+  shows tag and row data only, never the record's body. In an interactive session it numbers
+  the entries and asks which one to resume. A pick is accepted only from that same list, and
+  resume then runs every check on the picked record. `resume <number>` is rejected and points
+  to `list`.
+
+- **`mm config --help` and `mm session --help` end with examples (#2994).** Each group's
+  help now closes with three commands to copy, one per line: `mm config show --json`,
+  `mm config set search.default_top_k 20` and `mm config unset search.default_top_k`;
+  `mm session start --agent-id planner --title "Release prep"`, `mm session end --auto` and
+  `mm session list --since 2026-10-01 --limit 10`.
+
+### Fixed
+
+- **Handoff resume requires exactly one `handoff-id-<id>` tag on the newest row (#3475).**
+  Resume step 2 previously instructed agents to read the id out of the newest row's
+  `handoff-id-<id>` tag and check that it was a canonical UUID, leaving behavior undefined
+  when a row carried no such tag or more than one. Save always writes exactly one tag, but a
+  hand-edited or foreign record in the same namespace could carry zero or several. The workflow
+  now requires exactly one `handoff-id-<id>` tag on the newest row: with zero or several, or an
+  invalid id, the row's `source` and `chunk_id` are reported as unusable and execution stops
+  without falling back to another record, aligning with torn and mismatch failure handling.
+
+- **`mm init` on a `uv tool` install names `memtomem[all]` for a missing extra, so following
+  it keeps the extras the tool environment already has (#3495).** With one extra missing, the
+  hint and the install the wizard offers at the end were `uv tool install --reinstall
+  "memtomem[<extra>]"`. `--reinstall` keeps only the extras it names: with uv 0.12.13, running
+  it for `korean` on an install made from `memtomem[onnx]` removed `fastembed` and
+  `onnxruntime`. Both now name `[all]`, as the uvx re-run from #3489 does. The lines around the hints
+  no longer assume an install: the ONNX choice says it needs the `onnx` extra instead of
+  `pip install memtomem[onnx]`, the `kiwipiepy` warning drops `Run: pip install kiwipiepy`, the
+  summary says what fails "while it is missing" rather than "until installed", and the uvx
+  re-run ends in `memtomem init` (with `--non-interactive <same options>` on a scripted run)
+  instead of a literal `...`. A uvx summary prints that command once instead of twice. The
+  hint for a source or project checkout (`uv sync --extra …`) is unchanged.
+
+- **The Claude Code, Codex and OpenCode plugins ask uv for Python 3.12 when they start the
+  server (#3488).** Their launch command was `uvx --from memtomem[onnx]==<version>
+  memtomem-server`. uv resolves a requirement that names an extra against the first Python it
+  finds, so on a machine where that is older than 3.12 and uv manages no interpreter of its own
+  (a Mac with only the Command Line Tools' Python 3.9, for one) the command stopped with
+  `No solution found` and the plugin's server did not start. The launch is now
+  `uvx --python 3.12 --from …`, the interpreter request the Cursor, Antigravity, Hermes and
+  OpenClaw bundles already made: uv downloads Python 3.12 when it finds none, unless its
+  configuration disables Python downloads. The plugin quickstart (English and Korean), the
+  Claude Code guide, both plugin READMEs and the Claude plugin's `setup` and `status` skills
+  pass the same flag in their `uvx … mm …` commands, and the error for a missing optional
+  module names the same launch. Two things change for an existing setup. A manual Claude Code
+  registration copied from the old launch line no longer has the plugin's arguments, so Claude
+  Code no longer suppresses the plugin's copy of the server; `mm doctor --claude-mcp` reports
+  the difference and `/mcp` shows which connections started. And where uv is configured never
+  to download Python, the server now needs a Python 3.12 on the machine: a newer one alone was
+  enough before and is not now.
+
+- **The manual `uvx` registrations the docs, the Web UI setup guide and the server's printed
+  example give ask uv for Python 3.12 (#3493).** They showed
+  `uvx --isolated --from memtomem[all]==<version> memtomem-server`, which has the same failure
+  as the plugins' old launch: with uv 0.12.13 on macOS, an empty `HOME` and
+  `/usr/bin/python3` 3.9.6 first on `PATH`, `uv tool run --isolated --from
+  'memtomem[all]==0.7.12' memtomem-server --help` exited 1 with "the current Python version
+  (3.9.6) does not satisfy Python>=3.12", and with `--python 3.12` it printed the help. They
+  now read `uvx --python 3.12 --isolated --from …` (`"--python", "3.12"` first in a JSON or
+  TOML `args` array, right after `"uvx"` in OpenCode's `command` array) in the README, the
+  getting-started, MCP clients, Claude Code, Kimi Code and OpenCode guides, the OpenCode
+  plugin README, the Web UI's Claude Code, Antigravity and Codex snippets, and the help
+  `memtomem-server` prints when run in a terminal. The AnyIO guide's
+  terminal command, which resolves the default plugin's package specification with this
+  terminal's uv configuration, asks for 3.12 too, as that plugin's launch does; without the
+  flag it exited 1 on the same setup. The Kimi Code guide no longer says its entry matches what
+  `mm init` writes, and says to put `"--python", "3.12"` at the front of a `uvx` entry's `args`
+  that name an extra and ask for no Python. Commands that name no extra are unchanged: on the
+  same setup `uv tool run --from 'memtomem==0.7.12' mm --version` and
+  `uv tool run --from memtomem mm --version` each exited 0 and printed the version. As with
+  #3488, where uv is configured never to download Python, a copied registration needs a
+  Python 3.12 on the machine.
+
+- **A contended pid-file probe withholds the pid when its two reads differ (#3423).**
+  `probe_pid_file` reads the pid file before its lock attempt, and on contention it returned
+  the pid it had read. If the old holder had exited and a new one had locked and rewritten the
+  same file in between, `mm upgrade`, `mm web stop` and `mm daemon stop` were given the old
+  holder's pid to signal, a dead process or one that had reused its pid. A contended probe now
+  reads the file again. If the two reads differ, that probe reports the holder as running
+  without a pid, so no signal is sent on its answer: `mm web stop` and `mm daemon stop` stop
+  and ask you to retry. `mm web stop` also refuses in this case on Windows, where it would
+  otherwise take the pid from `web.json`, which the new Web UI rewrites only after `web.pid`.
+  For the same reason `mm web status` shows the pid, port and start time as unknown in this
+  case instead of filling them in from `web.json`. Two reads that agree still do not prove the
+  bytes are the new holder's: one that has locked but not yet rewritten the file leaves its
+  predecessor's pid in place for both.
+
+- **`mm init` run from `uvx` asks uv for Python 3.12 in the commands it suggests (#3485).** Its
+  closing "For repeat use" hint, and the error `mm init` raises when it cannot determine the
+  installed version for the isolated MCP launch, now read
+  `uv tool install --python 3.12 "memtomem[all]"`, the README Quick Start command. The uvx
+  re-invocation hint for a missing extra gained the same flag (its requirement is
+  `memtomem[all]` since #3489, the next entry). Without the flag, uv 0.12.13 on
+  macOS resolved `memtomem[all]` (installing) and `memtomem[onnx]` (re-invoking) against
+  `/usr/bin/python3` 3.9.6 first on `PATH` and stopped. This change leaves the `--reinstall`
+  hints for an existing tool environment as they were; #3495 changes their requirement.
+
+- **Outside a workspace, `mm init` run from `uvx` writes an MCP launch that asks uv for Python
+  3.12, and its missing-extra hints are a `uvx` command (#3489).** The MCP server command it
+  registers with Claude Code, or writes to `./.mcp.json` or Kimi Code's `mcp.json`, was
+  `uvx --isolated --from memtomem[all]==<version> memtomem-server`. It is now
+  `uvx --python 3.12 --isolated --from memtomem[all]==<version> memtomem-server`. With uv 0.12.13
+  on macOS and `/usr/bin/python3` 3.9.6 first on `PATH`, the old launch run with `--help`
+  exited 1 with `No solution found`, and the new one printed the server's help. One setup goes
+  the other way: with uv's Python downloads turned off and only a Python newer than 3.12 visible
+  to uv (3.14 in the run), the old launch printed the help and the new one stops with
+  `No interpreter found for Python 3.12`. The hint for a missing extra, in the wizard's ONNX
+  step and in the closing summary, was `uv tool install --reinstall "memtomem[<extra>]"`: an
+  install into a separate tool environment, not the `uvx` command run with the extra. It is
+  now `uvx --python 3.12 --from "memtomem[all]" memtomem init`, and when
+  `mm init --non-interactive` refuses for a missing extra the error reads `Re-run with the
+  extras: uvx --python 3.12 --from "memtomem[all]" memtomem init --non-interactive <same
+  options>` (the command's final wording is from #3495). The requirement is `[all]` whichever
+  extra is missing, and the summary prints that one command, where it used to add a second
+  re-invocation line naming the missing extra: a re-run that names only that one can come up
+  without another the run already had. With uv 0.12.13, memtomem 0.7.12 and
+  `--provider onnx --tokenizer kiwipiepy`, a run from `"memtomem[onnx]==0.7.12"` was refused
+  for `korean`, one from `"memtomem[korean]==0.7.12"` was refused for `onnx`, and one from
+  `"memtomem[all]==0.7.12"` wrote the config. From a source or project workspace, and for a
+  `uv tool` install, the MCP launch is unchanged; the `uv tool` hint changes in #3495.
+
+- **The automation plugin's missing-`mm` hint is the install command its README shows
+  (#3481).** When the SessionStart hook finds no `mm` on `PATH`, its hint now reads
+  `uv tool install --python 3.12 memtomem==<version>`, the line in the plugin README and the
+  Claude Code guide. The hint's previous command had no `--python 3.12`. The README and the guide
+  now write that command without single quotes, which Windows Command Prompt would pass through
+  as part of the requirement. The hint for an `mm` of the wrong version is unchanged.
+
+- **`mem_consolidate_apply` refuses to write a summary into a file that already exists
+  (#3474).** Each summary goes to a file named for that apply alone
+  (`consolidated/<date>-<source>-run<id>-<12 hex>.md`, #2802), and the summary's links to its
+  originals assume it is that file's only entry. The name was generated fresh but not checked,
+  so a file already at that path would have been appended to. The write now refuses an existing
+  file before anything is written, as `mem_agent_share` does for its copies (#3324): the run is
+  recorded as an error and the preview is kept, so applying it again writes to a new file. No
+  path is known to produce such a collision; this makes the assumption checked.
+
+- **Share titles strip Markdown heading markers so re-share prefixes collapse cleanly (#3470).**
+  Indexed Markdown entries retain their heading markers (`## Cache decision`), which caused
+  sharing to produce titles carrying the markers (`Shared: ## Cache decision`) and prevented
+  the `Shared: ` prefix check from matching on subsequent shares. As a result, each re-share
+  accumulated another `Shared: ## ` layer instead of collapsing to a single prefix.
+  `mem_agent_share` and `mm agent share` now strip leading `#{1,6}` heading markers on Markdown
+  chunks and collapse repeated `Shared: ` prefixes across all hierarchy levels, while
+  preserving multi-level ` > ` path joins and non-Markdown heading text.
+
+- **A second short `mem_agent_share` into the same namespace on the same day is indexed (#3324).**
+  Every copy went to the namespace's day file, where a short copy could merge into the chunk
+  of the entry before it and get no chunk of its own. When that entry was an earlier copy
+  shared through `mem_agent_share`, its `chunk_links` row made the re-index refuse with
+  `Reindex would remove linked chunk identities; explicit link migration is required`: the
+  copy stayed on disk unindexed, and every later write to that day file failed the same way.
+  `mm agent share` recorded no such link in 0.7.12, so there the second copy merged into the
+  first copy's chunk without that error. `mem_agent_share` and `mm agent share` now write each copy to a file of its own,
+  `shared-copies/<day file name without .md>-<12 hex>.md`, and refuse to write into a file that
+  already exists. A rebuild reads the copy's namespace back from that name, as it does for a day
+  file. A day file already stuck this way stays stuck. In the measured case, two short
+  `## Shared: memory` sections with no chunk overlap, renaming the second section's heading and
+  re-indexing the file restores it, and the first copy keeps its id and link.
+
+- **One schedule with a stored value memtomem cannot read no longer stops every other
+  schedule (#3440).** Each schedule read decodes every row it returns, and one row could raise
+  out of it. `params_json` that is not JSON, or `params_json` or `last_run_result` nested too
+  deeply to parse, failed `mm schedule list`, `mem_schedule_list` and the due check; a
+  `last_run_at` / `created_at` that is not an ISO date failed the due check (the listings
+  showed it as `unchecked: …` since 0.7.12). The dispatcher gives up on a tick whose due check
+  raises, so it ran no schedule at all until the row was deleted. Python 3.14 parses text
+  nested 100,000 levels deep, so there the read succeeded and the listings failed to serialise
+  it. Each value is now checked on its own row: `job_state` and `last_run_result` that are not a
+  JSON object, or that nest deeper than 100 levels, read as `null` with a warning. `params`
+  read that way are never replaced by the job's defaults (for `importance_decay` that is a
+  deletion at `max_age_days=90`): the row carries `params: null` and a new `params_error`, and
+  every run of it, from the dispatcher or `run-now`, is recorded as `error` with `invalid
+  params: <reason>` before the job starts. Empty `params_json`, `null` and `[]`, which used to
+  run with the defaults, are among them, and so is a params key nested deeper than 100 levels
+  that a release before `mm schedule add` refused unknown keys stored and the job ignored. A
+  timestamp that does not parse skips only its own row, and `cron_error` reports it as
+  `unparsable last_run_at: …` (or `created_at`) rather than `unchecked: …`; `mm schedule list`
+  marks it `(automatic runs blocked: stored timestamp unreadable)` and counts it in the closing
+  line, which now reads "the dispatcher cannot schedule them". An empty `last_run_at` is newly
+  blocked the same way: it used to fall back to `created_at`. Any other failure computing one
+  row's next slot (a date out of croniter's range raised `OverflowError`, or `OSError` on
+  Windows) also skips that row alone. Text that is not valid UTF-8 still fails every schedule
+  read; no memtomem writer stores it.
+
+### Docs
+
+- **The Hermes plugin's README now discloses three things its server does.** Hermes's plugin
+  catalog asks for risky behaviour in both the catalog pull request and the plugin's README.
+  Two were only in the catalog entry: with lifecycle policies enabled (`policy.enabled`) they
+  run on a timer without a tool call, and an `auto_consolidate` policy sends the chunks it
+  summarizes to the configured LLM provider; turning reranking on through `mem_do`
+  (`rerank.enabled`) loads the reranker at once, so the default local reranker downloads its
+  model from Hugging Face when it is not cached. The third is new in 0.7.11: the
+  `dedup_remove` action re-reads both chunks' whole source files, including a kept file
+  indexed from outside the configured memory directories. The Scope section also stops saying
+  indexing paths must be absolute: a relative one resolves against the plugin directory. The
+  Hermes package goes to 0.1.27 without a core release; its server stays
+  `memtomem[onnx]==0.7.12`.
+
+## [0.7.12] — 2026-11-18
+
+A patch with two fixes: a schedule the dispatcher cannot schedule now says so in every
+listing, and `mm daemon stop --help` no longer promises that a client reconnects (see Fixed).
+The PyPI project page now names the LangGraph and Hermes integrations, and the Hermes memory
+provider's README describes its catalog install.
+
+### Upgrading
+
+- **The plugins move their pin to 0.7.12 in the same release; a plugin that is not updated
+  keeps launching 0.7.11.** This release delivers Claude `0.5.43`, Codex `0.3.41`,
+  `memtomem-automation` `0.3.26`, OpenCode `0.3.39`, Hermes `0.1.26`, Antigravity `0.2.20`,
+  OpenClaw `0.1.4` and the Hermes memory provider `0.2.2` (README wording only); Kimi stays
+  `0.2.29` and Cursor `0.1.0`. The Hermes catalog entries install a pinned commit, which
+  today carries plugin `0.1.23` and provider `0.2.1`, so `hermes plugins install` keeps
+  installing those until the catalog moves its pin.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.26 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.12;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.12`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.12`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.12.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.11" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.11` to
+  `==0.7.12` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.12 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.12`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+
+### Fixed
+
+- **`mm daemon stop --help` clarifies client session termination and reconnect behavior (#3447).**
+  The help text previously stated that a connected client starts a new server when it next needs
+  one, which memtomem does not control or guarantee. It now says what memtomem does: every
+  session connected to the stopped daemon ends, its server (`memtomem-server --shared NAME`)
+  exits with status 1, and the client may need a reconnect or a restart. This matches the
+  shared daemon guide.
+- **A schedule the dispatcher cannot schedule now says so in every listing (#3459).** A row
+  stored with non-ASCII digits or spaces, which croniter 7 refuses and croniter 6 accepted,
+  was skipped on every dispatcher tick with only a warning in the log, and every listing
+  showed it as ordinary (memtomem requires `croniter>=2.0`, so a fresh install of 0.7.11
+  already runs 7.0.0). Each row that `mm schedule list --json` and `mem_schedule_list`
+  (`schedule_list` through `mem_do`) return now carries `cron_error`: `null` when the
+  expression can be scheduled; the croniter error when croniter cannot parse it, which `mm
+  schedule list` marks `(automatic runs blocked: cron not accepted)` and counts in a closing
+  line naming `mm schedule add` and `mm schedule delete <id>` (under croniter 6 only, a random
+  `R` field whose range leaves the field's bounds fails to parse on its out-of-range draws
+  alone, so such a row can be reported blocked and still run); or `unchecked: …`, marked
+  `(cron check failed)`, when the check reached no verdict. `unchecked` covers a stored
+  timestamp that does not parse and croniter's "failed to find next date", which comes both
+  from a date that never occurs (`0 0 30 2 *`, which `mm schedule add` accepts and the
+  dispatcher skips on every tick) and from one draw of croniter's random `R` field (`0 0
+  R(28-30) 2 *` fails only on the draw that lands on the 30th, and the dispatcher draws again
+  on every tick). Nothing else changes: a row whose expression croniter refuses or finds no
+  date for is skipped as before, `mm schedule run-now <id>` still runs it, and croniter 7's
+  reading of an expression it accepts is its own (`59/15 * * * *` now fires once an hour, at
+  minute 59). Also unchanged from 0.7.11: while an enabled row's base timestamp
+  (`last_run_at`, else `created_at`) does not parse, the dispatcher's due check stops for
+  every schedule; memtomem never writes such a value (#3440). To replace a
+  schedule, add the corrected one first with the same `--job` and the old row's `params` as
+  `--params`, leaving out any key `mm schedule add` refuses as unsupported (the job ignored
+  it), then delete the old one; the new schedule starts with no run history, and a
+  `dedup_scan` walk starts from the first pool (`docs/guides/reference/automation.md`).
+
+### Security
+
+- An advisory against `picomatch` 4.0.7 (npm), which GitHub reviewed on 2026-11-17, lets
+  a caller who can supply a glob pattern stall the process with a pattern such as
+  `+(*a)`; no fixed release exists, and 4.0.7 is the latest. It is a dev-only dependency
+  of the web UI's JavaScript unit tests, which reach it through `vitest`. Those tests
+  pass no glob of their own, and the only glob this repository authors for the run is
+  the `include` in `vitest.config.mjs`. The wheel does not contain `tests-js`; the source
+  distribution carries the test sources and their lockfile but no `node_modules`, so
+  installing memtomem neither installs nor runs `picomatch`. The advisory is recorded as
+  an exception with the same 2026-12-20 expiry as the others
+  ([GHSA-fc5q-39xc-vjpf](https://osv.dev/vulnerability/GHSA-fc5q-39xc-vjpf)).
+
+## [0.7.11] — 2026-11-17
+
+### Upgrading
+
+- **The plugins move their pin to 0.7.11 in the same release; a plugin that is not updated
+  keeps launching 0.7.10.** This release delivers Claude `0.5.42`, Codex `0.3.40`,
+  `memtomem-automation` `0.3.25`, OpenCode `0.3.38`, Hermes `0.1.25`, Antigravity `0.2.19`,
+  OpenClaw `0.1.3` and Kimi `0.2.29` (`0.2.25` in the 0.7.10 release); Cursor stays
+  `0.1.0`. The entries below name the
+  version in which each workflow text first changed. OpenCode `0.3.34` to `0.3.37` were
+  never published to npm, so `opencode-memtomem@0.3.38` is the first npm release that
+  carries those changes.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.25 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.11;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.11`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.11`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.11.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.10" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.10` to
+  `==0.7.11` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.11 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.11`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+- **Hermes plugin 0.1.23: a gated or private Hugging Face model needs your own server
+  entry.** The plugin's bundled server entry no longer uses a saved Hugging Face login or an
+  `HF_TOKEN` variable (see Changed). The default models are public and download as before.
+  If your configuration names a gated or private model, add your own `mcp_servers.memtomem`
+  entry without `HF_HUB_DISABLE_IMPLICIT_TOKEN` and with `HF_TOKEN` under `env:`; the plugin
+  README's example for that entry is the starting point. The launch line also gains
+  `--with 'huggingface-hub>=1.20'`, so a uv configuration that cannot resolve
+  `huggingface-hub` 1.20 or later now stops the server from starting.
+- **An existing `dedup_scan` schedule starts walking the store (#3432).** Its next run scans
+  the first pool, and each later run the pool after it, with no setting that keeps a
+  schedule on one pool (see Changed). The first 0.7.11 process to open a store adds a
+  `job_state` column to its `schedules` table. An older memtomem can keep using the same
+  database: its runs neither read nor change the stored position.
+- **Under the polling watcher, an edit made outside memtomem is indexed later (#2838).**
+  Polling is the default watcher on macOS. It now rescans every 10 s instead of every 1 s,
+  so such an edit reaches the index about 10 to 15 s after the write, where it took about
+  5 to 6 s (see Changed for the measurements). To keep the old interval, set
+  `indexing.watcher_poll_interval_ms` to `1000` and restart the server.
+- **A delete or edit by chunk id can now be refused on a store that holds one file under two
+  spellings of its path (#3408).** Such a store exists where a directory on a
+  case-insensitive volume was indexed under two spellings. The refusal says how to go on:
+  remove the stale spelling's rows from the web UI's Sources tab, which removes index rows
+  only, or edit the file directly when that tab lists neither spelling, as for a project's
+  `memories.local` tier (see Fixed).
+- **A `.env` kept inside the installed package's `memtomem/server/` directory is no longer
+  read (#3381).** The server's search for the nearest `.env` now starts one directory
+  higher (see Changed). Move such a file up to `memtomem/` or to any directory above it:
+  this release and earlier ones both find it there.
+- **An Ollama model that thinks now answers without thinking (#3382).** Every request the
+  Ollama provider sends carries `think: false`, in every LLM feature, and no setting turns
+  thinking back on. What such a model writes can differ from before (see Fixed).
+
+### Added
+
+- **`mem_add` reports how many chunks the written entry became (#3400).** `- Chunks indexed`
+  counts the whole file's re-index: it includes an earlier section re-chunked in the same
+  pass, leaves out an entry chunk that kept its id by content hash, and so cannot say whether
+  the entry stayed in one chunk. The result now also has `- Entry chunks: <n>`, the indexed
+  chunks the entry's lines fall in. It is counted by line span, so a whitespace-only fragment
+  inside the entry counts too, and it describes the file as this write indexed it. When the
+  entry's first chunk also holds text from before it, the number is followed by `(shares its
+  first chunk with text before the entry)`: a short entry merged into the previous section,
+  or an entry whose header lands in that section's chunk, which counts that chunk even when
+  the body stays in one chunk of its own. It reads `unknown` when the chunk spans cannot say
+  which chunks hold the entry (chunk overlap, masked text, a file another chunker handles
+  such as `.json`, or another writer's text in the file), and `unknown (this write did not
+  index the file)` when this write left the file's chunks not current: an exclusion, a
+  relink, an embedding failure, a file type with no chunker, a file too large or binary, or
+  another hold. An idempotent replay returns the stored result, so it repeats the line when
+  the first call's result had it. `mem_batch_add` has no such line: one
+  append covers the whole batch, so there is no count per entry. `Chunks indexed` is
+  unchanged.
+
+- **A bounded duplicate scan can be continued (#3397).** `mem_dedup_scan` and
+  `GET /api/dedup/candidates` take `after`, a chunk id: the scan takes the next `max_scan`
+  scannable chunks after it in chunk-id order. A scan covered one pool of at most `max_scan`
+  chunks and nothing could ask for the rest, so on a large store a scan left most chunks
+  out unless `max_scan` was raised, and the near phase's time grows with it. The tool's
+  last line now says how many chunks remain and the value that continues
+  (`38958 remain: continue with after="<chunk id>"`), and a scan that was given `after`
+  and took the last chunks says `reached the end of the store`. The route returns `next_after` and
+  `remaining_chunks`. The cursor is a position in chunk-id order, so chunks added or removed
+  between calls do not shift the ones still to come; a chunk added before the cursor waits
+  for the next walk. When one pool holds more pairs than `limit`, the scan says so
+  (`limit=50 kept 50 of 57 pairs`; `pairs_found` on the route): continuing does not show the
+  pairs that were cut, scanning the same position again with a higher `limit` does. The tool
+  accepts a `limit` up to 500, so no single call lists a pool with more pairs than that, and
+  a smaller `max_scan` can report other pairs than the ones that were cut. The scheduled
+  `dedup_scan` job's result gains `remaining` and `pairs_found` (the job continues between
+  runs: see Changed, #3432). A walk in steps is not one scan of the whole store: a near pair across two
+  pools can be reported from both, and copies with one content hash in different pools are
+  left to the near search, which a BM25-only store does not run.
+- **`mem_dedup_remove` removes one member of a duplicate pair from its file after checking
+  both members (#3419).** `mem_delete(chunk_id)` checks only the lines it removes, so a pair
+  whose kept file had changed since it was indexed could be resolved by deleting the last
+  copy of what the pair held. The new tool removes `remove_id`'s lines only when each
+  member's file and stored rows still match that file's last index receipt, the two are in
+  different files, and neither file has another hard-linked name; otherwise it refuses,
+  names the member and the reason, and removes nothing. It does not judge whether the two
+  members say the same thing, and a change to the kept file after the check is not seen.
+  Receipts come from a plain index pass; `--force`, the re-index a memory write runs, and
+  passes with `indexing.enrich_chunk_context` or `indexing.auto_summarize` on write none. A
+  file with no receipt that matches it is refused until a plain `mm index` of it, which
+  under those two settings does not help: the refusal says so. In core mode it is reached as `mem_do(action="dedup_remove", ...)`.
+
+- **`memtomem-server --shared NAME` and `mm serve --shared NAME` let MCP clients share one
+  engine (POSIX, opt-in, #3381).** The first session starts the daemon NAME, and later ones
+  join it when they match it on the `MEMTOMEM_*` and `LANGFUSE_*` variables after `.env`, the
+  tool mode and extra tools, `HOME`, the store path and the installed package. The variables
+  are compared in the order the process holds them, so the same variables in another order do
+  not match (the reason then reads `env (order)`). A session that does
+  not match, cannot share its store, uses a relative configured path, or runs on Windows is
+  served standalone, and `mem_status` shows `Shared daemon: NAME not joined (<reason>)`. Without
+  the option nothing changes. A joined session uses the daemon's live configuration, and inputs
+  outside that list (proxy and TLS variables, `FASTEMBED_CACHE_PATH`, Hugging Face variables)
+  are not compared. `memtomem-server --daemon NAME [--idle-timeout S]` runs a daemon in the
+  foreground. `mm doctor`'s `shared-daemons` check counts each daemon's sessions, and
+  `mm uninstall` also removes a dead daemon's log and stale session entries.
+
+- **`mm daemon status` and `mm daemon stop` report and stop shared daemons (POSIX).** A
+  shared daemon serves several client sessions from one engine (#3381). A client starts or joins
+  one with `--shared NAME` (previous entry). `status` lists each daemon's
+  name, pid and start time, and exits 0 when one runs, 3 when none does, and 1 when the runtime
+  directory cannot be listed. `--json` prints `{"daemons": [...], "count": N}`. `stop` sends
+  SIGTERM, then SIGKILL after `--grace` seconds only if the process is still alive, and confirms
+  the stop by the daemon's lock being released. Every session connected to the daemon ends with
+  it. `mm reset` and `mm uninstall` already refuse while a daemon runs; their refusal now names
+  the daemon and the `mm daemon stop` command. `mm doctor` adds a `shared-daemons` check, and
+  `mem_status` run inside a daemon shows its name, pid and open connections.
+
+- **`mem_dedup_scan` can show what the store holds about each member of a candidate pair
+  (experimental, off by default).** Two chunks with the same body are not always the same
+  record: the content hash covers the body only. With
+  `maintenance.experimental_duplicate_brief` set in `config.json`, or
+  `MEMTOMEM_MAINTENANCE__EXPERIMENTAL_DUPLICATE_BRIEF=true`, each member is followed by its
+  heading, namespace, scope, tags and validity window, the stored read-only flag, where it sits
+  in its source, and its relations and links, and each pair by the fields the two members
+  differ on. These are facts for whoever judges the pair; the scan recommends nothing and
+  still changes nothing. Members are shown as the store holds them in a second read after the
+  scan, so a heading or line number that changed in between shows its new value; a pair is
+  left out, and counted, when that read does not return one of its members (deleted, or on a
+  path the scan's listing hides) or the bodies of an exact pair do not match. With the setting
+  off none of these lines are printed. The
+  tool's parameters are the same either way, and `mem_config` and `mm config set` do not
+  change the setting.
+
+### Changed
+
+- **The scheduled `dedup_scan` job walks the store instead of scanning one pool on every run
+  (#3432).** A schedule scanned at most `max_scan` scannable chunks on each run, chosen the
+  same way every time, and nothing moved it on to the rest, so on a large store a schedule
+  never looked at most of it. (0.7.10 chose them in an order that differed between
+  processes: see Fixed, #3390.) Each run now scans the pool after the one the schedule's
+  last finished run scanned, in chunk-id order, and a run that reaches the end of the store
+  makes the next one start from the first pool. A schedule that already exists starts from
+  the first pool on its next run;
+  there is no setting that keeps the old behaviour. The position is stored on the schedule
+  and shown as `state` (`{"after": "<chunk id>"}`, or `null`) in `schedule_list` and
+  `mm schedule list --json`; the plain `mm schedule list` lines are unchanged. A run's
+  result gains `after` and `next_after`, the chunk ids the run and the next one start
+  after. Only a scan that finished moves the position: a run that ends in `error` or
+  `timeout`, or is `skipped`, leaves it. Each schedule has its own position, `mm schedule
+  run-now` and `schedule_run_now` move it as a dispatched run does, and deleting a schedule
+  deletes it. Runs of one schedule that overlap scan the same pool, and one that finishes
+  late puts the position back at the end of its own pool. The counts of a walk's runs do
+  not add up to a count for the store. An older memtomem sharing the database scans a
+  pool of its own choosing on its runs and leaves the position alone.
+
+- **The `update` and `handoff` workflows report the `Entry chunks` value `mem_add` prints
+  (#3400).** Both reported a chunk count, and the only one a `mem_add` result had was
+  `Chunks indexed`, the count for the whole file. `update` now reports each saved item's
+  `Entry chunks` value unchanged, with any note in parentheses, and lists the items whose
+  value is 2 or more. `handoff` save reports the record's value unchanged and does not
+  interpret it. The value is how many chunks the item's lines fall in. It does not say
+  which text landed in which chunk, and `update` never rewrites an item because of it.
+  Measured with the pinned `multilingual-e5-small` tokenizer (ceiling 384 tokens): an update
+  item of 1,050 characters and 399 tokens reported `2`, stored as 345 tokens plus a 55-token
+  chunk holding only its `Related:` citation; items of 372 and 88 tokens reported `1`.
+  memtomem `0.7.10` and older print no such line, and neither does a replay of a result
+  stored before the line existed: both workflows then say that the server did not report a
+  count, and do not substitute `Chunks indexed`. The delivery versions move with that text:
+  Claude `0.5.39`, Codex `0.3.37`, OpenCode `0.3.35`, Kimi `0.2.27`, Antigravity `0.2.16`.
+  Cursor stays `0.1.0` while its first marketplace review is open, but its rendered skills
+  change too.
+
+- **The `remember` workflow reports the `Entry chunks` value too, and only for a write
+  (#3437).** It reported an "indexed chunk count", which was `Chunks indexed`, the count for
+  the whole file. It now reports the value of the result's `Entry chunks` line unchanged and
+  does not interpret it. memtomem `0.7.10` and older print no such line: the workflow then
+  says that the server did not report a count, and does not substitute `Chunks indexed`. A
+  result that is a refusal or an error is reported unchanged, with no file or count added.
+  `remember` ships in the Hermes plugin and the OpenClaw bundle as well, so their
+  versions move with the text: Claude `0.5.40`, Codex `0.3.38`, OpenCode `0.3.36`, Kimi
+  `0.2.28`, Antigravity `0.2.17`, Hermes `0.1.24`, OpenClaw `0.1.2`. Cursor stays `0.1.0`
+  while its first marketplace review is open, but its rendered skill changes too.
+
+- **`handoff` save reports a refused `mem_add` as the refusal (#3443).** Save's last step
+  had no branch for a `mem_add` result that is a refusal or an error, so it reported such a
+  result in the shape of a write. Save now reports the handoff id, scope, namespace,
+  file and `Entry chunks` value only when `mem_add` confirms the write. It reports a refusal
+  or an error unchanged and adds no file or chunk count of its own; a refusal that names a
+  file in its own text keeps it. `handoff` can get such a result because it passes
+  `force_unsafe=false` and an `idempotency_key`: a record that matches a privacy pattern is
+  refused, and so is a call that finds a claim on its key still pending. The delivery
+  versions move with that text: Claude `0.5.41`, Codex `0.3.39`, OpenCode `0.3.37`, Kimi
+  `0.2.29`, Antigravity `0.2.18`. Cursor stays `0.1.0` while its first marketplace review
+  is open, but its rendered skill changes too.
+
+- **The duplicate scan leaves out pairs of read-only chunks from the same file, and says how
+  many (#3418).** A large JSON file is sliced into chunks that are all stored read-only, and
+  when it is minified every slice sits on line 1 and pairs with its siblings: on one real
+  store such pairs were 306 of 412 at `max_scan=5000`. Neither member of such a pair can be
+  removed (`mem_delete` and `mem_dedup_remove` refuse a read-only chunk), so they no longer
+  take `limit` slots. Read-only pairs across two files and pairs with a writable member are
+  still listed. `mem_dedup_scan`'s coverage line says `left out N pairs of read-only
+  chunks from the same file` when there are any, `GET /api/dedup/candidates` adds
+  `same_source_read_only_pairs`, the Maintenance panel shows the count under the results
+  (including "No duplicates found"), and a scheduled `dedup_scan` result adds the same key.
+  Such pairs no longer reach the panel's Keep A / Keep B merge.
+
+- **`mm upgrade` signals each process once, however many lock files it holds.** It used to
+  signal once per lock file. A shared daemon holds two, its name's and its store's, so its pid
+  was signalled a second time after it had exited. Both files are still removed. A pid whose
+  lock files record different start times is now reported and left running, because it may be
+  a recycled pid.
+- **When `mm uninstall` deletes state, it also removes what a shared daemon that exited
+  without cleaning up left in the runtime directory**: its lock file and its socket. A daemon
+  that is starting while uninstall runs keeps its lock file. With no state to delete, uninstall
+  leaves these files alone, as it leaves everything else.
+
+- **The polling file watcher rescans every 10 s instead of every 1 s, and
+  `indexing.watcher_poll_interval_ms` sets the interval (part of #2838).** Polling is the
+  default watcher on macOS (`watcher_backend: "auto"`) and what `"polling"` selects on every
+  platform. Each scan walks every watched directory, in every server process that runs a
+  watcher. Measured on an idle tree of about 100 directories holding about 8,500 entries,
+  one process used 10.2 % of a core at 1 s and 1.1 to 1.2 % at 10 s. An edit made outside
+  memtomem now waits up to one interval for the next scan and then the 5 s quiet period:
+  measured from write to index, 9.9 to 15.0 s where it was 5.4 to 6.0 s. `mem_add` indexes
+  what it writes and does not wait for the watcher. Set the interval between 100 and
+  60000 ms in `config.json` or with `MEMTOMEM_INDEXING__WATCHER_POLL_INTERVAL_MS`, and
+  restart the server to apply a change. The native backend ignores it.
+- **The server's search for a `.env` starts one directory higher (#3381).** python-dotenv
+  looked for the nearest `.env` starting in the installed package's `memtomem/server/`
+  directory. It now starts in `memtomem/`, so a `.env` placed inside `memtomem/server/` is no
+  longer read. Every directory above the package is searched as before.
+- **The Hermes plugin's server no longer uses a saved Hugging Face login.** With ONNX
+  embedding or the local reranker configured, the server's model downloads sent the login
+  that `hf auth login` saved (normally `~/.cache/huggingface/token`): the download libraries
+  use it unless told not to. Hermes's plugin catalog rules say a plugin never reads another
+  tool's login. The plugin's bundled server entry (package 0.1.23) now sets
+  `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` and holds `huggingface-hub` at 1.20 or later, the first
+  release that checks the variable before it opens the saved login; `HF_TOKEN` is not used
+  either. A fresh BM25-only configuration never contacted Hugging Face. The launch entries
+  of the other clients gain no such setting.
+
+### Fixed
+
+- **The `update` workflow no longer holds an item to 600 characters because it quotes a few
+  Korean, Japanese, or Chinese characters.** An item was capped at 1,000 characters, or at 600
+  as soon as any of its text was in one of those languages. An English item quoting five
+  Hangul characters was therefore held to 600 and reported as over the limit, although the
+  store kept it in one chunk of 223 tokens (the ceiling under `multilingual-e5-small` is 384).
+  Now there is one cap of 1,000 characters, citations included, and each Korean, Japanese, or
+  Chinese character counts as two. Measured on 504 saved update items, no item within the new
+  cap was stored as more than one chunk, and CJK items flagged though stored whole fell from
+  60 of 116 to 20. The cap is still a target, not a guarantee. An item reported as over the
+  limit now comes with its weighted count. The delivery versions move with that text: Claude
+  `0.5.38`, Codex `0.3.36`, OpenCode `0.3.34`, Kimi `0.2.26`, Antigravity `0.2.15`. Cursor
+  stays `0.1.0` while its first marketplace review is open, but its rendered skill changes too.
+
+- **A delete or edit no longer removes lines from a file the store holds under two spellings
+  of its path (#3408).** On a case-insensitive volume, a directory indexed once as `Notes` and
+  once as `notes` stores each file in it twice, and a duplicate scan lists the two copies as a
+  pair. Deleting one copy by chunk id removed its lines from the one real file while the other
+  copy's rows kept returning them in search. `mem_delete` and `mem_edit` by chunk id, and the
+  web UI's chunk edit and delete, now refuse when the file is also stored under another
+  spelling (same file on disk, path equal ignoring case and Unicode form), and say to remove
+  the stale spelling's rows from the web UI's Sources tab first, which removes index rows only,
+  or to edit the file directly when that tab lists neither spelling (it does not list a
+  project's `memories.local` tier or a held source). Nothing else changes: indexing a second spelling still adds its rows,
+  and existing duplicates stay until removed (#3409).
+- **A bounded duplicate scan selects the same chunks in every process (#3390).**
+  `mem_dedup_scan`, the web `GET /api/dedup/candidates` route and the scheduled `dedup_scan` job
+  scan at most `max_scan` chunks (default 500). They filled that pool source by source in the
+  iteration order of a Python `set`, which changes with the per-process hash seed, so the MCP
+  server and `mm web` on one store, or one job on either side of a restart, scanned different
+  samples and reported different candidates. On a store with 39,458 scannable chunks, two
+  processes found 15 and 10 candidate pairs at the default. The pool is now `max_scan`
+  scannable chunks taken in chunk-id order, read in one statement, from the start of the
+  store unless the call gives `after` (see Added, #3397): the same chunks in every process
+  for the same starting position while the scannable chunks and `max_scan` stay the same (32
+  pairs on that store for the first pool). A scheduled job moves its starting position
+  between runs (see Changed, #3432).
+  "Scannable" leaves out held and pending sources and any file holding a consolidation summary
+  of one, the scan's existing rule.
+  - The coverage line says how much of the store that was and how it was chosen:
+    `Scanned all 412 scannable chunks; ...` when the pool is every scannable chunk, and
+    `Scanned 500 of 39458 scannable chunks (the first 500 in chunk-id order); ...`
+    otherwise. The job's result gains `eligible` and the web response `eligible_chunks`,
+    the number of scannable chunks the pool was taken from.
+  - The pool's order also decided ties: which member of an exact group with equal timestamps
+    is listed first, which side of a near pair with equal timestamps is `chunk_a`, and which
+    of several equal pairs survive `limit`. Those now depend on the stored chunks only: a
+    small store can list a tied pair the other way round from before, and every process lists
+    it the same way.
+  - The `max_scan` parameter description now reads "Maximum chunks to scan, taken in
+    chunk-id order".
+  - A pool smaller than the store is still a subset: chunks outside it are reached only as
+    near neighbours of chunks inside it. A scan continues past its pool with `after` (see
+    Added, #3397); exact copies outside the pool are #3398.
+
+- **A non-string namespace description is rejected with a clear parameter error (#3355).**
+  `mem_do(action="ns_update", params=...)` forwarded parameters without type-checking
+  `description`. `storage.set_namespace_meta` treated falsy non-strings (`0`, `False`, `[]`)
+  as empty, skipping the write guard scan and storing `0` and `False` as the string `"0"`, while
+  `[]` triggered a database rollback error. Truthy non-strings (`5`, `["sk-..."]`, `{"k": 1}`)
+  failed deep inside the write guard with internal type errors. `set_namespace_meta` now
+  validates that any non-`None` description is a string, matching `validate_namespace_color`, so
+  every MCP tool reports `Error: Invalid namespace description: expected a string`, a
+  storage call raises the same message, and nothing is stored.
+
+- **Resources answer over stdio (#3374).** Reading the four static resources from a stdio
+  server failed, and with the MCP SDK `mcp` 2.2.0 the two templated ones failed too, while
+  tools on the same connection worked. Two causes, one per kind:
+  - The four static ones (`memtomem://sources`, `memtomem://namespaces`, `memtomem://tags`,
+    `memtomem://stats`) failed with `Error reading resource <uri>`, while `resources/list`
+    still listed all four. Their handlers receive no request context and looked the server's
+    state up through a value the server set while starting; over stdio the MCP SDK runs a
+    handler in the context of the task reading stdin, which starts first and never sees that
+    value.
+  - The two templated ones (`memtomem://sources{?cursor,limit,namespace}` and
+    `memtomem://chunks/{chunk_id}`) failed with `Error creating resource from template <uri>`.
+    Their handlers did declare the request context, but the SDK validates a template
+    function's arguments, and with the annotation these handlers used that validation
+    rebuilt the context object without the request inside it. That is `mcp` 2.2.0: with
+    2.3.0, which a new install resolves, the two already answered on 0.7.10.
+
+  The server now binds its state from the request itself for the length of each resource
+  read, and all six handlers read it from there. The first cause needs a transport that
+  hands the server a message from a task older than the server's own startup, as stdio does;
+  the second does not involve the transport. Only stdio was measured, before and after.
+
+- **A request that arrives while the server is still starting waits for the start to finish
+  (#3375).** The first request that touches the store opens it and then starts the file
+  watcher and the schedulers. A second request arriving during those starts was handed the
+  store at once; if the first request was then cancelled, its cleanup closed the store, and
+  the second request's next call failed with `Database is closing`. A request that arrives
+  in that window now waits, and if the first start was rolled back it starts the server
+  again itself. Reaching this took two callers inside the startup window, with the first
+  one cancelled or failing there: two requests in flight on one connection, two SSE
+  connections, or one request and the startup warmup (`warmup.enabled`). It was reproduced
+  with a script and not seen in use.
+
+- **`mem_config` names the tokenizer an FTS rebuild used (#3385).** Setting
+  `search.tokenizer` through `mem_config`, or `mem_do(action="config", ...)`, rebuilds the
+  keyword index, and the reply said `FTS index rebuilt (N chunks).` whichever tokenizer the
+  rows were built with. In a process where `kiwipiepy` cannot be imported, a `kiwipiepy`
+  rebuild falls back to `unicode61`, so a fallback rebuild read the same as a real Kiwi one.
+  The reply now reads `FTS index rebuilt with <tokenizer> (N chunks).`, and when that is not
+  the tokenizer you asked for, it adds a warning that this rebuild and every query in the
+  process fall back to it. `mm config set` already worded its message this way, and the web
+  UI's rebuild button now does too (#3395, next entry).
+
+- **The web UI's "Rebuild FTS" names the tokenizer it used (#3395).** `POST
+  /api/fts-rebuild`, the reindex banner's "Rebuild FTS" button, answered `FTS index rebuilt
+  for N chunks.` whichever tokenizer the rows were built with, so a `kiwipiepy` rebuild that
+  fell back to `unicode61` showed the same success toast as a real Kiwi one. Its `message`
+  now reads `FTS index rebuilt with <tokenizer> (N chunks).` and the response gains
+  `tokenizer` and `warning`. When the rebuild did not use the configured tokenizer, `warning`
+  and the message say that this rebuild and every query in the server fall back to it, and
+  the button shows a warning toast. Saving `search.tokenizer` in settings and a `config.json`
+  hot reload rebuild too: both now log the tokenizer the rows were built with, at warning
+  level on a fallback, and the save's response still does not mention a fallback (#3405).
+
+- **The Ollama provider turns thinking off, and an empty LLM answer no longer passes as "no
+  tags" or "no entities" (#3382).** With `llm.enabled` on and no model set, the Ollama model
+  is `gemma4:e2b`, which thinks before it answers. Ollama counts that thinking against the
+  token limit of the call, and the provider did not turn it off, so the model could use the
+  whole limit and return an empty answer. LLM auto-tagging and `mem_entity_scan` kept the
+  empty answer as their result, and the keyword and regex fallbacks did not run because the
+  call had not failed. Measured with `gemma4:e2b` on Ollama 0.40.13 over a five-line note,
+  five runs each: tagging came back empty in 2 and entity extraction in 5 before, and in 0
+  and 0 after. Two changes:
+  - Every request the Ollama provider sends now carries `think: false`, for all LLM
+    features. At a 256-token limit this took the empty answers to the tagging and entity
+    prompts from 5 of 5 to 0 of 5 on `gemma4:e2b` and from 3 of 3 to 0 of 3 on
+    `qwen3.5:2b`, and a tagging call on `gemma4:e2b` from 1.7 s to 0.1 s. `gemma3:270m`,
+    which has no thinking, accepted the field and answered. A model that used to think now
+    answers without it, so what it writes can differ.
+  - An empty answer to the tagging or entity prompt is now a failed call, on every provider,
+    so the fallback runs. `NONE` from the model still means "no entities".
+
+  Not changed: `mem_entity_scan` with `overwrite` still treats the regex fallback's result
+  as the new extraction when the LLM call fails, which can remove entities an earlier scan
+  wrote (#3383).
+
+- **The `tokenizer_fallback` warning's recovery rebuilds the store the server has open
+  (#3386).** Its `fix` told you to rebuild by running `mm config set search.tokenizer
+  kiwipiepy` with the server's launcher and environment. From a shell, that `mm` can open
+  another store than a plugin-launched server: a launcher can pass the server only some
+  environment variables, so a `MEMTOMEM_STORAGE__SQLITE_PATH` exported in the shell reaches
+  `mm` but not the server, and a relative `storage.sqlite_path` resolves against the shell's
+  working directory instead of the server's. The `fix` now rebuilds from inside the server,
+  with `mem_do(action="config", params={"key": "search.tokenizer", "value": "kiwipiepy"})`
+  through an MCP client connected to it. Before that it says to restart every process that
+  uses the store, `mm web` and `mm shell` among them, each with `search.tokenizer` set to
+  `kiwipiepy`, since a process still without the korean extra or configured with another
+  tokenizer writes `unicode61` rows into the rebuilt index, and to rebuild only once
+  `mem_status()` on each MCP server shows `search.tokenizer` as `kiwipiepy` and the warning
+  gone. A `kiwipiepy` setting made at runtime and never saved is lost on restart, which also
+  clears the warning, so the warning alone is not enough. Since #3385, the rebuild's reply
+  names the tokenizer it used, and the `fix` says to look for `kiwipiepy` there. `mm config
+  set` stays as the alternative where that `mm` has the extra and opens the same store.
+
+## [0.7.10] — 2026-11-15
+
+### Upgrading
+
+- **This release carries eight security fixes; upgrade every copy that serves MCP or the web
+  UI, and the `mm` CLI.** Seven close new advisories and the eighth closes the CLI and web
+  part of GHSA-ffh4-rj5x-2q25, which 0.7.9 left open. See Security for what each closes. The
+  plugins move their pin to 0.7.10 in the same release; a plugin that is not updated keeps
+  launching 0.7.9.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.24 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.10;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.10`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.10`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.10.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.9" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.9` to
+  `==0.7.10` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.10 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.10`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+- **`mem_export` takes a file name and writes it to `~/.memtomem/exports/`.** `output_file`
+  was a path. A client, prompt or workflow that passes one, `~/backup.json` or
+  `~/.memtomem/exports/backup.json` included, now gets `Export refused: output_file must be a
+  file name, not a path` and nothing is exported. Pass a name made of ASCII letters, digits,
+  `.`, `_` and `-` (at most 64 characters, no leading hyphen, no trailing dot, no Windows
+  device name), such as `backup.json`; the result names the full path. To keep a bundle
+  somewhere else, copy it out of that directory yourself. An `exports` directory that is a
+  symbolic link or a junction is refused; a link above it, such as `~/.memtomem` on another
+  disk, is followed. `mem_import` still takes a path, and the web UI's export and import are
+  unchanged. See Security.
+- **`mem_config` no longer changes `session_trace` settings.** Setting any of the ten
+  `session_trace.*` fields through `mem_config` or `mem_do(action="config")` returns
+  `'session_trace.<field>' cannot be changed through MCP` and names the terminal command,
+  `mm config set session_trace.<field> <value>`. `mm config set` and the web UI's
+  `PATCH /api/config` still change them, and `mem_config` still reads them. A `persist=true`
+  save of any other key no longer writes the `session_trace` section, so `config.json` keeps
+  what it had there. See Security.
+- **Outside settings, `mm context`, `mm mem init` and the web UI's sync refuse a project path that
+  is a link.** 0.7.9 said these still wrote through a linked runtime directory. Skills, agents,
+  commands, generated files, MCP servers and the `.gitignore` marker no longer do; settings sync
+  still follows a linked `.claude` and asks before a write whose destination is outside the
+  project, as before. When `.claude`, `.claude/skills` (or `agents`, `commands`), `.gemini`,
+  `.agents`, `.codex` or `.kimi` in a project is a symbolic link or a junction, wherever it
+  points, a project-scope sync skips that runtime, finishes the others and exits 1 after printing
+  `<entry> is a symbolic link or junction inside the project`; `sync --all-projects` counts the
+  project as failed. A pull from a linked runtime directory is refused, though
+  `mm context pull --from` another runtime proceeds; a linked `.github` skips the generated
+  `copilot-instructions.md`; a linked `.mcp.json` refuses the MCP server sync; and a linked
+  `.gitignore` stops `mm mem init` before it registers the tier. The web UI's routes refuse the
+  same writes; how a refusal appears in the response depends on the route. A project that links
+  one of these on purpose, a shared `.claude` for example, has to replace the link with a regular
+  directory or file. Diffs and the pull preview still read through a link, and
+  user-tier paths are not judged. See Security.
+- **The write guard has six more rules.** A write, index or sync that passed before can now
+  be refused when its text holds a password in a URL (`postgresql://user:<password>@host`),
+  a value after `x-api-key`, `client_secret`, `refresh_token` or `auth_token`, a `*_TOKEN=`
+  or `*_SECRET=` assignment, an AWS secret access key after its label with only whitespace
+  between, a Slack `xapp-` or `xoxe-` token, or an `Authorization: Bearer` header. Each
+  needs a value of 8 or more characters with a digit (20 or more for a bearer token, exactly
+  40 for the AWS key), so `client_secret=changeme` and a URL whose password is a placeholder
+  such as `<pw>` or `${DB_PASSWORD}` still pass. The `force_unsafe` valve outside
+  `project_shared` and what happens to a file the indexer accepted before are as in the
+  escape entry below (#3300). Content stored before this release is not re-scanned until
+  you run `mm mem rescan --scope <tier>` or `mm context rescan --scope <tier>`, once for each
+  tier to audit. See Security.
+- **The write guard reads the title and tags an entry is written with.** An add that passed before
+  is refused when a title or tag it writes matches a secret pattern (content that starts with its
+  own `## ` heading drops the title, and a dropped title is not read), on `mem_add`,
+  `mem_batch_add` and the MCP tools that write through `mem_add` (`mem_scratch_promote`,
+  `mem_agent_share` and `mem_reflect_save` among them, which take no `force_unsafe`), `mm add`,
+  the web UI's add and its scratch promote (served only by `mm web --mode dev`), the LangGraph
+  store, `mm agent share`, `mm review approve` and the interactive shell's add. Two of the
+  guard's rules
+  match a credential label before `:` or `=` whatever follows, so a title such as
+  `password: rotation policy` is refused although it holds no credential, while
+  `password rotation policy` passes. Where a surface has `force_unsafe`, it works as it does for
+  a match in the body. See Security.
+- **A web search is recorded only when the request carries the CSRF token.** The web UI
+  sends it on its searches, so nothing changes there. A script that calls `GET /api/search`
+  without the `X-Memtomem-CSRF` header still gets its results, but the search no longer
+  counts as an access, is not added to the search history, and returns a null
+  `query_run_id`, so no feedback can be attached to it. To have a script's searches
+  recorded, read the token from `GET /api/session` and send it in that header. An unrecorded
+  search also runs outside the result cache and the query-expansion cache, so a repeated
+  query is computed again, and expanded again by the model when LLM query expansion is on.
+  See Security.
+- **`POST /api/scratch/{key}/promote` refuses a `file` in a project tier.** The scratch
+  routes are served only by `mm web --mode dev`; the default mode does not have them. A direct
+  API call that names a file inside a `project_shared` or `project_local` tier registered under a
+  memory directory now gets 422 and the entry is not marked promoted. `POST /api/add` writes
+  to such a tier: give it the tier's `scope`, plus `confirm_project_shared=true` for
+  `project_shared`, and a `file` relative to the tier's memory directory (it refuses an
+  absolute path). It writes to the project the web server runs in, so a tier of another
+  project is not reached this way. The web UI's promote button sends no `file` and is
+  unchanged. See Security.
+- **memtomem now requires `opentelemetry-api>=1.45.2`.** The package was already installed
+  with `mcp`; the floor is new (see Security). An environment that holds OpenTelemetry at
+  an older version no longer resolves with memtomem until that pin moves. That includes a
+  pin on the SDK, which requires the API at exactly its own version:
+  `opentelemetry-sdk==1.45.1` needs `opentelemetry-api==1.45.1`.
+- **The write guard refuses a credential hidden by JSON-style escaping (#3300).** A write,
+  index or sync that passed before can now be refused when resolving `\"`, `\n`, `\t` or
+  `\uXXXX` in its text completes a rule: a JSON note or file holding `{"password": "…"}` in a
+  string, or a PEM header with escaped newlines. Text that only looks like an escape can match
+  too: `password\t=` in a regex or a path reads as `password`, a tab and `=`. Outside
+  `project_shared`, `force_unsafe` still writes it; in `project_shared` remove the text. When
+  the indexer now refuses a file it indexed before, the file's older chunks are held (hidden
+  from search) until a clean index; a new file is simply not indexed. In `mm mem rescan` and
+  `mm context rescan` JSON output, a span at or past the content's length points into a
+  resolved copy (see the operations guide).
+- **A settings sync refuses a canonical `.memtomem/settings.json` that holds a credential, at
+  every target tier (#3343).** The canonical is tracked by git whatever `hooks.target_scope`
+  is, so there is no `--force-unsafe` valve, including for `user` and `project_local`
+  targets that synced before. The check covers the whole file, keys the fan-out does not copy
+  (such as a top-level `env`) included. Remove the text from the canonical, then sync again.
+  Nothing is written when the refusal comes first; if the canonical changes to a refused one
+  during a sync, targets already written stay written and the rest report `error`.
+- **A namespace color must have 3, 4, 6 or 8 hex digits (#3116).** 0.7.7 accepted `#` and
+  any 3 to 8 hex digits, but a 5- or 7-digit value such as `#12345` is not a CSS color: the
+  Web UI left its Settings dot and Home bar uncolored, and its edit form showed black.
+  `mem_ns_update`, `mem_agent_register`, `mm agent register --color` and the Web UI's
+  namespace API now return an error for such a value and store nothing. A 5- or 7-digit color
+  stored earlier stays in the database and shows as the default color until you set a new one.
+- **A namespace description is scanned by the write guard (#3352).** `mem_ns_update`,
+  `mem_agent_register`, `mm agent register --description` and the Web UI's namespace edit
+  form stored the description without a scan, so a credential pasted there was kept in the
+  database and shown back by the Web UI and `mm agent list`. A description that matches a
+  secret pattern is now refused and nothing is stored: MCP returns an error,
+  `mm agent register` exits non-zero without registering, and the Web UI's namespace API
+  answers 403 `redaction_blocked`. There is no `force_unsafe` valve, since a description is a
+  label. Descriptions stored earlier are not re-scanned. Two of the guard's rules match a
+  credential label before `:` or `=` whatever follows, so a description such as
+  `set password: rotate monthly` or `api_key: see the vault` is refused although it holds no
+  credential (#3354). When every match is one of those two rules, the refusal names the
+  label wording and suggests a reword such as `password rotation`, and the Web UI's edit
+  form shows the same; any other match gets the refusal without it.
+
+### Fixed
+
+- **The Web UI's namespace edit form changes the stored color only when you pick one or
+  press Reset (#3116).** Every Save sent the color the form's color picker showed, so editing
+  only the description rewrote the stored value: `#abc` became `#aabbcc`, an alpha digit was
+  dropped, and `#808080` was cleared. Save now leaves the color out unless you picked a new
+  one; Reset still clears it, including a color the picker already shows as gray.
+
+- **A session summary is filed in its archive namespace even when another indexer reaches
+  the file first (#3340; one case remains, #3345).** `mem_session_end` wrote the summary file
+  and then indexed it
+  under `archive:session:<id>`, with no lock between the two. Another server's watcher or
+  `mm index` could index the file in that gap under its own namespace (`default` in a default
+  config). The session's own index then left those rows where they were, so the summary showed
+  up in a default `mem_search`, got no summary chunk id, and got no `summarizes` links. The
+  session now holds the file's lock from the write through its own index, so those indexers
+  wait. The index reads only the file the write placed: a path replaced by a link in between
+  is held rather than indexed through. A cancelled session end waits for its write to finish
+  before releasing the lock. An index call that finds the summary's directory missing still
+  skips the lock (#3345).
+- **The hook settings fan-out and the Web UI's settings conflict resolve now run the write
+  guard (#3343).** `mm context sync --include=settings` (and `generate`, the Web UI sync and
+  Sync All) copied `.memtomem/settings.json` into each runtime's settings file without
+  scanning it, so a rule that reached the canonical by a hand edit or a merge, rather than
+  through copy, migrate or promote, was written out unchecked. Resolving a conflict with
+  memtomem's version did the same for one rule. The fan-out now scans the canonical file as
+  written, before the first target, and again as each target re-reads it; resolve scans the
+  rule it writes. The skills, commands, agents and MCP server fan-outs already did this
+  (ADR-0011 §5). The canonical is itself tracked by git, so the copies exposed nothing it had
+  not already exposed; the change makes settings refuse like the other fan-outs.
+
+### Security
+
+- **The unprompted `mm context` and web UI writes no longer go through a link in the project:
+  the rest of [GHSA-ffh4-rj5x-2q25](https://github.com/memtomem/memtomem/security/advisories/GHSA-ffh4-rj5x-2q25) (high).**
+  0.7.9 removed the MCP routes and noted that the CLI and the web UI still wrote through a link.
+  In a cloned project, with no confirmation asked, `mm context sync` wrote skills, agents and
+  commands through a linked `.claude`, `.claude/skills` (or `agents`, `commands`), `.gemini`,
+  `.agents`, `.codex` or `.kimi`; `mm context generate` wrote `copilot-instructions.md` through a
+  linked `.github`; `mm mem init` and `mm context init --scope project_local` appended their
+  marker block to the file a linked `.gitignore` points at; and
+  `mm context sync --include mcp-servers` merged the project's MCP servers into the JSON file a
+  linked `.mcp.json` points at, which with `~/.claude.json` is a user-level registration.
+  These writes are now refused when an entry on the way is a link: every entry from the
+  project root down to a runtime's fan-out directory or a generated file's directory is judged
+  (symbolic links, junctions, and entries that cannot be inspected), wherever the link points,
+  and `.gitignore` and `.mcp.json`, which are written in place, are judged themselves. A link
+  at a generated file itself is replaced by a regular file rather than followed, as before.
+  Pull, import and extract from a linked runtime directory are refused too, so nothing is
+  copied from it into the canonical store. See Upgrading for what each command reports. Not
+  changed: the canonical `.memtomem` side; settings sync, which still follows a linked
+  `.claude` and whose host-write confirmation already covers every destination outside the
+  project; diffs and the pull preview, which still read through a link; a link planted at a
+  lock file's name; user-tier paths. Each check is made when the path is chosen.
+- **`mem_export` writes only into memtomem's export directory
+  ([GHSA-cvjr-876j-6h24](https://github.com/memtomem/memtomem/security/advisories/GHSA-cvjr-876j-6h24), medium).**
+  Since the first release, `mem_export(output_file=…)` and `mem_do(action="export")` wrote
+  the JSON bundle to any path and replaced a regular file already there. The bundle is
+  indented JSON that holds note text, and a shell that sources it runs a `$(…)` inside a
+  double-quoted line. So an agent following instructions found in its input could add a note
+  containing `$(command)`, export over `~/.zshrc`, `~/.bashrc`, `~/.zshenv` or `~/.profile`,
+  and have the command run at the next shell start. `output_file` is now a file name in one
+  portable grammar on every platform, and the bundle is written to `~/.memtomem/exports/`;
+  a path is refused before anything is exported, and so is an export directory that is a
+  link or a junction. The check is made when the path is chosen. Not changed: `mem_import`
+  reads from any path, since its boundary is the import redaction gate, and the web UI's
+  export is a download. ADR-0006 Axis G, which had accepted the path as a residual, is
+  amended. See Upgrading.
+- **`mem_config` can no longer switch session tracing on or choose where traces go
+  ([GHSA-h5h2-q8r9-qm43](https://github.com/memtomem/memtomem/security/advisories/GHSA-h5h2-q8r9-qm43), medium).**
+  From 0.2.4, `mem_config` and `mem_do(action="config")` set all ten `session_trace` fields
+  and saved them with `persist=true`, with neither the host nor the path checked. The traced
+  session commands (`mm session start`, `end`, `list`, `events`, `wrap` and
+  `mm activity log`) read the saved config, so an agent following instructions found in its
+  input could switch tracing on, raise `payload_mode` to `full`, send traces to a host it
+  runs, with the user's Langfuse keys presented to that host, or append trace rows to a file
+  it chose. The MCP setter now refuses every `session_trace` key before it reads the value.
+  A `persist=true` save of any other key also wrote the server's own copy of the section
+  over the file, which switched tracing back on for a user who had turned it off with
+  `mm config set` while the server ran; MCP saves now leave the section as the file has it.
+  Not changed: `mm config set` and `PATCH /api/config` set all ten fields, and `jsonl_path`
+  is not confined to a directory. Only the user chooses it now.
+- **The write guard catches a credential in a URL and under more labels
+  ([GHSA-h6g8-pjgf-2j99](https://github.com/memtomem/memtomem/security/advisories/GHSA-h6g8-pjgf-2j99), medium).**
+  None of these matched a rule: a password in a URL's userinfo
+  (`postgresql://admin:<password>@host`, `redis://:<password>@host`), a value after
+  `client_secret`, `x-api-key`, `refresh_token` or `auth_token`, `GITHUB_TOKEN=…`, an AWS
+  secret access key after its label with no `:` or `=`, Slack `xapp-` and bare `xoxe-`
+  tokens, and `Authorization: Bearer …`. Such content was stored, chunked and embedded on
+  every surface the guard protects, accepted into git-tracked `project_shared` files, and
+  sent to a hosted embedder or model when one is configured. The web UI's compose warning,
+  which uses the same list, missed them too. Six rules are added, 26 in all. Unlike the
+  older label rules, which match on the label alone, each needs a value: 8 or more token
+  characters with a digit, 20 or more for a bearer token, exactly 40 for an AWS key.
+  Accepted misses: a secret made of letters only, and a value whose first digit comes after
+  its 256th character. A value that runs straight into a parenthesis
+  (`refresh_token=uuid.uuid4().hex`) is read as a function call and skipped. In a session
+  trace, a long token matched by one of these rules is masked to its end. See Upgrading.
+- **The write guard reads the title and tags an entry is written with
+  ([GHSA-hf8j-8wfp-hwj2](https://github.com/memtomem/memtomem/security/advisories/GHSA-hf8j-8wfp-hwj2), low).**
+  From 0.1.33, every writer of a memory entry ran the guard on the entry's body and then
+  wrote the title into the `## ` heading and the tags into a `> tags:` line of the same
+  file, so a credential in the title or a tag passed the guard and landed in the memory
+  file. MCP `mem_add` also rendered a template after the guard, and a template puts the
+  title into its own heading. The guard now reads the block that is written, title and tags
+  included, and each tag as given, on `mem_add` (the template renders first) and the MCP tools
+  that write through it, `mem_batch_add`, `POST /api/add`, the web scratch promote (served
+  only by `mm web --mode dev`), `mm add`, the LangGraph store, `mm agent share`,
+  `mm review approve` and the interactive shell's add. Not changed, and
+  not scanned: the Hermes mirror header's `target` (a lowercase identifier of at most 32
+  characters) and Pinned Context's `block_id` and `agent_id` (letters, digits, `.`, `_` and
+  `-`), which writers of their own persist; the tags that the Notion and Obsidian importers
+  or `mem_fetch` merge into chunk metadata after their gate; and a `file=` name, which
+  becomes the chunk's `source_file`. See Upgrading.
+- **Scratch promote with an explicit `file` is judged for the tier that file is in
+  ([GHSA-5xgm-6q9x-vj9w](https://github.com/memtomem/memtomem/security/advisories/GHSA-5xgm-6q9x-vj9w), low; #2333).**
+  From 0.2.0, the web UI's `POST /api/scratch/{key}/promote` with `file` ran the write guard
+  for the user tier and then accepted any Markdown file under a memory directory. The route
+  is served only by `mm web --mode dev`. A
+  `project_shared` tier registered inside one is another tier: its files are tracked by git,
+  the guard refuses `force_unsafe` for it, and its writes ask for a confirmation. So
+  `force_unsafe` let a value the guard had flagged into a git-tracked file, and the
+  confirmation was never asked for. The indexer then refused the file, but the value was on
+  disk. The route now refuses any tier other than user with 422, before a lock or the file
+  is created and before the entry is marked promoted. Only a direct API call reached this:
+  the web UI's promote button sends no `file`. Not changed: the tier is still decided by the
+  path's spelling (#3268).
+- **A web search writes its records only when the request carries the CSRF token
+  ([GHSA-24vc-gwmh-77j9](https://github.com/memtomem/memtomem/security/advisories/GHSA-24vc-gwmh-77j9), low).**
+  `GET /api/search` raised the returned chunks' access counts, stored the query in the
+  search history and minted a run id. The CSRF guard, added in 0.1.36, asks for the token on
+  unsafe methods only, and its origin check passes a request that carries neither `Origin`
+  nor `Referer`. So a page elsewhere could make the user's browser write those records,
+  skewing the access-frequency boost and filling the history with its queries. The same
+  search now runs with or without the token, and only the recording needs it. The web UI
+  sends the token on its searches; when the server has restarted since the page loaded, it
+  fetches the current token and searches once more, so the search is recorded once. Not
+  changed: the origin check still passes a request with neither header. See Upgrading.
+- **The wiki's URL credential redaction no longer takes quadratic time
+  ([GHSA-fp6g-ch3g-p6g2](https://github.com/memtomem/memtomem/security/advisories/GHSA-fp6g-ch3g-p6g2), low).**
+  From 0.3.0, the expression that removes `user:password@` from a URL in the wiki's git
+  errors and its push and pull results tried a scheme at every position of a long run of
+  scheme characters and scanned to the run's end each time: 0.83 s for 40,000 letters. A
+  match may now start only where such a run starts, which takes 0.3 ms for the same input.
+  What is redacted is unchanged: on 300,000 random strings over URL characters the result
+  equals the old expression's.
+- **Upgrading memtomem now upgrades opentelemetry-api to the fix for
+  [GHSA-mf5v-w3w3-f6cg](https://osv.dev/vulnerability/GHSA-mf5v-w3w3-f6cg).** 0.7.9 moved the
+  lockfile to 1.45.2, but memtomem did not declare the package (it comes with `mcp`, which
+  accepts 1.28.0 and later), so an upgrade that did not re-resolve every dependency, such as
+  `pip install -U memtomem`, could keep 1.45.1: the case 0.7.9's Upgrading section describes.
+  memtomem now requires `opentelemetry-api>=1.45.2`, so any install that resolves 0.7.10 or
+  later gets a fixed release, and the release's artifact check refuses to publish a build
+  whose metadata lacks that floor. `mm upgrade` already reinstalled with a refreshed index;
+  for it the floor changes nothing.
+- **Every write guard now also reads its input with JSON-style escapes resolved (#3300).**
+  The guard scanned the text it was given. In a JSON file, or a JSON string inside other
+  text, a quote reads `\"`, a newline `\n`, and any character can be `\uXXXX`, so the
+  quoted-label rule and a PEM header split across lines missed a credential that the file's
+  reader decodes. Measured before this change, the copied settings hook fragment, an MCP
+  server definition and a `.json` file in a canonical directory all passed with
+  `{"password": "…"}` or `BEGIN\nRSA\nPRIVATE\nKEY` in a string, in `project_shared`.
+  `enforce_write_guard` and the audit-value sanitizer now scan the text plus up to two
+  copies with `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t` and `\uXXXX` resolved; nothing
+  is parsed, so duplicate keys, deep nesting and JSON after a header are covered. This
+  applies to every surface that calls the guard: memory writes and edits, indexing, context
+  sync, copy, migrate, install, bundles and pull, wiki promote, the Hermes mirror and the
+  LangGraph and LangChain stores. Stored content is unchanged; the copies are only scanned.
+  Content stored before this release is not re-scanned until you run
+  `mm mem rescan --scope <tier>` or `mm context rescan --scope <tier>`. YAML `\x` and TOML
+  `\U` escapes are not resolved.
+
+## [0.7.9] — 2026-11-14
+
+### Upgrading
+
+- **This release carries four security fixes; upgrade every copy that serves MCP or the web UI.**
+  See Security for what each closes. The plugins move their pin to 0.7.9 in the same release;
+  a plugin that is not updated keeps launching 0.7.8.
+- **Claude automation plugin users: upgrade the CLI too, with `mm upgrade`.**
+  `memtomem-automation` 0.3.23 runs prompt search, write-time indexing and
+  stop-time flushing only when the `mm` on your `PATH` reports exactly 0.7.9;
+  updating the plugins does not upgrade that CLI. Run
+  `mm upgrade --version 0.7.9`, confirm with `mm --version`, then start a new
+  Claude Code session.
+- **Claude plugin users with a manual MCP registration: align it with the new
+  pin.** The plugin now launches `memtomem[onnx]==0.7.9`. A manual entry that
+  still launches an earlier release no longer matches the plugin's launch, so
+  Claude cannot deduplicate the two and may expose duplicate tools. Run
+  `mm doctor --claude-mcp`, align the manual entry's launch with the plugin or
+  remove it, then reload and check `/mcp`.
+- **Any other MCP entry that launches an exact release keeps serving that
+  release: move its pin to 0.7.9.** Updating a plugin or the `mm` CLI does not
+  touch it. That covers an entry copied from the guides
+  (`uvx --isolated --from "memtomem[all]==0.7.8" memtomem-server`), one
+  `mm init --mcp` wrote while `mm` ran through `uvx` (it pins the release it
+  ran), a Kimi Code `mcp.json` entry, a Codex `[mcp_servers.memtomem]` section
+  (which wins over the plugin's server) and an OpenCode `mcp.memtomem` entry
+  (the plugin keeps it instead of adding its own). Change `==0.7.8` to
+  `==0.7.9` and restart the client; for Kimi Code, re-running
+  `mm init --mcp kimi` with the 0.7.9 CLI rewrites the entry. An entry that
+  launches an installed interpreter (`… -m memtomem.server`) runs whatever
+  memtomem that interpreter's environment has: `mm upgrade --version 0.7.9`
+  covers it when the interpreter belongs to the `uv tool` install; for any
+  other environment, upgrade memtomem there.
+- **Nine context-gateway tools are no longer on MCP; run them with `mm context`.** A client,
+  prompt or workflow that calls one of them gets an error: `Unknown tool: mem_context_…` when
+  called directly, `unknown action 'context_…'` through `mem_do`. The replacements are
+  `mm context init`, `generate`, `sync`, `pull`, `memory-migrate`, `migrate` (artifact
+  migration, and the former `artifact_migrate` alias), `copy` / `move` (artifact transfer) and
+  `version list` / `create` / `enable` / `promote` / `delete-label` (the former `promote`
+  alias is `mm context version promote`). The web UI keeps the ones it has a route for. See
+  Removed.
+- **A file indexed from an explicit path can no longer be edited or deleted by chunk id.**
+  `mm index <path>` and `mem_index(path=...)` outside every memory directory still index the
+  file and it stays searchable, but `mem_do("edit")`, `mem_do("delete")` and the web chunk
+  routes refuse it with `source_unmanaged` and write nothing. Edit the file itself, or
+  register its directory as a memory directory to edit it from memtomem. Files saved by the
+  web upload (`~/.memtomem/uploads`) stay editable. The web UI still shows the edit button for
+  such a chunk; the save is answered 409.
+- **Project-scope pinned writes through a link are refused.** `mem_pinned_set`,
+  `mem_pinned_delete`, `mm pinned set` and `mm pinned delete` with `--scope project_shared` or
+  `project_local` refuse when `.memtomem`, the tier directory, `pinned` or a directory below it
+  is a symlink or junction, wherever it points; nothing is written or removed. A project that
+  keeps one of them as a link on purpose has to replace it with a real directory. The user
+  scope and pinned reads are unchanged.
+- **The web UI refuses `/api/*` requests from a browser page on another origin.** Another
+  loopback port counts as another origin (`http://localhost:3000` against a UI on
+  `127.0.0.1:8080`), and reads are refused as well as writes (403). A tool that is not a
+  browser and sends no `Origin` or `Referer` is not affected. Behind a TLS-terminating proxy on
+  a loopback name every `/api/*` request is refused unless the server accepts the forwarded
+  scheme: forward `X-Forwarded-Proto` over a `127.0.0.1` connection and pass `Host` through with
+  its port, or start the UI with `--trusted-origin localhost`.
+- **The first 0.7.9 start rewrites the keyword index's file-name column once (#3208).** No
+  migration step and no schema change; see the Fixed entry. Running 0.7.8 or older against the
+  same database afterwards puts the full path back for the files it writes or moves, and those
+  rows match path words again until `mm index <memory dir> --force` rewrites them.
+- **An append can land and still be held out of search: re-index, do not append again
+  (#3289, #3320).** When the file a memory tool appended to is replaced by a link or another
+  file between the write and its re-index, the entry is on disk but the file's chunks are held
+  (hidden from search), and the tool answers with a warning, not an error; chunks stored under
+  a path spelling from before Unicode folding on macOS are not held and the warning says so
+  (#2907). Put a regular file
+  back at the path and re-index it to lift the hold; repeating the append would write the entry
+  twice. A refusal before the write (`… nothing was written. Try again.`) is different: there,
+  retrying is right.
+- **Narrower inputs and defaults.** Shell recall, the procedures list and Find Similar hide
+  system namespaces unless you ask for them (#3117). Registering a schedule refuses a `params`
+  key the job does not take (#3247). A credential written next to CJK text is refused by the
+  write guard where it used to pass; stored notes are not rescanned (#3298). The LangGraph
+  stores refuse a value whose strings hold a secret only their JSON form hid (#3300). A Notion
+  ZIP whose member names carry a root, a drive, a colon or an all-dots part is refused on every
+  platform (#3299). `GET /api/timeline` answers 422 for unparseable namespace syntax (#3288).
+  `ContextInfo(ranked_siblings=..., related_chunks=...)` raises `TypeError` (#3004). Each has
+  its entry below.
+- **`memtomem[onnx]` now requires `fastembed>=0.9.1` and `pillow>=13`, and the potion models
+  download `model.safetensors` on first load (#3246).** No reindex is needed; see Changed. An
+  install made without the lockfile keeps an older filelock until you run
+  `pip install -U filelock`, and an existing model cache keeps its mode until you run
+  `chmod 700 ~/.memtomem/cache/fastembed`; see Security.
+- **An existing environment keeps opentelemetry-api 1.45.1 until its dependencies are resolved
+  again.** A request with a crafted `traceparent` can stall a server on 1.45.1. Upgrading
+  memtomem alone may not move it; Security gives the step for each kind of install and the
+  version check.
+- **langchain-memtomem 0.2.1 follows this release** and requires `memtomem>=0.7.9,<0.8`.
+  Items its store wrote before that upgrade keep the `File:` / `Fragment` lines until each is
+  written again; see its CHANGELOG.
 
 - **`mm add --file` and the Web UI's `/api/add` with `file` refuse a file in another memory
   tier (#2821).** A file named relative to the user memory directory that lands in a project
@@ -48,13 +1941,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   builds the region with `memtomem.indexing.append_attribution.append_region(pre_image,
   appended)` and gets `IndexingStats.appended_chunk_ids`, the committed chunks whose line spans
   touch the appended lines, in file order, with `appended_attribution`: `"exact"` when every
-  one starts within the appended lines, `"merged"` when one starts before them (a short entry
-  merged into the previous section), and `"unverified"` with no ids otherwise. That covers a
-  file that is not the text the caller expected (another writer's bytes anywhere in it), a
-  file a chunker other than Markdown reads, masked chunks, chunk overlap anywhere in the file,
-  and an append that starts mid-line, because there a span does not say what a chunk holds.
-  Every single-entry append through `mem_add`'s write path reports it; `mem_batch_add` does
-  not yet. `mem_reflect_save`, `mem_agent_share` and a session's write provenance read it:
+  one starts on a line the append wrote, `"merged"` when one starts on a line from before it (a
+  short entry merged into the previous section), and `"unverified"` with no ids otherwise.
+  That covers a file that is not the text the caller expected (another writer's bytes anywhere
+  in it), a file a chunker other than Markdown reads, masked chunks, chunk overlap anywhere in
+  the file, and an append that starts mid-line, because there a span does not say what a chunk
+  holds.
+  Every append through `mem_add`'s write path reports it, and `mem_batch_add` reports one
+  attribution for the whole batch. `mem_reflect_save`, `mem_agent_share` and a session's write
+  provenance read it:
   `mem_consolidate_apply` still picks its chunk from `new_chunk_ids` (#3315).
 
 ### Changed
@@ -78,6 +1973,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Removed
 
+- **The context-gateway writes are off the MCP surface.** `mem_context_init`,
+  `mem_context_generate`, `mem_context_sync`, `mem_context_pull`, `mem_context_memory_migrate`,
+  `mem_context_artifact_migrate`, `mem_context_artifact_transfer`, `mem_context_version` and
+  `mem_context_promote` are no tool in any tool mode and no `mem_do` action, the `mem_do`
+  aliases `artifact_migrate` and `promote` are gone, and `MEMTOMEM_EXTRA_TOOLS` cannot name
+  them. `mem_context_version` goes although its `list` action only read, because it was one tool
+  with the writes. `mem_context_detect` and `mem_context_diff` stay. Every operation remains on
+  the `mm context` CLI (Upgrading lists the commands) and, where it has a route, the web UI, so
+  an agent with a shell runs it through the client's own command approval rather than with a
+  consent argument inside a memory tool call. The full-mode tool count goes from 102 to 93.
+  ADR-0044 records the decision; see Security.
 - **`ContextInfo.ranked_siblings` and `ContextInfo.related_chunks` are gone (#3004).** Both
   fields of `memtomem.models.ContextInfo` were declared for features that never shipped. Nothing
   set them and nothing read them, so they were always empty tuples. Code that passes either name
@@ -119,8 +2025,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the indexer attributes to the append (#3292) when it can, and `new_chunk_ids` as before when
   it cannot. An entry merged into a section that was never indexed now marks the session too,
   though nothing was deleted. The rules that marked a session after an append (a deleted
-  chunk, an indexing error, an exclusion or relink) are unchanged. `mem_batch_add`,
-  `mem_index` and `mem_fetch` record what they recorded before.
+  chunk, an indexing error, an exclusion or relink) are unchanged. `mem_batch_add` records the
+  chunks its whole batch became the same way, and a batch whose entries were all empty, which
+  writes nothing, records no event (it recorded the pending section's chunks). An entry that
+  starts with its own `## ` heading in a new file is attributed `"exact"`, not `"merged"`: its
+  chunk opens on the blank line the entry wrote above its header, so it no longer marks the
+  session. `mem_index` and `mem_fetch` record what they recorded before.
 - **`mm embedding-reset` no longer calls a reset of an empty store destructive (#2423).** A
   store stamped with one embedding model that never received a chunk, opened after the config
   names another model, still reports a mismatch and still needs
@@ -194,7 +2104,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   written file's chunks held as `source_relinked` and indexes nothing, and the result says the
   file "was replaced at its path". A file saved over the path by an editor in that window used
   to be indexed and reported as the write; it is now held until its next index pass, since the
-  write is not in it. A memory file that is a symlink is indexed where the write landed,
+  write is not in it (chunks stored under a pre-folding macOS path spelling excepted, #2907). A memory file that is a symlink is indexed where the write landed,
   wherever the link points afterwards. Imports still use the older check, which sees only a
   symlink at the file's own name. Not changed: the lookups a pass makes by path after its read
   (#3328, #3305, #3306).
@@ -220,9 +2130,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   covered: a replacement by another link to the same file; another process changing the file's
   content in place in between; on filesystems that report no file identity, a file replaced and
   put back around the open; on Windows, a directory on a new file's path replaced (a junction,
-  say), whether or not it is put back, and a refused create there can leave an empty file behind;
-  a link put, after the append, at a path that was already a link when read, which the re-index
-  still follows.
+  say), whether or not it is put back, and a refused create there can leave an empty file behind.
+  The re-index after the append no longer follows a link put at the path afterwards (#3320).
 
 - **A memory tool that finds its file's path replaced takes that file out of search (#3291).**
   When the path a memory tool read no longer leads to the same file by the time of its privacy
@@ -319,7 +2228,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   the first time this version opens them. On a store of 49,496 chunks that took
   about 4 seconds. If an older version later indexes or moves a file in the same
   database, that file's memories go back to the old behavior until this
-  version indexes it with `mm index --force` or rebuilds the FTS index. An
+  version indexes it with `mm index <memory dir> --force` or rebuilds the FTS index. An
   ordinary reindex does not rewrite unchanged memories.
 
 - **Web UI requests no longer answer HTTP 500 at once while another task holds a
@@ -367,8 +2276,106 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `SENTENCE_TRANSFORMERS_HOME`, since sentence-transformers 6 downloads there and earlier
   releases do not. A model given as a local directory is not checked.
 
+- **`mm session start --auto-end-stale` reports an oversized duration as a parameter error
+  (#3231).** `1000000000d`, beyond Python's `timedelta`, and `800000d`, which reaches back past
+  year 1, ended in an `OverflowError` traceback. Both now exit 2 with
+  `duration '<spec>' is too large.`, before storage is opened, so no session is created.
+- **`mm pinned set --file` reports a bad path instead of a traceback (#3232).** A missing path, a
+  directory or a file without read permission is now a usage error (exit 2) before anything
+  runs; a file that still fails to read, or is not UTF-8, is reported as
+  `Could not read <path>: <reason>` (exit 1).
+- **An unknown eval case or run no longer points at the database (#3233).** `mm quality show`,
+  `status` and `promote` with a name that does not exist, a name collision or a malformed label
+  added `Hint: storage backend error — run mm status …`; the database was fine. Those errors now
+  carry no hint.
+- **The Search tab's context-window "Off" option stays translated (#3235).** In Korean, saving or
+  reloading the config replaced 끄기 with "Off", and with a context window configured the
+  "Config (N↑M↓)" label was replaced by the plain Off text on boot and on every language switch.
+  Both labels now come from the locale files (new key `search.context_config`).
+- **Shape checks reject a trailing newline (#3236).** Python's `$` also matches before a final
+  newline, so six checks accepted `"<valid>\n"`: quality profile names and rerank model
+  segments, `mm upgrade --version` (which passed `memtomem==X\n` to uv), the project selector's
+  scope-id shape (a `"p-…\n"` value is now read as a path), instance-registry file names (a stray
+  `<name>\n` file was read as a live instance), and the storage-layer namespace check (the public
+  namespace validator already refused these). Frontmatter validity dates stay lenient.
+- **Saving one card in the Sources chunk browser keeps the drafts open in the others (#3077).**
+  The refresh after a save rebuilt every card, closing another card's editor and its unsaved
+  text, and a save that finished after you moved to another source replaced that view. The
+  refresh now waits until no editor is open, and only for the source still shown. While it
+  waits, the saved chunk's Copy, Edit and Delete (and the Document view's Copy All) are disabled,
+  with a notice that says why.
+- **`GET /api/timeline` treats a blank `namespace=` as no filter, and answers 422 for
+  unparseable namespace syntax (#3275, #3288).** A blank value was read as the namespace `""`,
+  which returned an empty timeline and dropped the system-namespace exclusion; it now behaves
+  like an omitted one, as `/api/search` does. Malformed syntax answered 400, where `/api/search`,
+  `/api/procedures` and `/api/chunks/{id}/similar` answer 422; it now answers 422 too.
+- **The Context Gateway's last "import" and "reverse-sync" wording says "pull" (#1867).** The
+  version snapshot note written by two pull paths read `import from …` and is now `pull from …`,
+  as the third already wrote; notes already stored in `versions.json` are not rewritten. The
+  visible "reverse-sync updates dir layout" warning and the published endpoint descriptions use
+  the same word.
+
 ### Security
 
+- **A file indexed from outside the memory directories can no longer be rewritten through its
+  chunk ([GHSA-c88f-mr95-mvv5](https://github.com/memtomem/memtomem/security/advisories/GHSA-c88f-mr95-mvv5), high).**
+  `mem_index` accepts any path, and edit and delete by chunk id then wrote to the chunk's source
+  file without asking where it was, so an MCP caller in the default `core` mode could index any
+  file the user can write with an indexable extension and replace its content with
+  `mem_do("edit")`. Edit and delete by chunk id over MCP and in the web UI, and the LangGraph
+  store's `delete`, now refuse a source that does not resolve under a configured index root, the upload directory
+  or, for project memory, that project's own tier directory, with `source_unmanaged`, before any
+  lock file is created. A link inside a memory directory that points out of it is not managed,
+  and a project tier directory that is itself a link gives no project-root authority (a
+  directory also listed in `indexing.memory_dirs` stays managed through that entry). Indexing an explicit path
+  no longer creates a `.<name>.lock` file beside it either: the lock for a source outside every
+  root lives under memtomem's per-user runtime directory. A sidecar already there is still
+  honoured, and a link at that name is never locked through; on Windows, which has no
+  `O_NOFOLLOW`, a link swapped in at that instant can have its target opened and closed again
+  untouched.
+- **Settings sync and the other context-gateway writes are no longer reachable over MCP
+  ([GHSA-vx6r-2p97-wjp7](https://github.com/memtomem/memtomem/security/advisories/GHSA-vx6r-2p97-wjp7), high).**
+  `mem_context_sync` and `mem_context_generate` merged a project's `.memtomem/settings.json`
+  hooks into `~/.claude/settings.json`, `~/.codex/hooks.json` and `~/.gemini/settings.json` once
+  the caller passed `allow_host_writes=true`, an argument the calling agent sets itself; and
+  migrating a project skill to the user tier followed by a user-scope sync installed it in every
+  runtime with no consent argument at all. The nine write tools are removed from MCP (see
+  Removed), so no tool argument stands in for the user's consent. The CLI asks at the terminal
+  before a settings write outside the project, as before.
+- **A project symlink no longer redirects memtomem's MCP writes out of the project
+  ([GHSA-ffh4-rj5x-2q25](https://github.com/memtomem/memtomem/security/advisories/GHSA-ffh4-rj5x-2q25), high).**
+  A link such as `.claude -> ~/.claude`, `.gitignore -> <file>` or
+  `.memtomem/memories/pinned/general -> <directory>` in a cloned project carried MCP writes
+  there: runtime fan-out from sync, the `.gitignore` marker from init, and pinned `set` (create
+  or rewrite) and `delete` (unlink). Sync and init are off MCP (above). Project-scope pinned
+  writes and deletes refuse when any entry from `.memtomem` down to the block file's parent is a
+  symlink, a junction or cannot be inspected; see Upgrading. The check is made when the path is
+  chosen, and the user tier is not judged. Not changed: `mm context sync` and the web UI's
+  project-scope sync still write through a linked runtime directory such as `.claude`; check a
+  cloned project's links before running them.
+- **The web UI no longer answers pages on another origin, including another loopback port
+  ([GHSA-fpqf-c22f-cw47](https://github.com/memtomem/memtomem/security/advisories/GHSA-fpqf-c22f-cw47), high).**
+  Its CORS rule echoed any loopback origin and its origin check accepted any loopback port, so a
+  page served from another local port (a dev server, a notebook, anything listening on
+  `localhost`) could read memory content and the CSRF token from `GET /api/session`, and from
+  0.6.0 send token-carrying writes, among them a user-tier skill write. The app now installs no
+  CORS middleware, and an `Origin` / `Referer` on a loopback name passes only when its scheme,
+  host and port are the ones the request was addressed to; `OPTIONS` goes through the same
+  checks. A request that names no origin still passes, a hostname named with
+  `--trusted-origin` passes on every port, and paths outside `/api/` are not gated, as before.
+  See Upgrading for proxies.
+- **The LangGraph stores' write guard now reads the strings inside a value as they are
+  stored (#3300).** `MemtomemBaseStore` (0.3.9 through 0.7.8) and `MemtomemHybridStore`
+  (0.6.0 through 0.7.8) scanned a value only in its JSON-serialized form, where `"` reads
+  `\"` and a newline reads `\n`. A rule that needs a literal quote or whitespace, such as the
+  quoted-label rule (`{"password": "…"}` inside a string) or a PEM header split across lines,
+  then did not match, and the store kept and returned the string verbatim: in every scope,
+  `project_shared` included, and without `force_unsafe`. Provider-prefixed tokens were still
+  caught. Both guards now also scan every key and string of the value raw
+  (`privacy.value_scan_parts`), so such a write is refused, or with `force_unsafe` outside
+  `project_shared` written as before. `MemtomemBaseStore` now separates the parts it scans
+  the way the hybrid store does, so a label in one identifier no longer pairs with the next
+  identifier. Records written before this release are not re-scanned.
 - **`mem_import_notion` no longer writes a ZIP member outside the output directory on
   Windows (#3299).** From 0.3.6 through 0.7.8 the member-name check asked only whether the
   name was absolute on the host or had a `..` part. On Windows a name with a root but no
@@ -433,6 +2440,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   as word characters, which is what the Web UI's pre-check already did with the same
   patterns. Nothing changes for a token between ASCII neighbours. A token directly after an
   accented Latin letter is matched too. Text stored before this change is not rescanned.
+- **opentelemetry-api moves from 1.45.1 to 1.45.2 in the lockfile** for
+  [GHSA-mf5v-w3w3-f6cg](https://osv.dev/vulnerability/GHSA-mf5v-w3w3-f6cg)
+  (CVE-2026-126360, published on 2026-11-13): parsing a crafted `traceparent` value takes
+  quadratic time. The memtomem server is reachable through it. The MCP SDK it is built on
+  reads `traceparent` from the `_meta` of a request with this parser, so a client can
+  stall the server with one request: a stdio server on 1.45.1 answered a `ping` whose
+  `_meta.traceparent` was a valid value followed by `-`, 40,000 spaces, a newline and one
+  more character after 3.0 s, against 0.001 s without it. On 1.45.2 the SDK's extraction
+  helper refuses a value longer than 512 characters at once (measured on the helper, not
+  through a server). Over stdio the client is the agent runtime that started the server;
+  over a network transport it is anyone who can reach the port. `opentelemetry-sdk` moves
+  to 1.45.2 and `opentelemetry-semantic-conventions` to 0.66b2 with it, since the SDK pins
+  the API version exactly. No memtomem package declares opentelemetry-api (it comes with
+  `mcp`), so the published constraints are unchanged: what moves is the lockfile, which
+  development and CI install from. An install that resolves its dependencies now gets a
+  fixed release. An environment that already exists keeps the version it has until its
+  dependencies are resolved again, and how to do that depends on how memtomem was
+  installed. The steps of the [AnyIO runtime update guide](docs/guides/anyio-security-update.md)
+  apply with `opentelemetry-api` in place of AnyIO: `mm upgrade` or
+  `uv tool upgrade memtomem` for a `uv tool` install; `uv cache clean opentelemetry-api`
+  and then `uv cache prune` for cached `uvx` launches, the plugin launch lines included;
+  `pip install -U opentelemetry-api` in a virtual environment, with `opentelemetry-sdk`
+  added where the `langfuse` extra is installed. Restart the MCP clients afterwards, and
+  check with the interpreter that runs memtomem that
+  `python -c "from importlib.metadata import version; print(version('opentelemetry-api'))"`
+  prints 1.45.2 or later.
 
 ## [0.7.8] — 2026-11-10
 
@@ -528,12 +2561,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   memory directory, which is indexed like any other note. The provider README
   lists what is stored, sent and dropped, and how to purge a mirror.
 - **`mem_search` takes `deadline_ms`, a budget for the server's own
-  processing.** It bounds the wait for a read connection, and is checked between
-  search stages and when a queued query embedding reaches the model, which then
-  does not run; past it the call returns `Error (retryable): … deadline …
-  exceeded …` and records nothing. Work already running — a SQLite read, an
-  embedding slice — finishes first, and a query embedding queued behind other
-  inference waits for it before failing, so this is not a response deadline.
+  processing.** It bounds the wait for a read connection, caps the reranker's
+  timeout, and is checked between search stages and when the worker picks up a
+  queued ONNX query embedding, which does not run if the budget has run out by
+  then. When the search detects an expiry, the call returns `Error (retryable):
+  … deadline … exceeded …`, persists no query-run observation and counts no
+  access. Work already running — a SQLite read, an embedding slice — finishes
+  first, and a query embedding queued behind other inference waits for it, so
+  this is not a response deadline.
   Without it, search runs exactly as before.
 - **`mem_do(action="version")` advertises `hermes_mirror`, `search_deadline_ms`
   and `namespace_selectors`.** The Hermes provider asks before its first call

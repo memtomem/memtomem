@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import importlib.util
 import copy
 import http.client
+import importlib.util
 import io
 import json
 import shlex
@@ -12,6 +12,7 @@ import subprocess
 import tarfile
 import tomllib
 import urllib.error
+import urllib.parse
 import zipfile
 from pathlib import Path
 from types import ModuleType
@@ -57,6 +58,7 @@ def _repo(
         '  "idna>=3.15",\n'
         '  "pyjwt>=2.13.0",\n'
         '  "python-multipart>=0.0.27",\n'
+        '  "opentelemetry-api>=1.45.2",\n'
         "]\n\n"
         "[project.optional-dependencies]\n"
         f'onnx = ["fastembed>=0.9.1,<0.10", "urllib3{urllib3}"]\n'
@@ -105,6 +107,7 @@ def _metadata(
         "idna>=3.15",
         "pyjwt>=2.13.0",
         "python-multipart>=0.0.27",
+        "opentelemetry-api>=1.45.2",
         f'urllib3{urllib3}; extra == "all"',
         f'urllib3{urllib3}; extra == "onnx"',
         f'urllib3{urllib3}; extra == "langfuse"',
@@ -1237,6 +1240,44 @@ def test_artifacts_reject_missing_floor(tmp_path: Path) -> None:
         rp.validate_artifacts(_dist(tmp_path, metadata=body), "0.3.6", repo)
 
 
+@pytest.mark.parametrize("name", sorted(rp._SECURITY_DIRECT_NAMES))
+def test_every_security_floor_is_required_of_the_project_and_the_artifacts(
+    tmp_path: Path, name: str
+) -> None:
+    """Each name in the set is a floor memtomem declares for a dependency it
+    could otherwise get transitively, so dropping one from ``pyproject.toml``
+    or from the built metadata must stop a release, whichever name it is."""
+    repo = _repo(tmp_path)
+    pyproject = repo / "packages" / "memtomem" / "pyproject.toml"
+    declared = pyproject.read_text(encoding="utf-8")
+    lines = [line for line in declared.splitlines(keepends=True) if f'"{name}>' in line]
+    assert len(lines) == 1, lines
+
+    built = _metadata()
+    requires = [
+        line
+        for line in built.splitlines(keepends=True)
+        if line.startswith(f"Requires-Dist: {name}>".encode())
+    ]
+    assert len(requires) == 1, requires
+    with pytest.raises(rp.ReleaseCheckError, match="direct floors"):
+        rp.validate_artifacts(
+            _dist(tmp_path, metadata=built.replace(requires[0], b"")), "0.3.6", repo
+        )
+
+    pyproject.write_text(declared.replace(lines[0], ""), encoding="utf-8")
+    with pytest.raises(rp.ReleaseCheckError, match="security-sensitive direct dependencies"):
+        rp.security_metadata_contract(repo)
+
+
+def test_the_real_project_is_held_to_the_opentelemetry_api_floor() -> None:
+    """The contract is derived from the checkout's own ``pyproject.toml`` and
+    the registered names. The floor dropped or lowered there, or the name
+    taken out of the set, fails here and not first at release time."""
+    direct, _ = rp.security_metadata_contract(_ROOT)
+    assert "opentelemetry-api>=1.45.2" in direct
+
+
 def test_artifacts_reject_missing_extra_marker(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     body = _metadata().replace(b'Requires-Dist: urllib3>=2.7.0; extra == "onnx"\n', b"")
@@ -1478,9 +1519,46 @@ def test_wait_ci_cli_reports_truncated_response_without_traceback(
     assert not output.out
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(b"[]", id="list"),
+        pytest.param(b'"x"', id="string"),
+        pytest.param(b"0", id="number"),
+        pytest.param(b"null", id="null"),
+    ],
+)
+def test_wait_ci_counts_non_object_body_as_api_error(monkeypatch, body) -> None:
+    clock = _Clock()
+    calls = []
+
+    def open_request(request, timeout):
+        response = _JSONResponse(body)
+        calls.append(response)
+        return response
+
+    monkeypatch.setattr(rp.urllib.request, "urlopen", open_request)
+    with pytest.raises(rp.ReleaseCheckError, match="3 consecutive times") as caught:
+        rp.wait_for_exact_main_ci(
+            repository="memtomem/memtomem",
+            sha="abc",
+            token="token",
+            timeout_seconds=10,
+            interval_seconds=1,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+    assert "response is not a JSON object" in str(caught.value)
+    assert isinstance(caught.value.__cause__, rp.ReleaseCheckError)
+    assert len(calls) == 3
+    assert clock.now == 2
+
+
 def test_cli_converts_protocol_error_at_the_final_boundary(monkeypatch, capsys):
-    # Inject past the HTTP boundaries to verify the CLI's defensive fallback;
-    # current HTTP callers already convert protocol errors themselves.
+    # Replacing ``validate_opencode_pypi`` bypasses the normal exception conversion,
+    # so only ``main``'s fallback can catch this. In a real run ``_request_json``
+    # converts protocol errors itself; ``_request_runs`` does not, and its polling
+    # caller ``wait_for_exact_main_ci`` converts them.
     def fail(*args, **kwargs):
         raise http.client.BadStatusLine("broken status")
 
@@ -1524,16 +1602,34 @@ def _pypi_metadata(version="0.3.6", description=None):
     }
 
 
+_OPENCODE_LAUNCH_LINE = (
+    'export const MCP_LAUNCH_ARGS = ["--python", "3.12", "--from", "memtomem[onnx]==0.3.6", '
+    '"memtomem-server"] as const;\n'
+)
+
+
+_OPENCODE_LAUNCH_MULTILINE = (
+    "export const MCP_LAUNCH_ARGS = [\n"
+    '  "--python", "3.12",\n'
+    '  "--from", "memtomem[onnx]==0.3.6",\n'
+    '  "memtomem-server",\n'
+    "] as const;\n"
+)
+
+
 def _opencode_repo(tmp_path):
     repo = _repo(tmp_path)
     contract = repo / "packages/memtomem-plugin-assets/contract.toml"
     contract.parent.mkdir(parents=True)
-    contract.write_text('[core]\nversion = "0.3.6"\nmcp_extras = ["onnx"]\n', encoding="utf-8")
+    contract.write_text(
+        '[core]\nversion = "0.3.6"\nmcp_extras = ["onnx"]\n[hermes]\npython = "3.12"\n',
+        encoding="utf-8",
+    )
     generated = repo / "packages/opencode-memtomem/src/generated.ts"
     generated.parent.mkdir(parents=True)
     generated.write_text(
         'export const CORE_VERSION = "0.3.6";\n'
-        'export const MCP_REQUIREMENT = "memtomem[onnx]==0.3.6";\n',
+        'export const MCP_REQUIREMENT = "memtomem[onnx]==0.3.6";\n' + _OPENCODE_LAUNCH_LINE,
         encoding="utf-8",
     )
     return repo
@@ -1671,9 +1767,22 @@ def test_registry_rejects_bad_metadata_without_polling(tmp_path, response):
 
 @pytest.mark.parametrize("state", ["active", "deprecated", "deleted"])
 def test_registry_refuses_every_already_listed_state(tmp_path, state):
-    replies = iter([(200, _pypi_metadata()), (200, {"status": state})])
+    calls = []
+
+    def fetch(url, timeout):
+        calls.append(url)
+        if url.startswith("https://pypi.org/"):
+            return 200, _pypi_metadata()
+        # The default registry API hides deleted versions: without this query a
+        # deleted record answers like a version that was never published.
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        if state == "deleted" and query.get("include_deleted") != ["true"]:
+            return 404, None
+        return 200, {"status": state}
+
     with pytest.raises(rp.ReleaseCheckError, match="already listed"):
-        rp.validate_registry_publish("v0.3.6", _repo(tmp_path), fetch_json=lambda *_: next(replies))
+        rp.validate_registry_publish("v0.3.6", _repo(tmp_path), fetch_json=fetch)
+    assert [url.startswith("https://pypi.org/") for url in calls] == [True, False]
 
 
 @pytest.mark.parametrize("status", [301, 401, 403, 429, 500, 503])
@@ -1747,7 +1856,7 @@ def test_opencode_refuses_pin_drift_before_network(tmp_path, change):
     if change == "version":
         text = text.replace('CORE_VERSION = "0.3.6"', 'CORE_VERSION = "0.3.7"')
     elif change == "requirement":
-        text = text.replace("memtomem[onnx]", "memtomem[all]")
+        text = text.replace('MCP_REQUIREMENT = "memtomem[onnx]', 'MCP_REQUIREMENT = "memtomem[all]')
     elif change == "duplicate":
         text += 'export const CORE_VERSION = "0.3.6";\n'
     elif change == "missing":
@@ -1756,6 +1865,37 @@ def test_opencode_refuses_pin_drift_before_network(tmp_path, change):
         (repo / "packages/memtomem-plugin-assets/contract.toml").write_text("[core]\n")
     generated.write_text(text)
     with pytest.raises(rp.ReleaseCheckError):
+        rp.validate_opencode_pypi(repo, fetch_json=lambda *_: pytest.fail("network called"))
+
+
+@pytest.mark.parametrize(
+    "launch_line",
+    [
+        # Only the array the server launches from drifts; the two scalar constants agree.
+        _OPENCODE_LAUNCH_LINE.replace("==0.3.6", "==0.3.7"),
+        _OPENCODE_LAUNCH_LINE.replace("[onnx]", "[all]"),
+        _OPENCODE_LAUNCH_LINE.replace('"--python", "3.12", ', ""),
+        _OPENCODE_LAUNCH_LINE.replace('"3.12"', '"3.13"'),
+        _OPENCODE_LAUNCH_LINE.replace('"memtomem-server"', '"memtomem"'),
+        _OPENCODE_LAUNCH_LINE.replace('"memtomem-server"]', '"memtomem-server"'),
+        _OPENCODE_LAUNCH_LINE * 2,
+        "",
+        # The expected line survives only in a comment; the live export differs.
+        "/*\n"
+        + _OPENCODE_LAUNCH_LINE
+        + "*/\n"
+        + _OPENCODE_LAUNCH_MULTILINE.replace("3.12", "3.13"),
+        # Not the renderer's shape, even with the right values.
+        _OPENCODE_LAUNCH_MULTILINE,
+    ],
+)
+def test_opencode_refuses_launch_argument_drift_before_network(tmp_path, launch_line):
+    repo = _opencode_repo(tmp_path)
+    generated = repo / "packages/opencode-memtomem/src/generated.ts"
+    text = generated.read_text()
+    assert text.count(_OPENCODE_LAUNCH_LINE) == 1
+    generated.write_text(text.replace(_OPENCODE_LAUNCH_LINE, launch_line))
+    with pytest.raises(rp.ReleaseCheckError, match="MCP_LAUNCH_ARGS"):
         rp.validate_opencode_pypi(repo, fetch_json=lambda *_: pytest.fail("network called"))
 
 
@@ -1788,6 +1928,17 @@ def test_http_probe_distinguishes_bad_json_from_transient_network(monkeypatch):
     monkeypatch.setattr(rp.urllib.request, "urlopen", unavailable)
     with pytest.raises(rp._ProbePending, match="could not confirm"):
         rp._request_json("https://pypi.org/example", 10)
+
+
+def test_http_probe_treats_malformed_utf8_as_terminal(monkeypatch):
+    # Valid JSON apart from the one byte, so only decoding can refuse it.
+    monkeypatch.setattr(
+        rp.urllib.request, "urlopen", lambda *a, **kw: _JSONResponse(b'{"info": "\xff"}')
+    )
+    with pytest.raises(rp.ReleaseCheckError, match="invalid JSON") as error:
+        rp._request_json("https://pypi.org/example", 10)
+    assert not isinstance(error.value, rp._ProbePending)
+    assert isinstance(error.value.__cause__, UnicodeDecodeError)
 
 
 @pytest.mark.parametrize(
@@ -2058,7 +2209,8 @@ def test_readiness_workflow_guard_rejects_dependency_and_order_bypasses(bypass):
 
 
 _CLAUDE = "packages/memtomem-claude-plugin"
-_CLAUDE_LAUNCH = ("--from", "memtomem[onnx]==0.6.7", "memtomem-server")
+_CLAUDE_PYTHON = ("--python", "3.12")
+_CLAUDE_LAUNCH = (*_CLAUDE_PYTHON, "--from", "memtomem[onnx]==0.6.7", "memtomem-server")
 _CLAUDE_CONTRACT = "packages/memtomem-plugin-assets/contract.toml"
 
 
@@ -2069,6 +2221,7 @@ def _claude_repo(
     args: tuple[object, ...] = _CLAUDE_LAUNCH,
     core: str = "0.6.7",
     extras: tuple[str, ...] = ("onnx",),
+    hermes: str = '[hermes]\npython = "3.12"\n',
 ) -> Path:
     repo = tmp_path / "claude"
     (repo / _CLAUDE / ".claude-plugin").mkdir(parents=True)
@@ -2082,7 +2235,8 @@ def _claude_repo(
     contract = repo / _CLAUDE_CONTRACT
     contract.parent.mkdir(parents=True)
     contract.write_text(
-        f'[core]\nversion = "{core}"\nmcp_extras = {json.dumps(list(extras))}\n', encoding="utf-8"
+        f'[core]\nversion = "{core}"\nmcp_extras = {json.dumps(list(extras))}\n{hermes}',
+        encoding="utf-8",
     )
     return repo
 
@@ -2130,18 +2284,23 @@ def test_claude_plugin_refuses_a_manifest_version_no_tag_can_name(tmp_path, vers
 @pytest.mark.parametrize(
     "args",
     [
-        ("--from", "memtomem-server"),
-        ("--with", "memtomem[onnx]==0.6.7", "memtomem-server"),
-        ("--from", "memtomem[onnx]==0.6.7", "memtomem==0.6.7"),
-        ("--from", "memtomem[onnx]==0.6.7", "memtomem-server", "MemToMem>=999.0.0"),
-        ("--from", 7, "memtomem-server"),
-        ("--from", "memtomem[onnx]>=0.6.7", "memtomem-server"),
-        ("--from", "memtomem[onnx]==0.6.8", "memtomem-server"),
-        ("--from", "memtomem[all]==0.6.7", "memtomem-server"),
-        ("--from", "memtomem==0.6.7", "memtomem-server"),
-        ("--from", "memtomem[]==0.6.7", "memtomem-server"),
-        ("--from", " memtomem[onnx]==0.6.7", "memtomem-server"),
-        ("--from", "MemToMem[onnx]==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--with", "memtomem[onnx]==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem[onnx]==0.6.7", "memtomem==0.6.7"),
+        (*_CLAUDE_LAUNCH, "MemToMem>=999.0.0"),
+        (*_CLAUDE_PYTHON, "--from", 7, "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem[onnx]>=0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem[onnx]==0.6.8", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem[all]==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "memtomem[]==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", " memtomem[onnx]==0.6.7", "memtomem-server"),
+        (*_CLAUDE_PYTHON, "--from", "MemToMem[onnx]==0.6.7", "memtomem-server"),
+        # The interpreter request: dropped, another minor, an open range, or out of place.
+        _CLAUDE_LAUNCH[2:],
+        ("--python", "3.13", *_CLAUDE_LAUNCH[2:]),
+        ("--python", ">=3.12", *_CLAUDE_LAUNCH[2:]),
+        (*_CLAUDE_LAUNCH[2:4], *_CLAUDE_PYTHON, "memtomem-server"),
     ],
 )
 def test_claude_plugin_refuses_a_launch_that_is_not_the_contract_one_before_any_network(
@@ -2165,9 +2324,29 @@ def test_claude_plugin_refuses_a_launch_left_behind_by_a_contract_bump(tmp_path)
     "extras,pin", [((), "memtomem[]==0.6.7"), (("onnx", "web_ui"), "memtomem[onnx,web_ui]==0.6.7")]
 )
 def test_claude_plugin_accepts_whatever_extras_the_contract_renders(tmp_path, extras, pin):
-    repo = _claude_repo(tmp_path, args=("--from", pin, "memtomem-server"), extras=extras)
+    args = (*_CLAUDE_PYTHON, "--from", pin, "memtomem-server")
+    repo = _claude_repo(tmp_path, args=args, extras=extras)
     reply = (200, _pypi_metadata(version="0.6.7"))
     assert rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=lambda *_: reply)
+
+
+@pytest.mark.parametrize(
+    "hermes",
+    [
+        "",
+        "[hermes]\n",
+        "[hermes]\npython = 3.12\n",
+        '[hermes]\npython = ""\n',
+        '[hermes]\npython = " "\n',
+        '[hermes]\npython = ">=3.12"\n',
+        '[hermes]\npython = "3.12.1"\n',
+        '[hermes]\npython = "3"\n',
+    ],
+)
+def test_claude_plugin_refuses_a_contract_with_no_interpreter_to_ask_uv_for(tmp_path, hermes):
+    repo = _claude_repo(tmp_path, hermes=hermes)
+    with pytest.raises(rp.ReleaseCheckError, match=r"hermes\.python"):
+        rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=_no_network)
 
 
 @pytest.mark.parametrize("contract", ["", "[core]\n", '[core]\nversion = "0.6.7"\n', None])
@@ -2181,9 +2360,7 @@ def test_claude_plugin_refuses_an_unusable_contract_before_any_network(tmp_path,
         rp.validate_claude_plugin("claude-plugin-v0.5.11", repo, fetch_json=_no_network)
 
 
-_CLAUDE_SERVER = (
-    '{"command": "uvx", "args": ["--from", "memtomem[onnx]==0.6.7", "memtomem-server"]}'
-)
+_CLAUDE_SERVER = json.dumps({"command": "uvx", "args": list(_CLAUDE_LAUNCH)})
 
 
 @pytest.mark.parametrize(

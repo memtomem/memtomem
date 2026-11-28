@@ -21,9 +21,11 @@ Namespaces organize memories into scoped groups.
 mem_ns_set(namespace="work")          # set session default
 mem_ns_get()                          # check current namespace
 mem_ns_list()                         # list all namespaces with counts
-→ default: 200 chunks
-  work: 150 chunks
-  personal: 94 chunks
+→ Namespaces (3 total):
+
+    default: 200 chunks
+    personal: 94 chunks
+    work: 150 chunks
 ```
 
 After `mem_ns_set`, search and add default to that namespace. `mem_index` is
@@ -35,13 +37,33 @@ explicitly still overrides both.
 ### Namespace metadata
 
 ```
-mem_ns_list()
-→ default: 200 chunks
-  work: 150 chunks (description="Company project docs", color="#3B82F6")
-  personal: 94 chunks
-
 mem_ns_update(namespace="work", description="Company project docs", color="#3B82F6")
+→ Updated metadata for namespace 'work'
+
+mem_ns_list()
+→ Namespaces (3 total):
+
+    default: 200 chunks
+    personal: 94 chunks
+    work: 150 chunks
 ```
+
+`mem_ns_list` prints names and chunk counts only. The Web UI shows the
+description and color under Settings → Namespaces, and `mm agent list` prints
+the description of each agent namespace and of `shared`.
+
+The description is scanned by the write guard on every surface that sets it
+(`mem_ns_update`, `mem_agent_register`, `mm agent register --description`, the
+Web UI's edit form), and there is no bypass for it. Two of the guard's rules
+match a credential label before `:` or `=` whatever follows, so
+`description="set password: rotate monthly"` is refused although it holds no
+credential. Spaces before the separator (`password = …`), a label inside a
+longer word (`mypassword:`) and a JSON-style escape (`password\t=`) match too.
+When every match is one of those two rules, the refusal names the label
+wording; reword the description, for example `password rotation`. A
+description that matches any other rule, such as a provider token or a
+quoted-JSON credential, gets the plain refusal. The rules are described under
+[Documenting the patterns in a note](core-memory-tools.md#documenting-the-patterns-in-a-note).
 
 ### Rename and delete
 
@@ -206,7 +228,23 @@ mem_dedup_merge(keep_id="chunk-A-uuid", delete_ids=["chunk-B-uuid"])
 → Deleted 1, kept chunk-A (tags merged)
 ```
 
-> **Performance**: `max_scan` controls how many chunks are compared pairwise. For large indexes (500+), start with `max_scan=100` to avoid timeouts (30s limit). Increase gradually if needed.
+> **What a scan covers**: `max_scan` (default 500) bounds the scan's pool: the first `max_scan` scannable chunks in chunk-id order, or, with `after`, the first `max_scan` whose id comes after that chunk id. Scannable chunks are the indexed chunks outside held and pending sources, and outside any file that holds a consolidation summary of a held or pending source, so their number can be smaller than the total `mem_status` reports. On a store with more scannable chunks than `max_scan`, the pool is a subset; without `after` it is the same one on every run while the scannable chunks and `max_scan` stay the same. The last line of the output says which case applies: `Scanned all 412 scannable chunks` or `Scanned 500 of 39458 scannable chunks (...)`.
+>
+> **Continuing a scan**: when chunks are left after the pool, the last line ends with how many and with the value that continues, for example `38958 remain: continue with after="<chunk id>"`. Pass that id as `after` to scan the next chunks; the last call's line ends with `reached the end of the store`. `GET /api/dedup/candidates` takes the same `after` and returns `next_after` and `remaining_chunks`. The cursor is a position in chunk-id order, not an offset: chunks added or removed between two calls do not shift the ones still to come, and the id of a chunk deleted since the last call still works. A chunk added with an id before the cursor is not seen until the next walk from the start. The scheduled `dedup_scan` job continues by itself: each run scans the pool after the one its schedule's last finished run scanned, and starts over after the end of the store (see [Reading a run record](automation.md#reading-a-run-record)).
+>
+> When one pool holds more pairs than `limit`, the last line says so (`limit=50 kept 50 of 57 pairs`). Continuing with `after` does not show the pairs that were cut: scan again from the same position with a higher `limit`. The tool accepts a `limit` up to 500; when one pool holds more pairs than that, the last line says `one call lists at most 500` and names an `offset`, the number of the pool's pairs to skip: scan again with the same `after`, `max_scan` and `threshold` and that `offset`. While pairs remain, each page's last line names the next `offset`; on the last page the pair clause gives only its range (`offset=500 kept pairs 501 to 501 of 501`) and names no next offset. Leave `offset` out again once you move on with `after`: the next pool's pairs start at 0, and the last line says so (`continue with after="<chunk id>" and no offset`). `GET /api/dedup/candidates` takes the same `offset` and returns it. A smaller `max_scan` is a different scan, not a way to see the pairs that were cut: the exact phase pairs each copy with the oldest copy in its pool, so a smaller pool can report other pairs.
+>
+> Each page is a scan of the pool again, so two pages line up only when both scans produce the same list. Exact duplicates come first and their order depends on the pool alone, so their pages line up while the pool's chunks do not change. The near duplicates after them come from a nearest-neighbour search that does not promise which of several neighbours at an equal distance it keeps at its cut, so which near pairs the list holds is not promised either. A near pair that enters or leaves the list between two scans shifts the positions of the pairs after it, so a page can then repeat a pair or leave one out; any change to the store between two pages can do this. A `pairs_found` that differs between two pages shows that the list changed; an equal one does not show that it did not.
+>
+> A walk in steps is not one scan of the whole store. A near pair whose members are in different pools can be reported from both, so tell repeats apart by the two chunk ids; this is the common case (walking a store of 39,397 scannable chunks 500 at a time took 79 calls and reported 351 of its 404 pairs twice). It is not guaranteed: each chunk is searched for its own nearest neighbours, so one member can find the other without being found by it. Copies with the same content hash in different pools are not found by the exact phase: the near search can still report them, with a score, and on a BM25-only store nothing does.
+>
+> The two phases treat the pool differently. Exact duplicates (same content hash) are found among pool chunks only, so a copy is reported when at least two of its members are in the pool. Near duplicates are searched with the stored vector of each pool chunk that has one, among its nearest neighbours in the user tier and that chunk's own project, so a neighbour can come from outside the pool. A chunk without a stored vector is counted and not searched, and a BM25-only store runs no near search; the last line reports both.
+>
+> **Performance**: the near phase runs one vector search per pool chunk that has a stored vector (none on a BM25-only store), so its time grows with `max_scan` (on a store of about 51,000 chunks, 500 chunks took 13 s and 5,000 took 136 s). A smaller `max_scan` is faster and scans a smaller subset. The web route and the Maintenance panel stop a scan after 120 s.
+
+> **Removing a copy from its file**: `mem_dedup_merge` deletes index rows only; the file still holds the text, so the next index pass brings it back. `mem_dedup_remove(remove_id, keep_id)` removes `remove_id`'s lines from its file and re-indexes it, as `mem_delete(chunk_id)` does for a file on disk, after checking both members: each member's file and stored rows must still match that file's last index receipt, the two must be in different files, and neither file may have another hard-linked name. A member whose file is missing is refused; `mem_delete(chunk_id)` removes such a chunk's index row instead. A refusal names the member and the reason and removes nothing. A plain `mm index <file>` writes the receipt the check needs; `mm index --force`, the re-index a memory write runs, and index passes with `indexing.enrich_chunk_context` or `indexing.auto_summarize` on do not.
+>
+> The check does not decide whether the two members say the same thing. Chunks with the same body can sit under different headings, frontmatter or link targets, and removing a chunk can take a heading the rest of its file depends on; read both members before you remove one. The kept file is checked, not locked, so a change to it after the check is not seen.
 
 ### Auto-tagging
 
@@ -255,7 +293,23 @@ and an unknown value is rejected outright. Silently ignoring a typo would make
 every chunk look entity-less, which under `overwrite=True` reads as "clear
 them all".
 
-> **LLM enhancement**: When LLM is enabled, `mem_entity_scan` uses LLM-based structured extraction for higher accuracy (especially person names and decisions). Falls back to regex/pattern matching when LLM is disabled or fails.
+When the LLM call for a chunk fails (provider unreachable, a timeout, an
+authentication error, or a reply that is neither exactly `NONE` nor contains
+at least one valid `TYPE|VALUE` line, judged before the `entity_types` filter),
+the scan leaves that chunk as it is: its existing rows are neither replaced nor
+cleared, and a chunk without rows stays without them. The summary counts these
+as `Chunks left unchanged (LLM extraction failed)`, and the server log has the
+error. Fix the provider and rerun with the same options. Under
+`overwrite=True` every matching chunk is tried again. A plain rerun tries only
+the matching chunks without rows, which is enough, since the others kept the
+rows they had. A `NONE` answer is not a failure: it means the content has no
+entities, and under `overwrite=True` it clears the chunk's rows as before.
+
+The scan stores nothing from the regex fallback for a failed chunk, so a chunk
+without rows stays without them even when the regex extractor would find
+something in it.
+
+> **LLM enhancement**: When LLM is enabled, `mem_entity_scan` uses LLM-based structured extraction for higher accuracy (especially person names and decisions). With LLM disabled it uses regex/pattern matching. When an LLM call fails, the chunk is left unchanged (see above) and nothing from the regex fallback is stored.
 
 ### Decay and expiration
 
@@ -442,7 +496,7 @@ mm memory doctor --fix --apply   # remove them from the index file
       - user_role.md
   ✗ 1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted (review with `mm gc orphan-sources`, then use `--apply` after confirming deletion)
       - /Users/you/.claude/projects/-Users-you-Work-myproj/memory/old_notes.md
-  ! MEMORY.md over budget: 25600 bytes (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)
+  ! MEMORY.md over budget: 25600 UTF-16 units (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)
       - L8
       - L40
 
@@ -470,10 +524,12 @@ Each dir header line reads `{category} · [index={index_file} ·] indexed {db_co
 | `db_extra` | warn | A DB source exists on disk but falls outside the current indexable set (unsupported extension or excluded path). | Usually expected. If the path is now excluded, `mm purge --matching-excluded --apply` reclaims it; unsupported-extension residue has no targeted fix yet. |
 | `index_orphan` | warn | An indexable file on disk is not listed in the index file (`MEMORY.md`). | Add a pointer line, or leave it — the TOC is curated. |
 | `ambiguous_index_line` | warn | The line names something the doctor won't resolve on a guess: a link target that isn't a plain relative path — one carrying a query (`live.md?view=1`), a percent-escape (`live%2Emd`), a scheme (`urn:live.md`) or a space (`<x y.md>`) — link syntax left unclosed (`- [B](b.md`), or a *contested wikilink label*: a genuine `[[memo]](note)` and an escaped same-name pointer (`[\[memo\]](file.md)`) share the line, both decode to the label `[memo]`, and the doctor cannot tell which occurrence is the wikilink, so neither is trusted. Such links are neither link-checked nor counted as listed, so the file one may have meant can also surface as an `index_orphan`. Ordinary filenames needing markdown escaping (`notes_(v2).md`, `notes_\(v2.md`, `notes_&amp;v2.md`) are *not* flagged — they are read as Markdown and resolve normally. | Rewrite the target as a plain relative filename; for a contested wikilink label, rename the wholly bracketed label if the link is meant as a pointer (un-escaping it makes the occurrence a wikilink instead). Reported as warn, not error. `--fix` will not touch such a line: an unreadable link is never *provably* dead, so a line holding only these is not a `--fix` candidate at all, and one sitting beside a genuinely dead link makes that line a [skip](#fixing-broken-links) — the rest of the file is still fixed. |
-| `budget` | warn | The index file exceeds its hot-cache budget: 24,400 bytes / 200 lines / 200 chars per line. | Trim the index file. |
+| `budget` | warn | The index file exceeds its hot-cache budget: 24,400 UTF-16 code units (Claude Code's own unit, not bytes) / 200 lines / 200 chars per line. | Trim the index file. |
 | `index_missing` | warn | The provider's index file (e.g. `MEMORY.md`) is absent or unreadable. | Create it, or ignore if the dir has no TOC convention. |
 | `dangling_wikilink` | info | A `[[name]]` on an index line naming no `name.md` inside the memory root, or one outside it (`[[name\|alias]]` resolves on `name`). Each item names its class, as `broken_link` does: `missing_target` — a *forward reference* (a memory worth writing later, which the [memory conventions](#dangling-wikilinks) allow) or a stale link to a deleted memo, which the doctor can't tell apart; `outside_root` — a name that escapes the root, and may well exist there. Never fails a run, and `--fix` never acts on it. | `missing_target`: write the memo, fix the name, or leave it as a deliberate forward reference. `outside_root`: correct the name by hand — nothing follows a wikilink, so an escape is a naming slip rather than the hazard it is for a pointer. |
 | `cold_candidate` | info | An indexed file never accessed since indexing (`access_count` 0, `last_accessed_at` unset). | Advisory — a future decay/curation candidate. |
+| `frontmatter_invalid` | warn | PyYAML cannot compose the leading `---` block of an indexable `.md` / `.markdown` file (invalid YAML, or nesting past its recursion limit), or the root is not a mapping. The block ends at a `---` line, which may end in spaces or tabs. memtomem reads frontmatter line by line, so unquoted prose that breaks the YAML still indexes, while a YAML reader of the same file gets no `name` / `description`. Each item is the path, the line when the parser gives one, and the PyYAML or Python error class (or `not a mapping`); the line's text and the parser's message are never printed. Only syntax and the root shape are checked: an error that appears when values are built (an unknown `!tag`, an impossible date such as `2026-13-45`, a bad `<<:` merge) is not found. Invalid UTF-8 bytes are replaced before parsing, and a file that starts with a byte-order mark is not checked. An empty or comment-only block is not reported. | Quote a free-text value as a double-quoted YAML string; make the block `key: value` lines. |
+| `frontmatter_truncated` | info | The effective (last) top-level `name` / `description` is a plain scalar (no quotes, not a `\|` / `>` block) that a `#` comment directly follows, so a YAML reader may see less than was meant (`name: shipped PR #530` reads as `shipped PR`). A block that uses a YAML alias (`*x`) is not checked. Items are the path, line and key. | If the `#` is meant literally, quote the value as a double-quoted YAML string; leave an intended comment as it is. |
 | `db_unavailable` | info | No readable memtomem DB at the configured path — only disk/index checks ran. | `mm index` to build the DB. |
 | `unowned_chunks` | info | DB sources under no configured `memory_dir` (a dir was removed, or content was added elsewhere). | Re-add the dir to keep it indexed; for a project root that was deleted from disk, `mm gc orphan-projects`. |
 
@@ -520,7 +576,7 @@ The exit code is `0` when clean or when only advisory (warn/info) findings exist
           "check": "budget",
           "severity": "warn",
           "count": 2,
-          "summary": "MEMORY.md over budget: 25600 bytes (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)",
+          "summary": "MEMORY.md over budget: 25600 UTF-16 units (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)",
           "items": ["L8", "L40"]
         }
       ]

@@ -377,10 +377,13 @@ async function ensureCsrfToken() {
   finally { if (_csrfTokenPromise === pending) _csrfTokenPromise = null; }
 }
 
-async function csrfFetch(url, options = {}) {
+// ``withToken`` attaches the token to a safe-method request as well: the
+// server records a search (history, access counts, a run id) only when the
+// request carries it, so a page elsewhere cannot write those records.
+async function csrfFetch(url, options = {}, { withToken = false } = {}) {
   const unsafe = _UNSAFE_METHODS.has((options.method || 'GET').toUpperCase());
   let token = '';
-  if (unsafe) {
+  if (unsafe || withToken) {
     token = await ensureCsrfToken();
     // Preserve plain objects, Headers and tuple lists. Normalize iterable
     // forms through Headers so repeated names retain fetch's merge semantics.
@@ -395,7 +398,18 @@ async function csrfFetch(url, options = {}) {
     if (token) options.headers['X-Memtomem-CSRF'] = token;
   }
   const res = await fetch(url, options);
-  if (!unsafe || res.status !== 403) return res;
+  if (!unsafe) {
+    // The server answered but did not record: the token it was sent is not the
+    // current one (it restarted since this page fetched it). Fetch the current
+    // token and send the read once more; the first one recorded nothing.
+    if (!token || res.headers?.get?.('X-Memtomem-CSRF-Stale') !== '1') return res;
+    if (_csrfToken === token) _csrfToken = null;
+    const fresh = await ensureCsrfToken();
+    if (!fresh || fresh === token) return res;
+    options.signal?.throwIfAborted();
+    return fetch(url, { ...options, headers: { ...options.headers, 'X-Memtomem-CSRF': fresh } });
+  }
+  if (res.status !== 403) return res;
   // Inspect a clone: other refusals retain their original response body for
   // the caller's privacy/consent/permission handling.
   if (typeof res.clone !== 'function') return res;
@@ -420,7 +434,7 @@ async function csrfFetch(url, options = {}) {
 // SPA parses it via ``api()`` below and surfaces a confirm-and-retry UX
 // through ``apiWithRedactionRetry()``. Issue #785.
 class RedactionBlockedError extends Error {
-  constructor({ hits, surface, scope }) {
+  constructor({ hits, surface, scope, labelOnly }) {
     super('redaction_blocked');
     this.name = 'RedactionBlockedError';
     this.hits = hits;
@@ -429,6 +443,9 @@ class RedactionBlockedError extends Error {
     // on surfaces that do not report one — callers must treat undefined as
     // "unknown", never as "not shared".
     this.scope = scope;
+    // True when every hit was a label rule (``password:``, ``api_key=``).
+    // Only the namespace description route reports it; undefined elsewhere.
+    this.labelOnly = labelOnly;
   }
 }
 
@@ -466,13 +483,18 @@ function formatProjectTierBlockedToast(err) {
   return lines.join('\n');
 }
 
+// Reads the server records only when they carry the CSRF token (``GET
+// /api/search``); ``api()`` sends it on them unless the caller says otherwise.
+const _RECORDED_READS = /^\/api\/search(\?|$)/;
+
 async function api(method, path, body, opts = {}) {
   if (typeof opts !== 'object' || Array.isArray(opts)) opts = {};
   const fetchOpts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body !== undefined) fetchOpts.body = JSON.stringify(body);
   if (opts.signal) fetchOpts.signal = opts.signal;
   else fetchOpts.signal = AbortSignal.timeout(opts.timeout ?? 30_000);
-  const res = await csrfFetch(API + path, fetchOpts);
+  const withToken = opts.withToken ?? _RECORDED_READS.test(path);
+  const res = await csrfFetch(API + path, fetchOpts, { withToken });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     if (
@@ -484,6 +506,7 @@ async function api(method, path, body, opts = {}) {
         hits: err.detail.hits,
         surface: err.detail.surface,
         scope: err.detail.scope,
+        labelOnly: err.detail.label_only,
       });
     }
     if (
@@ -4082,6 +4105,22 @@ function _isMarkdownSource(path) {
   return p.endsWith('.md') || p.endsWith('.markdown');
 }
 
+// Whether the server may certify this chunk's content as opening with
+// frontmatter: only a Markdown file's first chunk that opens with ``---``.
+function _mayOpenWithFrontmatter(chunk) {
+  return _isMarkdownSource(chunk.source_file) && chunk.start_line === 1
+    && (chunk.content || '').startsWith('---\n');
+}
+
+// Markdown of ``content``, with ``span`` (from ``_leadingFrontmatter``, or
+// null) as a metadata box above the rendered rest. Unsanitized: the caller
+// passes it through ``DOMPurify``.
+function _markdownHtml(content, span) {
+  if (span === null) return marked.parse(content);
+  return `<pre class="md-frontmatter"><code>${escapeHtml(span.replace(/\n$/, ''))}</code></pre>`
+    + marked.parse(content.slice(span.length));
+}
+
 // Indexed content alone cannot say whether it opens with the file's
 // frontmatter (a file opening ``# Topic`` / ``---`` / text / ``---`` stores the
 // same shape), so the server answers from the file. Source text needs no
@@ -4089,8 +4128,7 @@ function _isMarkdownSource(path) {
 let _frontmatterGen = 0;
 
 async function _requestFrontmatter(chunk) {
-  if (!_isMarkdownSource(chunk.source_file) || chunk.start_line !== 1) return;
-  if (!(chunk.content || '').startsWith('---\n')) return;
+  if (!_mayOpenWithFrontmatter(chunk)) return;
   const gen = _frontmatterGen;
   let resp;
   try {
@@ -4321,12 +4359,8 @@ function _setDetailMode(mode) {
     const isMarkdown = (lang === 'markdown' || _isMarkdownSource(STATE.detailViewSource));
     if (isMarkdown && typeof marked !== 'undefined') {
       codeView.className = 'detail-code-view md-preview';
-      const span = _detailFrontmatterSpan(content);
-      const html = span === null
-        ? marked.parse(content)
-        : `<pre class="md-frontmatter"><code>${escapeHtml(span.replace(/\n$/, ''))}</code></pre>`
-          + marked.parse(content.slice(span.length));
-      codeView.innerHTML = DOMPurify.sanitize(html);
+      codeView.innerHTML = DOMPurify.sanitize(
+        _markdownHtml(content, _detailFrontmatterSpan(content)));
     } else if (lang && lang !== 'markdown' && window.Prism && Prism.languages[lang]) {
       codeView.className = 'detail-code-view';
       codeView.innerHTML = `<pre><code class="language-${lang}">${Prism.highlight(content, Prism.languages[lang], lang)}</code></pre>`;
@@ -8194,10 +8228,11 @@ function escapeHtml(str) {
 // quote handling moved into escapeHtml.
 function escapeAttr(str) { return escapeHtml(str); }
 // Namespace colors are interpolated into ``style``/``value`` attributes. The
-// server only stores ``#`` + 3-8 hex digits (``NAMESPACE_COLOR_PATTERN``), but a
-// row written before that check may hold anything, so render it as the fallback.
+// server only stores ``#`` + 3, 4, 6 or 8 hex digits (``NAMESPACE_COLOR_PATTERN``),
+// but a row written before that check may hold anything, so render it as the
+// fallback.
 function safeCssColor(color, fallback) {
-  return typeof color === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(color) ? color : fallback;
+  return typeof color === 'string' && /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(color) ? color : fallback;
 }
 
 // ---------------------------------------------------------------------------

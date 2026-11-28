@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=150" />
+  <link rel="stylesheet" href="/style.css?v=151" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -824,6 +824,9 @@
                across tiers (filled from the GET /api/settings-sync payload's
                duplicate_tier_warnings; #1247 id 32). -->
           <div id="hooks-duplicate-banner" class="hooks-duplicate-banner" hidden></div>
+          <!-- #2644: settings files no check could read (filled from the GET
+               payload's unscanned_settings). -->
+          <div id="hooks-unscanned-banner" class="hooks-duplicate-banner" hidden></div>
           <!-- #1983 validation signal: canonical rules the sync drops for a
                non-string matcher (matcher_warnings) and target rules the diff
                skips as malformed (target_hooks.malformed). -->
@@ -1185,6 +1188,7 @@
               <span data-i18n="settings.dedup.empty_text">Run Scan to see duplicate candidates</span>
             </div>
             <div id="dedup-list" hidden></div>
+            <div id="dedup-omitted" class="dedup-omitted" hidden></div>
           </div>
           <div id="dedup-msg" class="status-msg" hidden></div>
         </div>
@@ -1946,25 +1950,25 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=7"></script>
-  <script src="/app.js?v=198"></script>
+  <script src="/app.js?v=202"></script>
   <script src="/chunk-progress.js?v=1"></script>
-  <script src="/settings-config.js?v=32"></script>
+  <script src="/settings-config.js?v=34"></script>
   <script src="/sources-memory-dirs.js?v=23"></script>
-  <script src="/settings-maintenance.js?v=9"></script>
-  <script src="/settings-namespaces.js?v=15"></script>
+  <script src="/settings-maintenance.js?v=10"></script>
+  <script src="/settings-namespaces.js?v=21"></script>
   <script src="/settings-harness.js?v=16"></script>
-  <script src="/settings-hooks-watchdog.js?v=29"></script>
+  <script src="/settings-hooks-watchdog.js?v=31"></script>
   <script src="/timeline.js?v=4"></script>
-  <script src="/context-gateway-core.js?v=4"></script>
+  <script src="/context-gateway-core.js?v=5"></script>
   <script src="/context-gateway-controls.js?v=3"></script>
-  <script src="/context-gateway-overview.js?v=10"></script>
+  <script src="/context-gateway-overview.js?v=11"></script>
   <script src="/context-gateway-list.js?v=5"></script>
   <script src="/context-gateway-conflict.js?v=4"></script>
   <script src="/context-gateway-detail.js?v=9"></script>
   <script src="/context-gateway-actions.js?v=7"></script>
   <script src="/context-gateway-pull.js?v=4"></script>
   <script src="/context-gateway-global.js?v=1"></script>
-  <script src="/context-portal.js?v=40"></script>
+  <script src="/context-portal.js?v=47"></script>
   <script src="/wiki.js?v=13"></script>
   <script src="/path-picker.js?v=4"></script>
 </body>

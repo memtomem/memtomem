@@ -32,9 +32,17 @@ import click
 from memtomem.cli._errors import exit_json_failure, raise_cli_error
 
 from memtomem import privacy
-from memtomem.cli.context_cmd import _append_gitignore_marker, _find_project_root
+from memtomem.cli.context_cmd import (
+    GITIGNORE_IS_LINK,
+    _append_gitignore_marker,
+    _find_project_root,
+)
 from memtomem.config import TargetScope, register_project_memory_dir
-from memtomem.memory_scope import resolve_memory_scope_dir
+from memtomem.memory_scope import (
+    MemoryScopeError,
+    ProjectEntryRelinked,
+    resolve_project_tier_write_dir,
+)
 
 
 _MEMORY_SCOPE_CHOICES = list(get_args(TargetScope))
@@ -152,7 +160,13 @@ def init_cmd(scope: str, confirm_project_shared: bool) -> None:
             action="init",
         )
 
-    tier_dir = resolve_memory_scope_dir(cast(TargetScope, scope), root)
+    # Before the ``.gitignore`` block, the mkdir and the registration: a
+    # linked tier names wherever the link points, another project's tier
+    # among them, and registering it would authorize writes there (#3623).
+    try:
+        tier_dir = resolve_project_tier_write_dir(cast(TargetScope, scope), root)
+    except MemoryScopeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     # project_local: git protection FIRST, registration last. A
     # ``.gitignore`` is only meaningful inside a git working tree, so
@@ -169,13 +183,18 @@ def init_cmd(scope: str, confirm_project_shared: bool) -> None:
                 "(or use --scope=project_shared for a git-tracked tier)."
             )
         try:
-            wrote, _msg = _append_gitignore_marker(root)
+            wrote, msg = _append_gitignore_marker(root)
         except OSError as exc:
             raise click.ClickException(
                 f"could not append the .gitignore guard block at {root}/.gitignore: "
                 f"{exc}. Aborting before registration so the project_local tier "
                 "is never registered without git protection."
             ) from exc
+        if msg == GITIGNORE_IS_LINK:
+            raise click.ClickException(
+                f"{ProjectEntryRelinked('.gitignore')} Aborting before registration so "
+                "the project_local tier is never registered without git protection."
+            )
         if wrote:
             click.secho(
                 "  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)",

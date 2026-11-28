@@ -71,8 +71,8 @@ token plus 28 characters, which then fits a 255-byte file name.
 The records themselves are `_records.py`'s, not `MemtomemBaseStore`'s: the
 same JSON shape (`schema_version` 1, `namespace`, `key`, `value`, `index`,
 `generation`, `created_at`, `updated_at`), the same record guard (the
-serialized value, every namespace segment, the key and the selectors are
-scanned before the first write), memtomem's atomic write and memtomem's
+serialized value, every key and string inside it raw, every namespace
+segment, the key and the selectors are scanned before the first write), memtomem's atomic write and memtomem's
 `matches_filter` for `search(filter=…)`. A record must sit at the path its
 own `namespace` and `key` encode to, or it is treated as torn.
 
@@ -180,7 +180,7 @@ mid-mutation and the item will disagree until it finishes.
 |---|---|
 | 0 | render the projection text; read the existing record; `generation = max(record, .last, .deleting) + 1` |
 | 1 | **guard the projection text** (`enforce_write_guard`, surface `langchain_memtomem_put`, the store's tier, `force_unsafe` as configured); `blocked` or `blocked_project_shared` raises `ValueError` and nothing has been written |
-| 1b | **guard the record** (`RecordStore.prepare`: the serialized value, namespace, key and selectors); a block raises and nothing has been written |
+| 1b | **guard the record** (`RecordStore.prepare`: the serialized value and its raw strings, namespace, key and selectors); a block raises and nothing has been written |
 | 2 | write the record atomically with the new generation |
 | 3 | unlink `.deleting` if present — the record just written outranks the marker |
 | 4a | `index=False`: unlink the projection and `.indexed`, `storage.delete_by_source(projection)`; done |

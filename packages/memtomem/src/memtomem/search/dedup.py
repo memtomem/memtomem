@@ -15,8 +15,48 @@ if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
     from pathlib import Path
 
-    from memtomem.models import NamespaceFilter
-    from memtomem.storage.base import StorageBackend
+    from memtomem.models import ChunkMetadata, ChunkTopology, NamespaceFilter
+    from memtomem.storage.base import StorageBackend, VisiblePool
+
+
+#: Stored metadata two chunks with the same body can still differ on, in the
+#: order ``differing_fields`` reports them.
+DIFFERING_FIELDS = ("heading", "namespace", "scope", "project_root", "tags", "validity")
+
+
+def differing_fields(a: ChunkMetadata, b: ChunkMetadata) -> tuple[str, ...]:
+    """Names from ``DIFFERING_FIELDS`` whose stored values differ between *a* and *b*.
+
+    A comparison, not a verdict: an empty result says the two records carry the
+    same metadata, not that either may be removed.
+    """
+    same = {
+        "heading": a.heading_hierarchy == b.heading_hierarchy,
+        "namespace": a.namespace == b.namespace,
+        "scope": a.scope == b.scope,
+        "project_root": a.project_root == b.project_root,
+        "tags": set(a.tags) == set(b.tags),
+        "validity": (a.valid_from_unix, a.valid_to_unix) == (b.valid_from_unix, b.valid_to_unix),
+    }
+    return tuple(name for name in DIFFERING_FIELDS if not same[name])
+
+
+def parse_scan_cursor(after: object) -> UUID | None:
+    """The chunk id a caller gave as a scan's ``after``; ``None`` is no cursor.
+
+    Every form ``UUID`` reads is accepted and comes back as the one id it
+    names, so the cursor compares with stored ids whatever case or punctuation
+    it was typed in. The id need not be stored. ``ValueError`` otherwise, with
+    a message a surface can show as is.
+    """
+    if after is None:
+        return None
+    if isinstance(after, str):
+        try:
+            return UUID(after)
+        except ValueError:
+            pass
+    raise ValueError(f"after must be a chunk id, got {after!r}")
 
 
 @dataclass(frozen=True)
@@ -33,17 +73,57 @@ class DedupCandidate:
 class DedupCoverage:
     """What one scan actually looked at. Describes the selected pool only.
 
-    A scan reads at most ``max_scan`` chunks, so an empty candidate list means
-    "nothing in this pool", never "nothing in the store"; near-phase neighbours
-    can still come from outside the pool.
+    A scan reads at most ``max_scan`` chunks, so an empty candidate list never
+    means "nothing in the store"; near-phase neighbours can still come from
+    outside the pool. With an ``offset`` it does not mean "nothing in this
+    pool" either: ``pairs_found`` says how many pairs the pool has.
+
+    The pool is the first ``max_scan`` visible chunks in ascending id order
+    with an id above ``after`` (from the start without one). ``next_after``
+    is the cursor that selects the chunks after this pool, so a store is
+    walked in bounded steps. A walk is not one unbounded scan: the exact phase
+    groups one pool at a time, and a pair whose members sit in different
+    pools can be reported once from each.
     """
 
     pool: int  # chunks selected for the scan (the exact phase's input)
+    eligible: int  # visible chunks in the store
     near_search_enabled: bool  # False for a BM25-only store
     probed: int  # pool chunks searched with their stored vector
     # Pool chunks the vector lookup returned nothing for: not vectorised yet, or
     # a stored vector that could not be decoded. They are not probed.
     without_vector: int
+    # Pairs left out because both members are read-only chunks of one source
+    # (see ``same_source_read_only``). Counted once per pair, before ``limit``.
+    same_source_read_only: int = 0
+    # Pairs the scan kept before ``offset`` and ``limit`` cut the list. Above
+    # the number returned, the rest are not reachable by moving the cursor on:
+    # the same pool has to be scanned again with a higher ``limit`` or an
+    # ``offset``. A smaller ``max_scan`` selects another pool, whose exact phase
+    # can report other pairs.
+    pairs_found: int = 0
+    after: UUID | None = None  # the cursor this scan started after
+    # Visible chunks above the pool's last id, in the snapshot the pool was
+    # read from. Zero means this scan reached the end of the store.
+    remaining: int = 0
+    next_after: UUID | None = None  # the pool's last id while ``remaining`` > 0
+
+
+def same_source_read_only(a: Chunk, b: Chunk) -> bool:
+    """Both chunks are stored read-only and come from the same stored source.
+
+    Such a pair cannot be resolved: ``mem_delete`` and ``mem_dedup_remove``
+    refuse a read-only member, and a store-only merge would drop one slice of
+    a file nothing here can rewrite (a near pair's slices hold different text)
+    until that file's next index pass. A minified JSON file sliced by
+    ``chunk_json`` pairs with itself hundreds of times (#3418). Read-only pairs
+    across two sources, and pairs with a writable member, are kept.
+    """
+    return (
+        a.metadata.source_read_only
+        and b.metadata.source_read_only
+        and a.metadata.source_file == b.metadata.source_file
+    )
 
 
 class DedupScanner:
@@ -63,12 +143,13 @@ class DedupScanner:
         threshold: float = 0.92,
         limit: int = 100,
         max_scan: int = 500,
+        after: UUID | None = None,
     ) -> list[DedupCandidate]:
         """Return duplicate candidate pairs (dry-run, no mutations).
 
         See :meth:`scan_with_coverage`; this drops the coverage report.
         """
-        candidates, _ = await self.scan_with_coverage(threshold, limit, max_scan)
+        candidates, _ = await self.scan_with_coverage(threshold, limit, max_scan, after)
         return candidates
 
     async def scan_with_coverage(
@@ -76,35 +157,92 @@ class DedupScanner:
         threshold: float = 0.92,
         limit: int = 100,
         max_scan: int = 500,
+        after: UUID | None = None,
+        offset: int = 0,
     ) -> tuple[list[DedupCandidate], DedupCoverage]:
         """Return duplicate candidate pairs and what the scan covered.
 
-        Phase 1 groups up to *max_scan* chunks by content_hash.
+        The pool is the first *max_scan* visible chunks in ascending id order
+        whose id is above *after* (an exclusive cursor; from the start without
+        one). The coverage's ``next_after`` continues from this pool.
+        Phase 1 groups the pool by content_hash.
         Phase 2 searches each of those chunks with its stored vector. Chunks
         without one are counted in the coverage, not probed: re-embedding them
         here would need an embedder, and re-embedding bare ``content`` did not
         reproduce the stored ``retrieval_content`` vectors (it found candidates
         for 2 of 62 chunks that stored vectors found on a real E5 store).
         Results are sorted: exact duplicates first, then by score descending.
+
+        The first *offset* pairs of that list are skipped and *limit* applies
+        to the rest, so a pool with more pairs than one call returns is listed
+        by scanning it again with the next offset. Two such pages line up only
+        when both scans produce the same list. The exact pairs come first and
+        their order depends on the pool alone. The near pairs after them depend
+        on which neighbours the vector search keeps when several sit at an
+        equal distance at its cut, a choice it does not promise
+        (``dense_search``); a near pair that enters or leaves the list between
+        two scans shifts the positions of the pairs after it.
+
+        Raises ``ValueError``, before anything is read, for a *max_scan* or
+        *limit* below 1, for an *offset* below 0, and for a *threshold* outside
+        0 to 1 (NaN included).
         """
         if max_scan < 1:
             raise ValueError(f"max_scan must be at least 1, got {max_scan}")
-        all_chunks = await self._get_all_chunks(max_scan)
+        # ``candidates[:limit]`` would list nothing for 0 and cut pairs from the
+        # end for a negative limit. With a NaN threshold ``score < threshold``
+        # is always false, so the near phase would skip no pair on score.
+        if limit < 1:
+            raise ValueError(f"limit must be at least 1, got {limit}")
+        if offset < 0:
+            raise ValueError(f"offset must be at least 0, got {offset}")
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError(f"threshold must be between 0 and 1, got {threshold}")
+        selected = await self._select_pool(max_scan, after)
+        all_chunks, eligible = selected.chunks, selected.visible
+        remaining = selected.above_cursor - len(all_chunks)
 
+        # A pair is recorded in ``seen`` whether it is kept or left out, so no
+        # later phase or reverse probe reaches it again; ``omitted`` holds the
+        # left-out ones, so each is counted once.
         seen: set[frozenset] = set()
+        omitted: set[frozenset] = set()
         candidates: list[DedupCandidate] = []
 
         # Phase 1: exact duplicates
-        candidates.extend(self._find_exact_duplicates(all_chunks, seen))
+        candidates.extend(self._find_exact_duplicates(all_chunks, seen, omitted))
 
         # Phase 2: near duplicates over the same pool
-        near, coverage = await self._find_near_duplicates(all_chunks, threshold, seen)
+        near, coverage = await self._find_near_duplicates(
+            all_chunks, eligible, threshold, seen, omitted
+        )
         candidates.extend(near)
 
         # Exact first, then by score descending
         candidates.sort(key=lambda c: (not c.exact, -c.score))
 
-        return candidates[:limit], coverage
+        return candidates[offset : offset + limit], replace(
+            coverage,
+            same_source_read_only=len(omitted),
+            pairs_found=len(candidates),
+            after=after,
+            remaining=remaining,
+            # The pool is in id order, so its last chunk is the cursor.
+            next_after=all_chunks[-1].id if remaining > 0 else None,
+        )
+
+    async def member_evidence(
+        self, candidates: Sequence[DedupCandidate]
+    ) -> dict[UUID, tuple[Chunk, ChunkTopology]]:
+        """The current row and topology of every member of *candidates*.
+
+        One storage read for all pairs. A member absent from the result was
+        deleted, or its source became hidden, after the scan read it. Render a
+        member from the chunk returned here, not from the candidate's: the id
+        survives a re-index that changes the heading or the line range.
+        """
+        ids = dict.fromkeys(c.id for pair in candidates for c in (pair.chunk_a, pair.chunk_b))
+        return await self._storage.get_chunks_with_topology(list(ids))
 
     async def merge(self, keep_id: UUID, delete_ids: list[UUID], dry_run: bool = False) -> int:
         """Merge duplicate chunks: keep *keep_id*, delete *delete_ids*.
@@ -207,27 +345,20 @@ class DedupScanner:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _get_all_chunks(self, max_count: int) -> list[Chunk]:
-        """Fetch up to *max_count* chunks from all source files."""
-        source_files = await self._storage.get_all_source_files()
-        chunks: list[Chunk] = []
-        for source in source_files:
-            remaining = max_count - len(chunks)
-            if remaining <= 0:
-                break
-            # Only what is still missing: the slice below used to discard the rest.
-            # The read judges the hold itself, and matches the stored path as
-            # stored, so a symlink placed at a held path cannot return another
-            # file's rows here (they would be scanned twice, against themselves).
-            chunks.extend(
-                await self._storage.list_chunks_by_source(
-                    source, limit=remaining, exclude_hidden=True, as_stored=True
-                )
-            )
-        return chunks[:max_count]
+    async def _select_pool(self, max_scan: int, after: UUID | None = None) -> VisiblePool:
+        """The first *max_scan* visible chunks by id above *after*, with the counts.
+
+        Id order depends on the stored rows only, so two processes scanning one
+        store select the same pool. It is also an input to the result: where
+        timestamps tie, the stable sorts below keep the pool's order. The
+        cursor goes to storage as ``str(UUID)``, the form ids are stored in.
+        """
+        return await self._storage.list_visible_chunks_by_id(
+            max_scan, None if after is None else str(after)
+        )
 
     def _find_exact_duplicates(
-        self, chunks: list[Chunk], seen: set[frozenset]
+        self, chunks: list[Chunk], seen: set[frozenset], omitted: set[frozenset]
     ) -> list[DedupCandidate]:
         hash_groups: dict[str, list[Chunk]] = defaultdict(list)
         for chunk in chunks:
@@ -244,20 +375,29 @@ class DedupScanner:
                 if pair in seen:
                     continue
                 seen.add(pair)
+                if same_source_read_only(keep, dup):
+                    omitted.add(pair)
+                    continue
                 candidates.append(DedupCandidate(chunk_a=keep, chunk_b=dup, score=1.0, exact=True))
         return candidates
 
     async def _find_near_duplicates(
         self,
         chunks: list[Chunk],
+        eligible: int,
         threshold: float,
         seen: set[frozenset],
+        omitted: set[frozenset],
     ) -> tuple[list[DedupCandidate], DedupCoverage]:
         candidates: list[DedupCandidate] = []
         enabled = getattr(self._storage, "dense_enabled", True) is not False
         if not chunks or not enabled:
             return candidates, DedupCoverage(
-                pool=len(chunks), near_search_enabled=enabled, probed=0, without_vector=0
+                pool=len(chunks),
+                eligible=eligible,
+                near_search_enabled=enabled,
+                probed=0,
+                without_vector=0,
             )
 
         # The vectors the chunks are stored with. Ingress embeds
@@ -295,6 +435,9 @@ class DedupScanner:
                 if pair in seen:
                     continue
                 seen.add(pair)
+                if same_source_read_only(chunk, r.chunk):
+                    omitted.add(pair)
+                    continue
                 # Older chunk becomes chunk_a (keep candidate)
                 if chunk.created_at <= r.chunk.created_at:
                     chunk_a, chunk_b = chunk, r.chunk
@@ -305,6 +448,7 @@ class DedupScanner:
                 )
         return candidates, DedupCoverage(
             pool=len(chunks),
+            eligible=eligible,
             near_search_enabled=True,
             probed=probed,
             without_vector=without_vector,

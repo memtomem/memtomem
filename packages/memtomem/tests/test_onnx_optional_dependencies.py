@@ -49,7 +49,7 @@ def test_missing_optional_module_has_server_environment_guidance(monkeypatch, mo
     assert caught.value.__cause__ is error
     message = str(caught.value)
     assert module in message
-    assert f"uvx --from 'memtomem[onnx]=={__version__}' memtomem-server" in message
+    assert f"uvx --python 3.12 --from 'memtomem[onnx]=={__version__}' memtomem-server" in message
     assert "environment that runs this server" in message
     assert "restart" in message
 

@@ -448,6 +448,78 @@ def _age_buckets(ages: list[float]) -> dict[str, int]:
     return buckets
 
 
+def _check_shared_daemons() -> CheckResult:
+    """Shared daemons (#3381) by their lifetime locks, as an observation only.
+
+    A daemon is also counted above, as one server, once it has opened its
+    store. Which store it serves is not shown: its lifetime lock records a pid
+    and a start time, not the registry identity a store attribution needs.
+    """
+    from memtomem.cli._liveness import enumerate_daemons
+
+    inventory = enumerate_daemons()
+    if inventory.error is not None:
+        return CheckResult(
+            name="shared-daemons",
+            status="info",
+            message="shared daemons could not be listed",
+            detail=scrub_text(inventory.error),
+        )
+    from memtomem._instance_registry import bridge_name_digest, snapshot_bridges
+
+    live = [d for d in inventory.daemons if d.state.alive]
+    stale = len(inventory.daemons) - len(live)
+    # Bridges are counted by the name they asked for: a bridge records no pid
+    # of its daemon, only a digest of the name.
+    bridges = snapshot_bridges()
+    by_digest: dict[str, int] = {}
+    for bridge in bridges.bridges:
+        by_digest[bridge.digest] = by_digest.get(bridge.digest, 0) + 1
+    counts = {d.name: by_digest.pop(bridge_name_digest(d.name), 0) for d in live}
+    unmatched = sum(by_digest.values())
+    data: dict[str, object] = {
+        "daemons": [
+            {
+                "name": d.name,
+                "pid": d.state.pid,
+                "started": d.state.started,
+                # A failed probe counts as alive (fail closed); say it is unverified.
+                "unverified": d.state.probe_error is not None,
+                "bridges": counts[d.name],
+            }
+            for d in live
+        ],
+        "stale": stale,
+        "bridges_without_daemon": unmatched,
+        "bridges_complete": bridges.complete,
+        "warnings": list(inventory.warnings),
+    }
+    if not live:
+        message = "no shared daemon running"
+    else:
+        listed = ", ".join(
+            f"{d.name} (pid {d.state.pid if d.state.pid is not None else '?'}, "
+            f"{counts[d.name]} bridge(s))"
+            for d in live
+        )
+        message = f"{len(live)} shared daemon(s) running: {listed}"
+    notes = [f"{stale} stale lifetime lock file(s) left by daemons that exited"] if stale else []
+    if unmatched:
+        notes.append(f"{unmatched} bridge(s) asked for a name with no matching daemon observed")
+    if not bridges.complete:
+        notes.append("the bridge list could not be read completely; counts are a lower bound")
+    notes.extend(
+        f"{d.name}: unverified ({scrub_text(d.state.probe_error)})"
+        for d in live
+        if d.state.probe_error is not None
+    )
+    notes.extend(scrub_text(warning) for warning in inventory.warnings)
+    detail = "; ".join(notes) or None
+    return CheckResult(
+        name="shared-daemons", status="info", message=message, detail=detail, data=data
+    )
+
+
 def _check_registry_hygiene(snapshot: RegistrySnapshot) -> CheckResult:
     """Leftovers in the sentinel and presence directories, as an observation."""
     # Counted together but reported apart in the JSON: both directories leave
@@ -608,6 +680,7 @@ def doctor(
         _check_runtime_dir(snapshot),
         _check_server_instances(snapshot, rows),
         _check_registry_hygiene(snapshot),
+        _check_shared_daemons(),
     ]
     status = _overall_status(results)
 

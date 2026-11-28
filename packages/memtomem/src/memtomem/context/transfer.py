@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import shlex
 import shutil
 import stat
@@ -99,18 +98,23 @@ from memtomem.context.migrate import (
     _DIR_MANIFEST,
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
+    ClaimState,
+    EntryProbe,
     MigratePartialError,
+    PathNamingClickException,
     RestoreOutcome,
     StagingClaim,
     StagingIdentityLostError,
     _detect_source_scope,
     _discard_claimed_staging,
     _existing_fanout_targets,
+    _probe,
     _promote_move,
     _remove_runtime_fanout_for,
     _restore_source,
     _stage_copy_into,
     _stage_move,
+    identity_refusal_not_restored,
 )
 from memtomem.context.privacy_scan import raise_or_collect, scan_artifact_tree
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
@@ -157,7 +161,32 @@ class TransferRecoveryError(TransferCollisionError):
     actively mislead — nothing collided; a transaction was interrupted, and the
     remediation is to inspect the two paths named in the message, not to remove
     something at the destination.
+
+    For a surface that answers a remote caller (#3532), ``safe_message`` says
+    which side and tier is wedged without a host path, and ``entries`` holds the
+    paths the swap error carried (its ``filename`` and ``retained``) for a log
+    line. The swap's own sentence is in ``message`` only: it embeds paths in its
+    prose and, for a malformed marker, values read from that file. Both are
+    keyword-only with defaults, so the exception still rebuilds from ``args``;
+    a raise site that sets neither leaves ``safe_message`` ``None``.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        safe_message: str | None = None,
+        entries: tuple[Path, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.safe_message = safe_message
+        self.entries = entries
+
+
+def _swap_entries(exc: SwapRecoveryError) -> tuple[Path, ...]:
+    """The paths *exc* carries as data — its ``filename``, then ``retained`` — deduped."""
+    found = ([Path(exc.filename)] if exc.filename else []) + list(exc.retained)
+    return tuple(dict.fromkeys(found))
 
 
 TransferMode = Literal["move", "copy"]
@@ -530,22 +559,45 @@ def _remove_entry(entry: StagingClaim) -> None:
     skip the bookkeeping and fan-out cleanup a finished move owes. The
     ``ENOENT`` is accepted only after LOOKING, so a removal that failed for
     some other reason and left the entry behind is still reported.
+
+    ONE :meth:`~memtomem.context.migrate.StagingClaim.check` decides, and only
+    an entry shown to be ours is removed (#3608). Absent returns without
+    touching anything; replaced or unverifiable refuses before any unlink. The
+    predecessor guarded the identity check with ``os.path.lexists``, which
+    calls an unreadable entry absent — so the check was skipped for exactly the
+    entry it could not vouch for, and the removal went ahead by name.
     """
     path = entry.path
-    if os.path.lexists(path):
-        entry.assert_still_ours("remove the pre-move copy")
+    state = entry.check()
+    if state is ClaimState.ABSENT:
+        return
+    refusal = entry.refusal_for(state, "remove the pre-move copy")
+    if refusal is not None:
+        raise refusal
     try:
         if path.is_symlink() or not path.is_dir():
             path.unlink()
             return
         shutil.rmtree(path)
-    except FileNotFoundError:
-        if os.path.lexists(path):
+    except FileNotFoundError as exc:
+        after, after_error = _probe(path)
+        if after is EntryProbe.UNREADABLE:
+            # The removal started and stopped, and the entry can no longer be
+            # read: what is left there is unknown. It is not reported as a
+            # stale copy to delete — the generic partial-move text says so —
+            # but as an entry to inspect first (#3608).
+            raise StagingIdentityLostError(
+                "transfer staging cannot be verified: removing the pre-move copy "
+                f"stopped and the entry can no longer be read ({after_error}). "
+                f"Inspect it by hand. Staging: {path}",
+                cause="unverifiable",
+            ) from exc
+        if after is not EntryProbe.ABSENT:
             raise
 
 
-def _log_rollback_survivors(src_path: Path, *candidates: Path) -> None:
-    """Name the pre-move copies that are ON DISK, and only those.
+def _log_rollback_survivors(src_path: Path, *candidates: StagingClaim) -> None:
+    """Name the pre-move copies that are ON DISK and ours, and only those.
 
     The rollback ladder preserves whatever it finds and never deletes what it
     has not seen land back at the source, so these ERRORs are the whole of
@@ -558,7 +610,22 @@ def _log_rollback_survivors(src_path: Path, *candidates: Path) -> None:
     operator looking for bytes that are not there, which is worse than saying
     nothing.
 
-    ``lexists``, not ``exists``: a flat artifact that is itself a symlink is
+    Each candidate is asked with :meth:`~memtomem.context.migrate.StagingClaim.check`,
+    not for presence (#3608). Presence only proves a name is occupied, so a
+    replacement would have been counted as a copy of the original; and
+    ``os.path.lexists`` calls an entry it cannot read absent, so a copy that
+    was sitting right there was reported as "no copy survives — nothing left
+    to recover". Ours: a surviving copy. Unverifiable: named as a place to
+    look, never counted. Replaced: named as not ours.
+
+    An empty result is reported as what it is — no copy at the paths this
+    transfer created — and never as "nothing left to recover" (#3608). That
+    verdict needs the canonical path too, and no order of probes keeps the two
+    answers consistent: a writer restoring the entry by hand between them
+    makes both look empty while the artifact is home. So the canonical path is
+    named as unchecked, not judged.
+
+    ``lstat``, not ``exists``: a flat artifact that is itself a symlink is
     parked AS a link, and if its target went away the dangling link is still
     the only name the parked artifact has.
 
@@ -568,22 +635,43 @@ def _log_rollback_survivors(src_path: Path, *candidates: Path) -> None:
     and one message listing what was observed beats two that each name a path
     and imply it is alone.
     """
-    survivors = [path for path in dict.fromkeys(candidates) if os.path.lexists(path)]
-    if not survivors:
+    unique = {claim.path: claim for claim in candidates}.values()
+    states = [(claim.path, claim.check()) for claim in unique]
+    survivors = [path for path, state in states if state is ClaimState.OURS]
+    unverifiable = [path for path, state in states if state is ClaimState.UNVERIFIABLE]
+    replaced = [path for path, state in states if state is ClaimState.REPLACED]
+    if unverifiable:
         logger.error(
-            "transfer rollback: the pre-move bytes of %s were not restored and "
-            "no copy of them survives — nothing left to recover.",
+            "transfer rollback: the pre-move bytes of %s were not restored; %s "
+            "could not be verified as this transfer's (file identity could not "
+            "be read) — it may still hold them; inspect it by hand.",
+            src_path,
+            ", ".join(str(path) for path in unverifiable),
+        )
+    if replaced:
+        logger.error(
+            "transfer rollback: %s no longer names the entry this transfer "
+            "created; its contents were not verified, it is not counted as a "
+            "copy of the pre-move bytes of %s, and it was left alone.",
+            ", ".join(str(path) for path in replaced),
             src_path,
         )
-        return
-    logger.error(
-        "transfer rollback: the pre-move bytes of %s were not restored; "
-        "%d surviving %s: %s — manual recovery required.",
-        src_path,
-        len(survivors),
-        "copy" if len(survivors) == 1 else "copies",
-        ", ".join(str(path) for path in survivors),
-    )
+    if survivors:
+        logger.error(
+            "transfer rollback: the pre-move bytes of %s were not restored; "
+            "%d surviving %s: %s — manual recovery required.",
+            src_path,
+            len(survivors),
+            "copy" if len(survivors) == 1 else "copies",
+            ", ".join(str(path) for path in survivors),
+        )
+    elif not unverifiable and not replaced:
+        logger.error(
+            "transfer rollback: the pre-move bytes of %s were not restored by "
+            "this transfer, and no transfer staging copy of them was found; that "
+            "path itself was not checked here — inspect it by hand.",
+            src_path,
+        )
 
 
 def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> StagingClaim:
@@ -1013,15 +1101,25 @@ def transfer_artifact(
             # relies on this literal staying byte-identical.
             raise click.ClickException(f"{kind}/{name} is already at scope='{to_scope}' (no-op).")
         if src_scope == "user" and to_scope == "user":
-            raise click.ClickException(
+            raise PathNamingClickException(
                 f"user tier is global — {kind}/{name} already lives in the shared user "
                 f"store ({src_store}); cross-project user→user transfer has nothing to "
-                f"move or copy."
+                f"move or copy.",
+                safe_message=(
+                    f"{kind}/{name} is already in the global user tier; choose a project "
+                    "tier as the destination."
+                ),
             )
-        raise click.ClickException(
+        # Not necessarily the same (project, tier): the stores are resolved, so
+        # two tiers whose directories are linked together land here too.
+        raise PathNamingClickException(
             f"source and destination resolve to the same canonical store ({src_store}); "
             f"same-(project, tier) transfer is not supported (a rename/duplicate verb is "
-            f"out of scope for ADR-0023)."
+            f"out of scope for ADR-0023).",
+            safe_message=(
+                f"the source ({src_scope}) and destination ({to_scope}) resolve to the same "
+                "canonical store; choose a destination backed by a different store."
+            ),
         )
 
     dst_name = new_name if new_name is not None else name
@@ -1149,6 +1247,10 @@ def transfer_artifact(
     def _lock_remaining() -> float | None:
         return None if _txn_deadline is None else max(0.0, _txn_deadline - time.monotonic())
 
+    # Which prelude refused, for the public text below. Set out here because the
+    # locked body must START with the prelude (the C0 prelude guard), and kept to
+    # one handler because the interception guard inventories them by occurrence.
+    wedged = ("source", src_scope, name)
     with acquire_canonical_locks([(src_store, name), (dst_store, dst_name)], timeout=lock_timeout):
         # ADR-0030 §10: resolve any interrupted swap on BOTH roots before
         # anything reads them. Apply-only by construction — the dry-run path
@@ -1159,9 +1261,19 @@ def transfer_artifact(
         # to roll back.
         try:
             run_swap_prelude(src_store, name, kind=kind)
+            wedged = ("destination", to_scope, dst_name)
             run_swap_prelude(dst_store, dst_name, kind=kind)
         except SwapRecoveryError as exc:
-            raise TransferRecoveryError(swap_failure_text(exc)) from exc
+            side, tier, wedged_name = wedged
+            raise TransferRecoveryError(
+                swap_failure_text(exc),
+                safe_message=(
+                    f"an interrupted directory swap blocks this transfer: "
+                    f"{kind}/{wedged_name} in the {side} {tier} tier could not be "
+                    "recovered automatically. Inspect it by hand, then retry."
+                ),
+                entries=_swap_entries(exc),
+            ) from exc
 
         # The source must still satisfy the FULL discovery contract under the
         # lock, not merely exist. Discovery may have counted a live swap marker
@@ -1319,7 +1431,11 @@ def transfer_artifact(
                 # restore has actually succeeded.
                 restore_from = claimed if holding is None else holding
                 cleanup_staging = False
-                if os.path.lexists(src_path):
+                # Each probe below answers in three, not two: ``lexists`` calls
+                # an entry it cannot read absent, and the ladder then told the
+                # operator that bytes sitting on disk were gone (#3608).
+                at_src, src_error = _probe(src_path)
+                if at_src is EntryProbe.PRESENT:
                     # src has reappeared — not by us. Don't overwrite the new
                     # src bytes; don't delete our copies either. The user
                     # reconciles by hand.
@@ -1335,12 +1451,38 @@ def transfer_artifact(
                         "were not put back — manual reconciliation required.",
                         src_path,
                     )
-                elif os.path.lexists(restore_from.path):
+                elif at_src is EntryProbe.UNREADABLE:
+                    # Not known to be free, so nothing is renamed onto it: it
+                    # may hold another writer's entry, exactly like the arm
+                    # above, and it is reported as what the probe saw.
+                    logger.error(
+                        "transfer rollback: src %s could not be checked (%s); the "
+                        "pre-move bytes were not put back there — manual "
+                        "reconciliation required.",
+                        src_path,
+                        src_error,
+                    )
+                elif restore_from.check() is ClaimState.ABSENT:
+                    # The entry that held the pre-move bytes is gone too, so
+                    # there is no rename to attempt. Same-FS ends here with
+                    # nothing anywhere; EXDEV still has the destination-side
+                    # copy, which the survivor line names if it is really
+                    # there. An entry that could not be READ is not this arm:
+                    # ``check`` calls it unverifiable, and ``_restore_source``
+                    # names it as the place to look.
+                    logger.error(
+                        "transfer rollback: src %s is gone and so is the entry "
+                        "that held the pre-move bytes (%s) — nothing to rename "
+                        "back.",
+                        src_path,
+                        restore_from.path,
+                    )
+                else:
                     # src is gone as expected; try the rename-back. Success
                     # means the bytes are home and any remaining copy is
                     # redundant; a refusal preserves everything and logs.
                     #
-                    # ``lexists``, not ``exists``: a flat artifact that is
+                    # ``lstat``, not ``exists``: a flat artifact that is
                     # itself a symlink is parked AS a link, and if its target
                     # went away mid-transfer the link is dangling — invisible
                     # to ``exists()``. That fell through to "nothing to do"
@@ -1358,17 +1500,37 @@ def transfer_artifact(
                         allow_cross_parent=holding is None,
                     )
                     cleanup_staging = outcome is RestoreOutcome.RESTORED
-                    if outcome is RestoreOutcome.IDENTITY_LOST:
-                        # The entry holding the pre-move bytes was replaced out
-                        # of band, and the stage consumed the source by an
-                        # atomic rename on BOTH paths — so the artifact is not
-                        # where the user left it, and it is not anywhere we can
-                        # name. That is a PARTIAL transfer, the state
-                        # ``MigratePartialError`` exists for and the one every
-                        # surface renders with its recovery text intact rather
-                        # than as a retryable conflict. Asked as an OUTCOME of
-                        # the restore rather than as a check before it, so the
-                        # answer cannot go stale between the two (#2314).
+                    # The entry the source was renamed into cannot be shown to
+                    # be ours, and the stage consumed the source by an atomic
+                    # rename on BOTH paths, so the artifact is not where the
+                    # user left it, and it is not anywhere we can vouch for.
+                    # That is a PARTIAL transfer, the state
+                    # ``MigratePartialError`` exists for and the one every
+                    # surface renders with its recovery text intact rather than
+                    # as a retryable conflict. Asked as an OUTCOME of the
+                    # restore rather than as a check before it, so the answer
+                    # cannot go stale between the two (#2314) — and the outcome
+                    # says which way ownership failed (#3608).
+                    if outcome is RestoreOutcome.IDENTITY_UNVERIFIABLE:
+                        # Not seen replaced: its identity could not be read, or
+                        # was never captured (#3545). The text names the entry
+                        # as the place to look, not as a stranger's.
+                        raise MigratePartialError(
+                            f"transfer left {kind}/{name} unaccounted for: "
+                            f"the move renamed the source into a transfer "
+                            f"entry, and the entry now at that path could "
+                            f"not be verified as this transfer's (its file "
+                            f"identity was not available), so it was "
+                            f"neither promoted nor rolled back. Do NOT "
+                            f"retry. Inspect that entry; if it holds the "
+                            f"artifact, reconcile anything now at the "
+                            f"canonical path and restore it there by hand. "
+                            f"Entry: {restore_from.path}. Canonical path: "
+                            f"{src_path}.",
+                            src_path=src_path,
+                            dst_path=dst_path,
+                        ) from exc
+                    if outcome is RestoreOutcome.IDENTITY_REPLACED:
                         raise MigratePartialError(
                             f"transfer left {kind}/{name} unaccounted for: the "
                             f"move consumed the source and the entry holding "
@@ -1382,28 +1544,23 @@ def transfer_artifact(
                             src_path=src_path,
                             dst_path=dst_path,
                         ) from exc
-                else:
-                    # The entry that held the pre-move bytes is gone too, so
-                    # there is no rename to attempt. Same-FS ends here with
-                    # nothing anywhere; EXDEV still has the destination-side
-                    # copy, which the survivor line names if it is really
-                    # there.
-                    logger.error(
-                        "transfer rollback: src %s is gone and so is the entry "
-                        "that held the pre-move bytes (%s) — nothing to rename "
-                        "back.",
-                        src_path,
-                        restore_from.path,
-                    )
 
                 if not cleanup_staging:
-                    # The bytes did not make it home on any of the three arms.
-                    # Both copies we could still be holding are preserved, so
-                    # name the ones a probe actually finds — and let the count
-                    # come from that probe: the EXDEV path keeps a second copy
-                    # at the destination on purpose (#2313), and the holding
-                    # entry it names may itself be what went missing (#2327).
-                    _log_rollback_survivors(src_path, restore_from.path, staging)
+                    # The bytes did not make it home on any of the arms. Both
+                    # copies we could still be holding are preserved, so name
+                    # the ones a probe actually finds — and let the count come
+                    # from that probe: the EXDEV path keeps a second copy at
+                    # the destination on purpose (#2313), and the holding entry
+                    # it names may itself be what went missing (#2327).
+                    _log_rollback_survivors(src_path, restore_from, claimed)
+                    if isinstance(exc, StagingIdentityLostError):
+                        # The refusal reads "this step was refused… then retry",
+                        # and every surface maps it to a retryable conflict.
+                        # The source is not home, so a retry would move
+                        # whatever now answers to the canonical path (#3608).
+                        raise identity_refusal_not_restored(
+                            f"{kind}/{name}", src_path, dst_path, (restore_from, claimed)
+                        ) from exc
 
                 if cleanup_staging and holding is not None:
                     # Same-FS restored staging itself, so there is nothing
@@ -1426,12 +1583,37 @@ def transfer_artifact(
                     _remove_entry(holding)
                 except StagingIdentityLostError as exc:
                     # The destination canonical is in place, so the move
-                    # COMMITTED; what failed is dropping the pre-move copy —
-                    # and the reason is that the entry at that name is no
-                    # longer the one we parked. The generic partial-move
-                    # message must not be reused here: it tells the operator
-                    # to remove that path, which this error proves is somebody
-                    # else's (#2314 round 3). Point them at the object instead.
+                    # COMMITTED; what failed is dropping the pre-move copy.
+                    # The generic partial-move message must not be reused
+                    # here: it tells the operator to remove that path, which
+                    # this error says we cannot vouch for (#2314 round 3).
+                    if exc.cause == "unverifiable":
+                        # Not seen replaced: the parked entry's identity could
+                        # not be read now (#3608). It is most likely the copy
+                        # itself, so it is named as the place to look — not as
+                        # a stranger's, and not as something renamed away.
+                        logger.error(
+                            "EXDEV cleanup: %s could not be verified as the "
+                            "pre-move copy this transfer parked; not removing it "
+                            "further.",
+                            holding.path,
+                        )
+                        raise MigratePartialError(
+                            f"{kind}/{name} was moved to {dst_path}, but the "
+                            f"pre-move copy could not be cleaned up: the entry "
+                            f"at {holding.path} could not be verified as the one "
+                            f"this transfer parked (its file identity could not "
+                            f"be read), so this transfer could not confirm or "
+                            f"finish removing it. "
+                            f"Verify {dst_path} holds the artifact you expect, "
+                            f"then inspect {holding.path}: if it is the parked "
+                            f"copy, remove it by hand. Fan-out cleanup has not "
+                            f"run.",
+                            src_path=holding.path,
+                            dst_path=dst_path,
+                        ) from exc
+                    # The entry at that name is no longer the one we parked.
+                    # Point them at the object instead.
                     logger.error(
                         "EXDEV cleanup: %s no longer names the pre-move copy "
                         "this transfer parked; leaving it alone.",

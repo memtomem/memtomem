@@ -146,7 +146,8 @@ class EmbeddingConfig(ConfigModel):
     def cpu_model_defaults(self) -> "EmbeddingConfig":
         from memtomem.embedding.profiles import e5_contract_error, is_bge_m3, is_e5
 
-        if self.provider.lower() == "onnx" and not self.model:
+        auto_selected = self.provider.lower() == "onnx" and not self.model
+        if auto_selected:
             object.__setattr__(self, "model", "multilingual-e5-small")
         if self.provider.lower() == "onnx" and is_e5(self.model):
             for key, value in {
@@ -157,7 +158,12 @@ class EmbeddingConfig(ConfigModel):
             }.items():
                 if key not in self.model_fields_set:
                     object.__setattr__(self, key, value)
-            error = e5_contract_error(self.model, self.dimension, self.max_sequence_tokens)
+            error = e5_contract_error(
+                self.model,
+                self.dimension,
+                self.max_sequence_tokens,
+                auto_selected=auto_selected,
+            )
             if error:
                 raise ValueError(error)
         if self.onnx_variant == "fp32" and self.onnx_artifact_path:
@@ -346,6 +352,16 @@ class SearchConfig(ConfigModel):
                 f"system_namespace_prefixes has {len(v)} entries; cap is 10. "
                 "Did you accidentally generate prefixes dynamically?"
             )
+        # SQLite's LIKE reads a bound pattern only up to its first NUL, so the
+        # SQL exclusion would compare with the part before it exactly while
+        # ``has_namespace_prefix`` compares the whole prefix (#3554).
+        for index, prefix in enumerate(v):
+            if "\x00" in prefix:
+                raise ValueError(
+                    f"system_namespace_prefixes[{index}] = {prefix!r} contains a NUL "
+                    "character; SQLite reads a LIKE pattern only up to its first NUL, "
+                    "so this prefix would not hide what it names"
+                )
         return v
 
 
@@ -466,6 +482,16 @@ class IndexingConfig(ConfigModel):
     # polling is slower but gives the indexer a reliable default there.  Other
     # platforms retain their native backend unless explicitly overridden.
     watcher_backend: Literal["auto", "native", "polling"] = "auto"
+    # How often the polling backend rescans the watched roots; the native
+    # backend ignores it.  Every pass walks and stats each root's whole tree,
+    # in every server process that runs a watcher, so a longer interval
+    # means fewer of those passes.  It also delays an edit made outside
+    # memtomem: one that lands right after a pass waits the whole interval,
+    # then ``watcher_debounce_ms``.  A file created and deleted between two
+    # passes is never seen.  Read when an observer is built: a running MCP
+    # server keeps the value it started with, and ``mm web`` stores an
+    # edited value and uses it for the next observer it builds.
+    watcher_poll_interval_ms: int = Field(default=10000, ge=100, le=60000)
     watcher_debounce_ms: int = Field(default=5000, ge=1, le=30000)
     watcher_max_wait_ms: int = Field(default=30000, ge=1, le=30000)
 
@@ -1213,6 +1239,19 @@ class ContextGatewayConfig(ConfigModel):
     auto_display_configured_projects: bool = True
 
 
+class MaintenanceConfig(ConfigModel):
+    """Settings for the maintenance scans (``mem_dedup_scan`` and its siblings)."""
+
+    # Off by default and outside ``MUTABLE_FIELDS``: it is set in ``config.json``
+    # or the environment, not by ``mem_config``. When true, ``mem_dedup_scan``
+    # prints the stored evidence for each member of a candidate pair (heading,
+    # namespace, scope, tags, validity, position in the source, relations and
+    # links) and the fields the two members differ on. The scan itself, its
+    # ordering and what it selects are unchanged; the output is about three
+    # times as long.
+    experimental_duplicate_brief: bool = False
+
+
 class SessionTraceConfig(ConfigModel):
     """Configuration for session command execution tracing."""
 
@@ -1301,6 +1340,7 @@ class Mem2MemConfig(BaseSettings):
     session_summary: SessionSummaryConfig = Field(default_factory=SessionSummaryConfig)
     context_gateway: ContextGatewayConfig = Field(default_factory=ContextGatewayConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
     session_trace: SessionTraceConfig = Field(default_factory=SessionTraceConfig)
 
     # Sections the loaders read, rejected and therefore ignored (#2385 item 3).
@@ -2284,6 +2324,104 @@ def _validate_loaded_section(
         raise generic_error
 
 
+class RelativeConfigPathError(ValueError):
+    """A configured path is relative in a process that refuses relative paths."""
+
+
+# Set only by a shared daemon (``memtomem.server.daemon``). A daemon runs in a
+# neutral working directory and serves clients in many others, so a relative
+# configured path has no meaning there; every other process keeps today's
+# meaning, relative to its own working directory.
+_refuse_relative_paths = False
+
+# The configured filesystem paths, per section class. A relative value in a
+# neutral working directory would open, watch or write the wrong place, or, for
+# the masking manifest, stop applying it silently.
+_RELATIVE_PATH_FIELDS: dict[type, tuple[str, ...]] = {
+    StorageConfig: ("sqlite_path",),
+    IndexingConfig: (
+        "memory_dirs",
+        "project_memory_dirs",
+        "read_only_memory_dirs",
+        "retain_missing_dirs",
+        "index_masking_manifest_path",
+        "chunk_tokenizer_path",
+    ),
+    EmbeddingConfig: ("onnx_artifact_path",),
+    ContextGatewayConfig: ("known_projects_path",),
+    SessionTraceConfig: ("jsonl_path",),
+}
+
+_SECTION_NAMES: dict[type, str] = {
+    StorageConfig: "storage",
+    IndexingConfig: "indexing",
+    EmbeddingConfig: "embedding",
+    ContextGatewayConfig: "context_gateway",
+    SessionTraceConfig: "session_trace",
+}
+
+
+def refuse_relative_config_paths() -> None:
+    """Make every later config build and section assignment refuse relative paths."""
+    global _refuse_relative_paths
+    _refuse_relative_paths = True
+
+
+def _is_relative_path_value(field: str, value: object) -> bool:
+    text = str(value)
+    if text == "":
+        return False
+    if field == "sqlite_path" and (text == ":memory:" or text.startswith("file:")):
+        # Not paths; a daemon refuses them separately, as stores it cannot name.
+        return False
+    if field == "chunk_tokenizer_path":
+        from memtomem.embedding.profiles import is_tokenizer_identifier
+
+        if is_tokenizer_identifier(text):
+            return False
+    return not Path(text).expanduser().is_absolute()
+
+
+def relative_section_paths(section_obj: object) -> list[str]:
+    """The dotted names of ``section_obj``'s configured paths that are relative."""
+    section_cls = type(section_obj)
+    fields = _RELATIVE_PATH_FIELDS.get(section_cls, ())
+    found: list[str] = []
+    for field in fields:
+        value = getattr(section_obj, field)
+        values = value if isinstance(value, list) else [value]
+        if any(_is_relative_path_value(field, item) for item in values):
+            found.append(f"{_SECTION_NAMES[section_cls]}.{field}")
+    return found
+
+
+def relative_config_paths(config: Mem2MemConfig) -> list[str]:
+    """The dotted names of every configured path in ``config`` that is relative."""
+    found: list[str] = []
+    for section_name in _SECTION_NAMES.values():
+        found.extend(relative_section_paths(getattr(config, section_name)))
+    return found
+
+
+def _relative_paths_error(names: list[str]) -> RelativeConfigPathError:
+    return RelativeConfigPathError(
+        "a shared daemon cannot use a relative configured path, because it has no "
+        "working directory of its own: " + ", ".join(names) + ". Use an absolute path or ~."
+    )
+
+
+def check_relative_config_paths(config: Mem2MemConfig) -> None:
+    """Raise :class:`RelativeConfigPathError` if refusing and ``config`` has one."""
+    if not _refuse_relative_paths:
+        return
+    try:
+        found = relative_config_paths(config)
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise RelativeConfigPathError(f"a configured path cannot be checked: {exc}") from exc
+    if found:
+        raise _relative_paths_error(found)
+
+
 def assign_section_fields(section_obj: object, updates: Mapping[str, object]) -> dict[str, object]:
     """Assign already-coerced values to one config section, invariants enforced.
 
@@ -2314,6 +2452,15 @@ def assign_section_fields(section_obj: object, updates: Mapping[str, object]) ->
     for key, value in updates.items():
         setattr(section_obj, key, value)
     invalid = section_invariant_error(section_obj, updates.keys())
+    if invalid is None and _refuse_relative_paths:
+        try:
+            relative = relative_section_paths(section_obj)
+        except (RuntimeError, ValueError, OSError) as exc:
+            # ``expanduser`` of an unknown ``~user`` raises; refuse, and roll back below.
+            invalid = f"a configured path cannot be checked: {exc}"
+        else:
+            if relative:
+                invalid = str(_relative_paths_error(relative))
     if invalid is not None:
         for key, old in old_values.items():
             setattr(section_obj, key, old)

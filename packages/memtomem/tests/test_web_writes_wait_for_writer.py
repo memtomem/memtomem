@@ -42,11 +42,14 @@ from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.web.app import create_app
 from memtomem.web.deps import require_configured
 
+from ._writer_overlap import CEILING_S, until_queued
 from .helpers import isolate_config_paths
+from .test_mutation_reindex_gate import _intruder_after_the_append
 
 _NOTE = "# Note\n\n## Plans\n\nalpha falcon body\n"
 _SHORT_WAIT_S = 1.0  # long enough that a slow CI loop still sees the waiter
-# The ingress guard scans the entry, not its title, so the index refuses this one.
+# Written into the file right after the append, where the write guard never
+# looked, so the re-index refuses the file.
 _SECRET_TITLE = "aws " + "AKIA" + "IOSFODNN7EXAMPLE"
 
 
@@ -73,27 +76,12 @@ class _Owner:
 
     async def start(self) -> None:
         self.task = asyncio.create_task(self._run())
-        await asyncio.wait_for(self.entered.wait(), 5)
+        await asyncio.wait_for(self.entered.wait(), CEILING_S)
 
     async def finish(self) -> None:
         self._release.set()
         if self.task is not None:
             await self.task
-
-
-def _queued(storage) -> bool:
-    """Whether a task is queued on the writer lock (test-only peek at asyncio)."""
-    return any(not w.cancelled() for w in (storage._writer_lock._waiters or ()))
-
-
-async def _until_queued(storage, owner: _Owner, task: asyncio.Future) -> bool:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 5
-    while not (owner.entered.is_set() and _queued(storage)) and not task.done():
-        if loop.time() > deadline:
-            break
-        await asyncio.sleep(0.005)
-    return owner.entered.is_set() and _queued(storage) and not task.done()
 
 
 async def _overlap(storage, owner: _Owner, call, *, while_queued=None):
@@ -103,11 +91,11 @@ async def _overlap(storage, owner: _Owner, call, *, while_queued=None):
     ``while_queued`` runs then, before the owner is released.
     """
     task = asyncio.ensure_future(call)
-    queued = await _until_queued(storage, owner, task)
+    queued = await until_queued(storage, owner, task)
     witness = while_queued() if queued and while_queued is not None else None
     await owner.finish()
-    result = await asyncio.wait_for(task, 10)
-    assert queued, "the call never queued on the writer while the owner held it"
+    result = await asyncio.wait_for(task, CEILING_S)
+    assert queued, str(queued)
     return result, witness
 
 
@@ -115,7 +103,8 @@ async def _timed_out(storage, owner: _Owner, call):
     """Run ``call`` while ``owner`` holds the writer past the shortened wait."""
     task = asyncio.ensure_future(call)
     try:
-        assert await _until_queued(storage, owner, task), "refused without waiting"
+        queued = await until_queued(storage, owner, task)
+        assert queued, str(queued)
         return await asyncio.wait_for(task, 10)
     finally:
         task.cancel()
@@ -218,6 +207,7 @@ async def test_a_timed_out_mark_after_a_privacy_refusal_keeps_its_diagnosis(
     """The privacy arm marks too; when that times out, the refusal says both things."""
     storage = components.storage
     key = await _scratch(storage)
+    _intruder_after_the_append(monkeypatch, _SECRET_TITLE)
     monkeypatch.setattr(scratch_mod, "WRITER_WAIT_S", _SHORT_WAIT_S)
     owner = _Owner(storage)
     _start_owner_after(monkeypatch, components.index_engine, "index_file", owner)
@@ -225,7 +215,7 @@ async def test_a_timed_out_mark_after_a_privacy_refusal_keeps_its_diagnosis(
         resp = await _timed_out(
             storage,
             owner,
-            client.post(f"/api/scratch/{key}/promote", json={"title": _SECRET_TITLE}),
+            client.post(f"/api/scratch/{key}/promote", json={"title": "clean title"}),
         )
 
     assert resp.status_code == 503, resp.text
@@ -239,6 +229,7 @@ async def test_a_privacy_refusal_still_marks_once_the_owner_finishes(components,
     """The privacy arm's mark waits too, and the caller still gets the privacy 409."""
     storage = components.storage
     key = await _scratch(storage)
+    _intruder_after_the_append(monkeypatch, _SECRET_TITLE)
     owner = _Owner(storage)
     _start_owner_after(monkeypatch, components.index_engine, "index_file", owner)
 
@@ -246,7 +237,7 @@ async def test_a_privacy_refusal_still_marks_once_the_owner_finishes(components,
         resp, _ = await _overlap(
             storage,
             owner,
-            client.post(f"/api/scratch/{key}/promote", json={"title": _SECRET_TITLE}),
+            client.post(f"/api/scratch/{key}/promote", json={"title": "clean title"}),
         )
 
     assert resp.status_code == 409, resp.text
@@ -711,6 +702,37 @@ async def test_auto_tag_waits_for_the_writer_before_the_tag_lock(
     stats, _ = await _overlap(storage, owner, auto_tag_mod.auto_tag_storage(storage))
 
     assert stats.tagged_chunks > 0
+
+
+async def test_auto_tag_keeps_tags_the_owner_commits_while_it_waits(
+    components, memory_dir, monkeypatch
+):
+    """#3194: the chunk is still untagged when auto-tag starts waiting for the writer."""
+    storage = components.storage
+    path = memory_dir / "note.md"
+    await _indexed(components.index_engine, path)
+    chunks = await storage.list_chunks_by_source(path, limit=None)
+    assert all(not c.metadata.tags for c in chunks)
+
+    async def owner_tags() -> None:
+        for c in chunks:
+            await storage.set_chunk_tags(c.id, ["by-owner"])
+
+    owner = _Owner(storage, then=owner_tags)
+
+    async def extract(*_args, **_kwargs):
+        if owner.task is None:
+            await owner.start()
+        return ["falcon"]
+
+    monkeypatch.setattr(auto_tag_mod, "_extract_tags_with_fallback", extract)
+
+    stats, _ = await _overlap(storage, owner, auto_tag_mod.auto_tag_storage(storage))
+
+    assert stats.tagged_chunks == 0
+    assert stats.skipped_chunks == len(chunks)
+    for c in await storage.list_chunks_by_source(path, limit=None):
+        assert c.metadata.tags == ("by-owner",)
 
 
 async def test_a_timed_out_auto_tag_write_raises_after_the_wait(

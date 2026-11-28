@@ -70,11 +70,32 @@ class TestDiscovery:
         held = mem_dir / "held.md"
         await _index(comp, held, "# D\n\nduplicateword shared body.\n")
         await _index(comp, mem_dir / "visible.md", "# D\n\nduplicateword shared body.\n")
-        _hold_during_read(monkeypatch, comp, held, REDACTION_BLOCKED_HOLD)
+        visible = await comp.storage.list_chunks_by_source((mem_dir / "visible.md").resolve())
+        # The scan selects its pool with one read of its own, so the hold is
+        # installed around that read: a check made beside it would see no hold.
+        real = comp.storage.list_visible_chunks_by_id
+        key = norm_path(held)
+        reads = 0
 
-        chunks = await DedupScanner(comp.storage)._get_all_chunks(100)
+        async def held_while_read(limit, after=None):
+            nonlocal reads
+            reads += 1
+            await comp.storage.hold_source(held, REDACTION_BLOCKED_HOLD)
+            try:
+                return await real(limit, after)
+            finally:
+                db = comp.storage._get_db()
+                db.execute("DELETE FROM held_sources WHERE source_file=?", (key,))
+                db.commit()
 
-        assert {str(c.metadata.source_file) for c in chunks} == {norm_path(mem_dir / "visible.md")}
+        monkeypatch.setattr(comp.storage, "list_visible_chunks_by_id", held_while_read)
+
+        pool = await DedupScanner(comp.storage)._select_pool(100)
+
+        assert reads == 1
+        assert {c.id for c in pool.chunks} == {c.id for c in visible}
+        assert pool.visible == pool.above_cursor == len(visible)
+        assert not await comp.storage.is_source_held(held)
 
     async def test_consolidation_candidates_preview_no_held_rows(
         self, bm25_only_components, monkeypatch
@@ -123,11 +144,15 @@ class TestDiscovery:
 
         async def record(text, *args, **kwargs):
             seen.append(text)
-            return []
+            return entity_extraction.EntityExtraction([], llm_failed=False)
 
         monkeypatch.setattr(entity_extraction, "extract_entities_with_llm", record)
 
-        await mem_entity_scan(ctx=StubCtx(AppContext.from_components(comp)))
+        out = await mem_entity_scan(ctx=StubCtx(AppContext.from_components(comp)))
+
+        # ``tool_handler`` turns an exception into an error string, so without
+        # this a stub the scan cannot read would still pass on ``seen`` alone.
+        assert out.startswith("Entity scan complete"), out
 
         assert any("visibleentityword" in text for text in seen)
         assert not any("heldentityword" in text for text in seen)

@@ -14,18 +14,22 @@ Covers the new path that runs alongside BM25 + dense:
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 import pytest
 
 import memtomem.search.pipeline as pipeline_module
-from memtomem.config import SearchConfig, SessionSummaryConfig
+from memtomem.config import SearchConfig, SessionSummaryConfig, StorageConfig
+from memtomem.errors import SearchDeadlineExceeded
 from memtomem.models import Chunk, ChunkLink, ChunkMetadata, NamespaceFilter, SearchResult
+from memtomem.search.deadline import SearchDeadline, bound_to_current_task
 from memtomem.search.fusion import reciprocal_rank_fusion
 from memtomem.search.pipeline import SearchPipeline
 from memtomem.server.formatters import _format_structured_results
 from memtomem.storage.base import SearchMetadataFilter
+from memtomem.storage.sqlite_backend import SqliteBackend
 from memtomem.storage.sqlite_helpers import norm_path
 
 
@@ -142,6 +146,29 @@ def _async_storage() -> AsyncMock:
     s.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
     s.get_chunks_shared_from_batch = AsyncMock(return_value={})
     s.recall_chunks = AsyncMock(return_value=[])
+    return s
+
+
+def _rescue_storage_reaching_hydration(summary_chunk: Chunk) -> AsyncMock:
+    """Storage whose summary lookup scores one summary above threshold and
+    whose links walk returns one ``summarizes`` link, so the helper reaches
+    the target hydration."""
+    s = _async_storage()
+    s.bm25_search = AsyncMock(return_value=[_sr(summary_chunk, score=0.9, rank=1, source="bm25")])
+    target = _chunk("c1", source="src/a.md")
+    s.get_chunks_shared_from_batch = AsyncMock(
+        return_value={
+            summary_chunk.id: [
+                ChunkLink(
+                    target_id=target.id,
+                    link_type="summarizes",
+                    namespace_target="default",
+                    created_at=datetime.now(timezone.utc),
+                    source_id=summary_chunk.id,
+                )
+            ]
+        }
+    )
     return s
 
 
@@ -270,6 +297,100 @@ class TestBoostSourcesHelper:
         storage.get_chunks_shared_from_batch = AsyncMock(return_value={})
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         assert await pipeline._session_summary_boost_sources("q") == set()
+
+    @pytest.mark.asyncio
+    async def test_hydration_failure_degrades_to_organic(self, monkeypatch):
+        """A storage failure in the target hydration still degrades and is
+        reported as a rescue failure — the non-expiry counterpart of the
+        deadline cases below."""
+        # The warn-once registry is process-global: keep this warning out of it.
+        monkeypatch.setattr(pipeline_module, "_RESCUE_WARNED", set())
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        summary_chunk = _chunk("summary", namespace="archive:session:abc")
+        storage = _rescue_storage_reaching_hydration(summary_chunk)
+        storage.recall_chunks = AsyncMock(side_effect=RuntimeError("chunks table gone"))
+        failures: list[str] = []
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+        result = await pipeline._session_summary_boost_sources(
+            "q", report_failure=lambda: failures.append("x")
+        )
+        assert result == set()
+        assert failures == ["x"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("site", ["get_chunks_shared_from_batch", "recall_chunks"])
+    async def test_a_budget_expiry_in_a_later_read_propagates_unreported(self, site, monkeypatch):
+        """#3637: an expiry raised by the links walk or the target hydration
+        is the search's budget running out, not a storage failure — it is
+        neither logged through ``_log_rescue_failure`` nor reported."""
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        summary_chunk = _chunk("summary", namespace="archive:session:abc")
+        storage = _rescue_storage_reaching_hydration(summary_chunk)
+        setattr(storage, site, AsyncMock(side_effect=SearchDeadlineExceeded("pool wait")))
+        logged: list[str] = []
+        monkeypatch.setattr(
+            pipeline_module, "_log_rescue_failure", lambda s, *a, **k: logged.append(s)
+        )
+        failures: list[str] = []
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+        with pytest.raises(SearchDeadlineExceeded, match="pool wait"):
+            await pipeline._session_summary_boost_sources(
+                "q", report_failure=lambda: failures.append("x")
+            )
+        getattr(storage, site).assert_awaited_once()
+        assert logged == []
+        assert failures == []
+
+    @pytest.mark.asyncio
+    async def test_an_expired_ambient_budget_raises_from_the_real_links_walk(
+        self, tmp_path, monkeypatch
+    ):
+        """#3637 through the real chain: the links walk's read lease sees the
+        expired ambient budget and raises; the rescue does not swallow it."""
+        # On a regression the swallow site would enter the process-global warn-once set.
+        monkeypatch.setattr(pipeline_module, "_RESCUE_WARNED", set())
+        backend = SqliteBackend(
+            config=StorageConfig(sqlite_path=tmp_path / "rescue.db"),
+            dimension=0,
+            embedding_provider="none",
+            embedding_model="",
+        )
+        await backend.initialize()
+        try:
+            summary_chunk = _chunk("summary", namespace="archive:session:abc")
+            # Only the summary lookup is stubbed, so it takes no lease of its own.
+            bm25_stub = AsyncMock(
+                return_value=[_sr(summary_chunk, score=0.9, rank=1, source="bm25")]
+            )
+            backend.bm25_search = bm25_stub  # type: ignore[method-assign]
+            cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+            pipeline = SearchPipeline(
+                storage=backend,
+                embedder=AsyncMock(),
+                config=SearchConfig(enable_bm25=True, enable_dense=False),
+                session_summary_config=cfg,
+            )
+            failures: list[str] = []
+
+            # Control: without a budget the walk runs, finds no link, reports nothing.
+            assert (
+                await pipeline._session_summary_boost_sources(
+                    "q", report_failure=lambda: failures.append("x")
+                )
+                == set()
+            )
+            assert failures == []
+
+            bm25_stub.reset_mock()
+            with bound_to_current_task(SearchDeadline(at=time.monotonic() - 1, budget_ms=1)):
+                with pytest.raises(SearchDeadlineExceeded, match="before a read connection"):
+                    await pipeline._session_summary_boost_sources(
+                        "q", report_failure=lambda: failures.append("x")
+                    )
+            bm25_stub.assert_awaited_once()
+            assert failures == []
+        finally:
+            await backend.close()
 
     @pytest.mark.asyncio
     async def test_lookup_threads_scope_context_through(self):

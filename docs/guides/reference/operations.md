@@ -61,7 +61,8 @@ sources" appears under the Search tab's source filter.
 
 ### Web API and readiness
 
-The local server exposes interactive OpenAPI documentation at `/api/docs`.
+The local server exposes interactive OpenAPI documentation at `/api/docs` and
+the OpenAPI schema it renders at `GET /api/openapi.json`.
 Use `GET /api/readiness` for orchestration: it returns `200` when the runtime
 is ready and `503` with `startup_unavailable` while required startup components
 are unavailable.
@@ -165,6 +166,15 @@ file you deleted, an excluded path, a file over 10 MB, or a file whose
 `mm index` run reported an error — so remove those chunks with the delete
 workflow instead.
 
+The guard and both rescans also read text with its JSON-style escape
+sequences resolved (`\"`, `\\`, `\n`, `\t`, `\uXXXX`, …), up to two levels
+deep, so a credential inside a JSON string or a JSON file is found as its
+reader will decode it. In `--json` output, a hit's `span_start`/`span_end`
+are offsets into the content followed by those resolved copies, each preceded
+by a line holding `---`; an offset at or past the content's length points into a copy, and
+one secret can be reported once per copy. Other escape syntaxes (YAML `\x`,
+TOML `\U`) are not resolved.
+
 ---
 
 ## Troubleshooting
@@ -248,6 +258,16 @@ Running both `memtomem-server` (MCP) and `memtomem-web` simultaneously is suppor
   stops processes itself and refuses while any Web UI or server runs. In those
   cases, stop them yourself first.
 - **Recommendation**: for typical usage, run only the MCP server. Launch the Web UI on-demand when you need visual browsing.
+
+### Shared daemon
+
+With `memtomem-server --shared NAME`, several client sessions are served by one
+background process instead of one server each (macOS and Linux, opt-in). The
+lifecycle commands treat that daemon as a server: `mm reset` and `mm uninstall`
+refuse while it runs and name the `mm daemon stop` command, and `mm upgrade`
+stops it, which ends the sessions connected to it. See
+[Share one server between sessions](../shared-daemon.md) for turning it on,
+checking that a session joined, and what ends a daemon.
 
 ### "swap_recovery_pending" when writing a skill
 

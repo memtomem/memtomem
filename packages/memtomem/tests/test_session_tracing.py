@@ -220,6 +220,43 @@ class TestPayloadSanitization:
             "*** KEEP"
         )
 
+    @pytest.mark.parametrize(
+        "secret",
+        [
+            "Authorization: Bearer " + "a1" * 150,
+            "client_secret=" + "a1" * 200,
+            "GITHUB_TOKEN=" + "a1" * 200,
+        ],
+        ids=["bearer", "label", "env"],
+    )
+    def test_a_long_value_a_bounded_rule_reads_in_part_is_masked_to_its_end(self, secret):
+        # These rules read at most 256 characters of a value; the mask still
+        # covers all of it, not only the part the rule matched.
+        assert session_tracing._redact_value(f"pre {secret}, post") == "pre ***, post"
+
+    @pytest.mark.parametrize("ch", list("-.~+/=_"))
+    def test_the_rest_of_a_long_value_is_masked_whatever_its_256th_character(self, ch):
+        value = "a1" + "a" * 253 + ch + "TAIL9"
+        assert session_tracing._redact_value(f"client_secret={value} end") == "*** end"
+
+    def test_a_complete_match_of_an_older_rule_is_not_extended(self):
+        text = "https://example.invalid/ghp_" + "a" * 36 + "/repos/owner/repo"
+        assert session_tracing._redact_value(text) == "https://example.invalid/***/repos/owner/repo"
+
+    def test_many_nested_hits_are_masked_in_linear_time(self):
+        import time
+
+        def best(n: int) -> float:
+            text = "xoxb-" + ("AKIA" + "A" * 16 + "-") * n
+            times = []
+            for _ in range(3):
+                start = time.perf_counter()
+                session_tracing._redact_value(text)
+                times.append(time.perf_counter() - start)
+            return min(times)
+
+        assert best(8_000) / best(1_000) < 30
+
     def test_jwt_after_a_hyphenated_prefix_is_masked_from_its_first_eyj(self):
         # The JWT rule may match from the second ``eyJ``; scan() moves the
         # start back, so the first segment is not left in the clear.
@@ -901,40 +938,6 @@ class TestConfigSaveValidationAndRollback:
         assert app_mock.state.config.session_trace.langfuse_enabled is False
 
     @pytest.mark.anyio
-    async def test_mcp_config_rollback(self, monkeypatch, tmp_path):
-        # Isolate HOME: on a persist failure the MCP rollback rebuilds a fresh
-        # config via load_config_d + load_config_overrides, both of which read
-        # ~/.memtomem (config.d/ and config.json). Without isolation a developer
-        # whose real config.json sets session_trace.langfuse_enabled=true leaks
-        # into the rollback baseline and this assertion flips to True (#1249).
-        set_home(monkeypatch, tmp_path)
-        app_mock = MagicMock()
-        app_mock.config = Mem2MemConfig()
-        app_mock.config.session_trace.enabled = True
-        app_mock.config.session_trace.langfuse_enabled = False
-
-        from memtomem.server.tools import status_config
-
-        monkeypatch.setattr(status_config, "_get_app_initialized", AsyncMock(return_value=app_mock))
-
-        from memtomem.server.tools.status_config import mem_config
-
-        res = await mem_config(
-            key="session_trace.langfuse_enabled", value="true", persist=True, ctx=MagicMock()
-        )
-
-        # Since #2110 the section is re-validated at assignment, so the tool
-        # refuses before persisting instead of writing, failing validation
-        # inside ``save_config_overrides``, and rolling back by reload.
-        assert "Cannot set 'session_trace.langfuse_enabled'" in res
-        assert "requires langfuse_public_key and langfuse_secret_key" in res
-        # The message must not start with "Set " — that prefix is what gates
-        # persistence and the runtime fanout in ``mem_config``.
-        assert not res.startswith("Set ")
-
-        assert app_mock.config.session_trace.langfuse_enabled is False
-
-    @pytest.mark.anyio
     async def test_mcp_config_persist_timeout_reverts_and_skips_fanout(self, monkeypatch, tmp_path):
         # #1567: save_config_overrides can now raise TimeoutError when another
         # process holds the config write lock. mem_config persists BEFORE the
@@ -1005,7 +1008,7 @@ class TestConfigMaskingAndSecretsSecurity:
         assert "my-openai-api-key" not in key_res2
         assert key_res2 == "embedding.api_key = ***"
 
-        # Test setting config masks the return confirmation value
+        # MCP cannot set the key, and its refusal does not echo the value.
         set_res = await mem_config(
             key="session_trace.langfuse_secret_key",
             value="new-secret",
@@ -1013,10 +1016,8 @@ class TestConfigMaskingAndSecretsSecurity:
             ctx=MagicMock(),
         )
         assert "new-secret" not in set_res
-        assert (
-            set_res
-            == "Set session_trace.langfuse_secret_key = '***' (runtime only — not persisted)"
-        )
+        assert "cannot be changed through MCP" in set_res
+        assert app_mock.config.session_trace.langfuse_secret_key == "my-langfuse-secret"
 
     @pytest.mark.anyio
     async def test_web_patch_config_secret_masking(self, monkeypatch):

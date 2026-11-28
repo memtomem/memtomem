@@ -930,7 +930,7 @@ async function _ctxSyncProjectScope(scopeId, btn) {
           failed = {
             phase: 'settings',
             reason: await _ctxErrorMessageFromResponse(
-              settingsResp, t('settings.ctx.sync_settings_failed_fallback')),
+              settingsResp, t('settings.ctx.sync_settings_failed_fallback'), 'settings'),
           };
           failedPhases.push('settings');
         } else {
@@ -942,7 +942,7 @@ async function _ctxSyncProjectScope(scopeId, btn) {
           const needsConfirmation = firstWithStatus('needs_confirmation');
           if (errored) {
             settingsSeverity = 'error';
-            settingsReason = errored.reason || '';
+            settingsReason = _ctxSettingsRowReason(errored);
           } else if (aborted) {
             settingsSeverity = 'aborted';
           } else if (needsConfirmation) {
@@ -1568,7 +1568,8 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
           showToast(t('toast.sync_partial_failed', {
             succeeded: report.phases.filter((phase) => phase.status === 'ok').map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
             failed_phase: failedPhases.map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
-            reason: failedPhases[0].error?.message || t('settings.ctx.sync_settings_failed_fallback'),
+            reason: _ctxSyncAllPhaseReason(
+              failedPhases[0], t('settings.ctx.sync_settings_failed_fallback')),
           }), 'error');
         } else if (batchAttentionSkips.length) {
           const items = [...new Set(batchAttentionSkips)];
@@ -1715,7 +1716,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
           failed = {
             phase: 'settings',
             reason: await _ctxErrorMessageFromResponse(
-              settingsResp, t('settings.ctx.sync_settings_failed_fallback')),
+              settingsResp, t('settings.ctx.sync_settings_failed_fallback'), 'settings'),
           };
         } else {
           const settingsData = await settingsResp.json().catch(() => ({}));
@@ -1726,7 +1727,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
           const needsConfirmation = firstWithStatus('needs_confirmation');
           if (errored) {
             settingsSeverity = 'error';
-            settingsReason = errored.reason || '';
+            settingsReason = _ctxSettingsRowReason(errored);
           } else if (aborted) {
             settingsSeverity = 'aborted';
           } else if (needsConfirmation) {

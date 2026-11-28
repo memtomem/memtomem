@@ -24,9 +24,15 @@ import memtomem
 def package_src_dir() -> Path:
     """Return the source root of the ``memtomem`` package imported by pytest.
 
-    Typically ``.../packages/memtomem/src``.
+    Typically ``.../packages/memtomem/src``: the directory ``import memtomem``
+    found the package in, made absolute. Nothing below it is resolved. An
+    ``__init__.py`` that links into another checkout would otherwise move the
+    root to that checkout, whose submodules the child would then import, and
+    following a ``memtomem`` directory that links to a differently named one
+    can pick a root where ``import memtomem`` finds another package or none
+    (#3574).
     """
-    return Path(memtomem.__file__).resolve().parents[1]
+    return Path(memtomem.__file__).parent.parent.resolve()
 
 
 def subprocess_env(

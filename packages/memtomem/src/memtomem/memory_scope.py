@@ -190,6 +190,58 @@ def resolve_memory_scope_dir(
     raise MemoryScopeError(f"unsupported memory scope: {scope!r}")
 
 
+def resolve_project_tier_write_dir(
+    scope: TargetScope,
+    project_root: Path | None,
+    user_base: Path = DEFAULT_USER_MEMORY_DIR,
+) -> Path:
+    """:func:`resolve_memory_scope_dir` for a write into the tier it returns.
+
+    A project tier is derived from ``project_root`` and then resolved, so a
+    tier directory, or the ``.memtomem`` holding it, delivered as a link names
+    whatever the link points at — another project's registered tier among
+    them, where the registration check finds it and the write lands (#3623).
+    Such a tier is refused here with the indexer's own predicate,
+    :func:`project_tier_is_relinked`, which the indexer uses to leave that
+    tier out. It is judged before anything is resolved, so a link that loops
+    is refused, not followed. The tier is then resolved by
+    :func:`resolve_memory_scope_dir`; an ``OSError`` or ``RuntimeError`` from
+    that resolution is refused the same way (#3646). One such failure is an
+    entry swapped for a loop after the check, on a Python whose ``resolve()``
+    raises on a loop (3.12 raises ``RuntimeError``, naming the absolute path). Where
+    ``resolve()`` returns the spelled path instead (3.13+), that path is the
+    answer. Only this resolution is covered: a tier resolved elsewhere, as
+    the project-context lookup does, keeps its own behaviour, and an entry
+    swapped after this returns is not bound to the later ``open``. Every
+    other case is :func:`resolve_memory_scope_dir`'s answer, errors included.
+
+    Raises:
+        MemoryScopeError: As :func:`resolve_memory_scope_dir` does, and when
+            the project tier is reached through a link, cannot be inspected,
+            or fails to resolve. The message names only the entries relative
+            to the project root: a web response carries it.
+    """
+    if project_root is not None and scope in ("project_shared", "project_local"):
+        if project_tier_is_relinked(project_tier_dir(scope, project_root)):
+            raise MemoryScopeError(_relinked_tier_refusal(scope))
+        try:
+            return resolve_memory_scope_dir(scope, project_root, user_base)
+        except (OSError, RuntimeError):
+            # The exception names the absolute path; the refusal must not.
+            raise MemoryScopeError(_relinked_tier_refusal(scope)) from None
+    return resolve_memory_scope_dir(scope, project_root, user_base)
+
+
+def _relinked_tier_refusal(scope: str) -> str:
+    """The write resolver's refusal of a project tier, naming only project-relative entries."""
+    entry = f".memtomem/{_PROJECT_TIER_DIR_NAMES[scope]}"
+    return (
+        f"{entry}, or the .memtomem directory holding it, is a symbolic link or "
+        "junction, or could not be inspected; nothing was written. Replace a link "
+        "with a regular directory, or make the entry readable."
+    )
+
+
 def resolve_scope_target(
     base: Path,
     name: str | Path,
@@ -344,6 +396,16 @@ _DAY_FILE_RE = re.compile(
     r"(?P<date>\d{4}-\d{2}-\d{2})--(?P<slug>.+)-(?P<digest>[0-9a-f]{%d})\.md" % _NS_DIGEST_LEN
 )
 
+#: How many hex digits of a random token :func:`share_copy_file_name` appends.
+_SHARE_TOKEN_LEN = 12
+
+#: A share copy's name: a day file's stem, ``-``, the token. A day file's own name
+#: never matches, because the 13th character before its ``.md`` is a digit of its
+#: 16-digit digest, not a ``-``. Other names can match (a consolidation summary's
+#: ends in a 12-digit token too), and declare nothing: a name declares only what
+#: remains without the token, so only when that is a day file's name.
+_SHARE_COPY_RE = re.compile(r"(?P<day>.+)-[0-9a-f]{%d}\.md" % _SHARE_TOKEN_LEN)
+
 #: How many candidates :func:`decode_day_file_namespace` tries before giving up
 #: (ADR-0043 §1). 2^16 is about 0.1 s of hashing, once per namespace per run.
 _DECODE_BUDGET = 1 << 16
@@ -403,11 +465,17 @@ def day_file_declaration(path: Path) -> tuple[str | None, bool]:
     indexer decides on the resolved path (``_index_file``'s ``decision_path``)
     while discovery keeps symlink names: decoding the link's name would preview
     one namespace and index another.
+
+    A share copy's name (:func:`share_copy_file_name`) declares what the day
+    file it was named after would: its token is dropped and the rest decoded.
     """
     try:
         name = resolve_path(path).name
     except OSError:
         name = path.name
+    copy = _SHARE_COPY_RE.fullmatch(name)
+    if copy is not None:
+        name = copy["day"] + ".md"
     return decode_day_file_namespace(name), _DAY_FILE_RE.fullmatch(name) is not None
 
 
@@ -447,10 +515,10 @@ def consolidation_file_name(source_name: str, run_id: int, *, date_str: str) -> 
     chunk id drops the ``consolidated_into`` edges that mark its originals as
     covered. The source name is only a readable hint, slugged like a day
     file's namespace. The run id names the ``maintenance_runs`` row, and the
-    random token keeps the name fresh when a reset store reuses run ids, since
-    an append into an existing file would put two entries in it again. The
-    name never ends in ``.consolidated.md``, the policy's virtual summary
-    suffix.
+    random token keeps the name fresh when a reset store reuses run ids. The
+    writer refuses a file that already exists rather than append a second
+    entry to it (``_mem_add_core``'s ``new_file_only``, #3474). The name never
+    ends in ``.consolidated.md``, the policy's virtual summary suffix.
     """
     stem = Path(source_name).stem
     slug = _FS_UNSAFE_RE.sub("-", stem).strip("-")
@@ -469,6 +537,31 @@ def consolidation_file_name(source_name: str, run_id: int, *, date_str: str) -> 
 _CONSOLIDATION_FILE_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}-(?:[A-Za-z0-9._-]+-)?run\d+-[0-9a-f]{12}\.md"
 )
+
+
+#: Directory, under a scope's memory base, that holds ``mem_agent_share`` copies.
+SHARE_COPY_DIR = "shared-copies"
+
+
+def share_copy_file_name(namespace: str | None, default_namespace: str, *, date_str: str) -> str:
+    """Return the file, relative to a scope base, for one share copy (#3324).
+
+    Each copy gets a file of its own, as a consolidation summary does (#2802).
+    In the namespace's day file a short copy is merged into the chunk of the
+    entry before it, and when that entry is an earlier copy its ``chunk_links``
+    row makes the re-index refuse to drop the old chunk id: the copy lands on
+    disk unindexed, and the whole file stops indexing. A file of its own holds
+    one entry, so nothing else is ever merged into or overlapped with it.
+
+    The name is the day file's name with a random token before ``.md``, so a
+    rebuild restores its namespace the way it restores a day file's
+    (:func:`day_file_declaration`), and moving it keeps it from ever becoming a
+    day file that later writes would append to. The writer refuses an existing
+    file rather than append to it (``_mem_add_core``'s ``new_file_only``).
+    """
+    day = day_file_name(namespace, default_namespace, date_str=date_str)
+    token = uuid.uuid4().hex[:_SHARE_TOKEN_LEN]
+    return f"{SHARE_COPY_DIR}/{day.removesuffix('.md')}-{token}.md"
 
 
 def is_consolidation_summary_file(path: Path) -> bool:
@@ -716,6 +809,51 @@ def entry_is_link(entry: Path) -> bool:
     except OSError:
         return True
     return stat_mod.S_ISLNK(mode) or entry.is_junction()
+
+
+class ProjectEntryRelinked(ValueError):
+    """A project path memtomem would write through, or copy from, is a link.
+
+    ``entry`` is the linked entry, relative to the project root and spelled
+    with forward slashes. The message names only that entry: the link's
+    target can sit anywhere, and a web response must not carry it.
+    """
+
+    def __init__(self, entry: str) -> None:
+        self.entry = entry
+        super().__init__(
+            f"{entry} is a symbolic link or junction inside the project; memtomem does not "
+            "write through it or copy from it. Replace it with a regular directory or file "
+            "to continue."
+        )
+
+
+def relinked_project_entry(project_root: Path, rel: Path, *, judge_leaf: bool) -> str | None:
+    """The first entry of ``project_root / rel`` that is a link, or ``None``.
+
+    The entries are judged one by one with :func:`entry_is_link`, from the
+    first component of ``rel`` down to its parent, and the last component too
+    when ``judge_leaf`` is set: a writer that replaces its file atomically
+    swaps a link at the leaf for a regular file, while one that opens the file
+    in place writes through it. Where a link points does not matter. Nothing
+    at or above ``project_root`` is judged; that part of the path belongs to
+    the machine, not to the checkout. The answer is the entry relative to
+    ``project_root`` with forward slashes.
+    """
+    if rel.is_absolute() or rel.anchor or ".." in rel.parts or not rel.parts:
+        raise ValueError(f"not a path inside the project: {rel.as_posix()!r}")
+    parts = rel.parts if judge_leaf else rel.parts[:-1]
+    for depth in range(1, len(parts) + 1):
+        if entry_is_link(project_root.joinpath(*parts[:depth])):
+            return Path(*parts[:depth]).as_posix()
+    return None
+
+
+def refuse_relinked_project_entry(project_root: Path, rel: Path, *, judge_leaf: bool) -> None:
+    """Raise :class:`ProjectEntryRelinked` when :func:`relinked_project_entry` finds one."""
+    entry = relinked_project_entry(project_root, rel, judge_leaf=judge_leaf)
+    if entry is not None:
+        raise ProjectEntryRelinked(entry)
 
 
 def is_project_tier_registered(target_dir: Path, project_memory_dirs) -> bool:

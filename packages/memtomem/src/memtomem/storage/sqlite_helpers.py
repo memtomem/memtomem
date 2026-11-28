@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 from functools import lru_cache
 from collections.abc import Iterable, Sequence
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from memtomem.models import NamespaceFilter, has_namespace_prefix
 
@@ -71,6 +71,29 @@ def resolve_path(p: Path) -> Path:
         return p.resolve()
     except RuntimeError:
         return Path(os.path.realpath(p))
+
+
+def join_path_base(base: PurePath, path: PurePath, raw: str) -> PurePath:
+    """Start ``path``, which is not absolute, at ``base`` instead of the process cwd.
+
+    For a caller that knows which directory a relative path was written
+    against when that is not this process's working directory. Takes pure
+    paths so the Windows shapes can be exercised on any platform.
+
+    ``is_absolute()`` is false on Windows for two shapes that are not plainly
+    relative. A rooted path with no drive (``\\foo``) joins to the root of
+    the base's drive, where a process started in ``base`` would resolve it. A
+    drive-relative path (``C:foo``) joins under ``base`` when it names the
+    base's drive; on another drive it means that drive's own working
+    directory, which only the process that wrote it knows, so it is refused.
+    ``raw`` is the text as given, for that message.
+    """
+    if path.drive and path.drive.casefold() != base.drive.casefold():
+        raise ValueError(
+            f"{raw!r} is relative to the working directory of drive {path.drive}, which "
+            "is not known here; pass an absolute path."
+        )
+    return base / path
 
 
 def own_leaf_key(file_path: Path) -> str:
@@ -148,6 +171,78 @@ def stored_key_moved(key: str) -> bool:
     Resolves, so async callers run it in a thread.
     """
     return norm_path(Path(key)) != fold_path_form(key)
+
+
+def _caseless(key: str) -> str:
+    """``key`` in Unicode canonical caseless form (D145), separators as ``/`` on Windows.
+
+    Broader than any filesystem's own folding on purpose: it only picks the
+    keys :func:`source_twins` then checks on disk, so a false match costs two
+    ``lstat`` calls and nothing else.
+    """
+    if os.name == "nt":
+        key = key.replace("\\", "/")
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", key).casefold())
+
+
+def _uppercased(key: str) -> str:
+    """``key`` upper-cased, the way NTFS compares names (its upcase table).
+
+    Case folding and upper-casing disagree on some letters: dotless ``ı``
+    upper-cases to ``I`` but folds to itself, so the two spellings match here
+    and not in :func:`_caseless`.
+    """
+    if os.name == "nt":
+        key = key.replace("\\", "/")
+    return unicodedata.normalize("NFD", key).upper()
+
+
+def twin_candidates(key: str, stored: Iterable[str]) -> list[str]:
+    """The stored keys other than ``key`` that may name its file under another spelling.
+
+    A string comparison only, no filesystem access: keys equal to ``key`` in
+    canonical caseless form or upper-cased. Sorted, so a caller naming one of
+    them names the same one every time.
+    """
+    folded, upper = _caseless(key), _uppercased(key)
+    return sorted(
+        {k for k in stored if k != key and (_caseless(k) == folded or _uppercased(k) == upper)}
+    )
+
+
+def _source_identity(key: str) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of the entry at ``key``, not following a leaf symlink.
+
+    ``None`` when there is no entry, or the filesystem reports no inode
+    (``st_ino == 0``), which is no identity rather than a shared one.
+    """
+    try:
+        info = os.lstat(key)
+    except (OSError, ValueError):
+        return None
+    return None if info.st_ino == 0 else (info.st_dev, info.st_ino)
+
+
+def source_twins(key: str, stored: Iterable[str]) -> list[str]:
+    """The stored keys that name the same file as ``key`` under another spelling (#3408).
+
+    On a case-insensitive volume ``Notes/a.md`` and ``notes/a.md`` are one
+    file, and indexing both spellings stores its lines twice. A twin is a
+    :func:`twin_candidates` key whose entry has ``key``'s device and inode.
+    ``lstat``, so a key whose leaf has become a symlink to the file is a link,
+    not the file (#2835). No identity on either side, no twin. On a
+    case-sensitive volume two case spellings are two inodes, so nothing there
+    is a twin; a hard link under a caseless-equal name is, and rewrites through
+    it are then refused for the same reason. Stats files, so async callers run
+    it in a thread.
+    """
+    candidates = twin_candidates(key, stored)
+    if not candidates:
+        return []
+    own = _source_identity(key)
+    if own is None:
+        return []
+    return [k for k in candidates if _source_identity(k) == own]
 
 
 def stored_key_spellings(spelling: str) -> list[str]:
@@ -419,6 +514,24 @@ def match_source_filter_value(filter_str: str, source_path: str) -> bool:
     if any(char in norm_filter for char in ("*", "?", "[")):
         return fnmatch(norm_source, norm_filter)
     return norm_filter in norm_source
+
+
+def decode_tags_column(raw: str) -> list | None:
+    """A ``chunks.tags`` value as a list, or ``None`` when it does not hold one."""
+    try:
+        decoded = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return decoded if isinstance(decoded, list) else None
+
+
+def tags_column_is_empty(raw: str) -> bool:
+    """Whether the chunk reader sees no tags in ``raw`` (SQL: ``memtomem_tags_empty``).
+
+    A ``json_valid()`` guard would not agree with that reader: it rejects the
+    ``NaN`` and ``Infinity`` that ``json.dumps`` writes and ``json.loads`` reads.
+    """
+    return not decode_tags_column(raw)
 
 
 def source_namespaces_admit(

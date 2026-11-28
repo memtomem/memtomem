@@ -37,7 +37,7 @@ DEFERRED = {
     "observability/session_tracing.py:get_trace_config": (1, 1),
     # Only the caller-supplied-base branch; a config-less ambient load is canonical.
     "runtime/components.py:create_components": (1, 1),
-    "server/__init__.py:_resolve_store_db_path": (1, 1),
+    "_store_identity.py:configured_store_path": (1, 1),
     "server/tools/context.py:_resolve_mcp_scope": (1, 1),
     "server/tools/status_config.py:collect_runtime_profile": (1, 1),
 }

@@ -67,6 +67,8 @@ from memtomem._settlement import settle_shielded_value
 from memtomem.cli._db_lock import check_db_lock, sqlite_file_uri
 from memtomem.cli._liveness import (
     check_server_liveness,
+    live_daemon_for_pid,
+    running_daemons_hint,
     check_web_liveness,
     record_narrowed_inventory_warning,
 )
@@ -128,6 +130,12 @@ def _refuse(
     sys.exit(2)
 
 
+def _with_daemon_hint(hint: str) -> str:
+    """*hint*, followed by the running shared daemons and their stop command (#3381)."""
+    daemons = running_daemons_hint()
+    return hint if daemons is None else f"{hint} {daemons}"
+
+
 def _refuse_registry(probe: UninstallProbeResult, *, as_json: bool = False) -> None:
     """Refuse on registry evidence — never ``--force``-overridable.
 
@@ -146,9 +154,11 @@ def _refuse_registry(probe: UninstallProbeResult, *, as_json: bool = False) -> N
             "registered for this user. Refusing to reset — an active process "
             "holds the store open, and wiping it underneath can lose writes or "
             "corrupt the WAL.",
-            "Stop every memtomem-server (close editor sessions using "
-            "memtomem) and any `mm web`, then retry. --force does not override "
-            "this check.",
+            _with_daemon_hint(
+                "Stop every memtomem-server (close editor sessions using "
+                "memtomem) and any `mm web`, then retry. --force does not override "
+                "this check."
+            ),
             as_json=as_json,
         )
     elif probe.state == "UNTRUSTED":
@@ -217,6 +227,15 @@ def _check_gates(
     )
     if server.alive:
         who = f"pid {server.pid}" if server.pid is not None else "pid unknown, flock held"
+        daemon = live_daemon_for_pid(server.pid)
+        if daemon is not None:
+            _refuse(
+                f"Shared daemon '{daemon}' still running ({who}). Refusing to reset — "
+                "a live writer racing the wipe can lose data or corrupt the WAL.",
+                f"Stop it with `mm daemon stop {daemon}`, or pass --force to override.",
+                as_json=as_json,
+                warnings=warnings,
+            )
         _refuse(
             f"MCP server still running ({who}). Refusing to reset — a live "
             "writer racing the wipe can lose data or corrupt the WAL.",
@@ -292,7 +311,7 @@ async def _acquire_barrier_or_refuse(
         _refuse(
             f"A memtomem process is starting or holding the lifecycle "
             f"barrier ({exc}). Refusing to reset.",
-            "Stop it and re-run mm reset.",
+            _with_daemon_hint("Stop it and re-run mm reset."),
             as_json=as_json,
             warnings=warnings,
         )

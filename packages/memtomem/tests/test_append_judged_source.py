@@ -876,6 +876,36 @@ async def test_web_add_merges_tags_into_the_new_entry_only(day_file):
     assert tagged and all("NEW ENTRY" in c.content for c in tagged), chunks
 
 
+async def test_web_add_boundary_ignores_breaks_only_splitlines_sees(day_file):
+    """``str.splitlines`` also breaks at ``\\x0c``; chunk line numbers do not (#2765).
+
+    Counting the earlier entry that way put the boundary 40 lines late, past
+    every chunk of the next entry, so none of them got its tag. The entry opens
+    with its own ``##`` heading, so the merge loop is what tags it (#2762).
+    """
+    comp, _, source = day_file
+    sections = "\n\n".join(
+        f"### Part {i}\n\n" + " ".join(f"part{i}-word{j}" for j in range(400)) for i in range(3)
+    )
+    async with _web_client(comp) as client:
+        first = await client.post(
+            "/api/add",
+            json={"content": "alpha" + "\x0c" * 40 + " end", "title": "Alpha", "tags": ["alpha"]},
+        )
+        second = await client.post(
+            "/api/add", json={"content": "## Beta\n\n" + sections, "tags": ["beta"]}
+        )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    chunks = await comp.storage.list_chunks_by_source(source)
+    parts = [c for c in chunks if "-word" in c.content]
+    assert parts
+    assert all("beta" in c.metadata.tags for c in parts), [
+        (c.metadata.start_line, c.metadata.tags) for c in parts
+    ]
+
+
 def _relink_inside_the_reindex(monkeypatch, comp, decoy: Path, aside: Path) -> None:
     """Replace the appended file with a link to ``decoy`` as its re-index starts."""
     engine = comp.index_engine

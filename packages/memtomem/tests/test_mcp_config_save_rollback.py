@@ -11,6 +11,7 @@ import pytest
 from memtomem import config as cfg_mod
 from memtomem.config import Mem2MemConfig
 from memtomem.config_signature import build_fresh_config
+from memtomem.server.helpers import mcp_saved_fields
 from memtomem.server.tools import status_config
 
 from .helpers import isolate_config_paths
@@ -26,7 +27,9 @@ def install_app(monkeypatch, config):
         config=config,
         search_pipeline=SimpleNamespace(invalidate_cache=MagicMock(), config=config.search),
         storage=SimpleNamespace(
-            rebuild_fts=AsyncMock(return_value=3), set_fts_tokenizer=MagicMock()
+            rebuild_fts=AsyncMock(return_value=3),
+            set_fts_tokenizer=MagicMock(),
+            fts_tokenizer_effective="kiwipiepy",
         ),
         embedder=SimpleNamespace(config=config.embedding),
     )
@@ -107,7 +110,7 @@ async def test_failed_save_restores_pre_edit_runtime(
     assert config.indexing.chunk_model_tokens == 512
     assert config.indexing.max_chunk_tokens == 384
     assert config_path.read_bytes() == disk_before
-    save.assert_called_once_with(config)
+    save.assert_called_once_with(config, mcp_saved_fields())
     for loader in [*loaders, fresh]:
         loader.assert_not_called()
     app.search_pipeline.invalidate_cache.assert_not_called()
@@ -139,7 +142,7 @@ async def test_failed_save_preserves_list_identity_and_skips_fanout(
 
     await status_config.mem_config(key, value, persist=True)
 
-    save.assert_called_once_with(config)
+    save.assert_called_once_with(config, mcp_saved_fields())
     assert app.config is config
     assert config.model_dump() == before
     assert config.search.rrf_weights is weights
@@ -212,7 +215,7 @@ async def test_success_preserves_persistence_and_fanout(
     assert app.search_pipeline.config is config.search
     assert app.embedder.config is config.embedding
     if persist:
-        save.assert_called_once_with(config)
+        save.assert_called_once_with(config, mcp_saved_fields())
         assert "(persisted to config.json)" in response
         assert (
             json.loads(config_path.read_text(encoding="utf-8"))[section_name][field_name] == actual
@@ -225,7 +228,7 @@ async def test_success_preserves_persistence_and_fanout(
     if key == "search.tokenizer":
         app.storage.set_fts_tokenizer.assert_called_once_with(actual)
         app.storage.rebuild_fts.assert_awaited_once_with()
-        assert "FTS index rebuilt (3 chunks)." in response
+        assert "FTS index rebuilt with kiwipiepy (3 chunks)." in response
     else:
         app.storage.set_fts_tokenizer.assert_not_called()
         app.storage.rebuild_fts.assert_not_called()
@@ -233,3 +236,23 @@ async def test_success_preserves_persistence_and_fanout(
         publish.assert_called_once_with(app.embedder, actual)
     else:
         publish.assert_not_called()
+
+
+async def test_cross_field_rejection_does_not_save_or_fan_out(config_path, monkeypatch):
+    # The section is re-validated at assignment (#2110), so an invalid
+    # combination is refused before ``persist=True`` could write it and every
+    # later load drop the section back to defaults.
+    config = Mem2MemConfig()
+    app = install_app(monkeypatch, config)
+    before = config.model_dump()
+    save = MagicMock()
+    monkeypatch.setattr(cfg_mod, "save_config_overrides", save)
+
+    response = await status_config.mem_config("indexing.max_chunk_tokens", "64", persist=True)
+
+    assert response.startswith("Cannot set 'indexing.max_chunk_tokens'")
+    assert "must be <= max_chunk_tokens" in response
+    assert config.model_dump() == before
+    save.assert_not_called()
+    assert not config_path.exists()
+    app.search_pipeline.invalidate_cache.assert_not_called()

@@ -32,9 +32,9 @@ behaviour is the same everywhere and only the invocation differs.
 | Hermes Agent plugin | — | — | — | not shipped: these need a project root, and Hermes starts the server outside one |
 | Gemini CLI | — | — | — | not shipped: this repository ships no workflows for it |
 
-This guide describes the workflows as shipped with memtomem `0.7.8` and these
+This guide describes the workflows as shipped with memtomem `0.7.14` and these
 plugin versions:
-`claude` 0.5.35 · `codex` 0.3.33 · `opencode` 0.3.31 · `kimi` 0.2.25 · `antigravity` 0.2.12 · `cursor` 0.1.0.
+`claude` 0.5.46 · `codex` 0.3.44 · `opencode` 0.3.42 · `kimi` 0.2.32 · `antigravity` 0.2.23 · `cursor` 0.1.0.
 `update` runs its `incremental` mode by default from `claude` 0.5.26,
 `codex` 0.3.23, `opencode` 0.3.23, `kimi` 0.2.21 and `antigravity` 0.2.2 on;
 older plugin releases ask for a mode instead (see the CHANGELOG).
@@ -59,17 +59,28 @@ fall back to your user-scope memory for project records.
 
 ## handoff
 
-`handoff` takes exactly one operation, `save` or `resume`. As a shorthand, `s`
-and `r` count only when they are the whole first word after the invocation, as
-in `s to codex-cli` or `r <handoff-id>`. The target runtime is one of
+`handoff` takes exactly one operation, `save`, `resume`, or `list`. As a
+shorthand, `s`, `r`, and `l` count only when they are the whole first word after
+the invocation, as in `s to codex-cli` or `r <handoff-id>`. The target runtime is one of
 `claude-code`, `codex-cli`, `kimi-code`, `opencode`, `antigravity-cli`,
 `cursor`, or `any` (the default).
 
 **Save** records work that actually happened, so it refuses to run when there
 is nothing observed to record and reports `insufficient_input: work context`
 instead of inventing a checkpoint. It reads the live `git rev-parse HEAD` and
-`git status --porcelain=v1 --branch`, then writes one record of at most 1,200
-characters with these fields, in this order:
+`git status --porcelain=v1 --branch`, then writes one record with these fields,
+in this order. The whole record, fence lines included, aims for at most 850 characters,
+with each Korean, Japanese, or Chinese character counted as two, and never more than
+1,200 characters, counted plainly. The target is meant to keep the record in one chunk on a store
+indexing with an exact token ceiling (384 tokens under `multilingual-e5-small`); it is
+not a guarantee. To fit, Save shortens only prose and moves whole paths out of
+`changed_files` into its omitted count. The ids, the root, the commit, the worktree
+summary and the artifact paths are never changed, and a path, symbol, command, GitHub
+reference or quote in the prose is kept whole or left out whole, except in `next_action`,
+where none is left out. A record that cannot meet the field caps
+and the 1,200 maximum that way is not saved; Save stops and names the value in the
+way. A record that meets them but stays over the size target is saved and reported
+with its weighted count.
 
 ```text
 handoff_id, from_runtime, to_runtime, project_root, objective, completed,
@@ -80,7 +91,11 @@ next_action
 The record goes to `scope="project_local"` with the tags `handoff`,
 `from-<runtime>`, `to-<runtime>`, `handoff-to-<runtime>`, and
 `handoff-id-<id>`. Save reports the `handoff_id`, the effective scope and
-namespace, the written file, and the indexed chunk count.
+namespace, the written file, and the value of the result's `Entry chunks` line:
+how many chunks the record's lines fall in. When the server does not print that
+line, Save says so instead of reporting another number. When `mem_add` refuses
+the record or returns an error, Save reports that result unchanged and adds no
+file or chunk count of its own.
 
 **Resume** loads one record: the one whose `handoff_id` you name, or otherwise
 the newest one addressed to the current runtime or to `any`. It treats the
@@ -96,6 +111,17 @@ GitHub issue or pull request as `owner/repo#N` or a full URL, resume reports
 its state when the host can query GitHub. Resume never deletes, edits, or
 replaces a handoff. It runs no memory search; it ends by telling you that `brief`,
 run with the record's objective as its task, lists related project memories.
+A number is not a `handoff_id`: `resume 2` is rejected and points you to `list`.
+
+**List** shows which records resume can load here, read-only. It reads the
+newest 30 rows addressed to the current runtime or to `any`, says which record a
+plain `resume` would select, and groups the rows by their `handoff-id-<id>` tag.
+Each entry shows only tag and row data (id, sender, recipient, time, and how many
+of its rows the page holds), never the record's text. When the page is full it
+says that older records may exist and that any entry may be incomplete. In an
+interactive session it then numbers the entries and asks which one to resume;
+a number or id from that list hands the record to resume, which runs every
+check. `list` takes no argument.
 
 ## brief
 
@@ -126,20 +152,38 @@ nothing.
 
 ## update
 
-`update` reviews the current session's outcomes and the latest ten commits,
-then saves only durable learnings. It has three modes:
+`update` reviews the current session's outcomes and recent commits, then saves
+only durable learnings. It has four modes:
 
 | mode | commits reviewed | records them as reviewed |
 |---|---|---|
 | `incremental` (the default) | those of the latest 10 that no earlier run recorded | yes |
 | `full` | all of the latest 10 | yes |
 | `topic` | the latest 10, filtered to the focus | no |
+| `backfill` | the readable unreviewed commits of the newest 10-commit slice, within the latest 100, that has one | yes |
 
-A request that names neither `full` nor `topic` runs `incremental` mode without
-asking; `f` and `t` are shorthands when they are the whole first word. `topic`
-needs a focus after the mode word. The window is the latest ten commits in every
-mode, and it is bounded, not a cursor: older commits are not reviewed. Session
-outcomes are reviewed in every mode.
+A request that names none of `full`, `topic` or `backfill` runs `incremental`
+mode without asking; `f` and `t` are shorthands when they are the whole first
+word. `topic` needs a focus after the mode word. `backfill` (shorthand `b`) is
+selected only as the whole first word, so `topic backfill plan` is a `topic` run.
+The window is the latest ten commits in every mode but `backfill`, and it is
+bounded, not a cursor: older commits are not reviewed. Session outcomes are
+reviewed in every mode.
+
+**Backfill.** When more than ten commits land between two runs, `incremental`
+never sees the excess. `backfill` reaches back to the latest 100: it lists their
+SHAs, asks the coverage tool slice by slice (ten at a time) which ones no run has
+recorded, and reads a slice's unreviewed commits one commit at a time, so a message
+is never split out of a multi-commit listing. The first slice in which at least one
+of those reads can be used is the one it reviews; a slice whose unreviewed commits
+all fail to read is reported and passed over. It reviews at most one slice per run,
+records exactly the commits it read and reviewed, and reports
+the positions it checked, the ones it left unchecked, and any commit whose read it
+could not use. A read is used when the command succeeded, its result came back
+inline with no sign of truncation, and its first line is the SHA asked for; a host
+that clips output without saying so cannot be detected. Run it again to reach the next slice. Commits deeper than 100 are out
+of its reach. Coverage is kept per machine, so each machine backfills its own
+store.
 
 Saved items are of three kinds: `decision` (architectural choices and their
 rationale), `bugfix` (non-obvious root causes and how they were resolved), and
@@ -147,12 +191,12 @@ rationale), `bugfix` (non-obvious root causes and how they were resolved), and
 commit has to state the reason the commit message gives; a commit that does not
 say why is skipped. Before each write, `update` searches existing memories and
 skips a candidate that memory already holds. Each item, its citations
-included, is at most 1,000 characters, or 600 when any of it is in Korean,
-Japanese, or Chinese, so that a store indexing with an exact token ceiling (384
+included, is at most 1,000 characters, with each Korean, Japanese, or Chinese
+character counted as two, so that a store indexing with an exact token ceiling (384
 tokens under `multilingual-e5-small`) usually keeps it in one chunk. Only the prose is
 shortened to fit, never a required citation or a verbatim path, symbol, command
 or quote; an item that still does not fit is written and reported as over the
-limit. Each item carries the tags `memory-update`, `memory-update-item`, the
+limit with its weighted count. Each item carries the tags `memory-update`, `memory-update-item`, the
 kind, `from-<runtime>`, and `git-head-<sha>`. Items land in the project tier;
 only a personal preference you explicitly asked to keep across projects goes to
 user scope.
@@ -163,7 +207,12 @@ read commits an earlier run already reviewed, and again after the last `mem_add`
 has returned, to record this run, even when it saved nothing. If any write
 failed, nothing is recorded and the next run reviews those commits again. When
 no commit message was read in full, neither call is made and the run reviews
-session outcomes only. memtomem `0.7.2` and later have the tool, exposed
+session outcomes only. In `backfill` mode the checks come first and use the
+listed SHAs, before any message is read, one call per slice it walks; the record
+call passes only the commits of the review slice that were read and reviewed,
+and is not made when the walk finds no review slice. A `backfill` check reply that
+names another project root, or whose counts do not add up, stops the run before
+it writes. memtomem `0.7.2` and later have the tool, exposed
 through `MEMTOMEM_EXTRA_TOOLS=mem_update_coverage`. The plugins' bundled server
 configurations set that variable, and so does every registration `mm init --mcp`
 writes; a server entry written by hand, or by an earlier `mm init`, has to add
@@ -173,8 +222,16 @@ or the variable not set. `topic` mode never touches coverage, so it keeps
 working either way.
 
 The report names the mode, `git_head`, the commits read, the coverage result,
-the saved items with their files and chunk counts, the skipped duplicates, and
-the yield as `commit-derived: <N>` and `session-derived: <M>`. An incremental
+the saved items with their files and each item's `Entry chunks` value, the
+skipped duplicates, and the yield as `commit-derived: <N>` and
+`session-derived: <M>`. The `Entry chunks` value is the one `mem_add` printed
+for that item. An integer is how many chunks the item's lines fall in, and it
+is followed by a note in parentheses when the first of those chunks also holds
+earlier text. Items whose value is 2 or more are listed separately. The integer
+does not say which text landed in which chunk, and `update` never rewrites an
+item because of it. When the value starts with `unknown`, or the server does
+not print the line, the report says the count was not reported and keeps the
+value when there is one. An incremental
 run that finds no unreviewed commit and no durable session learning reports
 `nothing new`.
 

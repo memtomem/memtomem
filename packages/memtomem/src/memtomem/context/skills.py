@@ -63,12 +63,15 @@ from memtomem.context._names import (
     validate_name,
 )
 from memtomem.context._runtime_targets import (
+    linked_runtime_reads,
+    relinked_skip,
     DiffRow,
     resolve_import_runtimes,
     runtime_artifact_listing,
     runtime_fanout_root,
 )
 from memtomem.context.skill_payload import is_payload_top_name
+from memtomem.memory_scope import ProjectEntryRelinked
 from memtomem.context.privacy_scan import (
     raise_or_collect,
     scan_artifact_tree,
@@ -1132,7 +1135,11 @@ def generate_all_skills(
                 skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
                 continue
             for skill_dir in canonicals:
-                dst = gen.target_dir(project_root, skill_dir.name, scope=scope)
+                try:
+                    dst = gen.target_dir(project_root, skill_dir.name, scope=scope)
+                except ProjectEntryRelinked as exc:
+                    skipped.append(relinked_skip(skill_dir.name, target, exc))
+                    continue
                 if dst is None:
                     skipped.append(
                         (
@@ -1330,6 +1337,8 @@ def generate_all_skills(
             skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
         for skill_dir in canonicals:
+            # No link refusal to convert here: this loop runs for ``user``
+            # (not judged) and ``project_local`` (no fan-out) only.
             dst = gen.target_dir(project_root, skill_dir.name, scope=scope)
             # ADR-0011 PR-E (#891): None means NO_FANOUT per
             # ``_runtime_targets.RUNTIME_FANOUT_TABLE``. Emit a typed skip
@@ -1687,6 +1696,10 @@ def extract_skills_to_canonical(
         try:
             runtime_dir = runtime_fanout_root("skills", runtime, source_scope_eff, project_root)
         except KeyError:
+            continue
+        except ProjectEntryRelinked as exc:
+            # Nothing is copied from behind a link into the canonical store.
+            skipped.append(relinked_skip(runtime, runtime, exc))
             continue
         if runtime_dir is None or not runtime_dir.is_dir():
             continue
@@ -2107,6 +2120,7 @@ def _skill_effective_equal(
     return True
 
 
+@linked_runtime_reads()
 def diff_skills(
     project_root: Path,
     *,

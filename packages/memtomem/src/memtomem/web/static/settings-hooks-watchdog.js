@@ -56,6 +56,14 @@ function _hooksErrDetail(detail, fallback) {
   return fallback;
 }
 
+// A Gate A refusal of the canonical .memtomem/settings.json (#3343) arrives as a
+// 422 whose top-level ``reason_code`` is ``privacy_blocked`` (sync and resolve),
+// or as a per-target result row carrying the same code when the canonical
+// changed mid-sync. Show the localized hint; the server's text is English only.
+function _hooksIsPrivacyBlocked(obj) {
+  return !!obj && obj.reason_code === 'privacy_blocked';
+}
+
 function _hooksScopedUrl(path) {
   if (typeof _ctxWithTargetScope === 'function') {
     return _ctxWithTargetScope(path);
@@ -478,6 +486,47 @@ function _renderHooksMatcherBanner(data) {
   el.hidden = false;
 }
 
+// #2644 unverified-settings banner: settings files that exist but no check
+// could read (invalid JSON, not an object, or under a directory without
+// search permission), from the GET payload's ``unscanned_settings``. Without
+// it a tier the duplicate check skipped vanished from the panel. Wording
+// mirrors the CLI's ``format_unscanned_settings_warning``
+// (context/settings_doctor.py); ``reason`` is the server's fixed vocabulary
+// and stays as sent.
+function _renderHooksUnscannedBanner(data) {
+  const el = qs('hooks-unscanned-banner');
+  if (!el) return;
+  const rows = Array.isArray(data && data.unscanned_settings) ? data.unscanned_settings : [];
+  if (!rows.length) {
+    el.innerHTML = '';
+    el.hidden = true;
+    return;
+  }
+  // Plain text throughout (``textContent``): neither a field nor the locale
+  // template around it is read as markup.
+  el.replaceChildren(...rows.map(row => {
+    const path = String(row.path || '');
+    const reason = String(row.reason || '');
+    const tier = String(row.tier || '');
+    const key = row.tier
+      ? 'settings.hooks.unscanned_target_row'
+      : 'settings.hooks.unscanned_canonical_row';
+    let text = t(key, { tier, path, reason });
+    if (text === key) {
+      // Cold-boot fallback while the locale fetch is in flight (same shape as
+      // the duplicate-tier banner above).
+      text = row.tier
+        ? `${tier} target file (${path}) was not checked: ${reason}. Hook duplicates, matchers and commands in it are unverified.`
+        : `Canonical settings file (${path}) was not checked: ${reason}. Hook duplicates, matchers and commands in it are unverified.`;
+    }
+    const div = document.createElement('div');
+    div.className = 'hooks-duplicate-banner-row';
+    div.textContent = text;
+    return div;
+  }));
+  el.hidden = false;
+}
+
 async function loadHooksSync() {
   const seq = ++_hooksSyncSeq;
   const statusEl = qs('hooks-sync-status');
@@ -493,6 +542,7 @@ async function loadHooksSync() {
   // stale-write gate.
   _renderHooksDuplicateBanner(null);
   _renderHooksMatcherBanner(null);
+  _renderHooksUnscannedBanner(null);
   const requestedScope = _hooksCurrentTargetScope();
   let requestedProjectScope = _hooksCurrentProjectScope();
   if (typeof _ctxFetchProjectsData === 'function') {
@@ -580,6 +630,7 @@ async function loadHooksSync() {
         : '');
     _renderHooksDuplicateBanner(data);
     _renderHooksMatcherBanner(data);
+    _renderHooksUnscannedBanner(data);
 
     // Sync Now is only meaningful when a canonical source exists and has
     // at least one hook rule. Disable the button for empty sources so a
@@ -863,7 +914,10 @@ async function loadHooksSync() {
           // the sync-eligibility write-guard 409 whose body carries only
           // {detail: {reason_code, ...}} — keep the generic detail toast.
           if (!r.ok && !(r.status === 409 && typeof result.status === 'string')) {
-            showToast(_hooksErrDetail(result.detail, t('toast.request_failed')), 'error');
+            const msg = _hooksIsPrivacyBlocked(result)
+              ? t('settings.ctx.privacy_blocked_settings_hint')
+              : _hooksErrDetail(result.detail, t('toast.request_failed'));
+            showToast(msg, 'error');
             return;
           }
           if (result.status === 'ok') {
@@ -908,6 +962,9 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
+      if (_hooksIsPrivacyBlocked(err)) {
+        throw new Error(t('settings.ctx.privacy_blocked_settings_hint'));
+      }
       throw new Error(_hooksErrDetail(err.detail, `Request failed: ${res.status}`));
     }
     return res.json();
@@ -945,7 +1002,12 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     // actually synced.
     const failed = results.filter(r => r.status === 'error' || r.status === 'aborted');
     if (failed.length) {
-      const detail = failed.map(r => `${r.name}: ${r.reason || r.status}`).join('; ');
+      const detail = failed.map(r => {
+        const reason = _hooksIsPrivacyBlocked(r)
+          ? t('settings.ctx.privacy_blocked_settings_hint')
+          : (r.reason || r.status);
+        return `${r.name}: ${reason}`;
+      }).join('; ');
       showToast(t('toast.sync_failed', { error: detail }), 'error');
       loadHooksSync();
       return;
@@ -1114,5 +1176,10 @@ window.addEventListener('langchange', () => {
   const matcherEl = qs('hooks-matcher-banner');
   if (matcherEl && !matcherEl.hidden && _hooksLastSyncData) {
     _renderHooksMatcherBanner(_hooksLastSyncData);
+  }
+  // And for the unverified-settings banner (#2644).
+  const unscannedEl = qs('hooks-unscanned-banner');
+  if (unscannedEl && !unscannedEl.hidden && _hooksLastSyncData) {
+    _renderHooksUnscannedBanner(_hooksLastSyncData);
   }
 });

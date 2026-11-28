@@ -147,3 +147,18 @@ def test_privacy_block_aborts_leg_and_writes_nothing(project: Path) -> None:
     assert result.exit_code != 0
     assert "Gate A" in result.output
     assert not (project / ".mcp.json").exists()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['{"password": "synthetic-example"}', "BEGIN\nRSA\nPRIVATE\nKEY"],
+    ids=["quoted-label", "pem"],
+)
+def test_secret_hidden_by_json_escaping_aborts_leg(project: Path, value: str) -> None:
+    # The canonical file holds the value JSON-escaped; .mcp.json would hand
+    # the decoded value to the MCP client (#3300).
+    _seed(project, definition={"command": "npx", "env": {"CONFIG": value}})
+    result = _run(["sync", "--include=mcp-servers"])
+    assert result.exit_code != 0
+    assert "Gate A" in result.output
+    assert not (project / ".mcp.json").exists()

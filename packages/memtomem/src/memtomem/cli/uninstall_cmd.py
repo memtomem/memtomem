@@ -76,6 +76,8 @@ from memtomem.cli._db_lock import DbLockState as _DbLockState  # noqa: F401  (te
 from memtomem.cli._db_lock import check_db_lock as _check_db_lock
 from memtomem.cli._liveness import ServerState, record_narrowed_inventory_warning
 from memtomem.cli._liveness import check_server_liveness as _check_server_liveness
+from memtomem.cli._liveness import live_daemon_for_pid as _live_daemon_for_pid
+from memtomem.cli._liveness import running_daemons_hint as _running_daemons_hint
 from memtomem.cli._liveness import probe_pid_file as _probe_pid_file  # noqa: F401  (test seam)
 from memtomem.cli.init_cmd import RuntimeProfile, _runtime_profile
 
@@ -228,6 +230,57 @@ def _registry_has_sentinels() -> bool:
         except OSError:
             continue
     return False
+
+
+def _sweep_stale_daemon_files(roots: Iterable[Path]) -> None:
+    """Remove what dead shared daemons left in the runtime roots (#3381); never raises.
+
+    Runs inside the exclusive lifecycle barrier. A daemon binds its socket only
+    after it holds that barrier shared, so no socket here can be a live one:
+    every ``daemon-<name>.sock`` socket is removed. A lifetime lock is removed
+    only while this process holds its flock, so a daemon that took it and is
+    now waiting for the barrier keeps it. A ``daemon-<name>.log`` is removed
+    when no live lifetime lock of that name is observed: a daemon opens its
+    log only once it holds the barrier, as it binds its socket. A daemon that
+    takes its lifetime lock in this window and then fails on the barrier this
+    command holds may lose its log. None of these files is store-scoped, so
+    the store inventory never stages them.
+    """
+    if os.name == "nt":
+        return
+    from memtomem._daemon_paths import (
+        lifetime_lock_path,
+        name_from_lifetime_lock,
+        name_from_log,
+        name_from_socket,
+    )
+    from memtomem.cli._liveness import (
+        UnsafeProbePathError,
+        probe_pid_file,
+        unlink_stale_pid_file_holding_barrier,
+    )
+
+    for root in roots:
+        try:
+            names = [entry.name for entry in os.scandir(root)]
+        except OSError:
+            continue
+        for name in names:
+            path = root / name
+            try:
+                if name_from_lifetime_lock(name) is not None:
+                    unlink_stale_pid_file_holding_barrier(path)
+                elif name_from_socket(name) is not None:
+                    if stat.S_ISSOCK(os.lstat(path).st_mode):
+                        os.unlink(path)
+                elif (daemon := name_from_log(name)) is not None:
+                    if (
+                        stat.S_ISREG(os.lstat(path).st_mode)
+                        and not probe_pid_file(lifetime_lock_path(root, daemon)).alive
+                    ):
+                        os.unlink(path)
+            except (OSError, UnsafeProbePathError):
+                continue
 
 
 def _prune_if_empty(path: Path) -> bool:
@@ -640,16 +693,16 @@ def _binary_uninstall_hint(profile: RuntimeProfile) -> tuple[str, list[str]]:
             "uvx (ephemeral — auto-cleaned on process exit)",
             ["No binary uninstall needed for the uvx caller."],
         )
-    if origin == "venv-relative":
-        venv_str = (
-            str(profile.workspace_venv_path) if profile.workspace_venv_path else "<workspace>/.venv"
-        )
+    if origin == "venv-relative" and profile.workspace_venv_path is not None:
+        # ``venv-relative`` means the running interpreter is the one of the
+        # environment uv uses for the workspace, so name that interpreter: a
+        # bare ``uv pip uninstall`` picks whichever environment is active or
+        # nearest. No ``rm -rf`` of the environment: at a workspace root it
+        # serves every member, and ``UV_PROJECT_ENVIRONMENT`` can put it
+        # anywhere.
         return (
-            f"workspace venv ({scrub_text(venv_str)})",
-            [
-                "uv pip uninstall memtomem",
-                f"  # or: rm -rf -- {_hint_quote(venv_str)}",
-            ],
+            f"workspace venv ({scrub_text(str(profile.workspace_venv_path))})",
+            [f"uv pip uninstall --python {_hint_quote(profile.runtime_interpreter)} memtomem"],
         )
     if origin == "system":
         return (
@@ -687,6 +740,13 @@ def _format_path(p: Path) -> str:
     home = str(Path.home())
     s = str(p)
     return s.replace(home, "~", 1) if s.startswith(home) else s
+
+
+def _echo_daemon_hint() -> None:
+    """Name the running shared daemons and their stop command under a refusal (#3381)."""
+    hint = _running_daemons_hint()
+    if hint is not None:
+        click.secho(f"  {hint}", fg="red")
 
 
 def _refuse_untrusted_registry(
@@ -1195,6 +1255,7 @@ def _delete_inventory(inv: _Inventory, *, keep_config: bool, keep_data: bool) ->
     # an unlocked ``rmdir`` here could land between a starting server's
     # ``mkdir`` and the marker it is about to open inside that same lock.
     _sweep_stale_presence()
+    _sweep_stale_daemon_files(inv.runtime_roots)
 
     for root in inv.runtime_roots:
         _prune_if_empty(root)
@@ -1306,6 +1367,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
                 "override this check.",
                 fg="red",
             )
+            _echo_daemon_hint()
         elif registry_state.state == "UNTRUSTED":
             _refuse_untrusted_registry(
                 registry_state.untrusted_path,
@@ -1382,11 +1444,15 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
                         fg="red",
                     )
             else:
+                daemon = _live_daemon_for_pid(server.pid)
+                label = "Server" if daemon is None else f"Shared daemon '{daemon}'"
                 click.secho(
-                    f"Server still running (pid {server.pid}). Refusing to delete state — "
+                    f"{label} still running (pid {server.pid}). Refusing to delete state — "
                     "an active server holds the SQLite WAL and deleting it risks corruption.",
                     fg="red",
                 )
+                if daemon is not None:
+                    click.secho(f"  Stop it with `mm daemon stop {daemon}`.", fg="red")
             if is_windows:
                 # On Windows --force cannot override (see #730 / branch above),
                 # so don't suggest it.
@@ -1472,6 +1538,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
             "re-run mm uninstall.",
             fg="red",
         )
+        _echo_daemon_hint()
         # Deliberately no ``--force`` hint: a held flock is never stale
         # (the kernel releases it when its holder dies), so there is
         # nothing here for --force to legitimately override.
@@ -1553,6 +1620,7 @@ def uninstall(keep_config: bool, keep_data: bool, force: bool, yes: bool) -> Non
                 "mm uninstall.",
                 fg="red",
             )
+            _echo_daemon_hint()
             sys.exit(2)
 
         summary = _delete_inventory(inv, keep_config=keep_config, keep_data=keep_data)

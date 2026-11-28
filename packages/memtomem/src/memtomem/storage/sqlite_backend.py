@@ -39,6 +39,7 @@ from memtomem.storage.base import (
     NamespaceAssignResult,
     NamespaceChunkCandidate,
     NamespaceRenameResult,
+    VisiblePool,
 )
 from memtomem.models import (
     CONSOLIDATED_SUFFIX,
@@ -51,6 +52,7 @@ from memtomem.models import (
 )
 from memtomem.storage import fts_tokenizer as _fts
 from memtomem.storage.sqlite_helpers import (
+    decode_tags_column,
     deserialize_f32,
     fts_source_text,
     match_source_filter_value,
@@ -60,6 +62,7 @@ from memtomem.storage.sqlite_helpers import (
     quote_ident,
     serialize_f32,
     source_namespaces_admit_sql,
+    tags_column_is_empty,
     utc_stamp,
 )
 from memtomem.storage.orphan_gc import (
@@ -394,6 +397,10 @@ class SqliteBackend(
             )
             self._db.create_function(
                 "memtomem_list_admit", 3, source_namespaces_admit_sql, deterministic=True
+            )
+            # Writer only: used by the conditional tag ``UPDATE``.
+            self._db.create_function(
+                "memtomem_tags_empty", 1, tags_column_is_empty, deterministic=True
             )
             # Restrict DB file to owner-only access
             try:
@@ -3730,6 +3737,44 @@ class SqliteBackend(
             rows = db.execute("SELECT DISTINCT source_file FROM chunks").fetchall()
         return {Path(row[0]) for row in rows}
 
+    async def list_visible_chunks_by_id(self, limit: int, after: str | None = None) -> VisiblePool:
+        """The first ``limit`` visible chunks in ascending id order, with the counts around them.
+
+        ``after`` is an exclusive cursor: only chunks whose stored id text
+        sorts above it are read. It need not name a stored chunk, so a walk
+        continues from the position of a chunk deleted since the last read.
+
+        The order is a property of the stored rows alone, so every process
+        selects the same chunks from the same store. The visibility rule is the
+        path-level one a listing uses (``VISIBLE_SOURCE_PATH``). One statement
+        returns the rows and both counts, so all three describe one snapshot
+        (a lease hands out a connection, not a snapshot, so two statements
+        could straddle a commit). The counts sit on their own row with the pool
+        joined to it, so they come back when the pool is empty: with a cursor
+        that no longer means nothing is visible. The statement reads stored
+        keys and takes no path as input, so there is none to resolve.
+        """
+        above = "" if after is None else " AND chunks.id > ?"
+        sql = (
+            "SELECT n.visible, n.above_cursor, pool.* FROM ("  # nosec B608
+            f"SELECT (SELECT COUNT(*) FROM chunks WHERE {VISIBLE_SOURCE_PATH}) AS visible, "
+            f"(SELECT COUNT(*) FROM chunks WHERE {VISIBLE_SOURCE_PATH}{above}) AS above_cursor"
+            ") AS n LEFT JOIN ("
+            f"SELECT chunks.* FROM chunks WHERE {VISIBLE_SOURCE_PATH}{above} "
+            "ORDER BY chunks.id LIMIT ?"
+            ") AS pool ON 1 ORDER BY pool.id"
+        )
+        params = (limit,) if after is None else (after, after, limit)
+        async with self._lease_txn_read_db() as db:
+            rows = db.execute(sql, params).fetchall()
+        # The counts row always comes back; an empty pool leaves its chunk
+        # columns NULL.
+        return VisiblePool(
+            chunks=[self._row_to_chunk(row[2:]) for row in rows if row[2] is not None],
+            visible=int(rows[0][0]),
+            above_cursor=int(rows[0][1]),
+        )
+
     async def get_orphan_candidate_source_files(self) -> set[Path]:
         """Exclude attached virtual summaries from filesystem checks.
 
@@ -4094,9 +4139,11 @@ class SqliteBackend(
         namespace: str,
         description: str | None = None,
         color: str | None = None,
+        *,
+        surface: str = "storage",
     ) -> None:
         assert self._ns is not None
-        return await self._ns.set_namespace_meta(namespace, description, color)
+        return await self._ns.set_namespace_meta(namespace, description, color, surface=surface)
 
     async def list_namespace_meta(self) -> list[dict]:
         assert self._ns is not None
@@ -4162,11 +4209,8 @@ class SqliteBackend(
         # into its keys, so this reader would "carry" tags that the SQL tag
         # filter (which requires ``json_type = 'array'``) excludes (#2191).
         # Both sides degrade the same way — to no tags at all.
-        try:
-            decoded = json.loads(tags)
-        except (json.JSONDecodeError, TypeError):
-            decoded = None
-        if isinstance(decoded, list):
+        decoded = decode_tags_column(tags)
+        if decoded is not None:
             parsed_tags = tuple(decoded)
         else:
             logger.warning("Corrupted tags for chunk %s", chunk_id)

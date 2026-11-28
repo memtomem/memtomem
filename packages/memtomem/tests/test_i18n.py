@@ -1137,6 +1137,8 @@ class TestNoHardcodedStrings:
             "settings.hooks.target_label_user",
             "settings.hooks.duplicate_banner_one",
             "settings.hooks.duplicate_banner_many",
+            "settings.hooks.unscanned_canonical_row",
+            "settings.hooks.unscanned_target_row",
             "toast.sync_scope_changed",
         ]
         leaks: list[str] = []
@@ -1610,6 +1612,8 @@ class TestNoHardcodedStrings:
             "settings.dedup.no_results": {"threshold"},
             "settings.dedup.summary_one": {"count"},
             "settings.dedup.summary_other": {"count"},
+            "settings.dedup.omitted_one": {"count"},
+            "settings.dedup.omitted_other": {"count"},
             "settings.dedup.badge_exact": set(),
             "settings.dedup.keep_a": set(),
             "settings.dedup.keep_a_title": set(),

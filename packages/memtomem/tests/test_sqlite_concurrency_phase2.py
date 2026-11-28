@@ -633,6 +633,8 @@ _TRANSACTION_SITES = {
     "indexing/watcher.py": [True],
     "search/decay.py": [True],
     "search/dedup.py": [True],
+    # mem_dedup_remove's read of holds, receipts and rows on the writer (#3419).
+    "server/tools/dedup_decay.py": [True],
     "server/tools/hermes_mirror.py": [True, True],
     # _gated_delete_transaction: mem_delete's Gate-B probe and its source or
     # namespace delete in one transaction (#3202).

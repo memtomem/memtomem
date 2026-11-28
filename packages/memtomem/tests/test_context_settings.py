@@ -9,7 +9,6 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
-import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
@@ -1041,74 +1040,121 @@ class TestClaudeSettingsCrossProcessLock:
     def test_lock_budget_bounds_whole_call_not_per_target(self, claude_home, tmp_path, monkeypatch):
         """The lock budget bounds the WHOLE call, not each target (#1145
         re-review). With several runtimes available and multiple sidecar locks
-        held, the TOTAL wait stays within ~one budget — a per-target bound would
+        held, the total backoff the call sleeps on the simulated clock is one
+        budget — a per-target bound would
         instead accumulate ``N_held × budget`` and could overrun the web
-        handler's 60s deadline, re-opening the orphaned-worker window."""
+        handler's 60s deadline, re-opening the orphaned-worker window.
+
+        The clock is simulated (#2750): one virtual clock stands in for ``time``
+        in both ``settings`` (which sets the shared deadline and grants each
+        acquire what is left of it) and ``_atomic`` (which polls until its
+        grant runs out), and only the backoff sleeps advance it. A
+        real-time bound measures the runner as much as the code: a stall on a
+        loaded runner moves a wall-clock inequality, the flake #2351 removed one
+        layer down. Time spent inside the real lock calls is not on that clock.
+        Each acquire is recorded with the timeout it was granted and the
+        attempts and simulated sleeps it used, so a failure shows every
+        target's own wait."""
+        import memtomem.context._atomic as atomic_mod
         import memtomem.context.settings as settings_mod
         from memtomem.context._atomic import _file_lock, _lock_path_for
 
+        from .test_context_atomic import _LockWaitRecorder
+
         # Make codex + gemini available too. Their dirs live under the fake HOME,
         # which is itself under project_root, so the host-write gate stays shut.
+        # Kimi reads its home from the ambient environment; keep it unavailable
+        # so exactly three targets take part.
+        monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
         (claude_home / ".codex").mkdir()
         (claude_home / ".gemini").mkdir()
         claude_t = claude_home / ".claude" / "settings.json"
         codex_t = claude_home / ".codex" / "hooks.json"
         gemini_t = claude_home / ".gemini" / "settings.json"
-
-        def _reset_targets() -> None:
-            for t in (claude_t, codex_t, gemini_t):
-                t.parent.mkdir(parents=True, exist_ok=True)
-                t.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
-
-        _reset_targets()
+        for t in (claude_t, codex_t, gemini_t):
+            t.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
         _make_canonical_settings(
             tmp_path,
             {"hooks": {"PostToolUse": [_rule("Write", "echo")]}},
         )
+        claude_lock, codex_lock, gemini_lock = (
+            _lock_path_for(t) for t in (claude_t, codex_t, gemini_t)
+        )
 
         budget = 0.5
-
-        # An absolute wall-clock bound was flaky: it folds the lock wait together
-        # with fixed I/O + portalocker overhead, which on a slow/loaded runner
-        # (the Windows CI runner) can dwarf the budget. Isolate the lock wait by
-        # subtracting a *symmetric* baseline — the SAME two locks held, but with a
-        # 0s budget so the contended targets abort immediately. That baseline runs
-        # the identical work profile (two aborts + one Gemini write) minus only
-        # the budgeted wait, so the subtraction removes overhead without the
-        # asymmetry of a no-lock 3-write fan-out (which would over-subtract and
-        # could mask a per-target regression).
-        monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_BUDGET_S", 0.0)
-        start = time.monotonic()
-        with _file_lock(_lock_path_for(claude_t)), _file_lock(_lock_path_for(codex_t)):
-            base_results = generate_all_settings(tmp_path, scope="user")
-        baseline = time.monotonic() - start
-        _reset_targets()
-        # The 0s baseline already shows the abort/ok split — both held targets
-        # abort and the free one writes, identical to the measured run's profile;
-        # its only difference is the budgeted wait.
-        assert base_results["claude_settings"].status == "aborted"
-        assert base_results["codex_settings"].status == "aborted"
-        assert base_results["gemini_settings"].status == "ok"
-
-        # Now the real budget. Hold the same TWO locks: per-target bounding waits
-        # ~2×budget; the shared deadline caps the *total* lock wait at ~one budget
-        # (once it expires the remaining held target gets a 0s non-blocking
-        # attempt).
         monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_BUDGET_S", budget)
-        start = time.monotonic()
-        with _file_lock(_lock_path_for(claude_t)), _file_lock(_lock_path_for(codex_t)):
-            results = generate_all_settings(tmp_path, scope="user")
-        held_elapsed = time.monotonic() - start
 
-        # The wait added over the symmetric baseline reflects ONE shared budget
-        # (~1×budget), strictly less than the ~2×budget a per-target bound would
-        # accumulate — discriminated without a fragile absolute threshold.
-        lock_wait = held_elapsed - baseline
-        assert lock_wait < budget * 1.8, (held_elapsed, baseline, lock_wait)
-        # Held targets aborted; the free one (gemini) still wrote ok.
-        assert results["claude_settings"].status == "aborted"
-        assert results["codex_settings"].status == "aborted"
-        assert results["gemini_settings"].status == "ok"
+        clock = _LockWaitRecorder(atomic_mod.portalocker.lock, atomic_mod.time, virtual_clock=True)
+        # Start the clock away from zero: at zero, a deadline anchored to the
+        # clock's origin instead of the call's start grants the same timeouts.
+        clock.sleep(100.0)
+        clock.reset()
+        assert clock.monotonic() == 100.0
+        acquires: list[dict] = []
+        orig_file_lock = settings_mod._file_lock
+
+        @contextlib.contextmanager
+        def recording_file_lock(lock_path, *, timeout=None):
+            record = {"lock": lock_path, "timeout": timeout}
+            acquires.append(record)
+            # The lock is real and the test holds two of them: an unbounded
+            # acquire would block on POSIX instead of failing.
+            assert timeout is not None, acquires
+            attempts_before, sleeps_before = clock.attempts, len(clock.slept)
+
+            def _close(outcome: str) -> None:
+                record["outcome"] = outcome
+                record["attempts"] = clock.attempts - attempts_before
+                record["slept"] = sum(clock.slept[sleeps_before:])
+
+            acquired = False
+            try:
+                with orig_file_lock(lock_path, timeout=timeout):
+                    acquired = True
+                    _close("acquired")
+                    yield
+            except BaseException as exc:
+                if not acquired:
+                    _close("timeout" if isinstance(exc, TimeoutError) else type(exc).__name__)
+                    if not isinstance(exc, TimeoutError):
+                        # Leaves before the assertions that print the records.
+                        exc.add_note(repr(acquires))
+                raise
+
+        # The holders take their locks on the real clock; the recorder goes in
+        # after, so it counts only the call's own acquires.
+        with _file_lock(claude_lock), _file_lock(codex_lock):
+            monkeypatch.setattr(atomic_mod.portalocker, "lock", clock.lock)
+            monkeypatch.setattr(atomic_mod, "time", clock)
+            monkeypatch.setattr(settings_mod, "time", clock)
+            monkeypatch.setattr(settings_mod, "_file_lock", recording_file_lock)
+            results = generate_all_settings(tmp_path, scope="user")
+
+        assert len(acquires) == 3, acquires
+        first_held, second_held, free = acquires
+        # Which held target is visited first is registration order, not the
+        # budget's concern: one acquire each, the free one last.
+        assert {first_held["lock"], second_held["lock"]} == {claude_lock, codex_lock}, acquires
+        assert free["lock"] == gemini_lock, acquires
+        # The first held target waits out the whole budget...
+        assert first_held["timeout"] == pytest.approx(budget), acquires
+        assert first_held["slept"] == pytest.approx(budget), acquires
+        assert first_held["outcome"] == "timeout", acquires
+        # ...so the second is granted what is left of it: nothing. One
+        # non-blocking attempt, no sleep, then it gives up. A per-target bound
+        # would grant it a fresh budget here.
+        assert second_held["timeout"] == 0.0, acquires
+        assert (second_held["attempts"], second_held["slept"]) == (1, 0), acquires
+        assert second_held["outcome"] == "timeout", acquires
+        # A spent budget still acquires a free lock: one attempt, acquire iff free.
+        assert free["timeout"] == 0.0, acquires
+        assert (free["attempts"], free["slept"], free["outcome"]) == (1, 0, "acquired"), acquires
+        # The call's simulated backoff totals one budget, not one per held target.
+        assert sum(clock.slept) == pytest.approx(budget), acquires
+
+        assert results["claude_settings"].status == "aborted", acquires
+        assert results["codex_settings"].status == "aborted", acquires
+        assert results["gemini_settings"].status == "ok", acquires
 
 
 class TestClaudeSettingsAtomicWrite:

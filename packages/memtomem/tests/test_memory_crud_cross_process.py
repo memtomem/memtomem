@@ -914,36 +914,82 @@ async def test_mem_delete_by_source_does_not_resurrect_a_removed_subdir(bm25_onl
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", ["edit", "delete"])
-async def test_the_byte_writing_chunk_branches_refuse_a_degraded_span(bm25_only_components, tool):
-    """#2346's rule, pinned per surface: a degraded span writes no bytes.
+async def test_the_byte_writing_chunk_edit_refuses_a_degraded_span(bm25_only_components):
+    """#2346's rule: a degraded span writes no bytes.
 
-    Both branches rewrite the source file — ``mem_edit`` replaces a chunk's
-    lines, ``mem_delete(chunk_id=…)`` removes them — so neither may run on a
-    span that holds no cross-process lock. Parametrized rather than written
-    twice because the two used to give different answers to the same
-    condition: before this rule, ``mem_edit`` surfaced whatever
+    ``mem_edit`` replaces a chunk's lines, so it may not run on a span that
+    holds no cross-process lock. Before this rule it surfaced whatever
     ``read_text`` raised, which said nothing about the lock.
 
     The refusal is not "the file is missing": it is decided on the lock, so it
     holds whether or not the file comes back, and a caller can act on it
-    (restore the directory, or reindex).
+    (restore the directory, or reindex). ``mem_delete(chunk_id=…)`` keeps the
+    same rule by writing no bytes on such a span: it removes the row only
+    (#2842, below).
     """
     comp, mem_dir = bm25_only_components
     ctx = StubCtx(AppContext.from_components(comp))
     chunk, source = await _indexed_chunk_in_a_subdir(comp, mem_dir, ctx)
 
     shutil.rmtree(source.parent)
-    if tool == "edit":
-        out = await memory_crud.mem_edit(chunk_id=str(chunk.id), new_content="NEW", ctx=ctx)
-    else:
-        out = await memory_crud.mem_delete(chunk_id=str(chunk.id), ctx=ctx)
+    out = await memory_crud.mem_edit(chunk_id=str(chunk.id), new_content="NEW", ctx=ctx)
 
     assert "source directory has been removed" in out, out
     assert "nothing was changed" in out, out
     assert not source.parent.exists(), "the refusal recreated the deleted directory"
     # Refused, not half-done: the rows are still there for a retry to act on.
     assert await comp.storage.get_chunk_hashes(source)
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_delete_on_a_degraded_span_removes_only_the_row(bm25_only_components):
+    """``mem_delete(chunk_id=…)`` with the directory gone: the row goes, as on the web (#2842).
+
+    The directory must stay gone too: the span degraded rather than recreate it.
+    """
+    comp, mem_dir = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    chunk, source = await _indexed_chunk_in_a_subdir(comp, mem_dir, ctx)
+
+    shutil.rmtree(source.parent)
+    out = await memory_crud.mem_delete(chunk_id=str(chunk.id), ctx=ctx)
+
+    assert out.startswith(f"Memory deleted from the index: chunk {chunk.id}\n"), out
+    assert await comp.storage.get_chunk(chunk.id) is None
+    assert not source.parent.exists(), "the delete recreated the deleted directory"
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_chunk_delete_leaves_a_file_that_came_back(
+    bm25_only_components, monkeypatch
+):
+    """Decided on the lock, not on a later stat — the web route's rule (#2346).
+
+    The tree is put back on the under-lock re-fetch, the first thing to run
+    after the acquire, so the span is degraded while the file is there again.
+    A delete that branched on a stat would cut the chunk's lines out of a file
+    it never locked; this one removes the row and leaves the bytes.
+    """
+    comp, mem_dir = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    chunk, source = await _indexed_chunk_in_a_subdir(comp, mem_dir, ctx)
+    shutil.rmtree(source.parent)
+    recreated = "## Alpha\n\nAlpha body\n"
+    real_get_chunk = comp.storage.get_chunk
+
+    async def get_chunk(chunk_id, **kwargs):
+        if kwargs.get("read_writer") and not source.exists():
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(recreated, encoding="utf-8")
+        return await real_get_chunk(chunk_id, **kwargs)
+
+    monkeypatch.setattr(comp.storage, "get_chunk", get_chunk)
+
+    out = await memory_crud.mem_delete(chunk_id=str(chunk.id), ctx=ctx)
+
+    assert out.startswith(f"Memory deleted from the index: chunk {chunk.id}\n"), out
+    assert source.read_text(encoding="utf-8") == recreated
+    assert await real_get_chunk(chunk.id) is None
 
 
 @pytest.mark.asyncio

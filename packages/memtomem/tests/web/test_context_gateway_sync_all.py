@@ -1509,3 +1509,140 @@ def test_sync_all_batch_unsupported_response_falls_back_to_legacy(page, mm_web_u
         "context/mcp-servers/sync",
         "context/settings/sync",
     ], f"fallback must run the legacy five-phase order, got {sync_paths!r}"
+
+
+# ── Settings Gate A refusals localize (#3343) ──────────────────────────────
+
+# en.json ``settings.ctx.privacy_blocked_settings_hint`` (prefix).
+PRIVACY_BLOCKED_SETTINGS_HINT_PREFIX = "A secret was detected in the shared hook settings"
+_SETTINGS_SERVER_ENGLISH = "Privacy scan blocked this settings sync: server text"
+
+
+def _error_toast_text(page) -> str:
+    page.wait_for_selector("#toast-container .toast.toast-error", timeout=4_000)
+    return (
+        page.locator("#toast-container .toast.toast-error .toast-msg").first.text_content() or ""
+    ).strip()
+
+
+@pytest.mark.parametrize(
+    "settings_phase",
+    [
+        pytest.param(
+            {
+                "type": "settings",
+                "status": "failed",
+                "error": {
+                    "error_kind": "validation",
+                    "http_status": 422,
+                    "message": _SETTINGS_SERVER_ENGLISH,
+                    "reason_code": "privacy_blocked",
+                },
+            },
+            id="refused-before-any-write",
+        ),
+        # ``_settings_severity`` rolls an error row up to ``failed`` with no
+        # ``error`` envelope: the code is only on the row.
+        pytest.param(
+            {
+                "type": "settings",
+                "status": "failed",
+                "results": [
+                    {"name": "claude_settings", "status": "ok", "reason": "", "warnings": []},
+                    {
+                        "name": "codex_settings",
+                        "status": "error",
+                        "reason": _SETTINGS_SERVER_ENGLISH,
+                        "warnings": [],
+                        "target": None,
+                        "reason_code": "privacy_blocked",
+                    },
+                ],
+                "duplicate_tier_warnings": [],
+            },
+            id="refused-mid-sync-row",
+        ),
+    ],
+)
+def test_sync_all_batch_settings_privacy_phase_is_localized(
+    page, mm_web_url: str, settings_phase: dict
+) -> None:
+    """A failed settings phase of the batch report shows the settings hint, not
+    the server's English, in both shapes the phase can fail in."""
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+    report = _batch_report(
+        [
+            _batch_phase("skills"),
+            _batch_phase("commands"),
+            _batch_phase("agents"),
+            _batch_phase("mcp-servers"),
+            settings_phase,
+        ],
+        changed=False,
+    )
+    page.route(
+        "**/api/context/sync-all**",
+        lambda r: r.fulfill(status=200, content_type="application/json", body=json.dumps(report)),
+    )
+
+    _run_sync_all(page, mm_web_url)
+
+    toast_text = _error_toast_text(page)
+    assert PRIVACY_BLOCKED_SETTINGS_HINT_PREFIX in toast_text, toast_text
+    assert _SETTINGS_SERVER_ENGLISH not in toast_text
+
+
+@pytest.mark.parametrize(
+    "status,body",
+    [
+        pytest.param(
+            422,
+            {"detail": _SETTINGS_SERVER_ENGLISH, "reason_code": "privacy_blocked"},
+            id="refused-before-any-write",
+        ),
+        pytest.param(
+            200,
+            {
+                "results": [
+                    {
+                        "name": "codex_settings",
+                        "status": "error",
+                        "reason": _SETTINGS_SERVER_ENGLISH,
+                        "warnings": [],
+                        "target": None,
+                        "reason_code": "privacy_blocked",
+                    }
+                ],
+                "duplicate_tier_warnings": [],
+            },
+            id="refused-mid-sync-row",
+        ),
+    ],
+)
+def test_sync_all_legacy_settings_privacy_is_localized(
+    page, mm_web_url: str, status: int, body: dict
+) -> None:
+    """The legacy per-type orchestration localizes both settings refusal shapes."""
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+    for typ in ("skills", "commands", "agents", "mcp-servers"):
+        page.route(
+            f"**/api/context/{typ}/sync",
+            lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+        )
+    page.route(
+        "**/api/context/settings/sync",
+        lambda r: r.fulfill(status=status, content_type="application/json", body=json.dumps(body)),
+    )
+    page.route(
+        "**/api/context/sync-all**",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+
+    _run_sync_all(page, mm_web_url)
+
+    toast_text = _error_toast_text(page)
+    assert PRIVACY_BLOCKED_SETTINGS_HINT_PREFIX in toast_text, toast_text
+    assert _SETTINGS_SERVER_ENGLISH not in toast_text
+    assert not page.locator("#toast-container .toast.toast-success").count()

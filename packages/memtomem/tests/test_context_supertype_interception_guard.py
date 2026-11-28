@@ -1390,6 +1390,19 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         "unknown', which every consumer treats as 'not provably ours' and "
         "therefore refuses to remove or promote; read-only; " + _RO,
     ),
+    ("context/migrate.py", "_probe", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Presence probe (#3608): an lstat that fails for anything but absence "
+        "is reported as UNREADABLE with its error, never as absent; " + _RO,
+    ),
+    ("context/migrate.py", "StagingClaim.check", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "Claim identity probe (#3608): an unreadable lstat answers "
+        "UNVERIFIABLE, which every consumer treats as 'not provably ours' and "
+        "therefore refuses to remove or promote; read-only; " + _RO,
+    ),
     ("context/migrate.py", "_fanout_target_matches", ("OSError",), 0): (
         _U,
         "no_recovery_callee",
@@ -1612,6 +1625,11 @@ INTERCEPT_SITES: dict[tuple[str, str, tuple[str, ...], int], _Row] = {
         _U,
         "no_recovery_callee",
         "settings json read; " + _NONSKILL,
+    ),
+    ("context/settings.py", "_load_canonical_settings", ("OSError",), 0): (
+        _U,
+        "no_recovery_callee",
+        "canonical settings read kept for the Gate A scan; " + _NONSKILL,
     ),
     ("context/settings.py", "_read_settings_target", ("OSError",), 0): (
         _U,

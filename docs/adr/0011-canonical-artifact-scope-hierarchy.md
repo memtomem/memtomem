@@ -241,6 +241,13 @@ repo forever," so the bypass valve does not belong here.
 > supply the persisted record and its indexes even if an embedding callback
 > changes the original selectors or value.
 >
+> **2026-11 (#3300):** the same escaping hides a quoted credential in a string
+> *inside* the value, which the store persists and returns verbatim. The record
+> guards of `MemtomemHybridStore`, `MemtomemBaseStore` and langchain-memtomem's
+> `RecordStore` now also scan every key and string of the decoded value raw
+> (`privacy.value_scan_parts`), and all three join scan parts with the same
+> non-whitespace separator.
+>
 > This is a whole-operation refusal, never redaction or renaming of a routing
 > key. A clean value cannot make a sensitive identifier safe: callers must
 > remove the credential from that identifier or choose a private destination
@@ -289,6 +296,21 @@ project_shared, the sync write is blocked regardless of `--force-unsafe`.
 > byte path scans before landing" claim above. User-tier editor saves
 > stay unscanned by design: not git-tracked, gated by
 > `allow_host_writes`, and still subject to the sync-time valve.
+
+> **2026-11 (#3343):** the hook settings fan-out (`generate_all_settings`)
+> and the web conflict resolve now take the fan-out chokepoint above; both
+> wrote canonical-derived hook rules into runtime settings files unscanned.
+> The settings canonical has one tier, `project_shared`, so both scan with
+> that scope and no valve whatever `hooks.target_scope` names. The fan-out
+> scans the canonical's text — the buffer it parses, so a shadowed duplicate
+> key is still seen — before the first target that would take a lock, then
+> again on each target's under-lock reread; a hit at the second point means
+> the canonical changed mid-sync, so targets already written stay written and
+> the rest are refused. Resolve scans the `{event: [rule]}` fragment it writes,
+> as promote does. Not every canonical-derived runtime write scans:
+> `settings-migrate` reads the canonical to build target rules but keeps its
+> documented private-target exemption (below), and rule deletion adds no
+> content.
 
 **Gate B (surface).** Explicit `--scope project_shared` flag plus
 confirm prompt at the CLI/MCP write surface (`mm add`,

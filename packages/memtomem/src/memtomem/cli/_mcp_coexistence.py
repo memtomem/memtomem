@@ -27,6 +27,10 @@ from memtomem.cli._claude_mcp import (
     _plugin_servers,
 )
 
+# System-wide Codex configuration files; the presence of either one makes the inspection
+# incomplete.
+_MANAGED_CODEX_CONFIGS = (Path("/etc/codex/requirements.toml"), Path("/etc/codex/config.toml"))
+
 
 def _inventory(client: str, report: Report) -> list[dict]:
     try:
@@ -156,7 +160,7 @@ def _inspect_host(client: str, report: Report) -> None:
                 break
         if data.get("profiles") or data.get("profile") or (root / "requirements.toml").exists():
             report.unknown("Codex profile or requirements need effective-configuration review.")
-        if Path("/etc/codex/requirements.toml").exists() or Path("/etc/codex/config.toml").exists():
+        if any(managed.exists() for managed in _MANAGED_CODEX_CONFIGS):
             report.unknown("Managed Codex configuration needs review.")
     manual = []
     for name, entry in _mapping(data, key, report, client).items():

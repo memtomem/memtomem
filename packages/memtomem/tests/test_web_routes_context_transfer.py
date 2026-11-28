@@ -16,7 +16,11 @@ covers what the WEB surface adds (ADR-0023 §10):
 
 from __future__ import annotations
 
+import errno
 import json
+import logging
+import os
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -26,6 +30,7 @@ from httpx import ASGITransport, AsyncClient
 from memtomem.config import ContextGatewayConfig, Mem2MemConfig
 from memtomem.context.lockfile import Lockfile, utcnow_iso8601_z
 from memtomem.web.app import create_app
+from memtomem.web.routes import _errors as _errors_mod
 from .helpers import set_home
 
 _AGENT_BODY = "---\nname: foo\ndescription: a clean test agent\n---\n\nhello\n"
@@ -115,6 +120,74 @@ def _other_project(tmp_path: Path, name: str = "proj-b", *, store: bool = True) 
     if store:
         (other / ".memtomem").mkdir()
     return other
+
+
+def _collision_message(kind: str, name: str, tier: str) -> str:
+    return (
+        f"destination already exists: {kind} '{name}' in the {tier} tier of the "
+        "destination. Resolve manually or remove the existing entry first."
+    )
+
+
+#: Everything in front of the paths in the engine's ``transfer_staging_busy`` text.
+_BUSY_REMEDIATION = (
+    "transfer staging is blocked: a name it needs is already taken and was NOT removed, "
+    "because that entry can be an interrupted move's only copy of an artifact. Inspect it "
+    "by hand, then retry. Occupied: "
+)
+
+
+_BUSY_MESSAGE = (
+    "transfer staging is blocked: a name it needs is already taken and was NOT removed, "
+    "because that entry can be an interrupted move's only copy of an artifact. Inspect it "
+    "by hand, then retry. The server log has the details."
+)
+# One sentence per way an identity refusal happens (#3608): a replacement, a staging
+# entry whose identity cannot be read, and a source refused before anything moved.
+_REPLACED_MESSAGE = (
+    "transfer staging was replaced out of band: the artifact was not published to the "
+    "destination. A staging copy may have been removed, and on a move the source may not be "
+    "back in place. Check the source and any staging entry by hand, then retry. The server "
+    "log has the details."
+)
+_UNVERIFIABLE_MESSAGE = (
+    "the transfer could not verify a staging entry's file identity: the artifact was not "
+    "published to the destination. A staging copy may have been removed, and on a move the "
+    "source may not be back in place. Check the source and any staging entry by hand, then "
+    "retry; if the filesystem does not report file identity, use one that does. The server "
+    "log has the details."
+)
+_SOURCE_UNVERIFIABLE_MESSAGE = (
+    "the transfer could not verify the source's file identity: nothing was moved, and the "
+    "artifact was not published to the destination. Fix access to the source, then retry; "
+    "if the filesystem does not report file identity, use one that does. The server log has "
+    "the details."
+)
+
+
+def _strings(value: object) -> list[str]:
+    """Every key and string value of a decoded JSON body, recursively."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for k, v in value.items() for s in (*_strings(k), *_strings(v))]
+    if isinstance(value, list):
+        return [s for item in value for s in _strings(item)]
+    return []
+
+
+def _assert_path_free(body: object, *leaky: Path) -> None:
+    """No decoded string carries a leaky path (given or resolved form) or ``$HOME``.
+
+    Walks the decoded body rather than ``json.dumps`` of it: serialized, a
+    Windows path's backslashes are doubled and the raw path never matches.
+    """
+    forbidden = {str(Path.home())}
+    for p in leaky:
+        forbidden |= {str(p), str(p.resolve())}
+    for s in _strings(body):
+        for f in forbidden:
+            assert f not in s, (f, s)
 
 
 # ── apply: cross-project move / copy ────────────────────────────────────
@@ -302,10 +375,92 @@ async def test_collision_409_destination_exists(client, cwd_root: Path, tmp_path
         },
     )
     assert resp.status_code == 409, resp.text
+    # The engine names the destination by its absolute path (#3302).
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "conflict"
     assert detail["reason_code"] == "destination_exists"
-    assert "destination already exists" in detail["message"]
+    assert detail["message"] == _collision_message("agents", "foo", "project_shared")
+
+
+@pytest.mark.asyncio
+async def test_collision_409_names_the_renamed_destination(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """``as_name`` is the name that collided, and the tier is the one asked for."""
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    _write_agent(_local_agents(other), "bar", "---\nname: bar\n---\n\nresident\n")
+    scope_b = await _register(client, other)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "to_target_scope": "project_local",
+            "to_project_scope_id": scope_b,
+            "as_name": "bar",
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "destination_exists"
+    assert detail["message"] == _collision_message("agents", "bar", "project_local")
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_symlinks
+async def test_collision_409_in_symlinked_store_is_path_free(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """The engine resolves the destination store, so a store linked out of the
+    project names a directory under neither root — the route's own message
+    must not depend on stripping it."""
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    external = tmp_path / "external-agents"
+    _write_agent(external, "foo", "---\nname: foo\n---\n\nresident\n")
+    _shared_agents(other).symlink_to(external, target_is_directory=True)
+    scope_b = await _register(client, other)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "to_target_scope": "project_shared",
+            "to_project_scope_id": scope_b,
+            "confirm_project_shared": True,
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, external, cwd_root, other)
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "destination_exists"
+    assert detail["message"] == _collision_message("agents", "foo", "project_shared")
+
+
+@pytest.mark.asyncio
+async def test_collision_409_user_tier_is_path_free(client, cwd_root: Path, tmp_path: Path) -> None:
+    """The user tier resolves under the request-time HOME, which the import-time
+    ``$HOME`` collapse does not know about."""
+    _write_agent(_shared_agents(cwd_root), "foo")
+    _write_agent(Path.home() / ".memtomem" / "agents", "foo", "---\nname: foo\n---\n\nhost\n")
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "move",
+            "from_scope": "project_shared",
+            "to_target_scope": "user",
+            "allow_host_writes": True,
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root)
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "destination_exists"
+    assert detail["message"] == _collision_message("agents", "foo", "user")
 
 
 def _usurp_staging_after_scan(monkeypatch, dst_store):
@@ -340,7 +495,11 @@ def _usurp_staging_after_scan(monkeypatch, dst_store):
 
 @pytest.mark.asyncio
 async def test_replaced_staging_409_transfer_staging_replaced(
-    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    client,
+    cwd_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An entry replaced out of band is a conflict with its own code (#2314).
 
@@ -355,26 +514,208 @@ async def test_replaced_staging_409_transfer_staging_replaced(
     dst_store = _shared_agents(other)
     dst_store.mkdir(parents=True, exist_ok=True)
     replaced = _usurp_staging_after_scan(monkeypatch, dst_store)
+    # The reproduction that moved the old 200-character cut past the paths: a
+    # frozen ``$HOME`` that occurs in the prose. The wire text must not care.
+    monkeypatch.setattr(_errors_mod, "_HOME", "Inspect it by hand, then retry.")
 
-    resp = await client.post(
-        "/api/context/agents/foo/transfer",
-        json={
-            "mode": "copy",
-            "to_target_scope": "project_shared",
-            "to_project_scope_id": scope_b,
-            "confirm_project_shared": True,
-        },
-    )
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post(
+            "/api/context/agents/foo/transfer",
+            json={
+                "mode": "copy",
+                "to_target_scope": "project_shared",
+                "to_project_scope_id": scope_b,
+                "confirm_project_shared": True,
+            },
+        )
 
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "conflict"
     assert detail["reason_code"] == "transfer_staging_replaced"
-    # The wire truncates at 200 characters, so the remediation has to arrive
-    # in front of the paths — the same shape the busy arm above pins.
-    assert "was replaced out of band" in detail["message"]
-    assert "Inspect it by hand, then retry." in detail["message"]
+    # The route's own sentence: the engine's text ends with the staging path,
+    # which goes to the log line instead (#3532).
+    assert detail["message"] == _REPLACED_MESSAGE
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert len(records) == 1, records
+    assert records[0].startswith(
+        "transfer agents/foo refused (transfer_staging_replaced): transfer staging was "
+        "replaced out of band"
+    )
+    assert records[0].endswith(f"Staging: {replaced[0]}"), records[0]
     assert (replaced[0] / "theirs.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_staging_409_carries_the_filesystem_remedy(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """A filesystem that reports no file identity gets its own remedy on the wire (#3532).
+
+    ``_staging_identity`` answers ``None`` there (``st_ino == 0``), and the claim
+    then refuses to consume its own entry; retrying on the same filesystem would
+    fail the same way, so the fixed sentence has to name the other way out.
+    """
+    from memtomem.context import migrate as migrate_mod
+
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    monkeypatch.setattr(migrate_mod, "_staging_identity", lambda _path: None)
+
+    # A copy refuses at the promote; the move twin below refuses earlier, at
+    # the source, because a move that renamed first could not roll back (#3545).
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post(
+            "/api/context/agents/foo/transfer", json={**_move_body(scope_b), "mode": "copy"}
+        )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "transfer_staging_replaced"
+    assert detail["message"] == _UNVERIFIABLE_MESSAGE
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert len(records) == 1, records
+    assert "transfer staging cannot be verified" in records[0]
+    assert "nothing was removed" not in records[0]
+
+
+@pytest.mark.asyncio
+async def test_a_move_without_file_identity_is_refused_before_it_consumes_the_source(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """The move twin of the cell above answers the same 409, with nothing moved (#3545).
+
+    Every entry under both projects reports ``st_ino == 0``, the filesystem the
+    issue describes. The move used to rename the source into staging, refuse
+    to promote it, and answer a partial-commit 500 that blamed a replacement
+    nobody made.
+    """
+    source = _write_agent(_shared_agents(cwd_root), "foo")
+    before = source.read_bytes()
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    roots = (cwd_root.resolve(), other.resolve())
+    real_lstat = Path.lstat
+
+    class _Zeroed:
+        def __init__(self, info):
+            self._info = info
+
+        def __getattr__(self, name):
+            return getattr(self._info, name)
+
+        st_ino = 0
+
+    def lstat(self, *args, **kwargs):
+        info = real_lstat(self, *args, **kwargs)
+        return _Zeroed(info) if any(self.is_relative_to(r) for r in roots) else info
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post("/api/context/agents/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "transfer_staging_replaced"
+    assert detail["message"] == _SOURCE_UNVERIFIABLE_MESSAGE
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert len(records) == 1, records
+    assert "does not report file identity" in records[0]
+    assert source.read_bytes() == before
+    dst_store = _shared_agents(other)
+    assert not (dst_store / "foo.md").exists() and not (dst_store / "foo").exists()
+    for store in (_shared_agents(cwd_root), dst_store):
+        assert not store.exists() or not list(store.glob(".migrate-*")), store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["copy", "move"])
+async def test_a_refusal_whose_rollback_removes_staging_does_not_deny_it(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog, mode: str
+) -> None:
+    """This 409 can follow a removal, so neither text says nothing was removed (#3609).
+
+    The identity read before the promote fails once. The rollback's own read
+    succeeds, so it removes the staging copy; on a move across filesystems it
+    first puts the source back.
+    """
+    from memtomem.context import migrate as migrate_mod
+    from memtomem.context import transfer as transfer_mod
+
+    move = mode == "move"
+    source = _write_agent(_shared_agents(cwd_root), "foo")
+    before = source.read_bytes()
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    src_store, dst_store = _shared_agents(cwd_root), _shared_agents(other)
+    crossed: list[Path] = []
+
+    if move:
+        real_rename = migrate_mod.rename_no_replace
+
+        def exdev_rename(src, dst, **kwargs):
+            # Cross-store only: parking the source and restoring it are
+            # same-parent renames, and must keep working.
+            if Path(src).parent != Path(dst).parent:
+                crossed.append(Path(src))
+                raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
+            return real_rename(src, dst, **kwargs)
+
+        monkeypatch.setattr(migrate_mod, "rename_no_replace", exdev_rename)
+
+    real_scan = transfer_mod.scan_artifact_tree
+    scanned: list[Path] = []
+
+    def scan_then_arm(*args, **kwargs):
+        result = real_scan(*args, **kwargs)
+        staged = Path(args[0])
+        assert [p.name for p in dst_store.glob(".migrate-*")] == [staged.name]
+        # A move is on the cross-filesystem path only if the injected EXDEV
+        # fired, the source is parked beside itself AND a separate copy sits
+        # in the destination store.
+        assert len(crossed) == (1 if move else 0), crossed
+        assert len(list(src_store.glob(".migrate-*"))) == (1 if move else 0)
+        assert source.exists() is not move
+        scanned.append(staged)
+        return result
+
+    real_lstat = Path.lstat
+    fired: list[Path] = []
+
+    def lstat(self, *args, **kwargs):
+        if scanned and not fired and self == scanned[0]:
+            fired.append(self)
+            raise OSError(errno.EIO, "injected one-shot failure", str(self))
+        return real_lstat(self, *args, **kwargs)
+
+    monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_then_arm)
+    monkeypatch.setattr(Path, "lstat", lstat)
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post(
+            "/api/context/agents/foo/transfer", json={**_move_body(scope_b), "mode": mode}
+        )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "transfer_staging_replaced"
+    assert len(scanned) == 1 and fired == scanned, (scanned, fired)
+    # What is on disk: the source is where it was, and the staging copy is gone.
+    assert source.read_bytes() == before
+    assert not os.path.lexists(scanned[0])
+    for store in (src_store, dst_store):
+        assert not list(store.glob(".migrate-*")), store
+    assert not (dst_store / "foo").exists()
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert len(records) == 1, records
+    assert "nothing was removed" not in records[0]
+    assert "nothing was removed" not in detail["message"]
+    assert detail["message"] == _UNVERIFIABLE_MESSAGE
 
 
 @pytest.mark.asyncio
@@ -404,6 +745,9 @@ async def test_staging_collision_409_transfer_staging_busy(
     leftover = dst_store / ".migrate-foo-424242-deadbeef.tmp"
     leftover.mkdir()
     (leftover / "agent.md").write_text("only copy\n", encoding="utf-8")
+    # The reproduction that moved the old 200-character cut past the paths: a
+    # frozen ``$HOME`` that occurs in the prose. The wire text must not care.
+    monkeypatch.setattr(_errors_mod, "_HOME", "Inspect it by hand, then retry.")
 
     resp = await client.post(
         "/api/context/agents/foo/transfer",
@@ -419,12 +763,409 @@ async def test_staging_collision_409_transfer_staging_busy(
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "conflict"
     assert detail["reason_code"] == "transfer_staging_busy"
-    # The wire truncates an engine reason at 200 characters, so the whole
-    # remediation has to live in front of the paths.
-    assert "was NOT removed" in detail["message"]
-    assert "Inspect it by hand, then retry." in detail["message"]
+    # The route's own sentence: the engine's text ends with the occupied
+    # paths, which go to the log line instead (#3532).
+    assert detail["message"] == _BUSY_MESSAGE
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     # The leftover survived the request, which is the entire point.
     assert (leftover / "agent.md").read_text(encoding="utf-8") == "only copy\n"
+
+
+_SKILL_BODY = "---\nname: {name}\ndescription: a clean test skill\n---\n\nhello\n"
+
+
+def _shared_skills(root: Path) -> Path:
+    return root / ".memtomem" / "skills"
+
+
+def _write_skill(store_root: Path, name: str) -> Path:
+    artifact = store_root / name
+    artifact.mkdir(parents=True, exist_ok=True)
+    manifest = artifact / "SKILL.md"
+    manifest.write_text(_SKILL_BODY.format(name=name), encoding="utf-8")
+    return manifest
+
+
+def _plant_two_swap_markers(store_root: Path, name: str) -> list[Path]:
+    """Two markers claiming one artifact: a real wedged state (``_dir_swap._find_marker``).
+
+    The prelude refuses it before reading either marker, so the bodies do not
+    matter; the names must match ``.swap-<name>-<pid>-<6 hex>.json``.
+    """
+    store_root.mkdir(parents=True, exist_ok=True)
+    markers = [store_root / f".swap-{name}-{s}.json" for s in ("111-aaaaaa", "222-bbbbbb")]
+    for marker in markers:
+        marker.write_text("{}", encoding="utf-8")
+    return markers
+
+
+def _swap_message(side: str, name: str, tier: str = "project_shared") -> str:
+    return (
+        f"an interrupted directory swap blocks this transfer: skills/{name} in the "
+        f"{side} {tier} tier could not be recovered automatically. Inspect it "
+        "by hand, then retry. The server log has the details."
+    )
+
+
+def _transfer_records(caplog: pytest.LogCaptureFixture) -> list:
+    """The route's own log records; each must be one scanned line with no traceback."""
+    records = [r for r in caplog.records if r.name == "memtomem.web.routes.context_transfer"]
+    for record in records:
+        assert record.exc_info is None, record.getMessage()
+        assert record.exc_text is None, record.getMessage()
+        assert "\n" not in record.getMessage(), record.getMessage()
+    return records
+
+
+def _move_body(scope_b: str) -> dict:
+    return {
+        "mode": "move",
+        "to_target_scope": "project_shared",
+        "to_project_scope_id": scope_b,
+        "confirm_project_shared": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("side", ["source", "destination"])
+async def test_swap_recovery_409_is_path_free(
+    client, cwd_root: Path, tmp_path: Path, side: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wedged swap on either side refuses without naming a host path (#3532).
+
+    Driven through the real prelude: two markers for one name is a state
+    ``_find_marker`` refuses, and the engine's own sentence for it embeds the
+    store path. The wire gets which side and tier is wedged; the server log
+    gets the entries, and never the engine sentence (a malformed marker's
+    field values are interpolated into some of those sentences).
+    """
+    _write_skill(_shared_skills(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    wedged = _shared_skills(cwd_root if side == "source" else other)
+    markers = _plant_two_swap_markers(wedged, "foo")
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post("/api/context/skills/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "conflict"
+    assert detail["reason_code"] == "swap_recovery_pending"
+    assert detail["message"] == _swap_message(side, "foo")
+
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert len(records) == 1, records
+    assert records[0] == (
+        "transfer skills/foo refused (swap_recovery_pending): "
+        f"{_swap_message(side, 'foo').removesuffix(' The server log has the details.')} "
+        f"Entries: {wedged / 'foo'}, {markers[0]}, {markers[1]}"
+    )
+    # Nothing was moved: the source is where it was.
+    assert (_shared_skills(cwd_root) / "foo" / "SKILL.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_swap_recovery_409_logs_both_rename_paths(
+    client,
+    cwd_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from memtomem.context import _dir_swap
+
+    _write_skill(_shared_skills(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    paths = _dir_swap._swap_paths(_shared_skills(other), "foo", "111-aaaaaa")
+    paths.old.mkdir(parents=True)
+    _dir_swap._write_marker(paths)
+
+    def fail_rollback(src: Path, dst: Path) -> None:
+        assert (src, dst) == (paths.old, paths.dst)
+        raise OSError(errno.EIO, "simulated recovery rename failure")
+
+    monkeypatch.setattr(_dir_swap, "rename_no_replace", fail_rollback)
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post("/api/context/skills/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    assert resp.json()["detail"] == {
+        "error_kind": "conflict",
+        "reason_code": "swap_recovery_pending",
+        "message": _swap_message("destination", "foo"),
+    }
+    (record,) = _transfer_records(caplog)
+    assert record.getMessage().endswith(f"Entries: {paths.dst}, {paths.old}")
+    assert paths.marker.is_file()
+    assert paths.old.is_dir()
+    assert not paths.dst.exists()
+
+
+@pytest.mark.asyncio
+async def test_swap_recovery_409_user_tier_destination(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """The tier in the text is the wedged side's, here the user tier (#3532)."""
+    _write_skill(_shared_skills(cwd_root), "foo")
+    user_store = tmp_path / "home" / ".memtomem" / "skills"
+    _plant_two_swap_markers(user_store, "foo")
+
+    resp = await client.post(
+        "/api/context/skills/foo/transfer",
+        json={
+            "mode": "move",
+            # The markers make discovery count ``foo`` as present in the user
+            # tier too; name the source so the ambiguity 400 does not shadow this.
+            "from_scope": "project_shared",
+            "to_target_scope": "user",
+            "allow_host_writes": True,
+        },
+    )
+
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root)
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "swap_recovery_pending"
+    assert detail["message"] == _swap_message("destination", "foo", tier="user")
+
+
+@pytest.mark.asyncio
+async def test_swap_recovery_409_names_the_renamed_destination(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """A copy with ``as_name`` is wedged under the destination name, not the source's (#3532)."""
+    _write_skill(_shared_skills(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    _plant_two_swap_markers(_shared_skills(other), "bar")
+
+    resp = await client.post(
+        "/api/context/skills/foo/transfer",
+        json={**_move_body(scope_b), "mode": "copy", "as_name": "bar"},
+    )
+
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    assert resp.json()["detail"]["message"] == _swap_message("destination", "bar")
+
+
+@pytest.mark.asyncio
+async def test_swap_recovery_409_keeps_marker_values_out(
+    client, cwd_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A malformed marker's field value reaches neither the wire nor the log (#3532).
+
+    The engine's sentence for a field mismatch interpolates the value it read
+    (``_dir_swap._validated_paths``); a value no secret pattern matches would
+    pass the scan, so the sentence itself must stay out.
+    """
+    _write_skill(_shared_skills(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    store = _shared_skills(other)
+    store.mkdir(parents=True)
+    marker = store / ".swap-foo-111-aaaaaa.json"
+    marker.write_text(json.dumps({"version": 1, "name": "OPAQUEVALUE42"}), encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post("/api/context/skills/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason_code"] == "swap_recovery_pending"
+    assert "OPAQUEVALUE42" not in resp.text
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert len(records) == 1, records
+    assert "OPAQUEVALUE42" not in records[0]
+    assert records[0].endswith(f"Entries: {marker}")
+
+
+@pytest.mark.asyncio
+async def test_swap_recovery_409_without_safe_message_falls_back(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """A raise site that sets no ``safe_message`` still answers path-free (#3532)."""
+    from memtomem.context.transfer import TransferRecoveryError
+    from memtomem.web.routes import context_transfer as route_mod
+
+    _write_skill(_shared_skills(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    def _wedged(*_a: object, **_k: object) -> None:
+        raise TransferRecoveryError(f"swap pending at '{other}'")
+
+    monkeypatch.setattr(route_mod, "transfer_artifact", _wedged)
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post("/api/context/skills/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 409, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    assert resp.json()["detail"]["message"] == (
+        "an interrupted directory swap blocks this transfer and could not be recovered "
+        "automatically. Inspect it by hand, then retry. The server log has the details."
+    )
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert len(records) == 1 and records[0].endswith("Entries: none recorded"), records
+
+
+@pytest.mark.asyncio
+async def test_swap_recovery_409_secret_shaped_name_is_scanned(
+    client, cwd_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A validated artifact name can match a provider-token pattern (#3532).
+
+    The wire message is then the marker. The log line keeps the kind and the
+    reason code, with the marker for the name and for the engine text (#3614).
+    """
+    from memtomem.web.routes._errors import _SECRET_REDACTED_MARKER
+
+    name = "ghp_" + "a" * 36
+    _write_skill(_shared_skills(cwd_root), name)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    _plant_two_swap_markers(_shared_skills(other), name)
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post(f"/api/context/skills/{name}/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "swap_recovery_pending"
+    assert detail["message"] == _SECRET_REDACTED_MARKER
+    logged = [r.getMessage() for r in _transfer_records(caplog)]
+    assert logged == [
+        f"transfer skills/{_SECRET_REDACTED_MARKER} refused (swap_recovery_pending): "
+        f"{_SECRET_REDACTED_MARKER}"
+    ], logged
+
+
+@pytest.mark.asyncio
+async def test_staging_busy_409_logs_the_occupied_paths(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """The wire gets a fixed sentence; the server log names the occupied paths (#3532)."""
+    from memtomem.context import migrate as migrate_mod
+
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    monkeypatch.setattr(migrate_mod.os, "getpid", lambda: 424242)
+    monkeypatch.setattr(migrate_mod.secrets, "token_hex", lambda _n: "deadbeef")
+    dst_store = _shared_agents(other)
+    dst_store.mkdir(parents=True, exist_ok=True)
+    leftover = dst_store / ".migrate-foo-424242-deadbeef.tmp"
+    leftover.mkdir()
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post("/api/context/agents/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason_code"] == "transfer_staging_busy"
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert len(records) == 1, records
+    assert records[0].startswith(
+        f"transfer agents/foo refused (transfer_staging_busy): {_BUSY_REMEDIATION}"
+    )
+    assert records[0].endswith(str(leftover)), records[0]
+
+
+@pytest.mark.asyncio
+async def test_refusal_log_line_escapes_control_characters(caplog) -> None:
+    """A line break in a path cannot split the record or forge a line after it (#3532)."""
+    from memtomem.web.routes import context_transfer as route_mod
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        route_mod._log_refusal("agents", "foo", "transfer_staging_busy", "Occupied: /a\nFAKE b")
+
+    records = [r.getMessage() for r in _transfer_records(caplog)]
+    assert records == [
+        "transfer agents/foo refused (transfer_staging_busy): Occupied: /a\\x0aFAKE b"
+    ]
+
+
+def test_refusal_log_line_with_a_secret_shaped_name_drops_the_engine_text_too(caplog) -> None:
+    """A rule can hit the name alone and miss it inside the engine text (#3614).
+
+    The GitLab rule refuses a trailing ``-``, so the staging path built from this
+    name scans clean. Only the hit on the name keeps it out of the record.
+    """
+    from memtomem import privacy
+    from memtomem.web.routes import context_transfer as route_mod
+    from memtomem.web.routes._errors import _SECRET_REDACTED_MARKER
+
+    name = "glpat-" + "a" * 20  # assembled at runtime: a synthetic GitLab token
+    text = f"Occupied: /s/.migrate-{name}-424242-deadbeef.tmp"
+    assert privacy.scan(name)
+    assert not privacy.scan(text)
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        route_mod._log_refusal("agents", name, "transfer_staging_busy", text)
+
+    assert [r.getMessage() for r in _transfer_records(caplog)] == [
+        f"transfer agents/{_SECRET_REDACTED_MARKER} refused (transfer_staging_busy): "
+        f"{_SECRET_REDACTED_MARKER}"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refusal_log_line_scans_the_paths_not_only_the_name(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """A secret shape in a staging path, with an ordinary artifact name, redacts the engine text.
+
+    The secret-name cell cannot tell a text scan from a name-only one, because
+    the name itself trips the scanner (#3532). The kind, the name and the reason
+    code stay in the record (#3614).
+    """
+    from memtomem.context import migrate as migrate_mod
+    from memtomem.web.routes._errors import _SECRET_REDACTED_MARKER
+
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path, name="ghp_" + "b" * 36)
+    scope_b = await _register(client, other)
+    monkeypatch.setattr(migrate_mod.os, "getpid", lambda: 424242)
+    monkeypatch.setattr(migrate_mod.secrets, "token_hex", lambda _n: "deadbeef")
+    dst_store = _shared_agents(other)
+    dst_store.mkdir(parents=True, exist_ok=True)
+    (dst_store / ".migrate-foo-424242-deadbeef.tmp").mkdir()
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post("/api/context/agents/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["message"] == _BUSY_MESSAGE
+    assert [r.getMessage() for r in _transfer_records(caplog)] == [
+        f"transfer agents/foo refused (transfer_staging_busy): {_SECRET_REDACTED_MARKER}"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unexpected_failure_500_is_path_free(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The catch-all has no structure to render from, so it says nothing of the cause (#3532)."""
+    from memtomem.web.routes import context_transfer as route_mod
+
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError(f"boom while reading {other / '.memtomem' / 'agents' / 'foo'}")
+
+    monkeypatch.setattr(route_mod, "transfer_artifact", _boom)
+
+    resp = await client.post("/api/context/agents/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 500, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "internal"
+    assert detail["message"] == "transfer failed unexpectedly; the server log has the details"
 
 
 @pytest.mark.asyncio
@@ -509,10 +1250,23 @@ async def test_unknown_destination_scope_404(client, cwd_root: Path) -> None:
     assert "unknown project_scope_id" in detail["message"]
 
 
+def _no_store_message(scope_id: str) -> str:
+    return (
+        f"destination project {scope_id!r} has no .memtomem/ store. Initialize it first: "
+        "run `mm context init` in that project's directory."
+    )
+
+
 @pytest.mark.asyncio
-async def test_destination_without_store_409(client, cwd_root: Path, tmp_path: Path) -> None:
+async def test_destination_without_store_409(client, cwd_root: Path) -> None:
+    """The 409 names the destination by its scope id, not its path (#2489).
+
+    The destination sits under the sandbox ``$HOME`` with a space in its name:
+    the old text put the absolute path in the prose and, unquoted, in a ``cd``
+    hint that broke on the space.
+    """
     _write_agent(_shared_agents(cwd_root), "foo")
-    bare = _other_project(tmp_path, "bare", store=False)
+    bare = _other_project(Path.home(), "bare project", store=False)
     scope_b = await _register(client, bare)
 
     resp = await client.post(
@@ -527,7 +1281,8 @@ async def test_destination_without_store_409(client, cwd_root: Path, tmp_path: P
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "no_memtomem_store"
-    assert "mm context init" in detail["message"]
+    assert detail["message"] == _no_store_message(scope_b)
+    _assert_path_free(resp.json(), bare, cwd_root)
 
 
 @pytest.mark.asyncio
@@ -539,7 +1294,9 @@ async def test_source_not_found_404(client, cwd_root: Path) -> None:
     assert resp.status_code == 404, resp.text
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "missing"
-    assert "not found in any scope" in detail["message"]
+    assert detail["message"] == (
+        "agents/ghost not found in any scope (user / project_shared / project_local)."
+    )
 
 
 @pytest.mark.asyncio
@@ -646,33 +1403,216 @@ async def test_dry_run_plans_without_confirmation(client, cwd_root: Path) -> Non
 # ── Gate A / privacy envelope ────────────────────────────────────────────
 
 
+_ROUTE_LOGGER = "memtomem.web.routes.context_transfer"
+
+
+def _gate_a_detail(hits: int) -> str:
+    """The route's whole Gate A 422 ``detail`` (#3605): a hit count and no name."""
+    return (
+        f"Gate A: a file in the artifact contains {hits} privacy pattern hit(s); write to "
+        "scope='project_shared' rejected. git history is forever — no force bypass available "
+        "for project_shared (ADR-0011 §5). Remove the secret-shaped values from the source "
+        "artifact or from the new name the request gives it, and retry; the server log has "
+        "the details."
+    )
+
+
+_TWO_SECRETS_BODY = _SECRET_BODY + "token=ghp_" + "a1B2c3D4e5" * 3 + "a1B2c3\n"
+
+
+_PRIVACY_REFUSED = (
+    "Gate A could not scan the artifact, so the write to project_shared was refused; "
+    "the server log has the details."
+)
+
+
+def _shared_body(**overrides) -> dict:
+    body = {"mode": "copy", "to_target_scope": "project_shared", "confirm_project_shared": True}
+    body.update(overrides)
+    return body
+
+
+def _refusal_logs(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The route's warning lines for this arm, each one scanned line with no traceback.
+
+    Every route record counts, so a caller also sees an arm that logged twice or
+    under another reason code; the arm under test emits the only one.
+    """
+    return [r.getMessage() for r in _transfer_records(caplog)]
+
+
 @pytest.mark.asyncio
-async def test_privacy_scan_blocks_with_standard_string_envelope(client, cwd_root: Path) -> None:
+async def test_privacy_scan_blocks_with_standard_string_envelope(
+    client, cwd_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """Secret bytes landing in project_shared → the standard 422 STRING
-    envelope (issue-pinned), zero residue at the destination. Copy mode
-    carries the transfer-native source-anchored remediation hint (a
-    same-root move keeps migrate's historical Gate A wording — engine
-    contract, pinned in test_context_transfer.py)."""
+    envelope (issue-pinned), zero residue at the destination.
+
+    The wire names no file (#3605). The engine text, whose hint re-anchors
+    onto the SOURCE manifest by its absolute path, goes to the log line."""
     src_manifest = _write_agent(_local_agents(cwd_root), "foo", _SECRET_BODY)
 
-    resp = await client.post(
-        "/api/context/agents/foo/transfer",
-        json={
-            "mode": "copy",
-            "to_target_scope": "project_shared",
-            "confirm_project_shared": True,
-        },
-    )
+    with caplog.at_level(logging.WARNING, logger=_ROUTE_LOGGER):
+        resp = await client.post("/api/context/agents/foo/transfer", json=_shared_body())
     assert resp.status_code == 422, resp.text
-    detail = resp.json()["detail"]
-    assert isinstance(detail, str)
-    assert "Offending file" in detail
-    # The hint re-anchors onto the SOURCE manifest (the transient staging
-    # path is gone after rollback).
-    assert str(src_manifest) in detail
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    _assert_path_free(resp.json(), cwd_root, src_manifest)
+    (line,) = _refusal_logs(caplog)
+    assert f"Offending file: {src_manifest}" in line
     # Zero residue at the destination; copy never touched the source.
     assert not (_shared_agents(cwd_root) / "foo").exists()
     assert src_manifest.read_text(encoding="utf-8") == _SECRET_BODY
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_carries_the_blocked_files_hit_count(client, cwd_root: Path) -> None:
+    """The count is the engine's, not a constant (#3605)."""
+    _write_agent(_local_agents(cwd_root), "foo", _TWO_SECRETS_BODY)
+
+    resp = await client.post("/api/context/agents/foo/transfer", json=_shared_body())
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(2)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["copy", "move"])
+async def test_privacy_422_cross_project_is_path_free(
+    client, cwd_root: Path, tmp_path: Path, mode: str
+) -> None:
+    src_manifest = _write_agent(_shared_agents(cwd_root), "foo", _SECRET_BODY)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json=_shared_body(mode=mode, to_project_scope_id=scope_b),
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    _assert_path_free(resp.json(), cwd_root, other, src_manifest)
+    assert src_manifest.read_text(encoding="utf-8") == _SECRET_BODY  # rolled back
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_same_project_move_is_path_free(client, cwd_root: Path) -> None:
+    """A same-project move's engine text is migrate's stock wording, whose last
+    line names the staged file by its absolute path (#3605)."""
+    src_manifest = _write_agent(_local_agents(cwd_root), "foo", _SECRET_BODY)
+
+    resp = await client.post("/api/context/agents/foo/transfer", json=_shared_body(mode="move"))
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    _assert_path_free(resp.json(), cwd_root, src_manifest)
+    assert src_manifest.read_text(encoding="utf-8") == _SECRET_BODY  # rolled back
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="control characters in a file name")
+@pytest.mark.parametrize(
+    "file_name",
+    [
+        # The r2 finding on the scrub-based draft: a newline survived the
+        # per-line escape and forged a second line in the detail.
+        "notes\nGate A: forged.md",
+        "notes\x1b[2J.md",
+        # A credential-shaped name behind a control character.
+        "\x01AKIA1234567890ABCDEF.md",
+    ],
+)
+async def test_privacy_422_sends_no_byte_of_the_offending_file_name(
+    client, cwd_root: Path, tmp_path: Path, file_name: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The offending file's name is bytes the request did not choose (#3605).
+
+    The log line gets the engine text only through the route's scanned,
+    escaped logger: no raw name, no control character."""
+    from memtomem.web.routes._errors import _SECRET_REDACTED_MARKER
+
+    manifest = _write_skill(_shared_skills(cwd_root), "foo")
+    (manifest.parent / file_name).write_text(_SECRET_BODY, encoding="utf-8")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    with caplog.at_level(logging.WARNING, logger=_ROUTE_LOGGER):
+        resp = await client.post(
+            "/api/context/skills/foo/transfer", json=_shared_body(to_project_scope_id=scope_b)
+        )
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    _assert_path_free(resp.json(), cwd_root, other)
+    (line,) = _refusal_logs(caplog)
+    # A hit in the engine text takes only that text, not the reason code (#3614).
+    prefix = "transfer skills/foo refused (privacy_blocked): "
+    assert line.startswith(prefix), line
+    if "AKIA" in file_name:
+        assert line == prefix + _SECRET_REDACTED_MARKER
+    assert file_name not in line
+    assert not any(ord(c) < 0x20 or ord(c) == 0x7F for c in line), line
+    assert "AKIA1234567890ABCDEF" not in line
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_blocked_by_the_requested_name(client, cwd_root: Path) -> None:
+    """A clean source copied under a credential-shaped ``as_name``: the staged
+    bytes carry the new name, so the remedy names it, and the wire does not
+    echo it (#3605)."""
+    src_manifest = _write_agent(_local_agents(cwd_root), "foo")
+    before = src_manifest.read_bytes()
+    new_name = "AKIA1234567890ABCDEF"
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer", json=_shared_body(as_name=new_name)
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    assert new_name not in resp.text
+    assert src_manifest.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_unreadable_staged_file_gets_the_fixed_text(
+    client, cwd_root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A staged file the scan cannot read is a ``PrivacyScanReadError``, whose
+    text names the staging path; the wire gets a fixed sentence (#3605)."""
+    _write_agent(_local_agents(cwd_root), "foo")
+    real_read_bytes = Path.read_bytes
+
+    def failing_read(self: Path) -> bytes:
+        if self.name == "agent.md" and self.parent.name.startswith(".migrate-"):
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", failing_read)
+    with caplog.at_level(logging.WARNING, logger=_ROUTE_LOGGER):
+        resp = await client.post("/api/context/agents/foo/transfer", json=_shared_body())
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _PRIVACY_REFUSED}
+    _assert_path_free(resp.json(), cwd_root)
+    (line,) = _refusal_logs(caplog)
+    assert "Gate A: cannot read" in line
+
+
+@pytest.mark.asyncio
+async def test_privacy_422_never_sends_engine_text(
+    client, cwd_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any ``PrivacyScanError`` that is not a block gets the fixed sentence,
+    never ``exc.message`` (#3605)."""
+    from memtomem.context.privacy_scan import PrivacyScanError
+    from memtomem.web.routes import context_transfer as route
+
+    _write_agent(_local_agents(cwd_root), "foo")
+    leaky = cwd_root / ".memtomem" / "agents.local" / "foo" / "agent.md"
+
+    def raising_transfer(*args, **kwargs):
+        raise PrivacyScanError(f"Gate A: something about {leaky}")
+
+    monkeypatch.setattr(route, "transfer_artifact", raising_transfer)
+    resp = await client.post("/api/context/agents/foo/transfer", json=_shared_body())
+    assert resp.status_code == 422, resp.text
+    assert resp.json() == {"detail": _PRIVACY_REFUSED}
+    _assert_path_free(resp.json(), cwd_root, leaky)
 
 
 # ── validation 400s ──────────────────────────────────────────────────────
@@ -800,6 +1740,9 @@ def _write_mcp_server(root: Path, name: str = "pg", definition: dict | None = No
         encoding="utf-8",
     )
     return path
+
+
+_MCP_MISSING = "mcp-servers/pg not found at the source project: .memtomem/mcp-servers/pg.json"
 
 
 def _mcp_copy_body(scope_b: str, **overrides) -> dict:
@@ -976,9 +1919,12 @@ async def test_mcp_collision_409(client, cwd_root: Path, tmp_path: Path) -> None
 
     resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
     assert resp.status_code == 409, resp.text
+    # The mcp-servers adapter raises the same collision with its own path (#3302).
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "conflict"
     assert detail["reason_code"] == "destination_exists"
+    assert detail["message"] == _collision_message("mcp-servers", "pg", "project_shared")
     assert existing.read_bytes() == before
 
 
@@ -986,15 +1932,14 @@ async def test_mcp_collision_409(client, cwd_root: Path, tmp_path: Path) -> None
 async def test_mcp_privacy_422_string_envelope(client, cwd_root: Path, tmp_path: Path) -> None:
     """Issue #1282 acceptance 1 on the wire: the standard project_shared
     block envelope — a STRING 422 detail, same as every sync surface."""
-    _write_mcp_server(cwd_root, definition=_MCP_SECRET)
+    src = _write_mcp_server(cwd_root, definition=_MCP_SECRET)
     other = _other_project(tmp_path)
     scope_b = await _register(client, other)
 
     resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
     assert resp.status_code == 422, resp.text
-    detail = resp.json()["detail"]
-    assert isinstance(detail, str)
-    assert detail.startswith("Gate A: pg.json contains 1 privacy pattern hit(s)")
+    assert resp.json() == {"detail": _gate_a_detail(1)}
+    _assert_path_free(resp.json(), cwd_root, other, src)
     # Zero destination residue: no canonical, no staging leftovers (the
     # store dir + lock sidecar are the locking machinery's own artifacts).
     dst_store = other / ".memtomem" / "mcp-servers"
@@ -1022,9 +1967,35 @@ async def test_mcp_source_not_found_404(client, cwd_root: Path, tmp_path: Path) 
 
     resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
     assert resp.status_code == 404, resp.text
+    # The engine's text ends with the resolved source path (#3532).
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other)
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "missing"
-    assert "mcp-servers/pg not found at the source project" in detail["message"]
+    assert detail["message"] == _MCP_MISSING
+
+
+@pytest.mark.asyncio
+async def test_mcp_source_not_found_404_linked_store(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """A source store linked out of the project still answers 404, path-free (#3532).
+
+    ``canonical_mcp_server_root`` resolves the link, so the engine's path sits
+    under no project root; the public text must not be derived from it.
+    """
+    elsewhere = tmp_path / "elsewhere" / "mcp"
+    elsewhere.mkdir(parents=True)
+    try:
+        (cwd_root / ".memtomem" / "mcp-servers").symlink_to(elsewhere, target_is_directory=True)
+    except OSError as exc:  # pragma: no cover - Windows without symlink privilege
+        pytest.skip(f"cannot create a directory symlink here: {exc}")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert resp.status_code == 404, resp.text
+    _assert_path_free(resp.json(), tmp_path, cwd_root, other, elsewhere)
+    assert resp.json()["detail"]["message"] == _MCP_MISSING
 
 
 @pytest.mark.asyncio
@@ -1043,11 +2014,288 @@ async def test_mcp_paused_destination_409(client, cwd_root: Path, tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_mcp_no_store_destination_409(client, cwd_root: Path, tmp_path: Path) -> None:
+    """Outside ``$HOME``, with a space and (POSIX) a control character in the name (#2489)."""
     _write_mcp_server(cwd_root)
-    other = _other_project(tmp_path, store=False)
+    name = "proj b" if sys.platform == "win32" else "proj b\x1b[31m"
+    other = _other_project(tmp_path, name, store=False)
     scope_b = await _register(client, other)
 
     resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["reason_code"] == "no_memtomem_store"
+    assert detail["message"] == _no_store_message(scope_b)
+    _assert_path_free(resp.json(), other, cwd_root)
+    assert not any("\x1b" in s for s in _strings(resp.json()))
+
+
+# ── 400 validation arm: engine refusals that name a path (#3543) ─────────
+
+
+_REFUSED_FALLBACK = "the transfer request was refused; the server log has the details."
+
+
+def _assert_validation(resp, message: str, *leaky: Path) -> None:
+    assert resp.status_code == 400, resp.text
+    _assert_path_free(resp.json(), *leaky)
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "validation"
+    assert detail["message"] == message
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_source_400_is_path_free(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_agent(Path.home() / ".memtomem" / "agents", "foo")
+    _write_agent(_shared_agents(cwd_root), "foo")
+    _write_agent(_local_agents(cwd_root), "foo")
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={"mode": "copy", "to_target_scope": "user", "allow_host_writes": True},
+    )
+    _assert_validation(
+        resp,
+        "agents/foo exists in multiple scopes: user, project_shared, project_local. "
+        "Set from_scope to one of these scopes.",
+        tmp_path,
+        cwd_root,
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_to_user_400_is_path_free(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_agent(Path.home() / ".memtomem" / "agents", "foo")
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "from_scope": "user",
+            "to_target_scope": "user",
+            "allow_host_writes": True,
+        },
+    )
+    _assert_validation(
+        resp,
+        "agents/foo is already in the global user tier; choose a project tier as the destination.",
+        tmp_path,
+        cwd_root,
+    )
+
+
+_SAME_STORE = (
+    "the source ({src}) and destination ({dst}) resolve to the same canonical store; "
+    "choose a destination backed by a different store."
+)
+
+
+@pytest.mark.asyncio
+async def test_same_store_400_is_path_free(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_agent(_shared_agents(cwd_root), "foo")
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "from_scope": "project_shared",
+            "to_target_scope": "project_shared",
+            "confirm_project_shared": True,
+        },
+    )
+    _assert_validation(
+        resp,
+        _SAME_STORE.format(src="project_shared", dst="project_shared"),
+        tmp_path,
+        cwd_root,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_symlinks
+async def test_linked_tiers_same_store_400_is_path_free(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """``canonical_artifact_dir`` resolves links, so two tiers can share one store."""
+    _write_agent(_shared_agents(cwd_root), "foo")
+    _local_agents(cwd_root).symlink_to(_shared_agents(cwd_root), target_is_directory=True)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "from_scope": "project_local",
+            "to_target_scope": "project_shared",
+            "confirm_project_shared": True,
+        },
+    )
+    _assert_validation(
+        resp,
+        _SAME_STORE.format(src="project_local", dst="project_shared"),
+        tmp_path,
+        cwd_root,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_symlinks
+async def test_mcp_symlinked_source_400_is_path_free(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    real = _write_mcp_server(tmp_path / "real")
+    store = cwd_root / ".memtomem" / "mcp-servers"
+    store.mkdir(parents=True)
+    (store / "pg.json").symlink_to(real)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    _assert_validation(
+        resp,
+        "mcp-servers/pg: the source .memtomem/mcp-servers/pg.json is a symlink; mcp-servers "
+        "copy refuses symlinked canonicals — the destination must be a regular git-tracked "
+        "file. Replace the symlink with a regular file holding the definition, then re-run "
+        "the copy.",
+        tmp_path,
+        cwd_root,
+        other,
+        real,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_unreadable_source_400_is_path_free(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _write_mcp_server(cwd_root).resolve()
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    fired: list[Path] = []
+    real_read_bytes = Path.read_bytes
+
+    def _read_bytes(self: Path) -> bytes:
+        if self == src:
+            fired.append(self)
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert fired, "the read hook never matched the canonical source"
+    _assert_validation(
+        resp,
+        "cannot read the source .memtomem/mcp-servers/pg.json; check that it exists and "
+        "that the server can read it.",
+        tmp_path,
+        cwd_root,
+        other,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_non_utf8_source_400_is_path_free(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_mcp_server(cwd_root).write_bytes(b'{"command": "\xff"}\n')
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    _assert_validation(
+        resp,
+        "the source .memtomem/mcp-servers/pg.json is not valid UTF-8; fix the source "
+        "definition before copying.",
+        tmp_path,
+        cwd_root,
+        other,
+    )
+
+
+@pytest.mark.asyncio
+async def test_path_naming_refusal_without_safe_message_falls_back(
+    client,
+    cwd_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A raise site that leaves ``safe_message`` unset still answers path-free,
+    and the engine's text goes to the one log line the fallback promises."""
+    from memtomem.context.migrate import PathNamingClickException
+    from memtomem.web.routes import context_transfer as route
+
+    engine_text = f"refused: {cwd_root / '.memtomem'} is wrong"
+
+    def _refuse(*_a: object, **_k: object) -> None:
+        raise PathNamingClickException(engine_text)
+
+    monkeypatch.setattr(route, "copy_mcp_server", _refuse)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    with caplog.at_level("WARNING", logger="memtomem.web.routes.context_transfer"):
+        resp = await client.post(
+            "/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b)
+        )
+    _assert_validation(resp, _REFUSED_FALLBACK, tmp_path, cwd_root, other)
+    assert [r.getMessage() for r in _transfer_records(caplog)] == [
+        f"transfer mcp-servers/pg refused (validation): {engine_text}"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_validation_400_passes_the_secret_scan(client, cwd_root: Path) -> None:
+    """Every 400 text from the final arm is scanned, path-naming or not (#3543)."""
+    name = "AKIA" + "1234567890ABCDEF"  # assembled at runtime: a synthetic AWS key ID
+    _write_agent(_shared_agents(cwd_root), name)
+
+    resp = await client.post(
+        f"/api/context/agents/{name}/transfer",
+        json={"mode": "move", "from_scope": "project_shared", "to_target_scope": "project_shared"},
+    )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "validation"
+    assert detail["message"] == "<redacted: secret-shape>"
+
+
+@pytest.mark.asyncio
+async def test_a_recreated_source_with_unverifiable_staging_is_a_500_partial(
+    client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 2 of #3608 on the wire: a partial commit, never the retryable 409.
+
+    The move consumed the source into staging, the staging entry cannot be
+    verified, and a writer recreated the source meanwhile, so nothing was put
+    back. A 409 that says "then retry" would have the next attempt move the
+    writer's entry while the artifact stays parked.
+    """
+    from memtomem.context import migrate as migrate_mod
+    from memtomem.context import transfer as transfer_mod
+
+    source = _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    dst_store = _shared_agents(other)
+    real_identity = migrate_mod._staging_identity
+    real_scan = transfer_mod.scan_artifact_tree
+
+    def identity(path):
+        if path.parent == dst_store.resolve() and path.name.startswith(".migrate-"):
+            return None
+        return real_identity(path)
+
+    def scan_and_recreate(*args, **kwargs):
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("racer\n", encoding="utf-8")
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(migrate_mod, "_staging_identity", identity)
+    monkeypatch.setattr(transfer_mod, "scan_artifact_tree", scan_and_recreate)
+
+    resp = await client.post("/api/context/agents/foo/transfer", json=_move_body(scope_b))
+
+    assert resp.status_code == 500, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "internal"
+    assert "Do NOT retry" in detail["message"]
+    assert source.read_text(encoding="utf-8") == "racer\n"
+    assert len(list(dst_store.glob(".migrate-*"))) == 1

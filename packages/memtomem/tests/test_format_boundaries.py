@@ -6,7 +6,6 @@ import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -305,7 +304,7 @@ async def test_mcp_resource_happy_path(storage, tmp_path, monkeypatch):
     from memtomem.server import resources
 
     c = Chunk("full", ChunkMetadata(source_file=tmp_path / "n.md"))
-    monkeypatch.setattr(resources, "_get_app_initialized", AsyncMock(return_value=object()))
+    monkeypatch.setattr(resources, "_get_active_app_initialized", AsyncMock(return_value=object()))
     monkeypatch.setattr(resources, "resolve_chunk", AsyncMock(return_value=c))
     out = json.loads(await resources.chunk_resource(str(c.id)))
     assert out["content"] == "full" and out["created_at"] == c.created_at.isoformat()
@@ -382,18 +381,15 @@ def test_pinned_description_is_guarded(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_mcp_export_refuses_leaf_symlink(storage, tmp_path, monkeypatch):
-    from memtomem.server.tools import export_import as tools
-
+async def test_export_refuses_leaf_symlink(storage, tmp_path):
+    # The MCP tool's own case (inside ~/.memtomem/exports/) is in
+    # test_mcp_export_confined.py; this pins the library writer it relies on.
     original = tmp_path / "original.json"
     original.write_text("private")
     link = tmp_path / "backup.json"
     link.symlink_to(original)
-    monkeypatch.setattr(
-        tools, "_get_app_initialized", AsyncMock(return_value=SimpleNamespace(storage=storage))
-    )
-    result = await tools.mem_export(output_file=str(link))
-    assert "symlink" in result
+    with pytest.raises(ValueError, match="symlink"):
+        await export_chunks(storage, output_path=link)
     assert original.read_text() == "private" and link.is_symlink()
     alias = tmp_path / "parent-alias"
     alias.symlink_to(tmp_path, target_is_directory=True)

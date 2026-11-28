@@ -194,12 +194,25 @@ async def _cmd_add(comp, args: list[str]) -> None:
     from datetime import datetime, timezone
 
     from memtomem import privacy
-    from memtomem.tools.memory_writer import append_entry
+    from memtomem.tools.memory_writer import (
+        append_entry,
+        entry_guard_text,
+        entry_open_fence,
+        open_fence_refusal,
+    )
+
+    # An entry that leaves a fence open makes every later entry in the day file
+    # code inside it (#3618).
+    fence = entry_open_fence(content)
+    if fence is not None:
+        click.secho(open_fence_refusal(fence), fg="red")
+        return
 
     # Interactive shell has no inline ``--force-unsafe`` syntax; on a
     # hit the user is told to retry via ``mm add --force-unsafe`` so
-    # the bypass remains an explicit, audit-logged action.
-    guard = privacy.enforce_write_guard(content, surface="cli_shell_add")
+    # the bypass remains an explicit, audit-logged action. The guard reads
+    # the entry as written, like every other appender.
+    guard = privacy.enforce_write_guard(entry_guard_text(content), surface="cli_shell_add")
     if guard.decision == "blocked":
         click.secho(
             f"Content matches {len(guard.hits)} privacy pattern(s); write rejected. "

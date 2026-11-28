@@ -7,12 +7,14 @@ import contextlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from contextvars import ContextVar, Token
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import Context
 
-from memtomem.config import Mem2MemConfig
+from memtomem._store_identity import resolve_store_path as resolve_store_path
+from memtomem.config import Mem2MemConfig, RelativeConfigPathError
 from memtomem.config_signature import Signature, build_fresh_config, current_signature
 from memtomem.constants import validate_namespace
 
@@ -31,7 +33,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def _stop_quietly(resource: object | None, stage: str) -> None:
+class DaemonStoreChanged(RuntimeError):
+    """A shared daemon's rebuilt config no longer selects the store it started on."""
+
+
+async def _stop_quietly(resource: object | None, stage: str) -> bool:
     """Stop ``resource`` and log (don't propagate) ordinary failures.
 
     Used by both :meth:`AppContext.ensure_initialized` failure cleanup and
@@ -41,12 +47,16 @@ async def _stop_quietly(resource: object | None, stage: str) -> None:
     propagates and the caller can decide whether to mask the original
     exception that triggered teardown (matches the lifespan helper from
     PR #404 / #406).
+
+    Returns ``False`` when the stop raised. The shared daemon reads it for the
+    owner's own close only: an exception escaping ``AppContext.close`` means its
+    sequence did not finish. Every other caller ignores it.
     """
     if resource is None:
-        return
+        return True
     stop = getattr(resource, "stop", None) or getattr(resource, "close", None)
     if stop is None:
-        return
+        return True
     try:
         await stop()
     except asyncio.CancelledError:
@@ -54,6 +64,8 @@ async def _stop_quietly(resource: object | None, stage: str) -> None:
         raise
     except Exception:
         logger.warning("Shutdown step '%s' failed", stage, exc_info=True)
+        return False
+    return True
 
 
 def _same_tier(left: object, right: object) -> bool:
@@ -161,6 +173,21 @@ class AppContext:
     # used in place of the cwd by ``_resolve_project_context_root`` (#2920).
     # Set at most once and never cleared, so no operation can see two roots.
     bound_project_root: Path | None = field(default=None, init=False)
+    # The working directory of the client on this connection, for a server
+    # whose own working directory is not that client's. An absolute directory
+    # with symlinks already resolved: whoever sets it resolves it, and no
+    # reader resolves it again. ``None`` on every shipped transport, where the
+    # process working directory is the client's. Per connection, so
+    # ``from_runtime_owner`` does not copy it.
+    client_cwd: Path | None = field(default=None, init=False)
+    # Set only on a shared daemon's owner (``memtomem.server.daemon``). The store
+    # the daemon resolved at start, which first initialization must still select
+    # after rebuilding its config; and the daemon's notification for a failure
+    # that ends it. Tool handlers turn exceptions into error strings and warmup
+    # swallows them, so the daemon learns of the failure through the callback,
+    # not the exception.
+    _frozen_store: Path | None = field(default=None, init=False, repr=False)
+    _on_terminal: Callable[[str], None] | None = field(default=None, init=False, repr=False)
     # Internal state — not part of the public ``__init__`` surface; populated
     # by ``ensure_initialized`` / ``from_components``. The watcher /
     # scheduler / policy_scheduler / health_watchdog handles are populated
@@ -169,6 +196,11 @@ class AppContext:
     # the MCP server don't run background loops.
     _components: Components | None = field(default=None, init=False, repr=False)
     _owns_components: bool = field(default=False, init=False, repr=False)
+    # True while ``ensure_initialized`` has published ``_components`` but not
+    # yet committed: the background starts read them through this context, so
+    # they are visible before it is known they will survive. Only
+    # ``ensure_initialized`` reads or writes it.
+    _init_in_flight: bool = field(default=False, init=False, repr=False)
     # SSE enters the SDK lifespan once per connection.  Secondary connection
     # contexts keep their session/namespace state here but delegate the
     # process-wide component graph and background services to the first
@@ -545,6 +577,10 @@ class AppContext:
 
         Concurrent first-callers serialize on ``_init_lock``; the first
         completes the init, later ones return the cached ``Components``.
+        A caller that arrives while the first is still starting background
+        loops waits on the lock too, rather than returning components the
+        first caller's rollback may yet close; if that initialization is
+        rolled back, the waiting caller runs it again itself.
         On failure the lock is released and ``_components`` stays ``None``,
         so a retry can succeed (transient failures like a race on DB file
         creation should not poison the context for the rest of the
@@ -584,7 +620,7 @@ class AppContext:
             self._components = comp
             self._watcher = self._runtime_owner._watcher
             return comp
-        if self._components is not None:
+        if self._components is not None and not self._init_in_flight:
             # Already initialized: this call is a handler entering, which is
             # the moment to notice that another process changed the index roots
             # (#2186). Kept here rather than in ``_get_app_initialized`` so it
@@ -613,9 +649,21 @@ class AppContext:
                 # would bank a changed fragment's signature while retaining
                 # its handshake-era values. Keep startup's tolerant override
                 # behavior so malformed config remains repairable.
-                self.config = build_fresh_config(migrate=True, strict_overrides=False)
+                try:
+                    self.config = build_fresh_config(migrate=True, strict_overrides=False)
+                except RelativeConfigPathError as exc:
+                    # Only a shared daemon refuses relative paths; to it this is
+                    # terminal, like a changed store below.
+                    self._notify_terminal(str(exc))
+                    raise
                 self.ambient_config_loaded = True
                 await self._reconcile_webhook_manager()
+
+            if self._frozen_store is not None:
+                # Before the barrier and before anything that opens storage: a
+                # daemon's store was fixed when it started, and a rebuilt config
+                # that selects another one is refused, not opened.
+                self._check_frozen_store()
 
             # #1936: take the lifecycle barrier BEFORE storage opens, so a
             # concurrent ``mm uninstall`` either has not started staging
@@ -635,124 +683,131 @@ class AppContext:
             # and ``_require_initialized`` would raise without this. The
             # except-block below rolls the flag back on failure so a retry
             # isn't blocked by half-built state.
-            self._components = comp
-            self._owns_components = True
-
-            dedup: DedupScanner | None = None
-            watcher: FileWatcher | None = None
-            watcher_started = False
-            scheduler: object | None = None
-            policy_scheduler: object | None = None
-            watchdog: object | None = None
+            # In flight from here until the ``finally`` below: the fast path
+            # at the top refuses these components while this is set, because
+            # the rollback further down may still close them (#3375).
+            self._init_in_flight = True
             try:
-                # #1935: advertise this server in the instance registry once
-                # storage is provably open (the DB file exists and this is
-                # the finalized config). Registration itself never raises;
-                # settlement re-raises a caught cancellation so the rollback
-                # below runs with the published sentinel recoverable.
-                if self.register_server_instance:
-                    await self._acquire_instance_registration(comp)
+                self._components = comp
+                self._owns_components = True
 
-                dedup = DedupScanner(storage=comp.storage)
+                dedup: DedupScanner | None = None
+                watcher: FileWatcher | None = None
+                watcher_started = False
+                scheduler: object | None = None
+                policy_scheduler: object | None = None
+                watchdog: object | None = None
+                try:
+                    # #1935: advertise this server in the instance registry once
+                    # storage is provably open (the DB file exists and this is
+                    # the finalized config). Registration itself never raises;
+                    # settlement re-raises a caught cancellation so the rollback
+                    # below runs with the published sentinel recoverable.
+                    if self.register_server_instance:
+                        await self._acquire_instance_registration(comp)
 
-                # Skip background loops in degraded mode (issue #349) — the
-                # watcher/schedulers/watchdog walk the index or re-embed
-                # chunks and would crash on the missing ``chunks_vec`` table.
-                # Recovery happens via ``mem_embedding_reset``, which calls
-                # :meth:`recover_from_degraded` to start what was skipped here
-                # without waiting for a restart (#2181).
-                watcher = FileWatcher(
-                    comp.index_engine,
-                    self.config.indexing,
-                    search_pipeline=comp.search_pipeline,
-                )
-                if comp.embedding_broken is None:
-                    await watcher.start()
-                    watcher_started = True
+                    dedup = DedupScanner(storage=comp.storage)
 
-                degraded = comp.embedding_broken is not None
-
-                if self.config.consolidation_schedule.enabled and not degraded:
-                    from memtomem.server.scheduler import ConsolidationScheduler
-
-                    scheduler = ConsolidationScheduler(self, self.config.consolidation_schedule)
-                    await scheduler.start()
-
-                if self.config.policy.enabled and not degraded:
-                    from memtomem.server.scheduler import PolicyScheduler
-
-                    policy_scheduler = PolicyScheduler(self, self.config.policy)
-                    await policy_scheduler.start()
-
-                if self.config.health_watchdog.enabled and not degraded:
-                    from memtomem.server.health_watchdog import HealthWatchdog
-
-                    watchdog = HealthWatchdog(
-                        self,
-                        self.config.health_watchdog,
-                        self.config.scheduler,
+                    # Skip background loops in degraded mode (issue #349) — the
+                    # watcher/schedulers/watchdog walk the index or re-embed
+                    # chunks and would crash on the missing ``chunks_vec`` table.
+                    # Recovery happens via ``mem_embedding_reset``, which calls
+                    # :meth:`recover_from_degraded` to start what was skipped here
+                    # without waiting for a restart (#2181).
+                    watcher = FileWatcher(
+                        comp.index_engine,
+                        self.config.indexing,
+                        search_pipeline=comp.search_pipeline,
                     )
-                    await watchdog.start()
+                    if comp.embedding_broken is None:
+                        await watcher.start()
+                        watcher_started = True
 
-                # P2 cron Phase A footgun: scheduler enabled without watchdog
-                # means schedules will silently never fire. Loud at startup
-                # (warning, not debug) per feedback_silent_except_log_level.
-                if self.config.scheduler.enabled and not self.config.health_watchdog.enabled:
-                    logger.warning(
-                        "scheduler.enabled=True but health_watchdog.enabled=False — "
-                        "schedules will not dispatch (scheduler rides the watchdog tick)"
-                    )
-                if (
-                    self.config.scheduler.enabled
-                    and self.config.scheduler.default_timezone.lower() != "utc"
-                ):
-                    logger.warning(
-                        "scheduler.default_timezone=%r — Phase A only honors 'utc'; "
-                        "falling back to UTC",
-                        self.config.scheduler.default_timezone,
-                    )
-            except BaseException:
-                # Same accumulate-and-defer discipline as ``close()``: a
-                # cancellation arriving during one of these stops must not
-                # skip the component close and sentinel settlement below.
-                # The original exception re-raises regardless (when the
-                # trigger *was* a cancellation, it is that same instance).
-                for resource, stage in (
-                    (watchdog, "health_watchdog"),
-                    (policy_scheduler, "policy_scheduler"),
-                    (scheduler, "scheduler"),
-                    (watcher, "watcher"),
-                ):
-                    try:
-                        await _stop_quietly(resource, stage)
-                    except asyncio.CancelledError:
-                        logger.warning("rollback stop '%s' cancelled — continuing", stage)
-                teardown = await close_components(comp)
-                # Release the sentinel only when storage provably closed —
-                # a failed close leaves a possibly-open store, which must
-                # stay advertised (#1935).
-                await self._release_instance_registration(teardown.storage_closed)
-                self._release_lifecycle_barrier(teardown.storage_closed)
-                self._components = None
-                self._owns_components = False
-                raise
+                    degraded = comp.embedding_broken is not None
 
-            self._dedup_scanner = dedup
-            self._config_signature = signature_at_load
-            # Cleared here, where initialization commits, and not next to the
-            # rebuild above. Everything between the two can raise — the webhook
-            # close is a cancellation point, and so is every component start —
-            # and clearing it eagerly made that abort permanent: the retry
-            # skipped the rebuild, kept the config from the aborted attempt,
-            # and then banked *this* signature over it. A config edit made in
-            # between was recorded as applied while never being read.
-            self.defer_config_migration = False
-            self._watcher = watcher
-            self._watcher_started = watcher_started
-            self._scheduler = scheduler
-            self._policy_scheduler = policy_scheduler
-            self._health_watchdog = watchdog
-            return comp
+                    if self.config.consolidation_schedule.enabled and not degraded:
+                        from memtomem.server.scheduler import ConsolidationScheduler
+
+                        scheduler = ConsolidationScheduler(self, self.config.consolidation_schedule)
+                        await scheduler.start()
+
+                    if self.config.policy.enabled and not degraded:
+                        from memtomem.server.scheduler import PolicyScheduler
+
+                        policy_scheduler = PolicyScheduler(self, self.config.policy)
+                        await policy_scheduler.start()
+
+                    if self.config.health_watchdog.enabled and not degraded:
+                        from memtomem.server.health_watchdog import HealthWatchdog
+
+                        watchdog = HealthWatchdog(
+                            self,
+                            self.config.health_watchdog,
+                            self.config.scheduler,
+                        )
+                        await watchdog.start()
+
+                    # P2 cron Phase A footgun: scheduler enabled without watchdog
+                    # means schedules will silently never fire. Loud at startup
+                    # (warning, not debug) per feedback_silent_except_log_level.
+                    if self.config.scheduler.enabled and not self.config.health_watchdog.enabled:
+                        logger.warning(
+                            "scheduler.enabled=True but health_watchdog.enabled=False — "
+                            "schedules will not dispatch (scheduler rides the watchdog tick)"
+                        )
+                    if (
+                        self.config.scheduler.enabled
+                        and self.config.scheduler.default_timezone.lower() != "utc"
+                    ):
+                        logger.warning(
+                            "scheduler.default_timezone=%r — Phase A only honors 'utc'; "
+                            "falling back to UTC",
+                            self.config.scheduler.default_timezone,
+                        )
+                except BaseException:
+                    # Same accumulate-and-defer discipline as ``close()``: a
+                    # cancellation arriving during one of these stops must not
+                    # skip the component close and sentinel settlement below.
+                    # The original exception re-raises regardless (when the
+                    # trigger *was* a cancellation, it is that same instance).
+                    for resource, stage in (
+                        (watchdog, "health_watchdog"),
+                        (policy_scheduler, "policy_scheduler"),
+                        (scheduler, "scheduler"),
+                        (watcher, "watcher"),
+                    ):
+                        try:
+                            await _stop_quietly(resource, stage)
+                        except asyncio.CancelledError:
+                            logger.warning("rollback stop '%s' cancelled — continuing", stage)
+                    teardown = await close_components(comp)
+                    # Release the sentinel only when storage provably closed —
+                    # a failed close leaves a possibly-open store, which must
+                    # stay advertised (#1935).
+                    await self._release_instance_registration(teardown.storage_closed)
+                    self._release_lifecycle_barrier(teardown.storage_closed)
+                    self._components = None
+                    self._owns_components = False
+                    raise
+
+                self._dedup_scanner = dedup
+                self._config_signature = signature_at_load
+                # Cleared here, where initialization commits, and not next to the
+                # rebuild above. Everything between the two can raise — the webhook
+                # close is a cancellation point, and so is every component start —
+                # and clearing it eagerly made that abort permanent: the retry
+                # skipped the rebuild, kept the config from the aborted attempt,
+                # and then banked *this* signature over it. A config edit made in
+                # between was recorded as applied while never being read.
+                self.defer_config_migration = False
+                self._watcher = watcher
+                self._watcher_started = watcher_started
+                self._scheduler = scheduler
+                self._policy_scheduler = policy_scheduler
+                self._health_watchdog = watchdog
+                return comp
+            finally:
+                self._init_in_flight = False
 
     async def recover_from_degraded(self) -> None:
         """Start the background loops a degraded startup skipped (#2181).
@@ -1093,6 +1148,38 @@ class AppContext:
             )
             self._failed_services.append((service, label))
 
+    def _notify_terminal(self, reason: str) -> None:
+        """Tell a shared daemon that this owner cannot serve; a no-op elsewhere.
+
+        Synchronous on purpose: it runs under ``_init_lock``, so it records and
+        signals only, and the daemon does the teardown in its own task.
+        """
+        if self._on_terminal is not None:
+            self._on_terminal(reason)
+
+    def _check_frozen_store(self) -> None:
+        """Refuse a rebuilt config that no longer selects the daemon's store.
+
+        A normalization that raises is refused too: the identity the daemon
+        holds cannot be shown to be the one the config now names.
+        """
+        frozen = self._frozen_store
+        assert frozen is not None  # the caller checked
+        configured = self.config.storage.sqlite_path
+        try:
+            current = resolve_store_path(configured)
+        except (OSError, RuntimeError, ValueError) as exc:
+            reason = f"the configured store {str(configured)!r} cannot be resolved: {exc}"
+        else:
+            if current == frozen:
+                return
+            reason = (
+                f"the configuration now selects the store {str(current)!r}, "
+                f"but this daemon serves {str(frozen)!r}"
+            )
+        self._notify_terminal(reason)
+        raise DaemonStoreChanged(reason)
+
     async def _acquire_lifecycle_barrier(self) -> None:
         """Take the shared lifecycle barrier before storage opens (#1936).
 
@@ -1386,29 +1473,59 @@ async def _get_app_initialized(ctx: CtxType) -> AppContext:
     return app
 
 
-# ── Lifespan-scoped AppContext, for handlers the SDK cannot inject ─────
-# The 2.0 SDK refuses to inject ``Context`` into a *static* resource handler
-# (only templated ones, which carry a request), and it removed the 1.x
-# ambient ``get_context()``. Static resources therefore reach the AppContext
-# through this handle, which ``app_lifespan`` owns.
+# ── Request-scoped AppContext, for handlers the SDK cannot inject ──────
+# The 2.0 SDK refuses to inject ``Context`` into a *static* resource handler,
+# the ``Context`` it injects into a templated one arrives without its request
+# when the parameter is annotated ``CtxType`` (see ``server/resources.py``),
+# and the 1.x ambient ``get_context()`` is gone. Resource handlers therefore
+# reach the AppContext through this handle.
 #
-# A ContextVar, not a module global: over SSE the SDK runs the whole lowlevel
-# server — lifespan included — once per *connection* (``MCPServer.sse_app``'s
-# ``handle_sse``), so two overlapping clients each enter their own lifespan.
-# A single global slot would let the second connection's context overwrite the
-# first's, and the first disconnect would then blank the handle out from under
-# a live second connection. Each connection runs in its own task, so a
-# ContextVar set inside the lifespan is visible to that connection's request
-# handlers (spawned beneath it) and to no one else's. stdio and
-# streamable-HTTP enter the lifespan once per process and are unaffected
-# either way.
-_ACTIVE_APP: ContextVar[AppContext | None] = ContextVar("memtomem_active_app", default=None)
+# The server's ``read_resource`` binds it for the length of one read, from
+# that request's own lifespan context (``server/__init__.py``). The lifespan
+# cannot publish it: the SDK starts a handler in a copy of the context of the
+# task that delivered the message, and over stdio that task (the stdin
+# reader) starts before the lifespan is entered, so a value set inside the
+# lifespan never reaches a handler (#3374).
+#
+# A ContextVar, not a module global: reads overlap — several on one
+# connection, and over SSE across connections that each have their own
+# AppContext. The SDK starts each request's handler in a task of its own,
+# so a binding made inside one read is not visible to another read.
+#
+# The variable holds a binding, not the AppContext itself, because resetting
+# a ContextVar does not reach copies: a task started during the read (the
+# watcher and schedulers, when the read is what first opens the store) copied
+# the variable and keeps its value for as long as it runs. What such a task
+# keeps is the binding, which the read empties on its way out.
+_ACTIVE_APP: ContextVar[_ActiveAppBinding | None] = ContextVar("memtomem_active_app", default=None)
 
 # The transport ``main()`` started this process with, or ``None`` when the
 # server was not started through ``main()`` (tests, embedders). Process-wide
 # by nature: one process runs one transport. ``mem_project_bind`` refuses
 # anything but ``"stdio"``, where one client owns the process; streamable HTTP
 # shares one ``AppContext`` across its clients, so a binding would cross them.
+# Set by a shared daemon (#3381) to a callable returning its summary. Kept here,
+# not in ``memtomem.server.daemon``: run as ``python -m``, that module is
+# ``__main__`` and an import of it by name would load a second, empty copy.
+_shared_daemon_summary: Callable[[], dict[str, object]] | None = None
+
+
+def shared_daemon_summary() -> dict[str, object] | None:
+    """Name, pid and open connections of the shared daemon this process runs, or ``None``."""
+    provider = _shared_daemon_summary
+    return provider() if provider is not None else None
+
+
+# Set by ``run_standalone`` when a ``--shared NAME`` session could not join its
+# daemon (#3381) and this process serves the client on its own instead.
+_shared_fallback: dict[str, str] | None = None
+
+
+def shared_fallback() -> dict[str, str] | None:
+    """``{"name", "reason"}`` of the shared daemon this process did not join, or ``None``."""
+    return dict(_shared_fallback) if _shared_fallback is not None else None
+
+
 _server_transport: str | None = None
 
 
@@ -1422,29 +1539,39 @@ def _get_server_transport() -> str | None:
     return _server_transport
 
 
-def _set_active_app(app: AppContext) -> Token[AppContext | None]:
-    """Publish the lifespan's ``AppContext``; returns the reset token."""
-    return _ACTIVE_APP.set(app)
+@dataclass
+class _ActiveAppBinding:
+    """What ``_ACTIVE_APP`` holds: the AppContext until the read ends, then ``None``."""
+
+    app: AppContext | None
 
 
-def _reset_active_app(token: Token[AppContext | None]) -> None:
-    """Retract what ``_set_active_app`` published. Lifespan only."""
+@contextlib.contextmanager
+def _bind_active_app(app: AppContext) -> Iterator[None]:
+    """Make ``app`` the active context for the enclosed resource read."""
+    binding = _ActiveAppBinding(app)
+    token = _ACTIVE_APP.set(binding)
     try:
+        yield
+    finally:
+        # Emptied as well as retracted: the reset below only reaches this
+        # task's context, and a task started during the read holds a copy.
+        binding.app = None
         _ACTIVE_APP.reset(token)
-    except ValueError:
-        # The token belongs to another Context — only reachable if a future
-        # refactor moves lifespan exit off the task that entered it. Blanking
-        # the value here is still better than leaving a torn-down context
-        # readable.
-        _ACTIVE_APP.set(None)
+
+
+def _active_app() -> AppContext | None:
+    """The AppContext of the resource read this task is inside, if any."""
+    binding = _ACTIVE_APP.get()
+    return None if binding is None else binding.app
 
 
 async def _get_active_app_initialized() -> AppContext:
-    """``_get_app_initialized`` for handlers that get no ``ctx``."""
-    app = _ACTIVE_APP.get()
+    """``_get_app_initialized`` for resource handlers, which take no ``ctx``."""
+    app = _active_app()
     if app is None:
         raise RuntimeError(
-            "No active AppContext: the MCP server lifespan is not running. "
+            "No active AppContext: a resource handler ran outside a request. "
             "Handlers that receive a ctx must use _get_app_initialized(ctx)."
         )
     await app.ensure_initialized()

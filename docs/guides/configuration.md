@@ -27,6 +27,8 @@ logged once at INFO, so the unprefixed variables above have no effect in
 ([MCP client setup](mcp-clients.md#11-environment-variable-overrides)).
 `PYTHON_DOTENV_DISABLED=1` turns the file off; the Hermes plugin's bundled
 server entry sets it, so under Hermes a `.env` does not configure that server.
+The same entry sets `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` and holds `huggingface-hub` at 1.20 or
+later, so under Hermes model downloads use neither a saved Hugging Face login nor `HF_TOKEN`.
 
 ```bash
 # Example: switch from Ollama to OpenAI
@@ -144,14 +146,26 @@ The Web UI server re-reads `config.json` and `config.d/*.json` on every
   (HTTP 409) until the file is fixed. Run `mm init --fresh` or edit
   the file by hand to recover.
 - A section that parses but fails its cross-field validation, such as a
-  stale `"dimension": 1024` left under an E5 model, is treated the same way
-  by the Web UI: the running config stays, the banner names the section and
-  the reason, and saves are refused until it is fixed. Other loads (MCP
-  startup, `mm status`, `mem_status`, `mm config show` on stderr, and
-  `GET /api/config`) keep running on the values the section would have
-  replaced and report the rejected section and its reason; `mem_status`
-  lists it as a `config_section_rejected` warning. An out-of-range value or
-  an unknown field is still skipped quietly in both cases.
+  stale `"dimension": 1024` left under an E5 model, is handled per layer when
+  the Web UI re-reads:
+  - **`config.json`**: the re-read fails like a truncated file. The running
+    config stays, `GET /api/config` returns the section and the reason as
+    `config_reload_error` (the red banner), and saves are refused (HTTP 409)
+    until it is fixed.
+  - **`config.d` fragment**: the section is skipped. When the re-read
+    otherwise succeeds, the reload goes through on the values the section
+    would have replaced, `GET /api/config` lists the section and the reason
+    in `config_load_warnings`, and the rejection by itself leaves
+    `config_reload_error` empty and saves not refused. A fragment edit also
+    re-reads `config.json`, so one that is still invalid has the outcome of
+    the `config.json` item. So does a rejected section that
+    [`read_only_memory_dirs`](#read_only_memory_dirs--index-it-never-write-it)
+    describes, which is fatal in a fragment too.
+- Other loads (MCP startup, `mm status`, `mem_status` and `mm config show` on
+  stderr) keep running on the values the section would have replaced and
+  report the rejected section and its reason; `mem_status` lists it as a
+  `config_section_rejected` warning. An out-of-range value or an unknown
+  field is still skipped quietly in the Web UI and in those other loads.
 
 Change detection is a cheap `os.stat` on `config.json` plus every
 fragment in `config.d/`, so GET latency is effectively unchanged. No
@@ -562,9 +576,11 @@ Fusion). The variables below tune each retriever and the fusion.
 | `MEMTOMEM_SEARCH__RRF_WEIGHTS` | `[1.0, 1.0]` | RRF weights for `[BM25, Dense]` — adjust to favor one retriever |
 | `MEMTOMEM_SEARCH__TOKENIZER` | `unicode61` | FTS tokenizer (`unicode61` or `kiwipiepy`) |
 | `MEMTOMEM_SEARCH__CACHE_TTL` | `30.0` | Search result cache TTL in seconds |
-| `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` | `["archive:", "agent-runtime:"]` | Namespace prefixes excluded from default search (max 10) |
+| `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` | `["archive:", "agent-runtime:"]` | Namespace prefixes excluded from default search (max 10; no NUL character) |
 
 Chunks in system namespaces (e.g. `archive:*` and the per-agent `agent-runtime:*` buckets) are hidden from `namespace=None` searches but remain retrievable with an explicit namespace argument. `namespace="!system"` applies the same exclusion explicitly, so it also overrides an active session or agent namespace on `mem_search` and `mem_recall`. Set to `[]` to make all namespaces searchable by default.
+
+A prefix containing a NUL character is rejected, because SQLite reads a `LIKE` pattern only up to its first NUL. When `config.json` or a `config.d` fragment supplies such a prefix, a tolerant load ignores that file's whole `[search]` section, so the values from the layers below it apply (a strict load fails, and so does `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` holding one; when that variable is set, the files' prefix lists are skipped instead); see [External edits while the Web UI is running](#external-edits-while-the-web-ui-is-running) for how each surface reports the rejected section.
 
 ## Query Expansion
 
@@ -695,8 +711,8 @@ What refuses, and what does not:
 - **`mm memory doctor --fix`** skips a protected root and exits non-zero,
   since repairing a provider index means rewriting it. The root is still
   *inspected* and reported.
-- **Not covered**, deliberately: anything where you name the destination
-  yourself, such as the path you hand `mem_export`; the canonical artifact
+- **Not covered**, deliberately: memtomem's own export directory
+  (`~/.memtomem/exports/`, where `mem_export` writes); the canonical artifact
   Store that `mm context` manages; and the host-global wiki
   (`~/.memtomem-wiki`). Those are separate stores with their own roots and
   their own commands — read-only governs memtomem's *memory* writes, not
@@ -765,6 +781,7 @@ is no in-place retarget.
 | `MEMTOMEM_INDEXING__RETAIN_MISSING_DIRS` | `[]` | Directories whose files, once missing on disk, stay searchable instead of being held; see below |
 | `MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS` | `[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]` | File types accepted by the indexer and file watcher |
 | `MEMTOMEM_INDEXING__WATCHER_BACKEND` | `auto` | Watch backend: `auto` uses polling on macOS and native events elsewhere; set `native` or `polling` to override. A running MCP server applies a change on its next memory operation |
+| `MEMTOMEM_INDEXING__WATCHER_POLL_INTERVAL_MS` | `10000` | How often the polling backend rescans the watched directories, 100–60000 ms; the native backend ignores it. A shorter interval picks an edit up sooner and costs more CPU while idle, in every server process that watches. A change that is undone again between two scans (a file created and deleted, or edited in place and restored with the same size and modification time) is not seen. Read when the watcher builds its observer: restart the server to apply a change |
 | `MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS` | `512` | Approximate packing preference; use the hard limit for an exact ceiling |
 | `MEMTOMEM_INDEXING__HARD_MAX_CHUNK_TOKENS` | `0` | Exact body ceiling (`0` disables); requires a matching local tokenizer |
 | `MEMTOMEM_INDEXING__CHUNK_TOKENIZER_PATH` | empty | Local embedding-model `tokenizer.json`; no model download |
@@ -833,8 +850,11 @@ means "archived" instead:
   chunks stay as an archive next to the new file's, so search can return
   the text twice.
 - **Archived chunks cannot be edited**, since there is no file to rewrite:
-  `mem_edit`, `mem_delete` and the web editor refuse with `source_missing`.
-  The web UI's chunk delete removes one from the index.
+  `mem_edit` and the web editor refuse with `source_missing` (or, when the
+  whole directory is gone, a "source directory has been removed" error).
+  Deleting one is allowed: `mem_delete(chunk_id=)` and the web UI's chunk
+  delete remove that chunk from the index and leave the source file
+  untouched.
 
 ### Lock sidecars (`.<name>.lock`)
 
@@ -1669,7 +1689,7 @@ The keys may come either from the config surface above or from the Langfuse SDK'
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (39 incl. `mem_do`), `full` (93 tools) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (39 incl. `mem_do`), `full` (95 tools) |
 | `MEMTOMEM_EXTRA_TOOLS` | *(unset)* | Comma-separated registered tool names exposed individually on top of the mode (no effect in `full`). A deployment that launches the server lists the tool its skill needs, so the skill's own allowlist can name it instead of being granted `mem_do`; the plugins' bundled server configurations set `mem_update_coverage`, which their `update` workflow needs outside `topic` mode, and so does every registration `mm init --mcp` writes (the `mm init` of memtomem 0.7.2 and earlier did not); a hand-written entry, or one an older `mm init` wrote, has to add it. If you also set it in the environment your MCP client inherits, use the same combined list (your names plus `mem_update_coverage`) in both places, or unset the inherited one and keep the combined list in the entry. Deployment configuration, not an authorization boundary: an unknown name is logged and ignored, and the surface only ever gains registered names. |
 
 In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action; `mem_do(action="help")` lists them. Fewer tools means less context usage for AI agents.
@@ -1736,6 +1756,12 @@ registry and stores local absolute paths.
 |----------|---------|-------------|
 | `MEMTOMEM_HOOKS__TARGET_SCOPE` | `user` | Tier that `mm context` writes memtomem-managed Claude Code hook rules into: `user` (`~/.claude/settings.json`), `project_shared` (`<project>/.claude/settings.json`), or `project_local` (`<project>/.claude/settings.local.json`). See ADR-0010 §3. |
 
+## Maintenance
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_MAINTENANCE__EXPERIMENTAL_DUPLICATE_BRIEF` | `false` | [Experimental](../../README.md#stability). When `true`, `mem_dedup_scan` prints, under each member of a candidate pair, what the store holds about it: heading, namespace, scope, tags, validity window, the stored read-only flag, where it sits in its source, and its relations and links. One more line names the fields the two members differ on. These are facts for whoever judges the pair, not a recommendation: the scan still selects and orders pairs the same way and still changes nothing. Each member is shown as the store holds it when the brief is written, which is a second read after the scan: a heading or line number that changed in between shows its new value, and a near pair keeps the score the scan computed. A pair is left out, and counted in a closing line, when that second read does not return one of its members (it was deleted, or it sits on a path the scan's listing hides: a held source, a pending source check, or the path of a policy summary whose parent is either) or when the two bodies of an exact pair do not match. Stored values (headings, tags, namespaces, scopes, paths, the preview) are printed in double quotes with quotes, backslashes and non-printable characters escaped; in the preview a line feed is shown as a space, as the plain scan shows it. A validity bound is printed to the second in UTC, or as `unix <seconds>` when it lies outside the years 1 to 9999. Output is about three times as long per pair. Set it in `config.json` (`{"maintenance": {"experimental_duplicate_brief": true}}`) or with this variable; `mm config set` and `mem_config` do not change it |
+
 ## Advanced / operator environment variables
 
 These are read directly from the process environment (not the layered
@@ -1762,6 +1788,10 @@ mem_config(key="search.default_top_k")            # Query a single value
 mem_config(key="search.default_top_k", value="20")  # Change for this server process
 mem_config(key="search.default_top_k", value="20", persist=True)  # Persist to config.json
 ```
+
+`mem_config` reads `session_trace.*` but does not change it, and its `persist=True` saves do not
+change what the `session_trace` section of `config.json` sets: whether session traces are
+recorded, and where they go, is set with `mm config set session_trace.<field> <value>`.
 
 ### CPU ONNX profiles
 

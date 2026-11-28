@@ -191,8 +191,8 @@ configuration creates no directory or database and leaves an existing file intac
 
 Put and import scan the value JSON, every namespace label, the key, and per-item
 `index` selectors before embedding or storage, even with `index=False` or without
-an embedder. Identifiers are also scanned as raw strings so JSON escaping cannot
-hide a quoted credential. Mutable values and selectors are copied before scanning;
+an embedder. Identifiers, and every key and string inside the value, are also
+scanned as raw strings so JSON escaping cannot hide a quoted credential. Mutable values and selectors are copied before scanning;
 embedding callbacks cannot change what was approved for storage.
 
 A privacy refusal raises `ValueError` without echoing the sensitive input. It

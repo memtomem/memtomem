@@ -72,6 +72,9 @@ _BACKFILL_RETRY_BASE_S = 5.0
 _HELD_RECHECK_INTERVAL_S = 300.0
 _HELD_RECHECK_BATCH = 100
 _HELD_PROBE_TIMEOUT_S = 2.0
+# How often a recheck waiting on stalled held probes looks at a probe thread
+# left by an earlier event loop, whose future can no longer settle (#3263).
+_HELD_STALL_POLL_S = 1.0
 # The start-time relink check (#2904): how often a start polls for an earlier
 # check's stalled thread to finish, and the waits before retrying a journal
 # write that met a busy database.
@@ -113,7 +116,9 @@ def _held_probe(path: Path) -> tuple[str, bool]:
     return source_state(path), is_link
 
 
-def _start_held_probe(path: Path) -> asyncio.Future[tuple[str, bool]]:
+def _start_held_probe(
+    path: Path,
+) -> tuple[asyncio.Future[tuple[str, bool]], threading.Thread]:
     """Run :func:`_held_probe` on its own daemon thread; the future gets its outcome.
 
     Not the default executor: a probe stalled on an unresponsive mount would
@@ -121,6 +126,10 @@ def _start_held_probe(path: Path) -> asyncio.Future[tuple[str, bool]]:
     join executor threads, so one held path could keep the process from
     exiting (#2908). A daemon thread is abandoned at exit instead. Raises
     ``RuntimeError`` when the thread cannot start.
+
+    Returns the thread with the future: a probe that finishes after the
+    running loop has closed cannot settle the future, so only the thread tells
+    whether it is still running (#3263).
     """
     loop = asyncio.get_running_loop()
     future: asyncio.Future[tuple[str, bool]] = loop.create_future()
@@ -150,7 +159,7 @@ def _start_held_probe(path: Path) -> asyncio.Future[tuple[str, bool]]:
         daemon=True,
     )
     thread.start()
-    return future
+    return future, thread
 
 
 def effective_watcher_backend(config: IndexingConfig) -> str:
@@ -174,7 +183,7 @@ def _stop_observer(observer: BaseObserver) -> None:
 
 def _create_observer(config: IndexingConfig) -> BaseObserver:
     if effective_watcher_backend(config) == "polling":
-        return PollingObserver()
+        return PollingObserver(timeout=config.watcher_poll_interval_ms / 1000.0)
     return Observer()
 
 
@@ -328,7 +337,13 @@ class FileWatcher:
         # stalled on a mount outlives the task, and even the event loop, that
         # started it, and a new start must not add another behind it.
         self._relink_scan_thread: threading.Thread | None = None
-        self._stalled_probes: set[asyncio.Future[tuple[str, bool]]] = set()
+        # Held-source probes not yet settled, each with its thread (#3263). Kept
+        # across stop/start, like the relink thread: one stalled on a mount
+        # still counts against the next lifecycle's budget. An entry leaves when
+        # its future settles, or at the next ``_prune_stalled_probes`` once its
+        # thread has ended: a probe that finishes after its loop has closed
+        # never settles its future.
+        self._stalled_probes: dict[asyncio.Future[tuple[str, bool]], threading.Thread] = {}
         self._held_cursor = 0
         self._recheck_wakeup = asyncio.Event()
         self._journal_failures = 0
@@ -719,13 +734,52 @@ class FileWatcher:
         self._relink_scan_thread = thread
 
     def _forget_probe(self, probe: asyncio.Future[tuple[str, bool]]) -> None:
-        self._stalled_probes.discard(probe)
+        # A settled probe has delivered, so it is not stalled even if its
+        # thread has yet to return.
+        self._stalled_probes.pop(probe, None)
         # A probe that fails after its wait timed out has no awaiter left:
         # ``shield`` drops its own callback when the outer wait is cancelled
         # while the probe is pending. Retrieve the exception here, or asyncio
         # reports it as never retrieved when the future is collected.
         if not probe.cancelled():
             probe.exception()
+
+    def _prune_stalled_probes(self) -> None:
+        """Drop the stalled probes that settled or whose thread has ended (#3263).
+
+        A settled one may still be here with its ``_forget_probe`` callback
+        queued; that callback still runs and retrieves its exception.
+        """
+        for probe, thread in list(self._stalled_probes.items()):
+            if probe.done() or not thread.is_alive():
+                del self._stalled_probes[probe]
+
+    async def _wait_for_a_stalled_probe(self) -> None:
+        """Wait until fewer than two held probes are stalled, or the recheck interval ends.
+
+        A probe started on this loop is awaited through its future. One left by
+        an earlier loop cannot settle its future here, so while one is counted
+        the wait is cut into ``_HELD_STALL_POLL_S`` slices and its thread is
+        looked at after each (#3263).
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _HELD_RECHECK_INTERVAL_S
+        while True:
+            self._prune_stalled_probes()
+            remaining = deadline - loop.time()
+            if len(self._stalled_probes) < 2 or remaining <= 0:
+                return
+            waitable = {
+                probe
+                for probe in self._stalled_probes
+                if probe.get_loop() is loop and not probe.done()
+            }
+            if len(waitable) < len(self._stalled_probes):
+                remaining = min(remaining, _HELD_STALL_POLL_S)
+            if waitable:
+                await asyncio.wait(waitable, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+            else:
+                await asyncio.sleep(remaining)
 
     async def _recheck_held_loop(self) -> None:
         from memtomem.storage.orphan_detect import RetainRule
@@ -778,6 +832,7 @@ class FileWatcher:
                     processed = 0
                     stalled = False
                     for path in batch:
+                        self._prune_stalled_probes()
                         if len(self._stalled_probes) >= 2:
                             logger.warning(
                                 "Held-source probes stalled; waiting before further checks"
@@ -785,8 +840,8 @@ class FileWatcher:
                             stalled = True
                             break
                         processed += 1
-                        probe = _start_held_probe(path)
-                        self._stalled_probes.add(probe)
+                        probe, thread = _start_held_probe(path)
+                        self._stalled_probes[probe] = thread
                         probe.add_done_callback(self._forget_probe)
                         try:
                             state, is_link = await asyncio.wait_for(
@@ -866,11 +921,7 @@ class FileWatcher:
                     self._held_cursor = (self._held_cursor + processed) % len(held)
                     startup_remaining = max(0, startup_remaining - processed)
                 if held and stalled:
-                    await asyncio.wait(
-                        self._stalled_probes,
-                        timeout=_HELD_RECHECK_INTERVAL_S,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
+                    await self._wait_for_a_stalled_probe()
                 elif startup_remaining:
                     await asyncio.sleep(0)
                 else:

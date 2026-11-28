@@ -119,13 +119,33 @@ async def promote_scratch(
         raise HTTPException(status_code=404, detail=f"Key '{key}' not found")
 
     from memtomem import privacy
-    from memtomem.tools.memory_writer import append_entry
+    from memtomem.tools.memory_writer import (
+        append_entry,
+        entry_guard_text,
+        entry_open_fence,
+        open_fence_refusal,
+    )
+
+    # An entry that leaves a fence open makes every later entry in the file
+    # code inside it (#3618).
+    fence = entry_open_fence(entry["value"], body.title, body.tags)
+    if fence is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "detail": "unclosed_code_fence",
+                "fence": fence,
+                "surface": "web_api_scratch_promote",
+                "message": open_fence_refusal(fence),
+            },
+        )
 
     # Promotion is the trust-boundary crossing — scratch is short-term
     # and stays in SQLite, but LTM markdown lands on disk and feeds
-    # search. Apply the same guard as ``mem_add``.
+    # search. Apply the same guard as ``mem_add``, to the entry as it is
+    # written (title and tags go into the file too).
     guard = privacy.enforce_write_guard(
-        entry["value"],
+        entry_guard_text(entry["value"], body.title, body.tags),
         surface="web_api_scratch_promote",
         force_unsafe=body.force_unsafe,
         audit_context={"key": key},
@@ -159,6 +179,22 @@ async def promote_scratch(
             raise HTTPException(
                 status_code=403, detail="Path is outside configured memory directories"
             )
+        # Promotion writes to the user tier, and the guard above ran for it. A
+        # tier registered inside a memory directory is another tier with its
+        # own gates (a project_shared file is tracked by git and refuses
+        # ``force_unsafe``), so a file there is refused, as on ``/api/add``.
+        from memtomem.memory_scope import explicit_target_tier_refusal
+        from memtomem.web.routes.system_indexing import _web_scope_hint
+
+        tier_err = explicit_target_tier_refusal(
+            target,
+            "user",
+            memory_dirs=config.indexing.memory_dirs,
+            project_memory_dirs=config.indexing.project_memory_dirs,
+            scope_hint=lambda tier: f"POST /api/add and {_web_scope_hint(tier)}",
+        )
+        if tier_err is not None:
+            raise HTTPException(status_code=422, detail=tier_err)
     else:
         from memtomem.memory_scope import MemoryScopeError, require_user_base, resolve_scope_target
 

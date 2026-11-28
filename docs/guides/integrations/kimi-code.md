@@ -9,15 +9,27 @@ bundle is not a Kimi plugin and does not install hooks or slash commands.
 
 Kimi reads `~/.kimi-code/mcp.json`, or `$KIMI_CODE_HOME/mcp.json` when that
 environment variable is set. memtomem `0.4.0` and later write that path, so
-`uvx --from 'memtomem==0.7.8' mm init --mcp kimi` is the shortest route.
+`uvx --from 'memtomem==0.7.14' mm init --mcp kimi` is the shortest route.
 Releases up to and including `0.3.14` wrote the legacy `~/.kimi/mcp.json`
 layout, which current Kimi Code does not read — move the entry if you
 registered with one of those. To write the file by hand instead, it needs
-exactly one `memtomem` entry. Its launch matches what `mm init` writes when
-run through `uvx` — the `[all]` extras let the server open a store
-configured for a local ONNX model. The `env` block exposes
+exactly one `memtomem` entry. Its launch is the no-install one: the `[all]`
+extras let the server open a store configured for a local ONNX model, and
+`--python 3.12` is there because without it the launch can stop before the
+server starts when uv picks a Python older than 3.12. An existing entry whose
+`command` is `uvx`, whose `args` name `memtomem[<extra>]` and ask for no
+Python, hand-written or written by `mm init`, can stop that way: add
+`"--python", "3.12"` at the front of its `args`. The flag in turn needs a
+Python 3.12 that uv can find or download, for this entry and for the one
+`mm init --mcp kimi` writes when run from `uvx`: where uv may not download
+Python on its own (`python-downloads = "never"` or `"manual"` in its
+configuration) and only a newer Python is installed, the server stops with `No interpreter found for
+Python 3.12`. Then install a Python 3.12 first, or install memtomem with the
+Python you have (`uv tool install --python 3.13 'memtomem[all]'`, with your
+version in place of `3.13`) and set
+`"command": "memtomem-server"` with no `args`. The `env` block exposes
 `mem_update_coverage`, which the `memtomem-update` skill needs for its
-default incremental mode and for `full`; without that setting the skill
+default incremental mode and for `full` and `backfill`; without that setting the skill
 stops before writing whenever a coverage call is due, while `topic` still
 works. `mm init` writes the same `MEMTOMEM_EXTRA_TOOLS` line in memtomem
 `0.7.3` and later (the entry below also states the default `core` tool mode, which
@@ -29,7 +41,7 @@ block, so add the `MEMTOMEM_EXTRA_TOOLS` line by hand to an entry it wrote:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--isolated", "--from", "memtomem[all]==0.7.8", "memtomem-server"],
+      "args": ["--python", "3.12", "--isolated", "--from", "memtomem[all]==0.7.14", "memtomem-server"],
       "env": {"MEMTOMEM_TOOL_MODE": "core", "MEMTOMEM_EXTRA_TOOLS": "mem_update_coverage"}
     }
   }
@@ -70,7 +82,7 @@ From a Git worktree, initialize the private project tier once:
 
 ```bash
 cd /path/to/project
-uvx --from 'memtomem==0.7.8' mm mem init --scope project_local
+uvx --from 'memtomem==0.7.14' mm mem init --scope project_local
 ```
 
 Then use the handoff skill explicitly:

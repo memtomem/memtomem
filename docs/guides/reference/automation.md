@@ -302,13 +302,17 @@ mem_do(action="schedule_delete", params={"id": "<id>"})
 
 ### Reading a run record
 
-Each schedule keeps the outcome of its latest run:
+Each schedule keeps the outcome of its latest run, and the position of a job
+that continues between runs:
 
 | Field             | Meaning                                                                 |
 |-------------------|-------------------------------------------------------------------------|
 | `last_run_status` | `ok`, `skipped`, `error`, `timeout`, or `running` while a run is in flight |
 | `last_run_error`  | Error text for `error` / `timeout`                                      |
 | `last_run_result` | The summary the job returned (`null` for `error` / `timeout`)           |
+| `state`           | Where the next run starts, for a job that continues (`dedup_scan`); `null` for the other jobs |
+| `params_error`    | Why the stored `params` cannot be read, or `null` when they can (see below) |
+| `cron_error`      | Why the dispatcher cannot schedule the row, or `null` when it can (see below) |
 
 `skipped` means the job returned normally but did no work, and its
 `skipped_reason` says why. For example, `dedup_scan` has no scanner
@@ -316,16 +320,123 @@ Each schedule keeps the outcome of its latest run:
 to the status. `mm schedule list --json` and `schedule_list` return the whole
 record.
 
+`cron_error` is checked each time the schedule is read, the same way the
+dispatcher finds the next slot: from `last_run_at`, or `created_at` before the
+first run. It does not depend on how the last run ended. It has four kinds of
+value:
+- `null`: the expression can be scheduled.
+- A croniter parse error, such as `CroniterBadCronError: …` or its subclass
+  `CroniterNotAlphaError: …`: croniter cannot read the expression, so the
+  dispatcher skips the schedule on every tick and it never runs on its own.
+  An expression stored with non-ASCII digits or spaces that croniter 6
+  accepted is refused by croniter 7 this way. `mm schedule list` marks such a
+  row `automatic runs blocked`; `mm schedule run-now <id>` still runs it.
+  Under croniter 6 only, a random `R` field whose range leaves the field's
+  bounds (`R(0-60)` for minutes) fails this way only on its out-of-range
+  draws, so such a row can be reported blocked and still run; croniter 7
+  refuses that expression every time.
+- `unparsable last_run_at: …` or `unparsable created_at: …`: the stored
+  timestamp the next slot is counted from is not an ISO date (an empty
+  `last_run_at` included), so the dispatcher skips the schedule on every tick.
+  `mm schedule list` marks such a row
+  `automatic runs blocked: stored timestamp unreadable`.
+- `unchecked: …`: the check did not reach a verdict. That covers
+  `CroniterBadDateError` ("failed to find
+  next date"), which croniter raises both for a date that never occurs
+  (`0 0 30 2 *`) and for one draw of its random `R` field that the next draw
+  may not repeat (`0 0 R(28-30) 2 *` fails only on the draw that lands on the
+  30th). `mm schedule list` marks such a row `cron check failed`. The message
+  is the same for both causes, so look at the row's `cron_expr`: one with no
+  random field and a date that never occurs is skipped on every tick like a
+  blocked row; replace it the same way.
+
+  `mm schedule add` and `schedule_register` look for a date only when the
+  expression has five fields separated by ASCII whitespace and is written
+  with nothing but digits, `* , - / ? # L W` and three-letter month and day
+  names, and they refuse it when croniter finds none, such as `0 0 30 2 *`.
+  Any other expression the installed croniter parses is stored without that
+  lookup: one with a random `R` field, six or seven fields, or other
+  characters. (A hashed `H` field does not parse here: neither command
+  passes the hash id croniter requires for it.) A row added that way, or
+  added before the check, can still show `cron check failed` in the listing.
+
+To replace a blocked schedule, add the corrected one first, written with ASCII
+digits and spaces and for a date that exists, with the same `--job` and the
+`params` that `mm schedule list --json` shows for the old row, passed as JSON
+to `--params`. If `mm schedule add` refuses a key as unsupported, leave it out:
+the job ignores keys it does not define. Then remove the old schedule with
+`mm schedule delete <id>`. The new schedule starts with no run history, and a
+`dedup_scan` walk starts again from the first pool.
+
+A stored value that cannot be read affects its own schedule only; the others
+keep running and listing. That holds for text that is valid UTF-8, which is
+what every memtomem writer stores; bytes that are not, written to the database
+by other means, still fail the whole listing. `state` and `last_run_result`
+that are not a JSON object, or that nest deeper than 100 levels, read as
+`null` with a warning in the server log. `params` read that way become `null` and
+`params_error` gives the reason. They are never replaced by the job's
+defaults: every run of that schedule, automatic or `run-now`, is recorded as
+`error` with `invalid params: <reason>` before the job starts. The plain
+`mm schedule list` shows only `(error)`; the reason is in
+`mm schedule list --json`. Such a row has no params to copy, so replace it
+with the params it was meant to have. Releases before `mm schedule add`
+refused unknown params keys stored them as given; one nested deeper than 100
+levels makes its row's params unreadable now, though the job ignored it.
+
 A `dedup_scan` result also reports what the scan covered: `pool` (chunks
-selected, at most `max_scan`), `probed` (pool chunks searched with their
-stored vector) and `without_vector` (pool chunks with no usable stored
-vector, not probed).
+selected, at most `max_scan`), `remaining` (scannable chunks after the pool),
+`probed` (pool chunks searched with their stored vector), `without_vector`
+(pool chunks with no usable stored vector, not probed),
+`same_source_read_only_pairs` (pairs left out because both members are
+read-only chunks of the same file; neither can be removed) and `pairs_found`
+(pairs before `limit`; when it is above `candidates`, the list was cut). The
+result holds these counts, not the pairs themselves. To see pairs for a run's
+pool, scan it again: run `mem_dedup_scan` with the run's `after` and
+`threshold` and the schedule's `max_scan` (another `max_scan` or `threshold` is
+another scan, which can report other pairs), and with `offset` when the pool holds more
+pairs than one call lists. That scans the store as it is now, so the pairs can
+differ from the ones the run counted.
 - **Zero candidates with a large `without_vector` count** means part of the
   pool was never checked, not that it is duplicate-free.
 - **`near_search_enabled: false`** (a BM25-only store) means only exact
   duplicates were looked for. `without_vector` is then `0` and says nothing
   about vector coverage.
 - **The counts describe the selected pool**, not the whole store.
+
+A `dedup_scan` schedule walks the store, one pool per run:
+
+- **Each run scans the pool after the one the last finished run scanned.**
+  The first run scans the first pool (the first `max_scan` scannable chunks
+  in chunk-id order). A run that reaches the end of the store (`remaining`
+  is `0`) makes the next run start from the first pool again, which is also
+  how a chunk added before the position during a walk gets scanned. In a
+  result, `after` is the chunk id the run started after and `next_after` the
+  one the next run starts after; each is `null` for the first pool.
+- **`state` holds the same position** as `{"after": "<chunk id>"}`, or
+  `null` when the next run starts from the first pool. It is the stored
+  position, not a description of a run in flight, and it is where to read
+  the position after a run that ended in `error` or `timeout`, which has no
+  result.
+- **Only a scan that finished moves the position.** A run that ends in
+  `error` or `timeout`, or is `skipped`, leaves it, so the next run scans
+  the same pool. A pool that times out on every run keeps the schedule
+  there; delete the schedule and register one with a smaller `max_scan`.
+- **Each schedule has its own position.** `mm schedule run-now` and
+  `schedule_run_now` move it as a dispatched run does. Deleting a schedule
+  deletes its position, and a new schedule starts from the first pool.
+- **The counts of a walk's runs do not add up to a count for the store.** A
+  walk in steps is not one scan of the whole store: a near pair whose members
+  are in two pools can be counted in both runs, and copies with one content
+  hash in different pools are left to the near search (see
+  [Deduplication](organization-maintenance.md#deduplication)).
+- **Runs of one schedule that overlap** (a `run-now` while a dispatched run
+  is in flight, or a run still going at its next slot) start from the same
+  position and scan the same pool, and the position is the one the last of
+  them to finish writes. A run that finishes after others have moved on
+  puts the position back at the end of its own pool: the pools after it are
+  scanned again, and a chunk added in the meantime before that position
+  waits for the next walk from the start. If that happens on every walk,
+  such a chunk can stay unscanned.
 
 > Phase A is direct-cron only. Natural-language schedules
 > (`spec="every Sunday 3am"`) and `disable`/`enable` commands arrive in

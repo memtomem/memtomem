@@ -9,12 +9,7 @@ from mcp.server.mcpserver import ResourceSecurity
 from mcp.shared.uri_template import UriTemplate
 
 from memtomem.server import mcp
-from memtomem.server.context import (
-    AppContext,
-    CtxType,
-    _get_active_app_initialized,
-    _get_app_initialized,
-)
+from memtomem.server.context import AppContext, _get_active_app_initialized
 from memtomem.server.tools._id_access import caller_boundary, resolve_chunk
 
 _SOURCES_URI = "memtomem://sources"
@@ -24,11 +19,14 @@ _SOURCES_PAGE_TEMPLATE = "memtomem://sources{?cursor,limit,namespace}"
 _SOURCES_PAGE_LIMIT = 50
 _SOURCES_PAGE_MAX = 500
 
-# The 2.0 SDK injects ``Context`` into templated resource handlers only —
-# a static URI carries no request, and declaring the parameter there is a
-# registration-time error. The four static resources below therefore read
-# the lifespan's AppContext through ``_get_active_app_initialized``;
-# ``chunk_resource`` is templated and keeps the injected ctx.
+# No handler here takes a ``ctx``. A static URI cannot: declaring the
+# parameter is a registration-time error in the 2.0 SDK. A templated one can,
+# but the SDK calls a template function through pydantic's ``validate_call``,
+# and an annotation of ``Context[AppContext, Any]`` (``CtxType``, the tools'
+# annotation) makes pydantic rebuild the ``Context`` it was handed, without
+# the request it carried. Every resource therefore reads the AppContext
+# through ``_get_active_app_initialized``, which the server's
+# ``read_resource`` binds from the request for the length of the read.
 
 
 async def _sources_page(
@@ -102,7 +100,6 @@ async def sources_page_resource(
     cursor: str | None = None,
     limit: int = _SOURCES_PAGE_LIMIT,
     namespace: str | None = None,
-    ctx: CtxType = None,
 ) -> str:
     """A page of visible source files starting after ``cursor``.
 
@@ -110,7 +107,7 @@ async def sources_page_resource(
     files with chunks in that namespace and is the only way to list files
     that live solely in a system namespace, as with ``mem_list``.
     """
-    app = await _get_app_initialized(ctx)
+    app = await _get_active_app_initialized()
     return await _sources_page(app, cursor=cursor, limit=limit, namespace=namespace)
 
 
@@ -141,14 +138,14 @@ async def stats_resource() -> str:
 
 
 @mcp.resource("memtomem://chunks/{chunk_id}")
-async def chunk_resource(chunk_id: str, ctx: CtxType = None) -> str:
+async def chunk_resource(chunk_id: str) -> str:
     """Read a specific chunk by UUID, inside the caller's project boundary.
 
     Same rule as ``mem_read`` — an id from another project reads as not-found
     (ADR-0036). The resource is a second door onto the same read; leaving it
     open would make the tool's screen decorative.
     """
-    app = await _get_app_initialized(ctx)
+    app = await _get_active_app_initialized()
     chunk = await resolve_chunk(app, UUID(chunk_id))
     if chunk is None:
         return json.dumps({"error": f"Chunk {chunk_id} not found"})

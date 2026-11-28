@@ -440,7 +440,20 @@ async def rebuild_fts(storage=Depends(get_storage)):
     # The writer wait comes before the rebuild starts (#3182).
     with writer_busy_as_503(WRITER_BUSY_NOTHING_CHANGED_DETAIL):
         count = await storage.rebuild_fts()
-    return {"ok": True, "rebuilt_rows": count, "message": f"FTS index rebuilt for {count} chunks."}
+    # Name the tokenizer the rows were built with, and warn when it is not the
+    # one configured: a kiwipiepy rebuild without the extra falls back to
+    # unicode61 and otherwise reports success in the same words.
+    built = storage.fts_tokenizer_effective
+    warning = _hot_reload.fts_rebuild_fallback_warning(storage)
+    message = f"FTS index rebuilt with {built} ({count} chunks)."
+    return {
+        "ok": True,
+        "rebuilt_rows": count,
+        "tokenizer": built,
+        # The UI shows ``message`` as is; ``warning`` only picks the toast kind.
+        "message": message if warning is None else f"{message} {warning}",
+        "warning": warning,
+    }
 
 
 @router.get("/stats", response_model=StatsResponse)

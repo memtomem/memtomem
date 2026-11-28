@@ -10,10 +10,11 @@ import contextlib
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
+from memtomem._admission import tool_surface_request as _tool_surface_request
 from memtomem.server.component_factory import (
     Components as Components,
     close_components as close_components,
@@ -22,6 +23,7 @@ from memtomem.server.component_factory import (
 from memtomem.server.context import (
     AppContext as AppContext,
     CtxType as CtxType,
+    _bind_active_app,
     _get_app as _get_app,
     _get_app_initialized as _get_app_initialized,
 )
@@ -40,10 +42,20 @@ from memtomem.server.helpers import (
 from memtomem.server.instructions import build_instructions
 from memtomem.server.lifespan import app_lifespan
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from mcp.server.lowlevel.helper_types import ReadResourceContents
+    from mcp_types import InputRequiredResult
+    from pydantic.networks import AnyUrl
+
 # Tool mode must be resolved BEFORE the MCPServer instance exists: the
 # instructions text has to describe the tool surface this mode actually
 # exposes (#1608), and ``instructions=`` is only accepted at construction.
 _TOOL_MODE = os.environ.get("MEMTOMEM_TOOL_MODE", "core").lower()
+# What a shared daemon compares a joining bridge's request against (#3381):
+# read from the same environment, at the same moment, as the surface itself.
+_TOOL_SURFACE_REQUEST = _tool_surface_request(os.environ)
 
 # ── Tool mode: core | standard | full ─────────────────────────────────
 # Set MEMTOMEM_TOOL_MODE env var to control which tools are exposed.
@@ -81,7 +93,34 @@ _CORE_TOOLS = {
 # on") get something other than ``mm --version``.
 from memtomem import __version__ as _memtomem_version
 
-mcp = MCPServer(
+
+class _MemtomemServer(MCPServer[AppContext]):
+    """``MCPServer`` whose resource reads carry the request's ``AppContext``."""
+
+    async def read_resource(
+        self, uri: AnyUrl | str, context: Context[AppContext, Any] | None = None
+    ) -> Iterable[ReadResourceContents] | InputRequiredResult:
+        """Bind the request's ``AppContext`` for the resource handlers.
+
+        They take no ``ctx`` (``server/resources.py`` says why), so this is
+        the last point on the read path that still holds the request. A read
+        that carries none (a direct call with no ``context``) passes through
+        with nothing bound.
+        """
+        app: AppContext | None = None
+        if context is not None:
+            try:
+                app = context.request_context.lifespan_context
+            except ValueError:
+                # ``Context.request_context`` refuses outside a request.
+                app = None
+        if app is None:
+            return await super().read_resource(uri, context)
+        with _bind_active_app(app):
+            return await super().read_resource(uri, context)
+
+
+mcp = _MemtomemServer(
     "memtomem",
     instructions=build_instructions(_TOOL_MODE, core_count=len(_CORE_TOOLS)),
     version=_memtomem_version,
@@ -121,6 +160,7 @@ from memtomem.server.tools.dedup_decay import (
     mem_cleanup_orphans,
     mem_dedup_scan,
     mem_dedup_merge,
+    mem_dedup_remove,
     mem_decay_scan,
     mem_decay_expire,
 )
@@ -140,6 +180,7 @@ from memtomem.server.tools.project_bind import mem_project_bind
 from memtomem.server.tools.update_coverage import mem_update_coverage
 from memtomem.server.tools.scratch import mem_scratch_set, mem_scratch_get, mem_scratch_promote
 from memtomem.server.tools.procedure import mem_procedure_save, mem_procedure_list
+from memtomem.server.tools.decision_record import mem_decision_record
 from memtomem.server.tools.pinned import (
     mem_context_compose,
     mem_pinned_delete,
@@ -342,7 +383,7 @@ def _sigterm_targets(pid_file: Path | None, presence: object) -> tuple[Path, ...
     return tuple(targets)
 
 
-def _install_sigterm_handler(*paths: Path | list[Path]) -> None:
+def _install_sigterm_handler(*paths: Path | list[Any]) -> None:
     """Install a SIGTERM handler that unlinks ``paths`` and hard-exits.
 
     ``mcp.run()`` runs an asyncio event loop, and asyncio swallows
@@ -412,6 +453,15 @@ def _install_sigterm_handler(*paths: Path | list[Path]) -> None:
         # window without ever risking deletion of another process's pid file.
         targets = (path for item in paths for path in (item if isinstance(item, list) else [item]))
         for path in targets:
+            if callable(path):
+                # A conditional cleanup the shared daemon puts first in the list:
+                # its socket is removed only while it is still the daemon's own.
+                # Whatever it raises, the remaining files and the exit still run.
+                try:
+                    path()
+                except Exception:  # nosec B110 - the hard exit below must run
+                    pass
+                continue
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -448,12 +498,16 @@ def _print_direct_stdio_help() -> None:
                 "",
                 "Configure your MCP client with:",
                 "  command: uvx",
-                f'  args: ["--isolated", "--from", "memtomem[all]=={_memtomem_version}", "memtomem-server"]',
+                # --python 3.12: without it the launch can stop before the server starts
+                # when uv picks a Python older than 3.12.
+                '  args: ["--python", "3.12", "--isolated", "--from", '
+                f'"memtomem[all]=={_memtomem_version}", "memtomem-server"]',
                 f'  env: {{"MEMTOMEM_EXTRA_TOOLS": "{extra_tools}"}}',
                 "",
                 "Example:",
                 f"  claude mcp add memtomem -s user -e MEMTOMEM_EXTRA_TOOLS={extra_tools} "
-                f"-- uvx --isolated --from 'memtomem[all]=={_memtomem_version}' memtomem-server",
+                "-- uvx --python 3.12 --isolated "
+                f"--from 'memtomem[all]=={_memtomem_version}' memtomem-server",
                 "",
                 "For a manually started network server, use:",
                 "  memtomem-server --transport sse --host 127.0.0.1 --port 8000 --url http://127.0.0.1:8000/sse",
@@ -466,68 +520,10 @@ def _print_direct_stdio_help() -> None:
 
 
 def _parse_server_args(argv: list[str] | None = None):
-    """Parse ``memtomem-server`` transport options."""
-    import argparse
+    """Parse ``memtomem-server`` transport options (:mod:`memtomem._server_entry`)."""
+    from memtomem._server_entry import parse_server_args
 
-    parser = argparse.ArgumentParser(
-        prog="memtomem-server",
-        description="Run the memtomem MCP server.",
-        epilog=(
-            "Security: sse/http transports have no first-party authentication; "
-            "treat them as trusted-network only and place an authenticated reverse "
-            "proxy in front before exposing publicly."
-        ),
-    )
-    parser.add_argument(
-        "--transport",
-        choices=("stdio", "sse", "streamable-http", "http"),
-        default="stdio",
-        help="MCP transport to use. 'http' is an alias for 'streamable-http'.",
-    )
-    parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help=(
-            "Local host/interface to listen on for sse/http transports, usually "
-            "127.0.0.1 behind nginx or 0.0.0.0 for trusted direct network access."
-        ),
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="Port for sse/http transports.",
-    )
-    parser.add_argument(
-        "--url",
-        default=None,
-        help=(
-            "Full MCP endpoint URL clients connect to, e.g. https://example.com/mcp. "
-            "The URL path is also used as this server's endpoint path; reverse "
-            "proxies should forward that path unchanged."
-        ),
-    )
-    parser.add_argument(
-        "--allowed-host",
-        action="append",
-        default=[],
-        help="Advanced: extra allowed Host header for sse/http transports. Repeatable.",
-    )
-    parser.add_argument(
-        "--allowed-origin",
-        action="append",
-        default=[],
-        help="Advanced: extra allowed Origin header for sse/http transports. Repeatable.",
-    )
-    parser.add_argument(
-        "--disable-dns-rebinding-protection",
-        action="store_true",
-        help=(
-            "Advanced/dangerous: disables DNS rebinding protection; only safe "
-            "behind an authenticated reverse proxy."
-        ),
-    )
-    return parser.parse_args(argv)
+    return parse_server_args(argv)
 
 
 def _normalize_transport(transport: str) -> str:
@@ -711,36 +707,157 @@ def _print_network_server_info(
 def _resolve_store_db_path() -> Path | None:
     """Best-effort store resolution for pid-file naming (#1990).
 
-    Mirrors the effective config the lazy context will later open: dotenv
-    first (the lifespan loads it before building ``Mem2MemConfig``, so the
-    pid digest must see the same ``MEMTOMEM_STORAGE__SQLITE_PATH``), then
-    the same env → config.d → overrides layering as the component factory —
-    but with ``migrate=False``: pid naming is a read-only concern and must
-    not rewrite ``config.json``. If a pending migration would change
-    ``storage.sqlite_path``, the digest is stale for exactly one server run
-    (equivalent to today's store-blind name), after which the persisted
-    config converges. The same bound applies when ``config.json`` /
-    ``config.d`` are edited after startup: the lazy context re-reads them
-    at first tool call, so the pid name can lag the opened store for this
-    run only — destructive CLI paths stay protected by the DB-lock probe
-    and the instance registry regardless. Any failure returns ``None``
-    and the caller falls back to the transitional bare ``server.pid``.
+    Dotenv first, through the lifespan's seam: the lifespan loads it before
+    building ``Mem2MemConfig``, so the pid digest must see the same
+    ``MEMTOMEM_STORAGE__SQLITE_PATH``. The layering itself is
+    :func:`memtomem._store_identity.configured_store_path`, which a process
+    that cannot import this package shares. Any failure returns ``None`` and
+    the caller falls back to the transitional bare ``server.pid``.
     """
     try:
-        from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
         from memtomem.server.lifespan import _load_dotenv
 
         _load_dotenv()
-        cfg = Mem2MemConfig()
-        load_config_d(cfg, quiet=True)
-        load_config_overrides(cfg, migrate=False)
-        return Path(cfg.storage.sqlite_path)
     except Exception:
         return None
+    from memtomem._store_identity import configured_store_path
+
+    return configured_store_path()
+
+
+def _claim_store_pid_file(
+    db_path: Path | None,
+    pid_file: Path,
+    process_started: str,
+    _sigterm_cleanup_targets: list[Any],
+) -> tuple[Any, Any]:
+    """Register presence, then take and stamp the store's pid lock.
+
+    The body of ``main()``'s startup span, shared with the shared daemon
+    (``memtomem.server.daemon``), which takes its store's ordinary pid lock the
+    same way. The caller holds :func:`_sigterm_deferred` and has installed
+    :func:`_install_sigterm_handler` on ``_sigterm_cleanup_targets``; this
+    function only appends to that list.
+
+    Returns ``(lock_handle, presence)``: the open pid file, or ``None`` when
+    another server holds the lock, and the presence registration, or ``None``.
+    """
+    import atexit
+
+    # Record this process in the instance registry's startup population
+    # (#2230), before the pid-lock decision because it is independent of it:
+    # the ``server[-<digest>].pid`` file is exclusive per store, so the
+    # contended arm below keeps no pid record at all — yet a second server on
+    # one store is exactly the accumulation this marker exists to make
+    # visible. It is also the only registration a handshake-only session ever
+    # performs, since the store-scoped sentinel's digest is the DB file's
+    # inode identity and no store is open yet.
+    #
+    # Best-effort by contract, and reported: the registry returns ``None``
+    # rather than raising for every ordinary failure (an untrusted directory,
+    # a lock timeout, a contended sentinel), so the warning keys off the
+    # return value, not off an exception. A server that cannot be counted
+    # must still start.
+    import logging
+
+    _presence = None
+    try:
+        from memtomem._instance_registry import register_server_presence
+
+        _presence = register_server_presence(
+            db_path,
+            on_path_reserved=_sigterm_cleanup_targets.append,
+        )
+    except Exception:  # pragma: no cover - defensive; the registry swallows its own
+        # Only an import-time failure reaches here; the traceback is the
+        # single piece of information the warning below cannot carry, so
+        # it is logged rather than dropped.
+        logging.getLogger(__name__).debug(
+            "presence registration could not be attempted", exc_info=True
+        )
+    if _presence is None:
+        logging.getLogger(__name__).warning(
+            "Could not record this server in the instance registry "
+            "(runtime dir: %s); `mm doctor` may under-report running servers.",
+            pid_file.parent,
+        )
+
+    from memtomem._pid_lock import lock_pid_file
+
+    try:
+        _lock_fp = lock_pid_file(pid_file, label="server pid")
+    except OSError:
+        if _presence is not None:
+            _presence.cleanup()
+        raise
+    if _lock_fp is None:
+        # Another server still holds the lock after the retry budget —
+        # proceed anyway (the editor expects the process to stay alive), but
+        # log a warning. Don't register atexit unlink or the SIGTERM handler:
+        # either would yank the primary server's pid file out from under it.
+        logging.getLogger(__name__).warning(
+            "Another memtomem-server is already writing to this store (pid file: %s). "
+            "Concurrent writes may be slow.",
+            pid_file,
+        )
+    else:
+        _sigterm_cleanup_targets.append(pid_file)
+        _lock_fp.seek(0)
+        _lock_fp.truncate()
+        # Keep the pid on the first line for old readers. The blank second
+        # line is the optional Web-UI port slot understood by
+        # ``cli._liveness._parse_pid_payload``; the third line records this
+        # process generation's UTC start time.
+        _lock_fp.write(f"{os.getpid()}\n\n{process_started}\n")
+        _lock_fp.flush()
+
+        # Composite cleanup — single atexit registration, platform-aware order
+        # (#818 review). Splitting close+unlink across two ``atexit.register``
+        # calls relies on LIFO so unlink runs before close, which works on
+        # POSIX (you can unlink an open file and the inode persists until
+        # close) but breaks on Windows: NTFS refuses to delete an open or
+        # locked handle, so a clean shutdown via ``atexit`` would raise
+        # ``PermissionError`` (WinError 32) and leave a stale ``server.pid``
+        # behind — the next start then misreads it as a live holder.
+        def _cleanup() -> None:
+            if os.name == "nt":
+                # Close → unlock → unlink. The close releases both the
+                # file handle and the portalocker lock; the unlink only
+                # then succeeds because no handle is open against the path.
+                try:
+                    _lock_fp.close()
+                finally:
+                    try:
+                        pid_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            else:
+                # POSIX: unlink while still holding the flock so we delete
+                # exactly the inode we own; without that, a window opens
+                # where another process could ``open`` the same path and
+                # we'd close-then-unlink the wrong inode. Closing the fd
+                # afterwards releases the flock.
+                pid_file.unlink(missing_ok=True)
+                _lock_fp.close()
+
+        atexit.register(_cleanup)
+
+    return _lock_fp, _presence
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Run the MCP server."""
+    """Run the MCP server: the entry dispatcher, then :func:`run_standalone`."""
+    from memtomem._server_entry import main as entry_main
+
+    entry_main(argv)
+
+
+def run_standalone(args, fallback: dict[str, str] | None = None) -> None:
+    """Run one standalone MCP server with already-parsed ``args``.
+
+    ``fallback`` is ``{"name", "reason"}`` when a ``--shared NAME`` session
+    could not join its daemon (#3381); ``mem_status`` then says so.
+    """
     import atexit
 
     from memtomem._runtime_paths import ensure_runtime_dir, server_pid_path
@@ -750,7 +867,6 @@ def main(argv: list[str] | None = None) -> None:
     # began before the package swap from one launched after it completed.
     process_started = datetime.now(UTC).isoformat()
 
-    args = _parse_server_args(argv)
     transport = _normalize_transport(args.transport)
     # These informational banners are safe on stdout: the stdio TTY guard exits
     # before mcp.run(), and network transports do not use stdout as the MCP stream.
@@ -832,103 +948,7 @@ def main(argv: list[str] | None = None) -> None:
         # added only after the exclusive lock proves ownership.
         _sigterm_cleanup_targets: list[Path] = []
         _install_sigterm_handler(_sigterm_cleanup_targets)
-        # Record this process in the instance registry's startup population
-        # (#2230), before the pid-lock decision because it is independent of it:
-        # the ``server[-<digest>].pid`` file is exclusive per store, so the
-        # contended arm below keeps no pid record at all — yet a second server on
-        # one store is exactly the accumulation this marker exists to make
-        # visible. It is also the only registration a handshake-only session ever
-        # performs, since the store-scoped sentinel's digest is the DB file's
-        # inode identity and no store is open yet.
-        #
-        # Best-effort by contract, and reported: the registry returns ``None``
-        # rather than raising for every ordinary failure (an untrusted directory,
-        # a lock timeout, a contended sentinel), so the warning keys off the
-        # return value, not off an exception. A server that cannot be counted
-        # must still start.
-        import logging
-
-        _presence = None
-        try:
-            from memtomem._instance_registry import register_server_presence
-
-            _presence = register_server_presence(
-                db_path,
-                on_path_reserved=_sigterm_cleanup_targets.append,
-            )
-        except Exception:  # pragma: no cover - defensive; the registry swallows its own
-            # Only an import-time failure reaches here; the traceback is the
-            # single piece of information the warning below cannot carry, so
-            # it is logged rather than dropped.
-            logging.getLogger(__name__).debug(
-                "presence registration could not be attempted", exc_info=True
-            )
-        if _presence is None:
-            logging.getLogger(__name__).warning(
-                "Could not record this server in the instance registry "
-                "(runtime dir: %s); `mm doctor` may under-report running servers.",
-                pid_file.parent,
-            )
-
-        from memtomem._pid_lock import lock_pid_file
-
-        try:
-            _lock_fp = lock_pid_file(pid_file, label="server pid")
-        except OSError:
-            if _presence is not None:
-                _presence.cleanup()
-            raise
-        if _lock_fp is None:
-            # Another server still holds the lock after the retry budget —
-            # proceed anyway (the editor expects the process to stay alive), but
-            # log a warning. Don't register atexit unlink or the SIGTERM handler:
-            # either would yank the primary server's pid file out from under it.
-            logging.getLogger(__name__).warning(
-                "Another memtomem-server is already writing to this store (pid file: %s). "
-                "Concurrent writes may be slow.",
-                pid_file,
-            )
-        else:
-            _sigterm_cleanup_targets.append(pid_file)
-            _lock_fp.seek(0)
-            _lock_fp.truncate()
-            # Keep the pid on the first line for old readers. The blank second
-            # line is the optional Web-UI port slot understood by
-            # ``cli._liveness._parse_pid_payload``; the third line records this
-            # process generation's UTC start time.
-            _lock_fp.write(f"{os.getpid()}\n\n{process_started}\n")
-            _lock_fp.flush()
-
-            # Composite cleanup — single atexit registration, platform-aware order
-            # (#818 review). Splitting close+unlink across two ``atexit.register``
-            # calls relies on LIFO so unlink runs before close, which works on
-            # POSIX (you can unlink an open file and the inode persists until
-            # close) but breaks on Windows: NTFS refuses to delete an open or
-            # locked handle, so a clean shutdown via ``atexit`` would raise
-            # ``PermissionError`` (WinError 32) and leave a stale ``server.pid``
-            # behind — the next start then misreads it as a live holder.
-            def _cleanup() -> None:
-                if os.name == "nt":
-                    # Close → unlock → unlink. The close releases both the
-                    # file handle and the portalocker lock; the unlink only
-                    # then succeeds because no handle is open against the path.
-                    try:
-                        _lock_fp.close()
-                    finally:
-                        try:
-                            pid_file.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-                else:
-                    # POSIX: unlink while still holding the flock so we delete
-                    # exactly the inode we own; without that, a window opens
-                    # where another process could ``open`` the same path and
-                    # we'd close-then-unlink the wrong inode. Closing the fd
-                    # afterwards releases the flock.
-                    pid_file.unlink(missing_ok=True)
-                    _lock_fp.close()
-
-            atexit.register(_cleanup)
+        _claim_store_pid_file(db_path, pid_file, process_started, _sigterm_cleanup_targets)
 
     if transport != "stdio":
         # Banner runs after the lock decision so the warning log (if any)
@@ -936,9 +956,16 @@ def main(argv: list[str] | None = None) -> None:
         assert public_url is not None  # narrowed by the configure branch above
         _print_network_server_info(transport, args, public_url, run_kwargs)
 
-    from memtomem.server.context import _set_server_transport
+    import memtomem.server.context as server_context
 
-    _set_server_transport(transport)
+    server_context._set_server_transport(transport)
+    if fallback is not None:
+        import logging
+
+        server_context._shared_fallback = dict(fallback)
+        logging.getLogger(__name__).warning(
+            "--shared %s: serving this session standalone: %s", fallback["name"], fallback["reason"]
+        )
 
     # ``run`` forwards these kwargs to the matching async runner, and its
     # overloads key off a literal transport — hence the explicit branches

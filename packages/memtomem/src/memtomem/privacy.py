@@ -1,10 +1,10 @@
 """Content redaction guard at the LTM trust boundary.
 
-The pattern set has two provenance tiers, both secret-class only. This
-module's 20 secret-class patterns are byte-identical to memtomem-stm
+The pattern set has three provenance tiers, all secret-class only. This
+module's first 20 secret-class patterns are byte-identical to memtomem-stm
 ``proxy/privacy.py:CREDENTIAL_PATTERNS`` as of memtomem-stm#1378, which
 mirrored the ASCII word boundaries of #3298 (see the note above
-``DEFAULT_PATTERNS``).
+``DEFAULT_PATTERNS``); the last 6 (tier 3) are ahead of it.
 
 1. **STM-synced subset** (13 patterns) — originally mirrored from
    memtomem-stm; the AWS secret-material label rule (memtomem-stm#553),
@@ -26,6 +26,12 @@ mirrored the ASCII word boundaries of #3298 (see the note above
    coherence (reverse sync, #1491 / memtomem-stm#549). The two sets matched
    after that sync; whenever LTM is ahead of STM again, the difference lasts
    until the next reverse sync lands.
+
+3. **LTM-origin additions** (6 patterns, GHSA-h6g8-pjgf-2j99) — URL
+   userinfo, OAuth / API-key labels, ``*_TOKEN=`` / ``*_SECRET=``
+   assignments, an AWS secret after its label without a separator, Slack
+   ``xapp-`` / ``xoxe-`` tokens, and bearer tokens. Each needs a value with a
+   digit (see the comment above them). Awaiting the reverse mirror into STM.
 
 Redaction at the LTM ingress is the trust boundary where blocking
 semantics demand a tight false-positive profile.
@@ -111,6 +117,12 @@ _JWT_RULE = (
 # character. ``re.ASCII`` is not the fix: ``\s`` and ``(?i)`` are
 # Unicode-aware on purpose, and an ideographic space between a label and its
 # ``=`` has to keep matching.
+#: Printable ASCII the userinfo rule below allows before and after the ``:``:
+#: no whitespace, string quotes (``"'`` and backtick) or ``/?#@``, and no ``:``
+#: in the user.
+_URL_BEFORE_COLON = r"[\x21\x24-\x26\x28-\x2E\x30-\x39\x3B-\x3E\x41-\x5F\x61-\x7E]"
+_URL_AFTER_COLON = r"[\x21\x24-\x26\x28-\x2E\x30-\x3E\x41-\x5F\x61-\x7E]"
+
 DEFAULT_PATTERNS: tuple[str, ...] = (
     r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]",
     r"(?i)(password|passwd|pwd)\s*[:=]",
@@ -283,6 +295,69 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     # (base64 of "pypi.org" / "test.pypi.org") is an exact fingerprint →
     # lowest FP of the set.
     r"(?<![A-Za-z0-9_])pypi-Ag(?:EIcHlwaS5vcmc|ENdGVzdC5weXBpLm9yZw)[A-Za-z0-9_-]{50,}",
+    # --- LTM-origin additions, GHSA-h6g8-pjgf-2j99 (awaiting the reverse mirror) ---
+    # Unlike the label rules above, which fire on the label alone, these need
+    # a value: 8+ token characters with a digit (a 20+ run for a bearer token,
+    # exactly 40 for an AWS key). Each value is read for at most 256 characters
+    # and its digit must fall inside them: an unbounded search re-reads the same
+    # run from every label repeated inside it, which is quadratic, and a longer
+    # value whose first digit comes later is the accepted miss. (Slack's tokens
+    # run on: a match that starts consumes the run greedily with nothing after
+    # it that can fail, so that stays linear too.) A value that is a function call (``uuid.uuid4().hex``) is code,
+    # not a secret, and is skipped. Whitespace and digits are spelled out
+    # (``[ \t\r\n]``, ``[0-9]``) because ``\s`` and ``\d`` mean other sets in the
+    # browser's RegExp; ``(?i)`` folds case like the older rules. Measured on a few thousand real notes and docs, that keeps
+    # placeholders (``<pw>``, ``${X}``, ``***``, ``changeme``, ``str``) out; a
+    # letters-only secret is the accepted miss. Every rule starts only where its
+    # leading run starts (the lookbehind), so a long run is entered once.
+    #
+    # Credentials in a URL's userinfo: ``scheme://[user]:password@``. User and
+    # password are printable ASCII without whitespace, string quotes or the URL
+    # delimiters (``/?#@``, and ``:`` in the user), so both runtimes count
+    # them alike and neighbouring JSON strings do not read as one URL. A
+    # password that is a whole placeholder up to the ``@`` (``<pw>``, ``${X}``,
+    # ``$X``, ``{{x}}``, ``***``) is left alone; ``$`` or ``*`` inside a real
+    # one is not.
+    (
+        r"(?<![A-Za-z0-9+.\-])[A-Za-z][A-Za-z0-9+.\-]{0,30}://"
+        + _URL_BEFORE_COLON
+        + r"{0,256}:"
+        + r"(?!(?:<"
+        + _URL_AFTER_COLON
+        + r"{0,256}>|\$\{"
+        + _URL_AFTER_COLON
+        + r"{0,256}\}"
+        + r"|\$[A-Za-z_][A-Za-z0-9_]{0,256}|\{\{"
+        + _URL_AFTER_COLON
+        + r"{0,256}\}\}|\*{1,256})@)"
+        + r"(?="
+        + _URL_AFTER_COLON
+        + r"{0,255}[0-9])"
+        + _URL_AFTER_COLON
+        + r"{8,256}@"
+    ),
+    # OAuth and API-key labels the older rules do not name, quoted or not.
+    r"(?i)(?<![A-Za-z0-9_.-])[\"']?(?:x-api-key|client[_-]?secret|refresh[_-]?token|auth[_-]?token)"
+    r"[\"']?[ \t\r\n]*[:=][ \t\r\n]*[\"']?(?![A-Za-z0-9._~+/=-]{0,256}\()"
+    r"(?=[A-Za-z0-9._~+/=-]{0,255}[0-9])[A-Za-z0-9._~+/=-]{8,256}",
+    # Environment-style assignments: ``GITHUB_TOKEN=…``, ``WEBHOOK_SECRET=…``.
+    r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{0,256}_(?:TOKEN|SECRET)[ \t]*=[ \t]*[\"']?"
+    r"(?![A-Za-z0-9._~+/=-]{0,256}\()(?=[A-Za-z0-9._~+/=-]{0,255}[0-9])[A-Za-z0-9._~+/=-]{8,256}",
+    # An AWS secret access key written after its label with no ``:`` or ``=``.
+    r"(?i)(?<![A-Za-z0-9_.-])aws[_-]?secret[_-]?access[_-]?key[ \t]+"
+    r"(?=[A-Za-z0-9/+]{0,39}[0-9])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])",
+    # Slack app-level (``xapp-``) and refresh-capable (``xoxe-``) tokens.
+    r"(?<![A-Za-z0-9_])(?:xapp-[0-9]-[A-Za-z0-9-]{10,}|xoxe(?:\.xox[bp])?-[0-9]-[A-Za-z0-9-]{10,})",
+    # An opaque bearer token in an Authorization header, quoted or not.
+    r"(?i)(?<![A-Za-z0-9_-])[\"']?authorization[\"']?[ \t\r\n]*:[ \t\r\n]*[\"']?bearer[ \t]+"
+    r"(?![A-Za-z0-9._~+/=-]{0,256}\()(?=[A-Za-z0-9._~+/=-]{0,255}[0-9])[A-Za-z0-9._~+/=-]{20,256}",
+)
+
+#: Indexes of the rules that read a value for at most 256 characters, so a hit
+#: may stop inside a longer token. A consumer that masks hit spans (session
+#: tracing) extends these over the rest of the token run.
+BOUNDED_VALUE_RULES: frozenset[int] = frozenset(
+    i for i, p in enumerate(DEFAULT_PATTERNS) if p.endswith("{8,256}") or p.endswith("{20,256}")
 )
 
 
@@ -677,6 +752,110 @@ _JWT_SEGMENT_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv
 _WORD_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
 
 
+def value_scan_parts(value: object) -> list[str]:
+    """Every dict key and string inside a JSON value, raw, in a fixed order.
+
+    A guard that scans only ``json.dumps(value)`` sees each string with
+    ``"`` as ``\\"`` and a newline as ``\\n``, so a rule that needs a literal
+    quote or whitespace misses a secret the store will persist and return
+    verbatim. Scan these parts alongside the serialized form, which still
+    carries the key/value pairing the quoted-label rule matches.
+
+    ``value`` is the decoded form that is persisted (``json.loads`` of the
+    serialized value). Order: a dict's keys in sorted order, each followed by
+    its value; a list's items in order. Join the parts with a non-whitespace
+    separator so a label in one part cannot pair with the next one.
+    """
+    parts: list[str] = []
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            parts.append(node)
+        elif isinstance(node, dict):
+            for key in sorted(node, key=str, reverse=True):
+                stack.append(node[key])
+                stack.append(key)
+        elif isinstance(node, list):
+            stack.extend(reversed(node))
+    return parts
+
+
+_HEX = "[0-9a-fA-F]"
+# One escape sequence, matched left to right so ``\\n`` reads as an escaped
+# backslash followed by ``n``. A high+low surrogate pair is tried before a
+# single ``\uXXXX`` so the pair becomes one character.
+_ESCAPE_RE = re.compile(
+    rf"\\(?:u([dD][89abAB]{_HEX}{{2}})\\u([dD][c-fC-F]{_HEX}{{2}})"
+    rf"|u({_HEX}{{4}})"
+    r'|(["\\/bfnrt]))'
+)
+_SIMPLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+_ESCAPE_PASSES = 2
+VIEW_SEPARATOR = "\n---\n"
+
+
+def _resolve_escape(match: re.Match[str]) -> str:
+    high, low, single, simple = match.groups()
+    if simple is not None:
+        return _SIMPLE_ESCAPES[simple]
+    if high is not None:
+        code = 0x10000 + ((int(high, 16) - 0xD800) << 10) + (int(low, 16) - 0xDC00)
+        return chr(code)
+    code = int(single, 16)
+    # A lone surrogate cannot be encoded; leave it spelled out.
+    return match.group(0) if 0xD800 <= code <= 0xDFFF else chr(code)
+
+
+def escape_views(text: str) -> list[str]:
+    """``text``, then up to two copies with JSON-style escape sequences resolved.
+
+    A JSON file, a JSON string inside a header or a shell command inside a
+    JSON string spells ``"`` as ``\\"``, a newline as ``\\n`` and any
+    character as ``\\uXXXX``. Rules that need a literal quote or whitespace
+    (the quoted-label rule, a PEM header split across lines) miss that
+    spelling, while whoever reads the file decodes it. Each view resolves
+    one level of ``\\"``, ``\\\\``, ``\\/``, ``\\b``, ``\\f``, ``\\n``,
+    ``\\r``, ``\\t`` and ``\\uXXXX``; a lone surrogate stays escaped and
+    any other ``\\X`` is left as is. A view keeps the text's structure, so a
+    key and its value stay side by side; nothing is parsed.
+
+    The views exist only to be scanned. Join them with
+    :data:`VIEW_SEPARATOR`, which is not whitespace, so a match cannot run
+    from the end of one view into the next.
+    """
+    views = [text]
+    current = text
+    for _ in range(_ESCAPE_PASSES):
+        if "\\" not in current:
+            break
+        resolved = _ESCAPE_RE.sub(_resolve_escape, current)
+        if resolved == current:
+            break
+        views.append(resolved)
+        current = resolved
+    return views
+
+
+def scan_with_escape_views(text: str) -> list[RedactionHit]:
+    """:func:`scan` over ``text`` and its :func:`escape_views`.
+
+    A hit's span is an offset into ``VIEW_SEPARATOR.join(escape_views(text))``:
+    one at or past ``len(text)`` lies in a view, not in ``text``. The same
+    secret can be counted once per view it appears in.
+    """
+    return scan(VIEW_SEPARATOR.join(escape_views(text)))
+
+
 def _jwt_old_start(text: str, start: int, floor: int) -> int:
     """Where ``_JWT_RULE_OLD`` began the match ``_JWT_RULE`` began at ``start``.
 
@@ -762,8 +941,11 @@ class WriteGuardResult:
     """Outcome of a single ``enforce_write_guard`` call.
 
     ``decision`` is one of ``_VALID_OUTCOMES``. ``hits`` is the raw
-    ``scan()`` result so callers can size-quote it in user-facing
-    errors (length only, never the matched bytes).
+    :func:`scan_with_escape_views` result so callers can size-quote it in
+    user-facing errors (length only, never the matched bytes). Spans are
+    offsets into the content joined with its escape views, so a span at or
+    past the content's length points into a view, and one secret can be
+    counted once per view.
     """
 
     decision: str
@@ -785,14 +967,14 @@ def sanitize_audit_value(value: object) -> object:
     leak it through the log line.
 
     Non-string values (``None``, ``int``, ``bool``) pass through. Strings
-    are re-scanned with the same ``DEFAULT_PATTERNS`` used for content;
+    are re-scanned the way the guard scans content, escape views included;
     any hit replaces the value entirely with a fixed marker, and very
     long strings are truncated so a multi-megabyte path can't blow up
     the audit line either.
     """
     if not isinstance(value, str):
         return value
-    if scan(value):
+    if scan_with_escape_views(value):
         return _AUDIT_REDACTED_MARKER
     if len(value) > _AUDIT_VALUE_MAX_LEN:
         return value[:_AUDIT_VALUE_MAX_LEN] + "...(truncated)"
@@ -1051,7 +1233,7 @@ def enforce_write_guard(
         if count_outcome:
             _record_outcome(outcome, tool)
 
-    hits = scan(content)
+    hits = scan_with_escape_views(content)
     if not hits:
         if record_outcome:
             record("pass", surface)

@@ -30,8 +30,9 @@ selection is decidable from one bounded page.
 from __future__ import annotations
 
 import json
-import os
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import UUID
 
@@ -568,62 +569,6 @@ _FIELDS = (
 )
 # A record saved before ``artifacts`` existed has every other field (#2930).
 _LEGACY_FIELDS = tuple(key for key in _FIELDS if key != "artifacts")
-_FASTEMBED_CACHE_ENV = ("MEMTOMEM_FASTEMBED_CACHE", "FASTEMBED_CACHE_PATH")
-
-
-def _verified_cached_e5_tokenizer() -> str | None:
-    """A copy of the pinned tokenizer already in a fastembed cache, read only.
-
-    Looks where the product would (the non-empty overrides, then the default
-    ``~/.memtomem/cache/fastembed``) without creating or writing anything, and
-    returns a file only when its checksum is the pinned one.
-    """
-    import hashlib
-    from pathlib import Path
-
-    from memtomem.embedding.profiles import E5_MODEL, E5_REVISION, E5_TOKENIZER_SHA256
-
-    roots = [os.environ[name] for name in _FASTEMBED_CACHE_ENV if os.environ.get(name)]
-    roots.append(str(Path.home() / ".memtomem" / "cache" / "fastembed"))
-    snapshot = Path("models--" + E5_MODEL.replace("/", "--"), "snapshots", E5_REVISION)
-    for root in roots:
-        candidate = Path(root).expanduser() / snapshot / "tokenizer.json"
-        if not candidate.is_file():
-            continue
-        with candidate.open("rb") as stream:
-            if hashlib.file_digest(stream, "sha256").hexdigest() == E5_TOKENIZER_SHA256:
-                return str(candidate)
-    return None
-
-
-@pytest.fixture(scope="session")
-def _e5_tokenizer_file(tmp_path_factory) -> str:
-    """The pinned E5 ``tokenizer.json``, checksum-verified, as a plain path.
-
-    Reuses a verified copy from an existing cache without writing to it;
-    otherwise downloads into a temporary cache, never the developer's. Skips
-    only when the file cannot be fetched. A checksum mismatch on the download
-    (``ValueError``) is a real failure and propagates.
-    """
-    pytest.importorskip("tokenizers")
-    pytest.importorskip("huggingface_hub")
-    httpx = pytest.importorskip("httpx")
-    from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
-
-    from memtomem.embedding.profiles import E5_TOKENIZER, resolve_tokenizer
-
-    cached = _verified_cached_e5_tokenizer()
-    if cached is not None:
-        return cached
-    with pytest.MonkeyPatch.context() as mp:
-        # ``MEMTOMEM_FASTEMBED_CACHE`` outranks ``FASTEMBED_CACHE_PATH``, so
-        # this alone keeps the download out of any cache the developer uses.
-        mp.setenv("MEMTOMEM_FASTEMBED_CACHE", str(tmp_path_factory.mktemp("fastembed")))
-        try:
-            path = resolve_tokenizer(E5_TOKENIZER)
-        except (HfHubHTTPError, LocalEntryNotFoundError, OSError, httpx.TransportError) as exc:
-            pytest.skip(f"pinned E5 tokenizer unavailable: {type(exc).__name__}: {exc}")
-    return str(path)
 
 
 @pytest.fixture
@@ -666,22 +611,34 @@ def _fenced_record(**values: str) -> str:
 
 
 def _capped_korean_record() -> str:
-    """Every capped field filled to its cap with Korean text, except ``completed``.
+    """Every prose field filled to its cap with Korean text, every other value compliant.
 
-    With ``artifacts`` filled too, the caps add up to more than the record's
-    1,200-character ceiling, so the workflow shortens another field and never a
-    path. ``completed`` gives up the difference here.
+    Every value is within its cap, yet with Korean counted as two the record is
+    far over the size target (#3399): the caps bound each field, the target the
+    whole record, and a record over it is saved anyway.
     """
     return _fenced_record(
-        objective=_korean(100),
-        completed=_korean(90),
-        changed_files=", ".join(f"src/pkg/모듈_{i}.py" for i in range(10)),
+        objective=_korean(80),
+        completed=_korean(160),
+        changed_files=", ".join(f"src/pkg/모듈_{i}.py" for i in range(6)) + ", +2 omitted",
         artifacts=", ".join(f"/Users/x/.gemini/tmp/세션/계획_{i}.md" for i in range(4)),
-        worktree_state=_korean(80),
-        validation=_korean(120),
-        blockers=_korean(80),
+        worktree_state="8 dirty:  M=5 ??=3; first=src/pkg/모듈_0.py",
+        validation=_korean(90),
+        blockers=_korean(60),
         next_action=_korean(120),
     )
+
+
+_RAW_CAPS = {
+    "objective": 80,
+    "completed": 160,
+    "changed_files": 120,
+    "artifacts": 160,
+    "worktree_state": 80,
+    "validation": 90,
+    "blockers": 60,
+    "next_action": 120,
+}
 
 
 def _e5_rows(tmp_path, record: str, config):
@@ -752,6 +709,11 @@ def test_e5_token_budget_splits_a_capped_record_between_field_lines(tmp_path, e5
     config, budget = e5_budget
     record = _capped_korean_record()
     assert len(record) <= 1200, "fixture left the workflow's 1,200-character ceiling"
+    fields = _parse_fields([record])
+    for key, cap in _RAW_CAPS.items():
+        assert len(fields[key]) <= cap, key
+    target, weight = _size_target()
+    assert _weighted(record, weight) > target, "fixture no longer over the size target"
 
     rows = _e5_rows(tmp_path, record, config)
 
@@ -770,7 +732,9 @@ def test_e5_token_budget_splits_a_capped_record_between_field_lines(tmp_path, e5
 def test_a_last_row_can_hold_only_the_closing_fence(tmp_path, e5_budget):
     """A record just over the budget leaves the closing fence alone in a row.
 
-    That row is legitimate, so the count must accept it.
+    That row is legitimate, so the count must accept it. The values are over the
+    caps Save applies since #3399: this is a record saved before them, which
+    resume still has to read.
     """
     config, budget = e5_budget
     record = _fenced_record(objective=_korean(100), completed=_korean(240), validation=_korean(95))
@@ -807,13 +771,14 @@ def test_capped_ordinary_lines_fit_the_e5_line_budget(value, e5_budget):
 def test_normalization_expanding_line_is_torn_and_detectable(tmp_path, e5_budget):
     """The case that makes resume's torn-record check apply to every record.
 
-    U+FDFA normalizes to 18 characters before tokenizing, so 240 of them cost
+    U+FDFA normalizes to 18 characters before tokenizing, so 160 of them cost
     far more than the budget although the record is within every cap. The
     line is torn mid-value. Nothing is lost, but the union now holds lines
     that are no field line, which is what resume's count catches.
     """
     config, budget = e5_budget
-    value = "\ufdfa" * 240
+    value = "\ufdfa" * 160
+    assert len(value) <= _RAW_CAPS["completed"]
     record = _fenced_record(completed=value)
     assert len(record) <= 1200
     assert budget.count(f"completed: {value}") > config.hard_max_chunk_tokens
@@ -875,6 +840,118 @@ def test_fields_no_cap_shortens_fill_most_of_the_e5_budget(e5_budget):
     cost = budget.count(_fenced_record(project_root=root))
 
     assert 340 < cost <= config.hard_max_chunk_tokens
+
+
+# --- The size target (#3399) -------------------------------------------------
+#
+# Save aims a record at a weighted size the E5 budget holds in one row.
+# ``test_plugin_assets`` pins the workflow's wording; the fixtures below are
+# whole records a Save could write, sized to that target by hand.
+
+_WORKFLOW = (
+    Path(__file__).resolve().parents[3] / "packages/memtomem-plugin-assets/workflows/handoff.md"
+)
+_WEIGHTS = {"one": 1, "two": 2}
+# The fixtures use only ASCII and Hangul syllables, plus, in the classifier test, the
+# punctuation the workflow names. Checking just those keeps this helper exact for what it
+# measures; it is not a full implementation of the workflow's character classes.
+_HANGUL_SYLLABLES = (0xAC00, 0xD7A3)
+_NAMED_PUNCTUATION = frozenset("。、「，")
+
+
+def _size_target() -> tuple[int, int]:
+    """The target and the CJK weight, as the workflow states them."""
+    flat = " ".join(_WORKFLOW.read_text(encoding="utf-8").split())
+    found = re.findall(
+        r"aim for at most ([\d,]+) characters for the complete record, fence lines included, "
+        r"counting each Korean, Japanese, or Chinese character as (\w+)\.",
+        flat,
+    )
+    assert len(found) == 1, found
+    return int(found[0][0].replace(",", "")), _WEIGHTS[found[0][1]]
+
+
+def _is_doubled(ch: str) -> bool:
+    low, high = _HANGUL_SYLLABLES
+    return low <= ord(ch) <= high or ch in _NAMED_PUNCTUATION
+
+
+def _weighted(text: str, weight: int) -> int:
+    for ch in text:
+        assert ord(ch) < 128 or _is_doubled(ch), f"unclassified character {ch!r}"
+    return sum(weight if _is_doubled(ch) else 1 for ch in text)
+
+
+def test_the_classifier_counts_what_the_fixtures_use() -> None:
+    assert _weighted("ab 1", 2) == 4
+    assert _weighted("한글", 2) == 4
+    assert _weighted("。、「，", 2) == 8
+    assert _weighted("handoff 크기", 2) == 12
+
+
+# Whole records of the kind real ones carry: ids, a hex sha, paths, a scratchpad
+# artifact, a derived worktree summary, and short complete prose with its commands
+# kept whole. Each weighs exactly 850.
+_NEVER_SHORTENED = {
+    "project_root": "/Users/dev/Work/agent-harness/memtomem",
+    "changed_files": (
+        "packages/memtomem-plugin-assets/workflows/handoff.md, "
+        "packages/memtomem/tests/test_plugin_assets.py, +6 omitted"
+    ),
+    "artifacts": (
+        "/private/tmp/claude-501/-Users-dev-Work-agent-harness-memtomem/"
+        "5002da3c-36c4-45fb-8831-46970c1d74af/scratchpad/plan.md"
+    ),
+    "git_head": "ca0fa40c9b6e2d1f7a3c58e4b0d92f61a7c3e5d8",
+    "worktree_state": "3 dirty:  M=2 ??=1; first=packages/memtomem/tests/test_plugin_assets.py",
+}
+_PROSE = {
+    "english": {
+        "objective": "Size handoff records for the E5 budget (#3399)",
+        "completed": (
+            "Lowered the handoff caps, added an 850 target with CJK counted as two, and "
+            "re-rendered six deliveries"
+        ),
+        "validation": "`ruff check` clean; full suite 24,827 passed",
+        "blockers": "none",
+        "next_action": "Run `/safe-push`, then open the PR.",
+    },
+    "korean": {
+        "objective": "E5 예산에 맞춘 handoff 크기 조정(#3399)",
+        "completed": (
+            "handoff cap 을 낮추고 한중일 문자를 2자로 세는 850 목표를 넣었으며, "
+            "가이드 세 곳과 변경 기록도 함께 고침"
+        ),
+        "validation": "`ruff check` 통과, 전체 스위트 24,827 통과",
+        "blockers": "없음",
+        "next_action": "`/safe-push` 실행 후 PR 을 열고 검사 확인",
+    },
+}
+
+
+@pytest.mark.parametrize("language", ["english", "korean"])
+def test_a_record_at_the_size_target_stays_one_e5_row(language, tmp_path, e5_budget):
+    """A whole record of exactly the target size is one row under the E5 budget.
+
+    The fixtures cost more than 0.40 tokens per weighted character, inside the
+    range of stored records, so the result is not carried by light padding.
+    """
+    config, budget = e5_budget
+    target, weight = _size_target()
+    record = _fenced_record(**_NEVER_SHORTENED, **_PROSE[language])
+    assert _weighted(record, weight) == target, "the fixture no longer weighs the target"
+    assert len(record) <= 1200
+    fields = _parse_fields([record])
+    for key, cap in _RAW_CAPS.items():
+        assert len(fields[key]) <= cap, key
+    tokens = budget.count(record)
+
+    rows = _e5_rows(tmp_path, record, config)
+
+    assert tokens <= config.hard_max_chunk_tokens
+    assert len(rows) == 1
+    assert _parse_fields([rows[0].content]) == fields
+    assert tokens / target > 0.40, "the fixture is no longer dense; re-pick its values"
 
 
 def test_a_bare_field_name_without_a_colon_is_not_a_field_line() -> None:
@@ -1014,3 +1091,150 @@ async def test_a_failure_report_needs_the_chunk_id_to_locate_the_file(monkeypatc
 
     assert f"- Source: {path}" in read
     assert "- Lines: 12-27" in read
+
+
+# ``handoff list`` reads one page with resume step 2's filter. What the workflow relies on
+# from storage: the page holds only addressed rows, newest first; its first row is the row
+# resume step 2 takes, whatever the two limits; and a malformed newest row stays on the page,
+# so list must judge the raw first row before it skips anything.
+_LIST_FILTER = "handoff-to-claude-code,handoff-to-any"
+_LIST_LIMIT = 30
+_RESUME_LIMIT = 10
+
+
+def _record_rows(handoff_id: str, to_runtime: str, created_at: datetime, rows: int):
+    """One record stored as several rows that carry the same tags, as a token re-split does."""
+    chunks = []
+    for part in range(rows):
+        chunk = _handoff_chunk(handoff_id, to_runtime, created_at)
+        chunk.content = f"part {part} of {handoff_id}\n"
+        chunks.append(chunk)
+    return chunks
+
+
+def _id_tag(chunk) -> str:
+    (tag,) = [t for t in chunk.metadata.tags if t.startswith("handoff-id-")]
+    return tag.removeprefix("handoff-id-")
+
+
+async def test_list_page_holds_only_addressed_rows_newest_first(components) -> None:
+    """Grouping the list page by first appearance gives the records newest first."""
+    older = "33333333-0000-4000-8000-000000000001"
+    newer = "33333333-0000-4000-8000-000000000002"
+    to_any = "33333333-0000-4000-8000-000000000003"
+    addressed = [
+        *_record_rows(older, "claude-code", _TARGET_AT, 3),
+        *_record_rows(newer, "claude-code", _TARGET_AT + timedelta(hours=1), 3),
+        *_record_rows(to_any, "any", _TARGET_AT + timedelta(hours=2), 2),
+    ]
+    # Newer than every addressed row, so an unfiltered or bare-tag page would lead with them.
+    elsewhere = _record_rows("33333333-0000-4000-8000-000000000004", "codex-cli", _DECOY_BASE, 3)
+    notes = [
+        _recipient_tagged_non_handoff(f"l{i}", "claude-code", _DECOY_BASE + timedelta(hours=i))
+        for i in range(3)
+    ]
+    await components.storage.upsert_chunks([*addressed, *elsewhere, *notes])
+
+    page = await components.storage.recall_chunks(limit=_LIST_LIMIT, tag_filter=_LIST_FILTER)
+
+    assert {c.id for c in page} == {c.id for c in addressed}
+    assert [c.created_at for c in page] == sorted((c.created_at for c in page), reverse=True)
+    grouped = list(dict.fromkeys(_id_tag(c) for c in page))
+    assert grouped == [to_any, newer, older]
+    # The structured rows list reads carry what an entry shows: id tag, time, and chunk id.
+    from memtomem.server.formatters import _format_recall_structured
+
+    row = json.loads(_format_recall_structured(page))["results"][0]
+    assert f"handoff-id-{to_any}" in row["tags"]
+    assert row["created_at"] == page[0].created_at.isoformat()
+    assert row["chunk_id"] == str(page[0].id)
+
+
+async def test_list_first_row_is_the_row_resume_selects(components) -> None:
+    """The record list names as plain resume's pick is decided by the same first row.
+
+    Checked against an independently expected row, not only list-versus-resume equality,
+    which would also hold if both pages shared a wrong order: the newest record is a tie
+    of three rows at one instant, so the server's ``id DESC`` tie-break decides it.
+    """
+    newest = "44444444-0000-4000-8000-000000000001"
+    tied = _record_rows(newest, "claude-code", _TARGET_AT + timedelta(days=1), 3)
+    older = [
+        row
+        for i in range(12)
+        for row in _record_rows(
+            f"44444444-0000-4000-8000-0000000001{i:02d}",
+            "any",
+            _TARGET_AT + timedelta(minutes=i),
+            2,
+        )
+    ]
+    elsewhere = _record_rows("44444444-0000-4000-8000-000000000999", "codex-cli", _DECOY_BASE, 2)
+    await components.storage.upsert_chunks([*older, *tied, *elsewhere])
+    expected = max(tied, key=lambda c: str(c.id)).id
+
+    listed = await components.storage.recall_chunks(limit=_LIST_LIMIT, tag_filter=_LIST_FILTER)
+    resumed = await components.storage.recall_chunks(limit=_RESUME_LIMIT, tag_filter=_LIST_FILTER)
+
+    assert listed[0].id == resumed[0].id == expected
+    assert _id_tag(listed[0]) == newest
+    # 27 addressed rows: the page is not full, so list makes no truncation claim here.
+    assert len(listed) == 27 < _LIST_LIMIT
+
+
+async def test_a_malformed_newest_row_stays_first_on_the_list_page(components) -> None:
+    """Storage does not drop a row whose id tag is malformed; list has to judge it first.
+
+    If list skipped malformed rows before naming plain resume's pick, it would name the
+    valid record below, which resume step 2 never selects: resume takes this row and
+    rejects its id.
+    """
+    valid = _handoff_chunk(_TARGET_ID, "claude-code", _TARGET_AT)
+    malformed = make_chunk(
+        content="handoff_id: not-a-uuid\n",
+        tags=("handoff", "handoff-to-claude-code", "handoff-id-not-a-uuid"),
+        namespace=_NAMESPACE,
+        source="handoff-malformed.md",
+    )
+    malformed.created_at = malformed.updated_at = _TARGET_AT + timedelta(hours=1)
+    await components.storage.upsert_chunks([valid, malformed])
+
+    page = await components.storage.recall_chunks(limit=_LIST_LIMIT, tag_filter=_LIST_FILTER)
+
+    assert [c.id for c in page] == [malformed.id, valid.id]
+
+
+async def test_a_newest_row_with_zero_or_multiple_id_tags_stays_first_on_resume_recall(
+    components,
+) -> None:
+    """Storage retains rows with zero or several id tags; resume's cardinality rule governs it (#3475).
+
+    If the newest row carries no `handoff-id-<id>` tag or carries several, storage still returns
+    it first. Resume step 2 requires exactly one id tag on the newest row, reporting the row
+    unusable rather than guessing or falling back.
+    """
+    valid = _handoff_chunk(_TARGET_ID, "claude-code", _TARGET_AT)
+    zero_tags = make_chunk(
+        content="handoff_id: 11111111-0000-4000-8000-000000000001\n",
+        tags=("handoff", "handoff-to-claude-code"),
+        namespace=_NAMESPACE,
+        source="handoff-zero-tags.md",
+    )
+    zero_tags.created_at = zero_tags.updated_at = _TARGET_AT + timedelta(hours=1)
+    multiple_tags = make_chunk(
+        content="handoff_id: 22222222-0000-4000-8000-000000000002\n",
+        tags=(
+            "handoff",
+            "handoff-to-claude-code",
+            "handoff-id-22222222-0000-4000-8000-000000000002",
+            "handoff-id-33333333-0000-4000-8000-000000000003",
+        ),
+        namespace=_NAMESPACE,
+        source="handoff-multiple-tags.md",
+    )
+    multiple_tags.created_at = multiple_tags.updated_at = _TARGET_AT + timedelta(hours=2)
+    await components.storage.upsert_chunks([valid, zero_tags, multiple_tags])
+
+    page = await components.storage.recall_chunks(limit=_RESUME_LIMIT, tag_filter=_LIST_FILTER)
+
+    assert [c.id for c in page] == [multiple_tags.id, zero_tags.id, valid.id]

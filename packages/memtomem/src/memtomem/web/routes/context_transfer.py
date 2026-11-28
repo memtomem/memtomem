@@ -58,6 +58,7 @@ import click
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from memtomem._runtime_paths import scrub_text
 from memtomem.config import TargetScope
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.mcp_servers import McpServerParseError
@@ -66,10 +67,11 @@ from memtomem.context.migrate import (
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
     MigratePartialError,
+    PathNamingClickException,
     StagingIdentityLostError,
     TransferStagingBusyError,
 )
-from memtomem.context.privacy_scan import PrivacyScanError
+from memtomem.context.privacy_scan import PrivacyBlockedError, PrivacyScanError
 from memtomem.context.projects import ProjectScope, compute_scope_id
 from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.context.transfer import (
@@ -79,7 +81,11 @@ from memtomem.context.transfer import (
     transfer_artifact,
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
-from memtomem.web.routes._errors import _classify_exception, _error, _redact_message
+from memtomem.web.routes._errors import (
+    _classify_exception,
+    _error,
+    _scan_secrets,
+)
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes.context_projects import (
     _default_project_root,
@@ -294,7 +300,8 @@ async def _ensure_dest_local_gitignored(dst_root: Path) -> str:
     the ``.git``-required precondition stay byte-identical across surfaces.
 
     Returns the helper's status code (``appended`` / ``already_present`` /
-    ``no_git_repo_pyproject_only`` / ``no_project_signal``) for the
+    ``no_git_repo_pyproject_only`` / ``no_project_signal`` /
+    ``gitignore_is_link``) for the
     response, and logs the non-write skips at WARNING so a dropped marker
     is never silent (mirrors the warnings the CLI/MCP surfaces emit).
     """
@@ -316,8 +323,89 @@ async def _ensure_dest_local_gitignored(dst_root: Path) -> str:
             "— .gitignore marker not written; the local tier is not git-protected.",
             dst_root,
         )
+    elif msg == "gitignore_is_link":
+        logger.warning(
+            "transfer: project_local landing at %s has a .gitignore that is a symbolic "
+            "link or junction — nothing written through it; the local tier is not "
+            "git-protected (replace the link with a regular file).",
+            dst_root,
+        )
     # ``already_present`` is the quiet, idempotent case (marker already on disk).
     return msg
+
+
+#: The wire text of the staging refusals (#3532): the route's own sentences,
+#: without the paths the engine's text carries, which go to the log line.
+_STAGING_BUSY_MESSAGE = (
+    "transfer staging is blocked: a name it needs is already taken and was NOT removed, "
+    "because that entry can be an interrupted move's only copy of an artifact. Inspect it "
+    "by hand, then retry. The server log has the details."
+)
+#: One sentence per ``StagingIdentityLostError.cause`` (#3608), sharing the reason
+#: code the SPA keys on. Each leads with what the engine refused on and ends
+#: with what holds whatever ran afterwards (#3609): a staging refusal can be
+#: followed by a cleanup or rollback that removes staging, so it says nothing
+#: about what is left on disk. The source refusal is raised before anything is
+#: renamed, so "nothing was moved" holds there.
+_STAGING_IDENTITY_TAIL = (
+    "the artifact was not published to the destination. A staging copy may have been "
+    "removed, and on a move the source may not be back in place. Check the source and any "
+    "staging entry by hand, then retry"
+)
+_STAGING_REPLACED_MESSAGES = {
+    "replaced": (
+        f"transfer staging was replaced out of band: {_STAGING_IDENTITY_TAIL}. The server log "
+        "has the details."
+    ),
+    "unverifiable": (
+        "the transfer could not verify a staging entry's file identity: "
+        f"{_STAGING_IDENTITY_TAIL}; if the filesystem does not report file identity, use one "
+        "that does. The server log has the details."
+    ),
+    "source_unverifiable": (
+        "the transfer could not verify the source's file identity: nothing was moved, and the "
+        "artifact was not published to the destination. Fix access to the source, then retry; "
+        "if the filesystem does not report file identity, use one that does. The server log has "
+        "the details."
+    ),
+}
+#: The 400 for a path-naming engine refusal that carries no ``safe_message`` (#3543).
+_REFUSED_MESSAGE = "the transfer request was refused; the server log has the details."
+#: The 422 for a Gate A privacy block (#3605). It is built from the hit count alone:
+#: the engine's text names the offending file by its absolute path, and a file name is
+#: bytes the request did not choose, so none of it reaches the wire. The scan stops at
+#: the first blocked file, so the count is that file's, not the artifact's. The scan
+#: reads the staged bytes, which carry a requested ``as_name``, so the remedy names both.
+_PRIVACY_BLOCKED_TEMPLATE = (
+    "Gate A: a file in the artifact contains {hits} privacy pattern hit(s); write to "
+    "scope='project_shared' rejected. git history is forever — no force bypass available "
+    "for project_shared (ADR-0011 §5). Remove the secret-shaped values from the source "
+    "artifact or from the new name the request gives it, and retry; the server log has "
+    "the details."
+)
+#: The 422 for any other ``PrivacyScanError``, such as a file the scan could not read
+#: or a directory it could not list (#3605).
+_PRIVACY_REFUSED_MESSAGE = (
+    "Gate A could not scan the artifact, so the write to project_shared was refused; "
+    "the server log has the details."
+)
+
+
+def _log_refusal(kind: str, name: str, reason_code: str, text: str) -> None:
+    """One warning line for a refusal whose wire message leaves out what an operator needs.
+
+    The caller-chosen name is secret-scanned on its own, and the engine text on
+    its own when the name is clean, so a hit leaves the kind and the reason code
+    in the record (#3614). A name that hits takes the engine text with it,
+    unscanned: the text can carry the name where a rule no longer matches it,
+    such as inside a staging file name. No ``exc_info``: the exception chain
+    would carry the text past the scan. The scan reads the raw strings;
+    ``scrub_text`` runs after it, so a control character in a project path cannot
+    split the record or forge a line after it.
+    """
+    shown = _scan_secrets(name)
+    detail = _scan_secrets(text) if shown == name else shown
+    logger.warning("%s", scrub_text(f"transfer {kind}/{shown} refused ({reason_code}): {detail}"))
 
 
 @router.post("/context/{kind}/{name}/transfer")
@@ -440,14 +528,23 @@ async def transfer_context_artifact(
         # a memtomem project — don't seed a half-initialized store into an
         # arbitrary registered directory. Within-project transfers keep
         # migrate's implicit-store behavior.
+        #
+        # Named by the scope id the caller sent, not by its root (#2489): the
+        # root is a host path, and a ``cd <root>`` hint is not pasteable once
+        # the path is taken out of it. Same text as the settings-copy route.
+        target = (
+            f"destination project {body.to_project_scope_id!r}"
+            if body.to_project_scope_id is not None
+            else "the destination project"
+        )
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "no_memtomem_store",
                 "message": (
-                    f"destination project has no .memtomem/ store: {dst_root}. "
-                    f"Initialize it first: cd {dst_root} && mm context init"
+                    f"{target} has no .memtomem/ store. Initialize it first: "
+                    "run `mm context init` in that project's directory."
                 ),
                 "project_scope_id": body.to_project_scope_id,
             },
@@ -517,31 +614,68 @@ async def transfer_context_artifact(
     except PrivacyScanError as exc:
         # The standard project_shared block envelope (string detail) every
         # sync surface emits — issue-pinned exception to the object envelope.
-        raise HTTPException(422, exc.message) from exc
+        # ``exc.message`` names the offending file by its absolute path
+        # (#3605), so it goes to the log line only.
+        _log_refusal(kind, name, "privacy_blocked", exc.message)
+        if isinstance(exc, PrivacyBlockedError):
+            message = _PRIVACY_BLOCKED_TEMPLATE.format(hits=int(exc.blocked.hits_count))
+        else:
+            message = _PRIVACY_REFUSED_MESSAGE
+        raise HTTPException(422, message) from exc
     except ArtifactNotFoundError as exc:
-        raise _error(404, "missing", exc.message) from exc
+        # ``safe_message`` when the engine's text names a path (#3532); the
+        # other not-found texts name none.
+        message = exc.message if exc.safe_message is None else exc.safe_message
+        raise _error(404, "missing", _scan_secrets(message)) from exc
     except TransferRecoveryError as exc:
         # BEFORE ``TransferCollisionError`` — it is a subclass, and inheriting
         # that arm would report an interrupted transaction as
         # ``destination_exists``. Nothing collided: the remediation is to
-        # inspect the two paths the engine names, not to remove something at the
-        # destination. Engine text, so it is redacted like every other raw
-        # exception on this route.
+        # inspect the entries the swap left, not to remove something at the
+        # destination.
+        #
+        # The engine's own sentence embeds those entries as host paths and, for
+        # a malformed marker, values read from it (#3532), so neither the wire
+        # nor the log gets it. The wire gets which side and tier is wedged; the
+        # log line gets the entries the error carries as data. Not cut at 200
+        # characters: every part is composed, and the last clause is the
+        # pointer to the log.
+        stated = (
+            exc.safe_message
+            if exc.safe_message is not None
+            else (
+                "an interrupted directory swap blocks this transfer and could not be "
+                "recovered automatically. Inspect it by hand, then retry."
+            )
+        )
+        public = f"{stated} The server log has the details."
+        entries = ", ".join(str(p) for p in exc.entries) or "none recorded"
+        _log_refusal(kind, name, "swap_recovery_pending", f"{stated} Entries: {entries}")
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "swap_recovery_pending",
-                "message": _redact_message(exc.message),
+                "message": _scan_secrets(public),
             },
         ) from exc
     except TransferCollisionError as exc:
+        # The engine's text names the destination by its resolved absolute
+        # path, which can sit under neither project root nor the import-time
+        # ``$HOME`` (a store linked out of the project, the request-time user
+        # tier), so stripping roots out of it cannot make it path-free. The
+        # route states the collision in the terms the caller chose instead;
+        # the SPA keys on ``reason_code`` and shows its own advice.
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "destination_exists",
-                "message": exc.message,
+                "message": (
+                    f"destination already exists: {kind} '{body.as_name or name}' in the "
+                    f"{body.to_target_scope} tier of the destination. Resolve manually or "
+                    "remove the existing entry first."
+                ),
             },
         ) from exc
     except TransferStagingBusyError as exc:
@@ -551,35 +685,44 @@ async def transfer_context_artifact(
         # nothing is broken, a leftover is in the way and a human has to look
         # at it. Its own reason code, never ``destination_exists`` — the
         # destination is free; the remediation is to inspect the staging
-        # entries the message names, not to remove the destination.
+        # entries the engine names, not to remove the destination.
         #
-        # Redacted like every other raw engine string on this route: unlike
-        # ``MigratePartialError``, whose paths ARE the recovery steps for the
-        # operator who ran it, this one can reach a remote caller who has no
-        # business learning the destination store's absolute layout, and the
-        # unredacted text stays in the server log via ``raise ... from``.
+        # Unlike ``MigratePartialError``, whose paths ARE the recovery steps for
+        # the operator who ran it, this one can reach a remote caller who has no
+        # business learning the destination store's absolute layout. The
+        # engine's text ends with those paths, and redacting it only hid them by
+        # the 200-character cut — a ``$HOME`` collapse inside the prose moved the
+        # cut past them (#3532). So the wire gets the route's own sentence and
+        # the log line gets the engine's: an ``HTTPException`` raised ``from``
+        # its cause does not log the cause.
+        _log_refusal(kind, name, "transfer_staging_busy", str(exc))
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "transfer_staging_busy",
-                "message": _redact_message(str(exc)),
+                "message": _STAGING_BUSY_MESSAGE,
             },
         ) from exc
     except StagingIdentityLostError as exc:
-        # The staging entry this transfer created was replaced out of band
-        # (#2314): nothing was promoted, nothing was removed. Conflict for the
-        # same reason as the busy arm above — nothing is broken, something is
-        # in the way and a human has to look at it — with its own reason code,
-        # because the remediation differs: a busy name is retried, a replaced
-        # entry has to be understood first. Redacted like its sibling; the
-        # unredacted text stays in the server log via ``raise ... from``.
+        # The transfer refused because an identity it needed could not be
+        # confirmed; the cases are spelled out where it is raised
+        # (``StagingClaim`` and the move's source preflight in
+        # ``context/migrate.py``). Conflict for the same reason as the busy arm
+        # above — nothing is broken, something is in the way and a human has to
+        # look at it — with its own reason code, because the remediation differs:
+        # a busy name is retried, this has to be understood first. The route's own
+        # sentence on the wire and the engine's in the log, like its sibling and
+        # for the same reasons — one sentence per ``cause``, so the caller hears
+        # whether the entry was replaced, could not be read, or was the source
+        # and nothing moved (#3608).
+        _log_refusal(kind, name, "transfer_staging_replaced", str(exc))
         raise HTTPException(
             status_code=409,
             detail={
                 "error_kind": "conflict",
                 "reason_code": "transfer_staging_replaced",
-                "message": _redact_message(str(exc)),
+                "message": _STAGING_REPLACED_MESSAGES[exc.cause],
             },
         ) from exc
     except MigratePartialError as exc:
@@ -599,11 +742,29 @@ async def transfer_context_artifact(
         raise _error(400, "validation", str(exc)) from exc
     except click.ClickException as exc:
         # Engine-validated combinations (same store, rename outside copy,
-        # multi-`name:` manifest, …) — bad request input, engine wording.
-        raise _error(400, "validation", exc.message) from exc
+        # multi-`name:` manifest, …) — bad request input. A refusal whose
+        # engine text names a host path carries the same statement without it
+        # (#3543); the other texts name none and go out as written. A
+        # path-naming raise that left ``safe_message`` unset gets a fixed
+        # sentence, and its text goes to the log line only.
+        if isinstance(exc, PathNamingClickException):
+            if exc.safe_message is not None:
+                message = exc.safe_message
+            else:
+                _log_refusal(kind, name, "validation", exc.message)
+                message = _REFUSED_MESSAGE
+        else:
+            message = exc.message
+        raise _error(400, "validation", _scan_secrets(message)) from exc
     except Exception as exc:  # pragma: no cover - classified catch-all
+        # An unknown exception has no structure to build a path-free sentence
+        # from, so the caller gets the classification and a pointer (#3532).
         logger.error("transfer %s/%s failed", kind, name, exc_info=True)
-        raise _error(500, _classify_exception(exc), _redact_message(str(exc))) from exc
+        raise _error(
+            500,
+            _classify_exception(exc),
+            "transfer failed unexpectedly; the server log has the details",
+        ) from exc
 
     if gate is not None:
         flag, reason = gate

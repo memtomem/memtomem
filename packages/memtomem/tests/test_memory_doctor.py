@@ -28,6 +28,7 @@ Layers:
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 import os
 import re
@@ -861,10 +862,48 @@ class TestBudget:
         assert m.over_budget
         assert m.line_count == 250
 
-    def test_byte_count_over_cap(self):
-        m = measure_budget("x" * 25_000)
+    def test_unit_count_over_cap(self):
+        # Short lines, so the file total — not the 200-char per-line cap — trips it.
+        m = measure_budget("\n".join(["x" * 199] * 125))
+        assert m.overlong_lines == ()
+        assert m.line_count == 125
+        assert m.utf16_units == 125 * 199 + 124
         assert m.over_budget
-        assert m.byte_len == 25_000
+
+    def test_cjk_index_is_counted_in_utf16_units_not_utf8_bytes(self):
+        # #3578: Claude Code caps MEMORY.md at 25,000 UTF-16 code units, so a Hangul
+        # syllable is 1 unit (3 UTF-8 bytes). 19,999 units / 59,799 bytes is well
+        # inside the cap and must not warn.
+        text = "\n".join(["가" * 199] * 100)
+        assert len(text.encode("utf-8")) == 59_799
+        m = measure_budget(text)
+        assert m.utf16_units == 100 * 199 + 99
+        assert not m.over_budget
+
+    def test_non_bmp_characters_count_two_units(self):
+        # 60 lines x 200 emoji + 1 line x 170 emoji, 60 separators = exactly 24,400.
+        lines = ["😀" * 200] * 60 + ["😀" * 170]
+        at_cap = measure_budget("\n".join(lines))
+        assert at_cap.overlong_lines == ()
+        assert at_cap.utf16_units == 2 * (60 * 200 + 170) + 60 == 24_400
+        assert not at_cap.over_budget  # strict ``>``
+        over = measure_budget("\n".join(lines[:-1] + ["😀" * 171]))
+        assert over.utf16_units == 24_402
+        assert over.over_budget
+
+    def test_total_is_measured_on_the_trimmed_text(self):
+        assert measure_budget("  x\n\n").utf16_units == 1
+
+    def test_trim_set_is_javascript_not_python(self):
+        # Claude Code trims with JS ``String.prototype.trim``: U+FEFF goes, U+0085
+        # stays; Python's bare ``strip()`` does the opposite on both.
+        feff, nel, nbsp, ideographic, ls = (chr(c) for c in (0xFEFF, 0x85, 0xA0, 0x3000, 0x2028))
+        assert measure_budget(f"{feff}x{feff}").utf16_units == 1
+        assert measure_budget(f"x{nel}").utf16_units == 2
+        assert measure_budget(f"{ls}x{ideographic}{nbsp}").utf16_units == 1
+
+    def test_lone_surrogate_does_not_raise(self):
+        assert measure_budget("a\ud800").utf16_units == 2
 
     def test_overlong_line_measured_in_chars_not_bytes(self):
         # 150 CJK chars = 450 UTF-8 bytes but only 150 characters, so it must
@@ -2838,14 +2877,14 @@ class TestCli:
         self._patch_loader(monkeypatch, config)
         index = (mem_dir / "MEMORY.md").resolve()
 
-        real_read_text = Path.read_text
+        real_read_bytes = Path.read_bytes
 
-        def deny_index(self, *args, **kwargs):
+        def deny_index(self):
             if self.resolve() == index:
                 raise PermissionError(13, "Permission denied")
-            return real_read_text(self, *args, **kwargs)
+            return real_read_bytes(self)
 
-        monkeypatch.setattr(Path, "read_text", deny_index)
+        monkeypatch.setattr(Path, "read_bytes", deny_index)
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
 
@@ -2866,20 +2905,339 @@ class TestCli:
         self._patch_loader(monkeypatch, config)
         index = (mem_dir / "MEMORY.md").resolve()
 
-        real_read_text = Path.read_text
+        real_read_bytes = Path.read_bytes
 
-        def deny_index(self, *args, **kwargs):
+        def deny_index(self):
             if self.resolve() == index:
                 raise OSError()
-            return real_read_text(self, *args, **kwargs)
+            return real_read_bytes(self)
 
-        monkeypatch.setattr(Path, "read_text", deny_index)
+        monkeypatch.setattr(Path, "read_bytes", deny_index)
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
 
         assert result.exit_code == 0
         finding = self._index_missing_finding(json.loads(result.output))
         assert finding["summary"] == "could not read MEMORY.md: OSError"
+
+    def _budget_finding(self, payload):
+        dir_entry = next(d for d in payload["dirs"] if d["category"] == "claude-memory")
+        return next((f for f in dir_entry["findings"] if f["check"] == "budget"), None)
+
+    def test_total_only_budget_warning_reports_utf16_units(self, doctor_env, monkeypatch):
+        # #3578: the unit is no longer bytes; a total-only warning has no overlong lines.
+        config, mem_dir = doctor_env
+        self._patch_loader(monkeypatch, config)
+        (mem_dir / "MEMORY.md").write_bytes(("\n".join(["x" * 199] * 125) + "\n").encode("utf-8"))
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+
+        assert result.exit_code == 0  # warn is advisory
+        finding = self._budget_finding(json.loads(result.output))
+        assert finding is not None
+        assert finding["severity"] == "warn"
+        assert "24999 UTF-16 units (cap 24400)" in finding["summary"]
+        assert "bytes (cap" not in finding["summary"]
+        assert finding["items"] == []
+        assert finding["count"] == 0
+
+    def test_cjk_index_over_utf8_cap_but_under_unit_cap_does_not_warn(
+        self, doctor_env, monkeypatch
+    ):
+        config, mem_dir = doctor_env
+        self._patch_loader(monkeypatch, config)
+        (mem_dir / "MEMORY.md").write_bytes(("\n".join(["가" * 199] * 100) + "\n").encode("utf-8"))
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+
+        assert self._budget_finding(json.loads(result.output)) is None
+
+    def test_crlf_index_is_measured_with_its_carriage_returns(self, doctor_env, monkeypatch):
+        # Claude Code reads the file with ``readFileSync(..., "utf-8")`` — no newline
+        # folding — so 122 lines x 199 chars joined by CRLF is 24,520 units there. A
+        # universal-newline read would see 24,399 and stay silent.
+        config, mem_dir = doctor_env
+        self._patch_loader(monkeypatch, config)
+        (mem_dir / "MEMORY.md").write_bytes("\r\n".join(["x" * 199] * 122).encode("utf-8"))
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+
+        finding = self._budget_finding(json.loads(result.output))
+        assert finding is not None
+        assert "24520 UTF-16 units (cap 24400)" in finding["summary"]
+
+
+# ── Frontmatter validity (#2719) ────────────────────────────────────
+
+
+@pytest.fixture
+def fm_env(tmp_path, monkeypatch):
+    """An empty ``claude-memory`` dir and a DB path that does not exist."""
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-test-fm" / "memory"
+    mem_dir.mkdir(parents=True)
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "absent.db"
+    config.indexing.memory_dirs = [mem_dir]
+    return config, mem_dir
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(text.encode("utf-8"))
+
+
+def _fm(*lines: str) -> str:
+    return "---\n" + "".join(f"{line}\n" for line in lines) + "---\n\nbody\n"
+
+
+def _frontmatter_items(config, mem_dir, check: str = "frontmatter_invalid") -> list[str]:
+    (report,) = [
+        r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path[0] != "("
+    ]
+    finding = _findings_by_check(report).get(check)
+    return [] if finding is None else finding.items
+
+
+class TestFrontmatterInvalid:
+    @pytest.mark.parametrize(
+        ("line", "problem"),
+        [
+            ("description: `mm` shortcut not available", "ScannerError"),
+            ("description: Read commands use `{error: ...}`", "ScannerError"),
+            ('description: "no such table: chunks_vec" on every call', "ParserError"),
+        ],
+    )
+    def test_reports_the_shapes_from_the_issue(self, fm_env, line, problem):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm("name: note", line))
+        (report,) = [
+            r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path[0] != "("
+        ]
+        finding = _findings_by_check(report)["frontmatter_invalid"]
+        assert finding.severity == "warn"
+        assert finding.items == [f"note.md:3 ({problem})"]
+
+    def test_crlf_file_reports_the_same_line(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm("name: note", "description: `x`").replace("\n", "\r\n"))
+        assert _frontmatter_items(config, mem_dir) == ["note.md:3 (ScannerError)"]
+
+    @pytest.mark.parametrize(
+        ("lines", "item"),
+        [
+            (("- a", "- b"), "note.md:2 (not a mapping)"),
+            (("# comment", "null"), "note.md:3 (not a mapping)"),
+            (("", "just prose"), "note.md:3 (not a mapping)"),
+        ],
+    )
+    def test_reports_a_root_that_is_not_a_mapping(self, fm_env, lines, item):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm(*lines))
+        assert _frontmatter_items(config, mem_dir) == [item]
+
+    @pytest.mark.parametrize(
+        ("lines", "item"),
+        [
+            (("name: x\u2028description: `y`",), "note.md:2 (ScannerError)"),
+            (("# comment\u2028- a",), "note.md:2 (not a mapping)"),
+        ],
+    )
+    def test_line_counts_only_newlines(self, fm_env, lines, item):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm(*lines))
+        assert _frontmatter_items(config, mem_dir) == [item]
+
+    def test_a_line_that_only_starts_with_hyphens_does_not_close_the_block(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm("description: `x`", "----: metadata"))
+        assert _frontmatter_items(config, mem_dir) == ["note.md:2 (ScannerError)"]
+
+    @pytest.mark.parametrize("padding", [" ", "\t"], ids=["space", "tab"])
+    def test_a_closing_line_may_end_in_blanks(self, fm_env, padding):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", f"---\ndescription: `x`\n---{padding}\n\nbody\n")
+        assert _frontmatter_items(config, mem_dir) == ["note.md:2 (ScannerError)"]
+
+    def test_control_character_reports_its_line(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm("name: x", "description: a\x07b"))
+        assert _frontmatter_items(config, mem_dir) == ["note.md:3 (ReaderError)"]
+
+    def test_deep_nesting_does_not_stop_the_run(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "a.md", _fm("a: " + "[" * 5000))
+        _write(mem_dir / "b.md", _fm("description: `x`"))
+        assert _frontmatter_items(config, mem_dir) == [
+            "a.md (RecursionError)",
+            "b.md:2 (ScannerError)",
+        ]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param(_fm("name: note", "description: plain"), id="valid"),
+            pytest.param("# Title\n\n---\n- a\n---\n", id="no-leading-block"),
+            pytest.param(_fm("## Heading"), id="comment-only"),
+            pytest.param("---\n\n---\n\nbody\n", id="blank"),
+            pytest.param("---\n---\n\nprose\n\n---\n", id="adjacent-empty"),
+            pytest.param("---\n- a\n----\n", id="four-hyphen-closer"),
+            pytest.param(
+                "---\nname: a\n--- \n\ndescription: `x`\n\n---\n", id="space-after-closer"
+            ),
+            pytest.param(
+                "---\nname: a\n--- x\n\ndescription: `x`\n\n---\n", id="text-after-closer"
+            ),
+        ],
+    )
+    def test_not_reported(self, fm_env, text):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", text)
+        assert _frontmatter_items(config, mem_dir) == []
+        assert _frontmatter_items(config, mem_dir, "frontmatter_truncated") == []
+
+    @pytest.mark.parametrize(
+        "lines",
+        [
+            pytest.param(("x: !!bool abc",), id="constructor-only-error"),
+            pytest.param(("a: &a {k: v}", "b: {<<: [*a, *a]}"), id="merge-aliases"),
+        ],
+    )
+    def test_values_are_never_constructed(self, fm_env, monkeypatch, lines):
+        import yaml
+
+        def construct(*_args):
+            raise AssertionError("frontmatter values were constructed")
+
+        monkeypatch.setattr(yaml.constructor.BaseConstructor, "construct_document", construct)
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm(*lines))
+        assert _frontmatter_items(config, mem_dir) == []
+
+    def test_no_source_text_reaches_any_output(self, fm_env, monkeypatch, caplog):
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        config, mem_dir = fm_env
+        canary = "sk-canary-2719"
+        _write(mem_dir / "a.md", _fm(f"description: `{canary}`"))
+        _write(mem_dir / "b.md", _fm(f"x: *{canary}"))
+        _write(mem_dir / "c.md", _fm(f"{canary}"))
+        _write(mem_dir / "d.md", _fm(f"name: {canary} #{canary}"))
+        monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
+        caplog.set_level(logging.DEBUG)
+        human = CliRunner().invoke(cli, ["memory", "doctor"])
+        as_json = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+        # Warnings alone: the exit code stays 0.
+        assert (human.exit_code, as_json.exit_code) == (0, 0)
+        assert "a.md:2 (ScannerError)" in human.output
+        assert "b.md:2 (ComposerError)" in human.output
+        assert "c.md:2 (not a mapping)" in human.output
+        assert "d.md:2 (name)" in human.output
+        payload = json.loads(as_json.stdout)
+        assert payload["status"] == "issues"
+        (entry,) = [d for d in payload["dirs"] if d["path"][0] != "("]
+        items = {f["check"]: f["items"] for f in entry["findings"]}
+        assert items["frontmatter_invalid"] == [
+            "a.md:2 (ScannerError)",
+            "b.md:2 (ComposerError)",
+            "c.md:2 (not a mapping)",
+        ]
+        assert items["frontmatter_truncated"] == ["d.md:2 (name)"]
+        assert canary not in human.output
+        assert canary not in as_json.output
+        assert canary not in caplog.text
+
+    def test_only_markdown_files_are_read(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "data.yaml", _fm("description: `x`"))
+        _write(mem_dir / "other.markdown", _fm("description: `x`"))
+        assert _frontmatter_items(config, mem_dir) == []
+        config.indexing.supported_extensions = config.indexing.supported_extensions | {".markdown"}
+        assert _frontmatter_items(config, mem_dir) == ["other.markdown:2 (ScannerError)"]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlink needs privilege on Windows")
+    def test_a_non_markdown_alias_does_not_hide_the_note(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "a.md", _fm("description: `x`"))
+        (mem_dir / "z.py").symlink_to(mem_dir / "a.md")
+        assert _frontmatter_items(config, mem_dir) == ["a.md:2 (ScannerError)"]
+
+    def test_nested_root_owns_its_files(self, fm_env):
+        config, mem_dir = fm_env
+        child = mem_dir / "child"
+        _write(child / "note.md", _fm("description: `x`"))
+        _write(mem_dir / "sub" / "note.md", _fm("description: `x`"))
+        config.indexing.memory_dirs = [mem_dir, child]
+        assert _frontmatter_items(config, mem_dir) == [
+            f"{Path('sub') / 'note.md'}:2 (ScannerError)"
+        ]
+        assert _frontmatter_items(config, child) == ["note.md:2 (ScannerError)"]
+
+    def test_index_files_follow_the_provider_convention(self, fm_env, tmp_path):
+        config, mem_dir = fm_env
+        notes = tmp_path / "notes"
+        for root in (mem_dir, notes):
+            _write(root / "MEMORY.md", _fm("description: `x`"))
+            _write(root / "README.md", _fm("description: `x`"))
+        config.indexing.memory_dirs = [mem_dir, notes]
+        assert _frontmatter_items(config, mem_dir) == []
+        assert _frontmatter_items(config, notes) == [
+            "MEMORY.md:2 (ScannerError)",
+            "README.md:2 (ScannerError)",
+        ]
+
+
+class TestFrontmatterTruncated:
+    @pytest.mark.parametrize(
+        ("lines", "items"),
+        [
+            (("name: shipped PR #530",), ["note.md:2 (name)"]),
+            (("description: #530 shipped",), ["note.md:2 (description)"]),
+            (("name: x", "description: first", "  second #3"), ["note.md:4 (description)"]),
+            (("# c\u2028name: x #1",), ["note.md:2 (name)"]),
+            (("{name: x, description: y # c", "}"), ["note.md:2 (description)"]),
+            (("name: &a x # c",), ["note.md:2 (name)"]),
+            (("name: x # c", "!!null name: y"), ["note.md:2 (name)"]),
+            (("name: # key comment", "  x # value comment"), ["note.md:3 (name)"]),
+            (("name: shipped PR #530", "----: metadata"), ["note.md:2 (name)"]),
+        ],
+    )
+    def test_reports_a_value_a_comment_follows(self, fm_env, lines, items):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm(*lines))
+        (report,) = [
+            r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path[0] != "("
+        ]
+        finding = _findings_by_check(report)["frontmatter_truncated"]
+        assert (finding.severity, finding.items) == ("info", items)
+        assert "frontmatter_invalid" not in _findings_by_check(report)
+
+    @pytest.mark.parametrize(
+        "lines",
+        [
+            pytest.param(('name: "x #1"',), id="double-quoted"),
+            pytest.param(("name: 'x' # c",), id="quoted-then-comment"),
+            pytest.param(("name: a#b",), id="no-space-before-hash"),
+            pytest.param(("description: |  # c", "  x"), id="block-scalar"),
+            pytest.param(("name: x", "# standalone"), id="comment-line"),
+            pytest.param(("name:", "  # standalone", "b: 1"), id="empty-then-comment-line"),
+            pytest.param(("title: x #1",), id="other-key"),
+            pytest.param(("name: x #1", "name: y"), id="overridden-duplicate"),
+            pytest.param(("title: &a x # c", "name: *a"), id="alias-value"),
+            pytest.param(("meta:", "  &k name: &v x # c", "*k : *v"), id="aliased-key-and-value"),
+            pytest.param(("meta: &k name", "*k : x # c"), id="aliased-key"),
+            pytest.param(("name: &a x # c", "other: *a"), id="any-alias-skips-the-block"),
+            pytest.param(("!!null name: x # c",), id="key-tagged-null"),
+            pytest.param(("!!set {name: x # c", "}"), id="root-tagged-set"),
+            pytest.param(("meta:", "  name: x #1"), id="nested"),
+        ],
+    )
+    def test_not_reported(self, fm_env, lines):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm(*lines))
+        assert _frontmatter_items(config, mem_dir, "frontmatter_truncated") == []
 
 
 # ── Docs-as-tests parity ────────────────────────────────────────────
@@ -3089,8 +3447,8 @@ class TestDocsParity:
     def test_budget_caps_match_documented_numbers(self):
         import memtomem.cli.memory_doctor_cmd as mod
 
-        # Quoted in the checks table: "24,400 bytes / 200 lines / 200 chars".
-        assert mod._INDEX_MAX_BYTES == 24_400
+        # Quoted in the checks table: "24,400 UTF-16 code units / 200 lines / 200 chars".
+        assert mod._INDEX_MAX_UNITS == 24_400
         assert mod._INDEX_MAX_LINES == 200
         assert mod._INDEX_MAX_LINE_CHARS == 200
 
@@ -4555,3 +4913,109 @@ class TestStrictGrammarRule:
 
         assert result.exit_code == 0
         assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == ""
+
+
+class TestWikilinkMatcherIsLinear:
+    """The doctor's wikilink grammar, matched in one pass (#3634).
+
+    ``_WIKILINK_RE`` run with ``sub`` / ``finditer`` rescanned the rest of a text
+    token from every unclosed ``[[``, quadratic in the token's length. The
+    regex is kept as the grammar and these tests hold the matcher equal to it.
+    """
+
+    _UNCLOSED = ("x[[" * 20000, "x[[a|" * 20000, ("x[[" * 2000 + "\n") * 10)
+    # Every opener fails at the same distant ``]``: a matcher that cached only
+    # end-of-input misses, not found delimiters, would rescan to it each time.
+    _ONE_DISTANT_CLOSER = ("x[[" * 20000 + "]x", "x[[a|" * 20000 + "]x")
+
+    @staticmethod
+    def _spec(text):
+        from memtomem.cli.memory_doctor_cmd import _WIKILINK_RE
+
+        return [(m.start(), m.end(), m.group(1)) for m in _WIKILINK_RE.finditer(text)]
+
+    @staticmethod
+    def _scrub_spec(text):
+        from memtomem.cli.memory_doctor_cmd import _WIKILINK_RE
+
+        return _WIKILINK_RE.sub("", text)
+
+    def test_parsing_unclosed_openers_does_not_run_the_regex(self, monkeypatch):
+        from memtomem.cli import memory_doctor_cmd
+
+        class NotRun:
+            def __getattr__(self, name):
+                raise AssertionError(f"the backtracking regex was used ({name})")
+
+        monkeypatch.setattr(memory_doctor_cmd, "_WIKILINK_RE", NotRun())
+        for text in self._UNCLOSED + self._ONE_DISTANT_CLOSER:
+            parsed = parse_memory_index("- [a](a.md) " + text + "\n")
+            assert parsed.wikilinks == ()
+
+    def test_end_searches_scan_at_most_twice_the_text(self, monkeypatch):
+        """Counted, not timed: the distance the target and alias end searches scan,
+        from each start position to the delimiter found (or the end of the text),
+        stays within twice the text. Only those two searches are counted."""
+        from memtomem.cli import memory_doctor_cmd
+
+        read = [0]
+
+        class Counting:
+            def __init__(self, pattern):
+                self._pattern = pattern
+
+            def search(self, text, pos):
+                m = self._pattern.search(text, pos)
+                read[0] += (m.start() if m else len(text)) - pos
+                return m
+
+        for name in ("_WIKILINK_TARGET_END", "_WIKILINK_ALIAS_END"):
+            monkeypatch.setattr(memory_doctor_cmd, name, Counting(getattr(memory_doctor_cmd, name)))
+        for text in self._UNCLOSED + self._ONE_DISTANT_CLOSER:
+            read[0] = 0
+            assert memory_doctor_cmd._wikilink_spans(text) == []
+            assert 0 < read[0] <= 2 * len(text), (len(text), read[0])
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "no links",
+            "[[a]] and [[b|c]]",
+            "[[[a]]",  # the target may hold a ``[``
+            "[[a|b|c]]",  # the alias may hold a ``|``
+            "[[]] [[|a]] [[a|]]",  # an empty target or alias is not a link
+            "[[a]b]]",  # nor one crossing ``]``
+            "[[a\nb]] [[a|b\nc]]",  # unlike the chunker's, a newline is let through
+            "[[a| ]]",
+            "[[a][[b]]",
+            "x[[" * 50 + "[[ok]]",
+        ],
+    )
+    def test_spans_match_the_grammar(self, text):
+        from memtomem.cli.memory_doctor_cmd import _scrub_wikilinks, _wikilink_spans
+
+        spans = _wikilink_spans(text)
+        assert spans == self._spec(text)
+        assert _scrub_wikilinks(text, spans) == self._scrub_spec(text)
+
+    def test_spans_match_the_grammar_on_random_text(self):
+        import random
+
+        from memtomem.cli.memory_doctor_cmd import _scrub_wikilinks, _wikilink_spans
+
+        tokens = ["[", "]", "|", "\n", "a", " ", "[[", "]]", "|]]", "b|c"]
+        rng = random.Random(3634)
+        for _ in range(20000):
+            text = "".join(rng.choice(tokens) for _ in range(rng.randint(0, 24)))
+            spans = _wikilink_spans(text)
+            assert spans == self._spec(text), repr(text)
+            assert _scrub_wikilinks(text, spans) == self._scrub_spec(text), repr(text)
+
+    def test_a_decoded_newline_match_is_scrubbed_but_not_collected(self):
+        """``&#10;`` decodes to a newline inside the text token, so the match is
+        scrubbed (no stranded brackets, the label stays a wikilink) but raw
+        source never wrote it, so the census does not collect it."""
+        parsed = parse_memory_index("- [[memo]](note) then [[a&#10;b|c&#10;d]]\n")
+        assert parsed.entries == ()
+        assert parsed.wikilinks == ((1, "memo"),)

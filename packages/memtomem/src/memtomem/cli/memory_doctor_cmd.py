@@ -90,10 +90,19 @@ Checks (per configured ``memory_dir``):
   line, #1774). Left unclassified rather than guessed at, so the line is
   reported for a human instead of being link-checked, counted as listed, or
   offered to ``--fix``.
-* **budget** — the index file exceeds its byte / line / per-line-char budget
+* **budget** — the index file exceeds its UTF-16-unit / line / per-line-char budget
   (the hot cache loaded into the agent's context each session).
 * **cold_candidate** — indexed files never accessed since indexing
   (``access_count`` sum 0 and ``last_accessed_at`` NULL). Informational.
+* **frontmatter_invalid** — Markdown files whose leading frontmatter block is not
+  valid YAML, or whose root is not a mapping (#2719). memtomem reads frontmatter
+  line by line, so unquoted prose that breaks the YAML still indexes, while a
+  YAML reader of the same file gets no keys. The block is composed, never
+  constructed (see :func:`_inspect_frontmatter`).
+* **frontmatter_truncated** — the effective top-level ``name`` / ``description``
+  is a plain scalar that a ``#`` comment directly follows, so a YAML reader may
+  see less than was meant. A block that uses an alias is not judged.
+  Informational.
 
 Output: human glyphs by default, ``--json`` for a structured payload. Exit
 ``1`` when any *error*-severity finding exists (``stale_source``,
@@ -130,6 +139,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import click
+import yaml
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
@@ -144,9 +154,11 @@ if TYPE_CHECKING:
 # the curation process targets. These live here, not in
 # ``ProviderIndexConvention``, because Tier 1 is the only consumer; the
 # write-contract ADR promotes them to config when ``--fix`` needs to enforce
-# them. Per-line cap is measured in characters (not bytes) so CJK prose isn't
-# double-counted.
-_INDEX_MAX_BYTES = 24_400
+# them. The file total is measured in UTF-16 code units of the text trimmed the
+# way JavaScript ``trim()`` does — what Claude Code compares with its 25,000
+# cap — so CJK prose isn't double-counted as UTF-8 bytes (24,400 leaves a
+# 600-unit margin). The per-line cap is measured in characters.
+_INDEX_MAX_UNITS = 24_400
 _INDEX_MAX_LINES = 200
 _INDEX_MAX_LINE_CHARS = 200
 
@@ -305,7 +317,70 @@ _WIKILINK_LABEL_RE = re.compile(r"^\[[^\[\]]*\]$")
 # (``&#10;``) decoded to it, and refusing that match changes what
 # :func:`_settle_wikilink_labels` makes of a ``[[memo]](note)`` label on the
 # same line.
+#
+# The grammar :func:`_wikilink_spans` implements. It is not run with ``sub`` or
+# ``finditer``: on a run of unclosed ``[[`` openers the regex rescans the rest of
+# the token from each one, quadratic in the token's length (#3634). The spans
+# give the same matches in one pass, and a test holds them equal to this regex.
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+_WIKILINK_TARGET_END = re.compile(r"[\]|]")
+_WIKILINK_ALIAS_END = re.compile(r"\]")
+
+
+def _wikilink_spans(text: str) -> list[tuple[int, int, str]]:
+    """``(start, end, target)`` of each match ``_WIKILINK_RE.finditer(text)`` yields.
+
+    In time linear in *text*. A target runs from ``[[`` to the first ``]`` or
+    ``|`` and can end nowhere else, since a shorter one would leave a character
+    neither ``|`` nor ``]]`` can start with; the same holds for an alias,
+    ending at the first ``]``. So each opener is decided at the first such
+    character after it. The openers are visited left to right, so the position
+    of that character is found once and reused until an opener passes it.
+    """
+    spans: list[tuple[int, int, str]] = []
+    if "[[" not in text:
+        return spans
+    size = len(text)
+    target_end = alias_end = -1
+
+    def first(pattern: re.Pattern[str], pos: int, known: int) -> int:
+        # ``known`` is the first match at or after an earlier position: while it
+        # is not behind ``pos`` it is also the first at or after ``pos``.
+        if known >= pos:
+            return known
+        m = pattern.search(text, pos)
+        return m.start() if m else size
+
+    i = text.find("[[")
+    while i != -1:
+        start = i + 2
+        target_end = first(_WIKILINK_TARGET_END, start, target_end)
+        end = -1
+        if target_end > start:
+            if text.startswith("]]", target_end):
+                end = target_end + 2
+            elif text.startswith("|", target_end):
+                alias = target_end + 1
+                alias_end = first(_WIKILINK_ALIAS_END, alias, alias_end)
+                if alias_end > alias and text.startswith("]]", alias_end):
+                    end = alias_end + 2
+        if end == -1:
+            i = text.find("[[", i + 1)
+            continue
+        spans.append((i, end, text[start:target_end]))
+        i = text.find("[[", end)
+    return spans
+
+
+def _scrub_wikilinks(text: str, spans: list[tuple[int, int, str]]) -> str:
+    """*text* with *spans* removed: ``_WIKILINK_RE.sub("", text)`` for its spans."""
+    parts: list[str] = []
+    copied = 0
+    for start, end, _target in spans:
+        parts.append(text[copied:start])
+        copied = end
+    parts.append(text[copied:])
+    return "".join(parts)
 
 
 def _wikilink_in(raw: str, inner: str) -> bool:
@@ -554,15 +629,16 @@ def _read_inline(token: Token) -> tuple[list[tuple[str, str, bool]], list[str], 
             # brackets no whole ``[[…]]`` accounts for — the strands a needle
             # split across token boundaries always leaves — force opacity.
             claim_sources.append(child.content)
-            scrubbed = _WIKILINK_RE.sub("", child.content)
+            spans = _wikilink_spans(child.content)
+            scrubbed = _scrub_wikilinks(child.content, spans)
             if "[" in scrubbed or "]" in scrubbed:
                 opaque = True  # stranded brackets: split or escaped syntax
             if _UNRESOLVED_LINK_SYNTAX_RE.search(child.content):
                 unresolved = True
             events.extend(
-                ("wiki", m.group(1), "")
-                for m in _WIKILINK_RE.finditer(child.content)
-                if _wikilink_in(raw, m.group(0)[2:-2])
+                ("wiki", target, "")
+                for start, end, target in spans
+                if _wikilink_in(raw, child.content[start + 2 : end - 2])
             )
     links, wikilinks = _settle_wikilink_labels(raw, events, claim_sources, opaque)
     return links, wikilinks, unresolved
@@ -762,32 +838,48 @@ def classify_link(target: str, *, root: Path, source_dir: Path) -> LinkClass:
 
 @dataclass(frozen=True)
 class BudgetMeasure:
-    byte_len: int
+    utf16_units: int
     line_count: int
     overlong_lines: tuple[int, ...]  # 1-based line numbers exceeding the char cap
 
     @property
     def over_budget(self) -> bool:
         return (
-            self.byte_len > _INDEX_MAX_BYTES
+            self.utf16_units > _INDEX_MAX_UNITS
             or self.line_count > _INDEX_MAX_LINES
             or bool(self.overlong_lines)
         )
 
 
+# ECMAScript WhiteSpace + LineTerminator — the characters ``String.prototype.trim``
+# removes. Python's bare ``str.strip()`` differs (it strips ``\x1c-\x1f`` and
+# ``\x85`` and keeps U+FEFF), which can flip the verdict at the threshold.
+_JS_TRIM_CHARS = "".join(
+    chr(cp)
+    for cp in (
+        *(0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0x1680),
+        *range(0x2000, 0x200B),  # U+2000..U+200A
+        *(0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF),
+    )
+)
+
+
 def measure_budget(text: str) -> BudgetMeasure:
     """Measure an index file against the hot-cache budget.
 
-    Bytes are UTF-8 encoded length; lines are counted from ``splitlines``;
-    per-line length is character count (``len``) so a CJK line isn't penalised
-    for its multi-byte encoding.
+    ``text`` is the file as decoded, with its newlines intact (Claude Code does
+    not fold CRLF before measuring). The total is the UTF-16 code-unit length of
+    the JS-trimmed text; lines are counted from ``splitlines``; per-line length
+    is character count (``len``) so a CJK line isn't penalised for its
+    multi-byte encoding.
     """
     lines = text.splitlines()
     overlong = tuple(
         i for i, line in enumerate(lines, start=1) if len(line) > _INDEX_MAX_LINE_CHARS
     )
+    trimmed = text.strip(_JS_TRIM_CHARS)
     return BudgetMeasure(
-        byte_len=len(text.encode("utf-8")),
+        utf16_units=len(trimmed.encode("utf-16-le", errors="surrogatepass")) // 2,
         line_count=len(lines),
         overlong_lines=overlong,
     )
@@ -1298,6 +1390,141 @@ def _confirm_stale(
     return "fresh", decision
 
 
+# ── Frontmatter: can a YAML reader read it? ─────────────────────────
+
+# The line that ends a block: three hyphens followed by a space, a tab or the end
+# of the line, which is where YAML itself sees a document marker.
+_CLOSING_LINE_RE = re.compile(r"\n---(?=[ \t\n]|$)")
+# What may follow those hyphens for the line to close the block.
+_CLOSING_REST_RE = re.compile(r"[ \t]*(?:\n|$)")
+# What makes the rest of a plain scalar's line a comment.
+_TRAILING_COMMENT_RE = re.compile(r"[ \t]+#")
+
+
+@dataclass(frozen=True)
+class _FrontmatterCheck:
+    """What :func:`_inspect_frontmatter` found. Lines are 1-based file lines.
+
+    Neither field carries source text: ``problem`` is an exception class name or
+    a fixed phrase, and a ``truncated`` key is one of two known names.
+    """
+
+    problem: tuple[int | None, str] | None = None
+    truncated: tuple[tuple[int, str], ...] = ()
+
+
+def _inspect_frontmatter(content: str) -> _FrontmatterCheck:
+    """Check the leading frontmatter block of *content* as YAML.
+
+    The block runs from the opening ``---`` to the first :data:`_CLOSING_LINE_RE`
+    line of the raw text, which is what an external reader sees. If that line
+    holds more than blanks after the hyphens there is no block. Unlike the chunker's
+    ``_FRONT_MATTER_RE``, a line such as ``----: x`` does not end the search,
+    and two adjacent fences are an empty block.
+
+    It is composed into nodes and never constructed into values, as
+    ``_frontmatter.flat_yaml`` does. Construction costs more than the text on
+    some input (merge aliases, long base-60 integers) and can raise errors whose
+    message is a source value. So an error only construction would raise (an
+    unknown tag, an impossible date) is not found here.
+
+    A parser failure is reported by class name only: PyYAML's message and
+    ``problem`` string quote the source.
+
+    A block that uses an alias gets no truncation check: a composed alias is its
+    anchor's node, position included, so the line its comment sits on would be
+    another entry's.
+    """
+    if not content.startswith("---\n"):
+        return _FrontmatterCheck()
+    # From 3, so that the opener's own newline can start the closing line.
+    close = _CLOSING_LINE_RE.search(content, 3)
+    if close is None or not _CLOSING_REST_RE.match(content, close.end()):
+        return _FrontmatterCheck()
+    block = content[4 : close.start()]
+
+    def line_of(index: int) -> int:
+        # Counted in "\n" only: PyYAML's own line numbers also break on U+2028.
+        return block.count("\n", 0, index) + 2
+
+    try:
+        root = yaml.compose(block, Loader=yaml.SafeLoader)
+    except Exception as exc:  # RecursionError and ReaderError are not MarkedYAMLError
+        mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+        index = mark.index if mark is not None else getattr(exc, "position", None)
+        line = None if index is None else line_of(index)
+        return _FrontmatterCheck(problem=(line, type(exc).__name__))
+    if root is None:  # empty or comment-only: there is no value to lose
+        return _FrontmatterCheck()
+    if not isinstance(root, yaml.MappingNode):
+        return _FrontmatterCheck(problem=(line_of(root.start_mark.index), "not a mapping"))
+
+    # The tags are what a reader goes by: a ``!!set`` root gives ``name`` no
+    # value, and a ``!!null name:`` key is not the ``name`` key.
+    if root.tag != "tag:yaml.org,2002:map" or any(
+        isinstance(t, yaml.AliasToken) for t in yaml.scan(block, Loader=yaml.SafeLoader)
+    ):
+        return _FrontmatterCheck()
+    effective = {
+        key.value: value
+        for key, value in root.value
+        if key.tag == "tag:yaml.org,2002:str" and key.value in ("name", "description")
+    }
+    truncated: list[tuple[int, str]] = []
+    for name, value in effective.items():
+        if not isinstance(value, yaml.ScalarNode) or value.style is not None:
+            continue
+        if _TRAILING_COMMENT_RE.match(block, value.end_mark.index):
+            truncated.append((line_of(value.end_mark.index), name))
+    return _FrontmatterCheck(truncated=tuple(sorted(truncated)))
+
+
+def _check_frontmatter(report: DirReport, root: Path, files: Sequence[Path]) -> None:
+    """Add the two frontmatter findings for the Markdown *files* of one dir."""
+    invalid: list[str] = []
+    truncated: list[str] = []
+    for path in sorted(files):
+        content = _read_indexable_content(path)
+        if content is None:
+            continue
+        check = _inspect_frontmatter(content)
+        try:
+            label = str(path.relative_to(root))
+        except ValueError:  # pragma: no cover - ownership already checked
+            label = path.name
+        if check.problem is not None:
+            line, problem = check.problem
+            where = label if line is None else f"{label}:{line}"
+            invalid.append(f"{where} ({problem})")
+        truncated.extend(f"{label}:{line} ({key})" for line, key in check.truncated)
+    if invalid:
+        report.findings.append(
+            Finding(
+                check="frontmatter_invalid",
+                severity="warn",
+                summary=(
+                    f"{len(invalid)} file(s) have frontmatter PyYAML cannot read as a mapping — "
+                    "a reader like it gets no `name` / `description` (quote a free-text value "
+                    "as a double-quoted YAML string; a block needs `key: value` lines)"
+                ),
+                items=invalid,
+            )
+        )
+    if truncated:
+        report.findings.append(
+            Finding(
+                check="frontmatter_truncated",
+                severity="info",
+                summary=(
+                    f"{len(truncated)} frontmatter value(s) may be cut at a `#` — YAML reads the "
+                    "rest of the line as a comment (if the `#` is meant literally, quote the "
+                    "value as a double-quoted YAML string)"
+                ),
+                items=truncated,
+            )
+        )
+
+
 # ── Analysis ────────────────────────────────────────────────────────
 
 
@@ -1319,6 +1546,7 @@ def _analyze_dir(
     root (whose DB rows are bucketed to the child), making the parent falsely
     report the child's already-indexed files as uncovered.
     """
+    from memtomem.chunking.markdown import MARKDOWN_EXTENSIONS
     from memtomem.config import (
         categorize_memory_dir,
         index_excluded_filenames,
@@ -1340,10 +1568,15 @@ def _analyze_dir(
     # ``_gather_reports`` — a nested child root owns its own subtree).
     disk_files = engine.discover_indexable_files(resolved_dir)  # type: ignore[attr-defined]
     disk_norm: dict[str, Path] = {}
+    # Kept apart from ``disk_norm``, whose keys are resolved paths: a ``z.py``
+    # symlink to ``a.md`` takes that note's slot there.
+    markdown_norm: dict[str, Path] = {}
     for p in disk_files:
         owning = resolve_owning_memory_dir(p, memory_dirs)
         if owning is not None and norm_path(owning) == dir_key:
             disk_norm[norm_path(p)] = p
+            if p.suffix in MARKDOWN_EXTENSIONS:
+                markdown_norm[norm_path(p)] = p
 
     # DB side: source-file signal rows already bucketed to this dir.
     db_norm: dict[str, tuple[Path, int, str | None, int, float, float]] = {
@@ -1600,6 +1833,8 @@ def _analyze_dir(
             )
         )
 
+    _check_frontmatter(report, resolved_dir, list(markdown_norm.values()))
+
     # 5/6/7. Index-file checks (only for providers with a TOC convention).
     if index_file_name:
         _analyze_index_file(
@@ -1625,7 +1860,11 @@ def _analyze_index_file(
     the TOC file."""
     index_path = root / index_file_name
     try:
-        text = index_path.read_text(encoding="utf-8")
+        # Bytes, not ``read_text``: the budget must see the file the way Claude Code
+        # does, with CRLF intact. ``text`` below is the universal-newline view every
+        # other check has always used.
+        raw = index_path.read_bytes().decode("utf-8")
+        text = raw.replace("\r\n", "\n").replace("\r", "\n")
     except FileNotFoundError:
         report.findings.append(
             Finding(
@@ -1775,9 +2014,9 @@ def _analyze_index_file(
         )
 
     # budget — hot-cache size.
-    budget = measure_budget(text)
+    budget = measure_budget(raw)
     if budget.over_budget:
-        parts = [f"{budget.byte_len} bytes (cap {_INDEX_MAX_BYTES})"]
+        parts = [f"{budget.utf16_units} UTF-16 units (cap {_INDEX_MAX_UNITS})"]
         parts.append(f"{budget.line_count} lines (cap {_INDEX_MAX_LINES})")
         if budget.overlong_lines:
             shown = ", ".join(f"L{n}" for n in budget.overlong_lines[:_SAMPLE_LIMIT])

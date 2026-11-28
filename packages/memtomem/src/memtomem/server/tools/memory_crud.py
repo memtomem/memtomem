@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import stat
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -47,9 +49,11 @@ from memtomem.source_provenance import (
 )
 from memtomem.tools.memory_writer import (
     EditBaseMismatchError,
+    OpenFenceEditError,
     RestoreOutcome,
     SourceChangedError,
     WrittenSource,
+    open_fence_edit_refusal,
     read_pre_image,
     read_with_source_key,
     restore_pre_image_quietly,
@@ -70,7 +74,7 @@ def edit_base_mismatch_message(exc: EditBaseMismatchError) -> str:
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from memtomem.models import Chunk, ChunkMetadata, IndexingStats
     from memtomem.tools.memory_writer import Appended, JudgedSource, PreImage, Rewrite
@@ -281,11 +285,14 @@ async def _namespace_mix_refusal(
 
 @asynccontextmanager
 async def _locked_chunk(
-    app: AppContext, uid: UUID, chunk_id: str
+    app: AppContext, uid: UUID, chunk_id: str, *, rewrite_guard: bool = True
 ) -> AsyncIterator[tuple[Chunk | None, str | None, bool]]:
     """Yield ``(chunk, None, cross_process_held)`` with the source file's L1+L2
     locks held and the chunk re-fetched fresh under them, or
     ``(None, error_message, cross_process_held)``.
+
+    ``rewrite_guard=False`` leaves out :func:`_scope_loss_refusal`, for a caller
+    that may only remove the row and asks it itself before any rewrite.
 
     ``cross_process_held`` is ``False`` when the source's directory was gone and
     L2 degraded to its in-process layer (#2346). A caller that then writes bytes
@@ -382,7 +389,11 @@ async def _locked_chunk(
                         yield None, f"Error: chunk {chunk_id} not found.", cross_process_held
                         return
                     if AppContext.memory_file_lock_key(fresh.metadata.source_file) == key:
-                        refusal = await _scope_loss_refusal(app, fresh, chunk_id)
+                        refusal = (
+                            await _scope_loss_refusal(app, fresh, chunk_id)
+                            if rewrite_guard
+                            else None
+                        )
                         if refusal is not None:
                             yield None, refusal, cross_process_held
                             return
@@ -498,6 +509,42 @@ async def _flag_imprecise_write(
         or ((stats.excluded_files or stats.relinked_files) and appended)
     ):
         await mark_provenance_incomplete(app, session_id)
+
+
+def _entry_chunks_line(stats: IndexingStats) -> str:
+    """The ``- Entry chunks:`` line of a ``mem_add`` result (#3400).
+
+    ``- Chunks indexed`` is the whole file's upsert count, so it cannot say
+    whether the appended entry stayed in one chunk. This line can: it counts
+    the indexed chunks the entry's lines fall in, ``appended_chunk_ids``
+    (#3292), including a chunk that kept an existing id by content hash. The
+    count is by span, not by content, so a whitespace-only fragment inside the
+    entry counts too. It describes the file as this write indexed it; a later
+    write to the file can chunk the entry differently.
+
+    * ``exact``: the number alone. Every counted chunk holds only appended text.
+    * ``merged``: the number, and that the first chunk also holds text from
+      before the entry (a short entry merged into the previous section, or an
+      entry header that lands in that section's chunk, which counts even when
+      the entry's body stays in one chunk of its own).
+    * ``unverified``: ``unknown``. The spans cannot say what a chunk holds
+      (overlap, a masked projection, a chunker other than Markdown), or the
+      file was not the text this call wrote.
+    * The index pass did not leave the file's chunks current (``current_files``
+      is 0: an exclusion, a relink, an embedding failure, a suffix with no
+      chunker, a size or binary skip, any hold). Older rows can remain, a
+      reused entry chunk among them, so this is ``unknown``, not 0.
+
+    The number comes first, so a reader can match ``Entry chunks: (\\d+)``.
+    """
+    if not stats.current_files:
+        return "- Entry chunks: unknown (this write did not index the file)"
+    count = len(stats.appended_chunk_ids)
+    if stats.appended_attribution == "exact":
+        return f"- Entry chunks: {count}"
+    if stats.appended_attribution == "merged":
+        return f"- Entry chunks: {count} (shares its first chunk with text before the entry)"
+    return "- Entry chunks: unknown"
 
 
 async def _preflight_refusal(
@@ -669,6 +716,9 @@ async def _mutate_file_and_reindex(
             # every gate in front of it: hand back what the span holds, so one
             # retry against the source text can succeed.
             return None, edit_base_mismatch_message(exc)
+        if isinstance(exc, OpenFenceEditError) and not mutation_completed:
+            # Refused inside the rewrite before a byte was written (#3633).
+            return None, f"Error: {open_fence_edit_refusal(exc.run)}"
         if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
             # No byte was written. In particular, do not reindex here: doing
             # so could erase the stale row and bless an unrelated replacement.
@@ -810,13 +860,15 @@ def _validate_path(
             )
         from memtomem.memory_scope import (
             MemoryScopeError,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
         )
 
         try:
             # ``user_base`` is unused for project tiers — don't index a
-            # possibly-empty ``memory_dirs`` here (#1768).
-            base = resolve_memory_scope_dir(scope, project_root)
+            # possibly-empty ``memory_dirs`` here (#1768). A linked tier is
+            # refused: its target may be another project's registered tier,
+            # which the root check below would accept (#3623).
+            base = resolve_project_tier_write_dir(scope, project_root)
         except MemoryScopeError as exc:
             return None, f"Error: {exc}"
         target = (base / raw).resolve()
@@ -854,7 +906,9 @@ async def _mem_add_core(
     event_type: str,
     confirmation_surface: str = "mem_add",
     file_name: str | None = None,
+    new_file_only: bool = False,
     on_appended: Callable[[str], None] | None = None,
+    ledger_tool: str = "mem_add",
 ) -> tuple[str, "IndexingStats | None"]:
     """Core logic for ``mem_add`` — also usable from internal callers that
     need the ``IndexingStats`` (e.g. ``mem_consolidate_apply`` linking new
@@ -903,10 +957,21 @@ async def _mem_add_core(
     construction, so it is never re-targeted the way a day file is (#2005).
     Ignored when ``file`` is given.
 
+    ``new_file_only`` refuses the write when the target file already exists,
+    before anything is written: for a ``file_name`` whose point is that the
+    entry is the file's only one (a share copy #3324, a consolidation summary
+    #3474). The check reads the
+    preflight's view of the file under the lock; a file created after it is
+    refused by the writer's exclusive create.
+
     ``on_appended`` is called once with the text this call appended, under the
     file lock, right after the append and before the re-index.
     ``stats.appended_chunk_ids`` names the chunks this entry became (#3292),
     while ``stats.new_chunk_ids`` describes the whole file's re-index.
+
+    ``ledger_tool`` is the tool name ``idempotency_key`` is recorded under.
+    The ledger is keyed by ``(tool, key)``, so a caller whose keys must not
+    replay, or be replayed by, an ordinary ``mem_add`` key names its own.
 
     Returns:
         Tuple of ``(user_facing_message, stats)``. ``stats`` is ``None``
@@ -936,7 +1001,7 @@ async def _mem_add_core(
     # the redaction gates (avoids double-counting privacy outcomes). The
     # authoritative re-check happens under the file lock below.
     if idempotency_key is not None:
-        stored = await app.storage.idempotency_get("mem_add", idempotency_key)
+        stored = await app.storage.idempotency_get(ledger_tool, idempotency_key)
         if stored is not None:
             return (stored + _REPLAY_MARKER, None)
 
@@ -1040,8 +1105,32 @@ async def _mem_add_core(
     # signal, while this is the write-rejection gate at the trust boundary.
     # (Kept as a comment rather than in the tool description: it explains why
     # the server behaves this way, which no caller needs in order to call it.)
+    #
+    # The template is rendered first and the guard reads the entry as it will
+    # be written, title and tags included: a template puts the title into its
+    # own heading, so scanning the arguments as given would miss it there.
+    if template:
+        from memtomem.templates import list_templates, render_template
+
+        try:
+            content = render_template(template, content, title=title)
+            # Template already includes its own heading — don't duplicate
+            title = None
+        except ValueError as exc:
+            return (f"Error: {exc}\n\nAvailable templates:\n{list_templates()}", None)
+
+    from memtomem.tools.memory_writer import entry_guard_text, entry_open_fence, open_fence_refusal
+
+    # An entry that leaves a fence open makes every later entry in the file
+    # code inside it (#3618). Refused before the privacy guard, so the guard
+    # records no outcome (a Gate B consent line above can still have been
+    # emitted: it records the consent, not the write).
+    fence = entry_open_fence(content, title, tags)
+    if fence is not None:
+        return (f"Error: {open_fence_refusal(fence)}", None)
+
     guard = privacy.enforce_write_guard(
-        content,
+        entry_guard_text(content, title, tags),
         surface="mem_add",
         force_unsafe=force_unsafe,
         scope=effective_scope,
@@ -1069,17 +1158,6 @@ async def _mem_add_core(
             None,
         )
 
-    # Apply template if specified
-    if template:
-        from memtomem.templates import list_templates, render_template
-
-        try:
-            content = render_template(template, content, title=title)
-            # Template already includes its own heading — don't duplicate
-            title = None
-        except ValueError as exc:
-            return (f"Error: {exc}\n\nAvailable templates:\n{list_templates()}", None)
-
     if target is None:
         # ADR-0011: route the default-dated file to the canonical
         # directory for the requested scope. Without this branch, MCP
@@ -1092,7 +1170,7 @@ async def _mem_add_core(
             is_project_tier_registered,
             project_tier_registration_error,
             require_user_base,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
             resolve_scope_target,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
@@ -1114,7 +1192,9 @@ async def _mem_add_core(
             if project_root_override is not None:
                 project_root = project_root_override
             try:
-                base = resolve_memory_scope_dir(effective_scope, project_root)
+                # A linked tier is refused before the registration check,
+                # which would accept another project's tier it leads to (#3623).
+                base = resolve_project_tier_write_dir(effective_scope, project_root)
             except MemoryScopeError as exc:
                 return (f"Error: {exc}", None)
             # ADR-0011: refuse if the resolved tier directory is not
@@ -1249,13 +1329,19 @@ async def _mem_add_core(
                     )
                     if refusal is not None:
                         return (refusal, None)
+                    if new_file_only and judged.existed:
+                        return (
+                            f"Error: {target} already exists; nothing was written. "
+                            "Retry to write to a new file.",
+                            None,
+                        )
                     # Idempotency claim under the lock (issue #1573). The claim is a
                     # global (tool, key) row, not a file lock, so it also blocks a
                     # concurrent same-key call that targets a *different* file: exactly
                     # one caller wins the write, the rest replay or get "in progress".
                     if idempotency_key is not None:
                         state, stored = await app.storage.idempotency_claim(
-                            "mem_add", idempotency_key
+                            ledger_tool, idempotency_key
                         )
                         if state == "completed":
                             assert stored is not None  # completed rows always carry a result
@@ -1279,12 +1365,12 @@ async def _mem_add_core(
                         # The path stopped holding the judged file before the open:
                         # nothing was written. A refusal, so ``stats is None``.
                         if idempotency_key is not None:
-                            await _release_idempotency_claim(app, "mem_add", idempotency_key)
+                            await _release_idempotency_claim(app, ledger_tool, idempotency_key)
                         refusal = await _changed_append_refusal(app, target, judged, op="mem_add")
                         return (refusal, None)
                     except Exception:
                         if idempotency_key is not None:
-                            await _release_idempotency_claim(app, "mem_add", idempotency_key)
+                            await _release_idempotency_claim(app, ledger_tool, idempotency_key)
                         raise
                     if on_appended is not None:
                         on_appended(appended.text)
@@ -1338,6 +1424,7 @@ async def _mem_add_core(
                         f"Memory added to {target}\n"
                         f"- Namespace: {display_ns}\n"
                         f"- Chunks indexed: {stats.indexed_chunks}\n"
+                        f"{_entry_chunks_line(stats)}\n"
                         f"- File: {target}"
                     )
                     # A fact of this write, not an advisory tail: stored with the
@@ -1356,7 +1443,7 @@ async def _mem_add_core(
                     if idempotency_key is not None:
                         try:
                             await app.storage.idempotency_complete(
-                                "mem_add", idempotency_key, result
+                                ledger_tool, idempotency_key, result
                             )
                         except Exception:
                             logger.warning(
@@ -1753,6 +1840,215 @@ async def mem_edit(
         ) + _rewrite_notices("edit", stats, meta.source_file)
 
 
+def _gate_b_refusal(
+    meta: ChunkMetadata, chunk_id: str, confirm_project_shared: bool, *, surface: str
+) -> str | None:
+    """ADR-0011 Gate B for a chunk delete, and its consent audit when it passes."""
+    from memtomem import privacy
+
+    inferred_scope = meta.scope or "user"
+    if inferred_scope != "project_shared":
+        # An ordinary user-tier delete asked for no consent and must not be
+        # recorded as having given one.
+        return None
+    if not confirm_project_shared:
+        logger.info(
+            f"{surface} rejected project_shared chunk without confirmation",
+            extra={"chunk_id": chunk_id, "scope": inferred_scope},
+        )
+        return "Error: deleting scope='project_shared' chunks requires confirm_project_shared=True."
+    privacy.emit_project_shared_confirmation(
+        surface=surface,
+        mechanism="param",
+        action="delete",
+        audit_context={"chunk_id": chunk_id},
+    )
+    return None
+
+
+def _stat_unless_missing(path: Path) -> os.stat_result | None:
+    """``path``'s stat, or ``None`` when nothing is there; other failures raise."""
+    try:
+        return path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+async def _source_missing_for_delete(
+    chunk: Chunk, chunk_id: str, cross_process_held: bool
+) -> tuple[bool, str | None]:
+    """Whether a chunk delete may remove only the row: ``(missing, refusal)``.
+
+    The web route's policy (``web/routes/chunks.py`` ``delete_chunk``). A span
+    that took no cross-process lock had no directory to lock in, and is decided
+    on that, not on a stat: the file can come back after the acquire, and the
+    row-only delete then writes no bytes to it (#2346). Otherwise only confirmed
+    absence counts. A stat that fails another way, or finds something other
+    than a regular file, is refused: neither is an archive, and a FIFO there
+    would block the pre-image read.
+    """
+    if not cross_process_held:
+        return True, None
+    try:
+        found = await asyncio.to_thread(_stat_unless_missing, chunk.metadata.source_file)
+    except OSError:
+        logger.warning("Could not inspect the source of chunk %s", chunk_id, exc_info=True)
+        return False, (
+            f"Error: could not access chunk {chunk_id}'s source file; nothing was deleted. "
+            "Retry once it is accessible."
+        )
+    if found is None:
+        return True, None
+    if not stat.S_ISREG(found.st_mode):
+        return False, (
+            f"Error: chunk {chunk_id}'s source is not a regular file; nothing was deleted. "
+            "Repair or reindex the source and retry."
+        )
+    return False, None
+
+
+async def _delete_row_of_missing_source(
+    app: AppContext,
+    chunk: Chunk,
+    chunk_id: str,
+    confirm_project_shared: bool,
+    *,
+    surface: str,
+) -> str:
+    """Remove the row of a chunk whose source file is missing; the source is not written (#2842).
+
+    Runs under the source's locks. The checks that decide the delete read the
+    writer inside the delete's own transaction, so nothing commits between
+    them and the delete (#3202): a redaction hold placed or a re-scope made
+    since the locked fetch is judged here. The config-level read-only and
+    managed-source gates are asked again here too, as the rewrite asks them
+    again after its locks: ``_locked_chunk`` asked them before it waited, and
+    root reconciliation can change both meanwhile. The rewrite's own gates
+    (stored read-only flags, exclusion, the scope-loss guard) are left out, as
+    on the web route: they protect bytes and a re-index, and there is neither.
+    """
+    source_file = chunk.metadata.source_file
+    provenance_session_id = await capture_session_for_untracked_write(app)
+    async with _gated_delete_transaction(app):
+        fresh = await app.storage.get_chunk(chunk.id, exclude_withheld=True, read_writer=True)
+        # Resolved here, not before the wait: a project tier unregistered
+        # meanwhile puts the caller outside a project its row still names.
+        if fresh is None or not in_boundary(fresh, caller_boundary(app)):
+            return f"Error: chunk {chunk_id} not found."
+        if str(fresh.metadata.source_file) != str(source_file):
+            raise RetryableError(
+                f"chunk {chunk_id} moved to another source file while it was deleted; "
+                "nothing was deleted. Retry."
+            )
+        if app.index_engine.is_read_only_source(source_file):
+            return f"Error: {SOURCE_READ_ONLY_DETAIL}"
+        if not app.index_engine.is_managed_source(source_file, fresh.metadata):
+            return f"Error: {UNMANAGED_SOURCE_DETAIL}"
+        refusal = _gate_b_refusal(fresh.metadata, chunk_id, confirm_project_shared, surface=surface)
+        if refusal is not None:
+            return refusal
+        deleted = await app.storage.delete_chunks([chunk.id], finalize_emptied=True)
+    if not deleted:
+        return f"Error: chunk {chunk_id} not found."
+    app.search_pipeline.invalidate_cache()
+    await flag_untracked_write(app, provenance_session_id)
+    return (
+        f"Memory deleted from the index: chunk {chunk_id}\n"
+        f"- Source file {source_file} was missing and was left untouched"
+    )
+
+
+async def _delete_chunk(
+    app: AppContext,
+    uid: UUID,
+    chunk_id: str,
+    confirm_project_shared: bool,
+    *,
+    surface: str = "mem_delete",
+    precheck: Callable[[Chunk], Awaitable[str | None]] | None = None,
+    index_only_if_missing: bool = False,
+) -> str:
+    """Remove one chunk's lines from its file and re-index it: ``mem_delete``'s chunk branch.
+
+    ``precheck`` runs under the file's locks, after every gate and before the
+    pre-image read, on the fresh chunk; a string it returns is the refusal and
+    nothing past it runs. ``mem_dedup_remove`` uses it to check the member it
+    keeps. ``surface`` names the tool in the consent audit and its log line.
+
+    ``index_only_if_missing=True`` removes the chunk from the index without
+    writing the file when the source file is missing, as the web route's chunk
+    delete does (#2842); without it a missing source is refused. It does not
+    combine with ``precheck``, whose checks are about the file the rewrite
+    would change.
+    """
+    from memtomem.tools.memory_writer import remove_lines
+
+    assert precheck is None or not index_only_if_missing
+    # Serialize the read → rewrite → re-index → rollback span on the
+    # chunk's source file; re-fetch fresh under the lock (issue #1570).
+    async with _locked_chunk(app, uid, chunk_id, rewrite_guard=not index_only_if_missing) as (
+        chunk,
+        lock_err,
+        cross_process_held,
+    ):
+        if lock_err:
+            return lock_err
+        assert chunk is not None
+        if index_only_if_missing:
+            missing, refusal = await _source_missing_for_delete(chunk, chunk_id, cross_process_held)
+            if refusal is not None:
+                return refusal
+            if missing:
+                return await _delete_row_of_missing_source(
+                    app, chunk, chunk_id, confirm_project_shared, surface=surface
+                )
+            # The guard ``_locked_chunk`` left out for this caller, asked under
+            # the same locks on the same row, before anything below rewrites.
+            refusal = await _scope_loss_refusal(app, chunk, chunk_id)
+            if refusal is not None:
+                return refusal
+        if not cross_process_held:
+            # See ``mem_edit``: this branch removes the chunk's lines from
+            # the file, so it may not run on a span that took no
+            # cross-process lock (#2346).
+            return _degraded_source_error(chunk_id)
+        meta = chunk.metadata
+        if meta.source_read_only or meta.redaction_count:
+            return f"Error: {SOURCE_READ_ONLY_DETAIL}"
+        # Confirm gate on the fresh chunk: a migrate could have re-scoped
+        # it while we waited for the lock (see mem_edit for the rationale).
+        refusal = _gate_b_refusal(meta, chunk_id, confirm_project_shared, surface=surface)
+        if refusal is not None:
+            return refusal
+        if precheck is not None:
+            refusal = await precheck(chunk)
+            if refusal is not None:
+                return refusal
+        stats, mutate_err = await _mutate_file_and_reindex(
+            app,
+            meta.source_file,
+            # See ``mem_edit``: the pre-image's identity is what keeps this
+            # from recreating a source somebody else already removed (#2367).
+            lambda pre: remove_lines(
+                meta.source_file,
+                meta.start_line,
+                meta.end_line,
+                expected_source_span_hash=meta.source_span_hash,
+                expected_identity=pre.identity,
+            ),
+            op="delete",
+            stored=meta,
+        )
+        if mutate_err:
+            return mutate_err
+        assert stats is not None
+        return (
+            f"Memory deleted from {meta.source_file}\n"
+            f"- Lines {meta.start_line}-{meta.end_line} removed\n"
+            f"- Re-indexed: {stats.indexed_chunks} chunks"
+        ) + _rewrite_notices("delete", stats, meta.source_file)
+
+
 @mcp.tool()
 @tool_handler
 @register("crud")
@@ -1766,7 +2062,9 @@ async def mem_delete(
     """Delete memory entries from the index (and optionally from the source file).
 
     When chunk_id is given, the specific chunk's line range is removed from
-    the markdown file and the file is re-indexed.
+    the markdown file and the file is re-indexed. If that file is missing
+    from disk, the chunk is removed from the index instead, as the Web UI's
+    chunk delete does; the source is not written.
     When source_file is given, all chunks from that file are removed from the
     index (the file itself is NOT deleted).
     When namespace is given, all chunks in that namespace are removed from the index.
@@ -1781,7 +2079,6 @@ async def mem_delete(
         confirm_project_shared: Required for project_shared chunks
     """
     from memtomem import privacy
-    from memtomem.tools.memory_writer import remove_lines
 
     app = await _get_app_initialized(ctx)
     # Captured before the branches below rather than inside them: each
@@ -1796,65 +2093,9 @@ async def mem_delete(
         except (ValueError, TypeError):
             return f"Error: invalid chunk ID format: {chunk_id}"
 
-        # Serialize the read → rewrite → re-index → rollback span on the
-        # chunk's source file; re-fetch fresh under the lock (issue #1570).
-        async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err, cross_process_held):
-            if lock_err:
-                return lock_err
-            if not cross_process_held:
-                # See ``mem_edit``: this branch removes the chunk's lines from
-                # the file, so it may not run on a span that took no
-                # cross-process lock (#2346).
-                return _degraded_source_error(chunk_id)
-            assert chunk is not None
-            meta = chunk.metadata
-            if meta.source_read_only or meta.redaction_count:
-                return f"Error: {SOURCE_READ_ONLY_DETAIL}"
-            # Confirm gate on the fresh chunk: a migrate could have re-scoped
-            # it while we waited for the lock (see mem_edit for the rationale).
-            inferred_scope = meta.scope or "user"
-            if inferred_scope == "project_shared" and not confirm_project_shared:
-                logger.info(
-                    "mem_delete rejected project_shared chunk without confirmation",
-                    extra={"chunk_id": chunk_id, "scope": inferred_scope},
-                )
-                return (
-                    "Error: deleting scope='project_shared' chunks requires "
-                    "confirm_project_shared=True."
-                )
-            # Mirrors the gate's scope predicate: falling through also covers
-            # an ordinary user-tier delete, which asked for no consent and
-            # must not be recorded as having given one.
-            if inferred_scope == "project_shared":
-                privacy.emit_project_shared_confirmation(
-                    surface="mem_delete",
-                    mechanism="param",
-                    action="delete",
-                    audit_context={"chunk_id": chunk_id},
-                )
-            stats, mutate_err = await _mutate_file_and_reindex(
-                app,
-                meta.source_file,
-                # See ``mem_edit``: the pre-image's identity is what keeps this
-                # from recreating a source somebody else already removed (#2367).
-                lambda pre: remove_lines(
-                    meta.source_file,
-                    meta.start_line,
-                    meta.end_line,
-                    expected_source_span_hash=meta.source_span_hash,
-                    expected_identity=pre.identity,
-                ),
-                op="delete",
-                stored=meta,
-            )
-            if mutate_err:
-                return mutate_err
-            assert stats is not None
-            return (
-                f"Memory deleted from {meta.source_file}\n"
-                f"- Lines {meta.start_line}-{meta.end_line} removed\n"
-                f"- Re-indexed: {stats.indexed_chunks} chunks"
-            ) + _rewrite_notices("delete", stats, meta.source_file)
+        return await _delete_chunk(
+            app, uid, chunk_id, confirm_project_shared, index_only_if_missing=True
+        )
 
     if source_file:
         # ``source_file`` usually names a stored key, as ``mem_list`` prints it
@@ -2197,13 +2438,35 @@ async def mem_batch_add(
     # only record outcomes after deciding whether to commit the
     # whole batch (transactional invariant: no pass record on a
     # rejected batch).
+    from memtomem.tools.memory_writer import entry_guard_text, entry_open_fence
+
+    def _entry_fields(entry: dict) -> tuple[str | None, str, list[str] | None]:
+        """``(title, value, tags)`` as the block is written; the guard reads the same."""
+        key = entry.get("key") or entry.get("title", "")
+        return key or None, entry.get("value") or entry.get("content", ""), entry.get("tags")
+
+    # A block that leaves a fence open would make every block after it, and every
+    # later entry in the file, code inside it (#3618). The whole batch is refused,
+    # before any guard decision is taken or recorded.
+    open_fences = []
+    for idx, entry in enumerate(entries):
+        entry_title, value, entry_tags = _entry_fields(entry)
+        if value and entry_open_fence(value, entry_title, entry_tags) is not None:
+            open_fences.append(idx)
+    if open_fences:
+        return (
+            f"Error: items at indices {open_fences} leave a code fence open, so every "
+            "entry written to the file after them would be indexed inside that fence. "
+            "Whole batch rejected; close the fences and retry."
+        )
+
     decisions: list[tuple[int, str, int]] = []  # (idx, decision, hit_count)
     for idx, entry in enumerate(entries):
-        value = entry.get("value") or entry.get("content", "")
+        entry_title, value, entry_tags = _entry_fields(entry)
         if not value:
             continue
         guard = privacy.enforce_write_guard(
-            value,
+            entry_guard_text(value, entry_title, entry_tags),
             surface="mem_batch_add",
             force_unsafe=force_unsafe,
             scope=effective_scope,
@@ -2273,7 +2536,7 @@ async def mem_batch_add(
             is_project_tier_registered,
             project_tier_registration_error,
             require_user_base,
-            resolve_memory_scope_dir,
+            resolve_project_tier_write_dir,
             resolve_scope_target,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
@@ -2288,7 +2551,8 @@ async def mem_batch_add(
         else:
             project_root = _resolve_project_context_root(app)
             try:
-                base = resolve_memory_scope_dir(effective_scope, project_root)
+                # A linked tier is refused, as in ``_mem_add_core`` (#3623).
+                base = resolve_project_tier_write_dir(effective_scope, project_root)
             except MemoryScopeError as exc:
                 return f"Error: {exc}"
             # ADR-0011 PR-D round 6: refuse if the resolved tier dir is
@@ -2331,13 +2595,11 @@ async def mem_batch_add(
         skipped = 0
         blocks: list[str] = []
         for entry in entries:
-            key = entry.get("key") or entry.get("title", "")
-            value = entry.get("value") or entry.get("content", "")
-            entry_tags = entry.get("tags")
+            entry_title, value, entry_tags = _entry_fields(entry)
             if not value:
                 skipped += 1
                 continue
-            blocks.append(format_entry_block(value, title=key or None, tags=entry_tags))
+            blocks.append(format_entry_block(value, title=entry_title, tags=entry_tags))
         return skipped, append_blocks(path, blocks, judged=judged)
 
     # Serialize the batch append + re-index under the per-file lock (issue
@@ -2356,6 +2618,7 @@ async def mem_batch_add(
         # Bounded re-target loop, same contract as ``_mem_add_core``
         # (issue #2005): the day file's name depends on the namespace, which
         # is only authoritative once resolved inside the lock.
+        from memtomem.indexing.append_attribution import append_region
         from memtomem.indexing.engine import PrivacyRejection
         from memtomem.tools.memory_mutation import appended_valve_text
 
@@ -2465,6 +2728,10 @@ async def mem_batch_add(
                             ),
                             lock_held=True,
                             written_source=appended.source,
+                            # One region for every entry: the batch's provenance
+                            # event names the chunks the whole batch became, so
+                            # no reader needs them entry by entry.
+                            append_region=append_region(judged.data, appended.text),
                         )
                     except PrivacyRejection as exc:
                         # The entry is on disk and the result may not be indexed
@@ -2516,12 +2783,15 @@ async def mem_batch_add(
                     f"Error: {target} is locked by another process (migration in flight?); retry."
                 )
             app.search_pipeline.invalidate_cache()
-            await record_write_provenance(
-                app,
-                session_id=provenance_session_id,
-                event_type="batch_add",
-                stats=stats,
-            )
+            # A batch of only empty entries wrote nothing, so the re-index's
+            # ids, if any, are another writer's pending text, not this session's.
+            if appended.text:
+                await record_write_provenance(
+                    app,
+                    session_id=provenance_session_id,
+                    event_type="batch_add",
+                    stats=stats,
+                )
             break
         else:
             return NS_RETARGET_EXHAUSTED_ERROR

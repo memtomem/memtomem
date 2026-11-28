@@ -119,6 +119,10 @@ class TestWebMetadataIdentity:
             (None, {"pid": True, "procid": _PROCID}, {}),
             (None, {"pid": 0, "procid": _PROCID}, {}),
             (None, {"pid": -1, "procid": _PROCID}, {}),
+            # The probe saw web.pid change mid-probe (#3423): the sidecar may
+            # be the predecessor's, and no pid is left to check it against.
+            # Same inputs as the unreadable-pid identity above, plus the flag.
+            (None, {"pid": 77, "procid": _PROCID}, {"payload_changed": True}),
         ],
     )
     def test_unproven_identity_is_none(self, tmp_path, pid, sidecar, extra) -> None:

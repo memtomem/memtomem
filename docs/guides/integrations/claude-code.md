@@ -55,8 +55,12 @@ Before `/plugin install`, review existing registrations in `/mcp`, then run
 the diagnostic from the project you want to inspect:
 
 ```bash
-uvx --from "memtomem[all]==0.7.8" mm doctor --claude-mcp
+uvx --python 3.12 --from "memtomem[all]==0.7.14" mm doctor --claude-mcp
 ```
+
+Like the plugin's server launch below, this needs a Python 3.12 that uv can
+find or download; the paragraph after the install commands says what to do
+where uv may not download Python on its own.
 
 The pin is there because installing the plugin registers an MCP server; it does
 not put `mm` on your PATH. If you already have the CLI installed,
@@ -67,6 +71,8 @@ plus current/prospective risk and whether an existing registration can be reused
 Exit codes are `0` (no detected conflict), `1` (duplicate risk), and `2`
 (incomplete inspection). The prospective check uses this CLI release's generated
 plugin contract; an installed plugin is checked against its actual manifest.
+The marketplace can serve a plugin newer than that release, with a different
+launch command, so repeat the diagnostic after installing.
 It does not intercept Claude's installation command.
 
 ```
@@ -78,14 +84,20 @@ For project-scoped onboarding, run `claude plugin install memtomem@memtomem --sc
 from that project directory instead. The [plugin quickstart](../plugin-quickstart.md#3-path-a-install-the-claude-code-plugin)
 explains effective enablement and disabling a manual server only in that project.
 
-The plugin launches the server via an exact reviewed `uvx --from
-memtomem[onnx]==<version>` pin, so [uv](https://docs.astral.sh/uv/) must be on your
-PATH. BM25 works with the default `embedding.provider=none`; embeddings are
+The plugin launches the server via an exact reviewed
+`uvx --python 3.12 --from memtomem[onnx]==<version>` pin, so
+[uv](https://docs.astral.sh/uv/) must be on your PATH, and the server needs a
+Python 3.12 that uv can find or download. Where uv may not download Python on its own (`python-downloads =
+"never"` or `"manual"` in its configuration), the server does not start on a
+machine with only a newer Python until you install a Python 3.12
+(`uv python install 3.12` downloads one under `"manual"`, not under `"never"`);
+[Option B](#option-b-register-the-mcp-server-manually) can use the Python you
+have. BM25 works with the default `embedding.provider=none`; embeddings are
 optional.
 
 > **Already registered via `claude mcp add`?** What happens depends on
 > whether your manual entry launches the server with the **same command and
-> arguments** as the plugin — `uvx --from 'memtomem[onnx]==0.7.8' memtomem-server`
+> arguments** as the plugin — `uvx --python 3.12 --from 'memtomem[onnx]==0.7.14' memtomem-server`
 > (environment variables are not compared; measured on Claude Code 2.1.218):
 >
 > - **Same command** — Claude Code suppresses the plugin-managed copy, your
@@ -94,8 +106,8 @@ optional.
 >   the manual entry wins, including its environment.
 > - **Different command** — and the manual registrations this guide and
 >   [mcp-clients.md](../mcp-clients.md) teach (`memtomem-server` from your
->   environment, or `uvx --isolated --from "memtomem[all]==0.7.8"
->   memtomem-server`) *are* different — **duplicate registrations are possible**,
+>   environment, or `uvx --python 3.12 --isolated --from
+>   "memtomem[all]==0.7.14" memtomem-server`) *are* different — **duplicate registrations are possible**,
 >   exposing tools under
 >   `mcp__memtomem__mem_*` plus `mcp__plugin_memtomem_memtomem__mem_*`.
 >
@@ -186,8 +198,13 @@ Both `-s local` and `-s user` write to `~/.claude.json` — no need to edit
 that file by hand.
 
 The direct command preserves the extras in the persistent environment used by
-`mm`. For a no-install setup, use `uvx --isolated --from
-"memtomem[all]==0.7.8" memtomem-server`. If an older user-scope registration
+`mm`. For a no-install setup, use `uvx --python 3.12 --isolated --from
+"memtomem[all]==0.7.14" memtomem-server`, which needs a Python 3.12 that uv can
+find or download: where uv may not download Python on its own and only a newer
+Python is installed, it stops with `No interpreter found for Python 3.12`. Then install a
+Python 3.12 first, or install memtomem with the Python you have
+(`uv tool install --python 3.13 'memtomem[all]'`, with your version in place of
+`3.13`) and use the direct command above. If an older user-scope registration
 already exists, replace it explicitly:
 
 ```bash
@@ -316,15 +333,15 @@ only when those side effects are wanted:
 Install the exact CLI version expected by the automation bundle:
 
 ```bash
-uv tool install 'memtomem==0.7.8'
+uv tool install --python 3.12 memtomem==0.7.14
 ```
 
 That command installs no extras. If your store uses a local ONNX model (the
-`mm init` English and Korean presets do), install `'memtomem[onnx]==0.7.8'`
-or `'memtomem[all]==0.7.8'` instead; a base-only `mm` reports the missing
+`mm init` English and Korean presets do), install `'memtomem[onnx]==0.7.14'`
+or `'memtomem[all]==0.7.14'` instead; a base-only `mm` reports the missing
 ONNX dependencies rather than indexing.
 
-Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.7.8`
+Already have memtomem installed as a uv tool? Run `mm upgrade --version 0.7.14`
 instead of reinstalling; the
 [CLI reference](../reference/data-config-cli.md#cli-reference) covers what it
 preserves and stops.
@@ -334,7 +351,9 @@ prompt or tool fields as shell variables. It validates the `mm` version at
 session start and fails open when input or dependencies are invalid. Logs live
 under `${CLAUDE_PLUGIN_DATA}/hook.log` and contain command status, not prompt
 content. The dispatcher runs through `uv`, including on Windows where a
-`python3` alias may not exist.
+`python3` alias may not exist. It runs on the interpreter uv finds first, which
+may be an older system Python: it needs Python 3.8 or newer, while `mm` itself
+needs Python 3.12 or newer, which its install command asks uv for.
 
 <details>
 <summary>Which settings file gets written? (hook tiers)</summary>

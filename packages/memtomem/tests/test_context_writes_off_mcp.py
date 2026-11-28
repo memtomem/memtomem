@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING
 import anyio
 import pytest
 
+from _subprocess_env import subprocess_env
+
 from memtomem.server import _ALL_REGISTERED_TOOLS, _CORE_TOOLS, _STANDARD_PACKS
 from memtomem.server.tool_registry import ACTIONS
 from memtomem.server.tools.meta import _ALIASES, mem_do
@@ -108,13 +110,15 @@ def _server_env(tmp_path: Path, home: Path, mode: str, extra_tools: str | None) 
     ``HOME`` and the runtime directory point into ``tmp_path``. The server also
     loads a ``.env`` it finds by walking up from its own source file, which under
     an editable install reaches the checkout root whatever ``HOME`` and the cwd
-    are; ``PYTHON_DOTENV_DISABLED`` closes that. ``PYTHONPATH`` entries are made
-    absolute because the child runs from the project directory.
+    are; ``PYTHON_DOTENV_DISABLED`` closes that. ``subprocess_env()`` puts the
+    source root of the ``memtomem`` this process imported first on
+    ``PYTHONPATH``; the inherited entries after it are made absolute because the
+    child runs from the project directory.
     """
     xdg = tmp_path / "xdg"
     xdg.mkdir(exist_ok=True)
     os.chmod(xdg, 0o700)
-    env = os.environ.copy()
+    env = subprocess_env()
     env.update(
         {
             "HOME": str(home),

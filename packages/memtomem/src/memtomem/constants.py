@@ -270,12 +270,21 @@ def validate_writable_namespace(value: object) -> str:
     on purpose. Namespace rules produce shapes the strict gate refuses (a
     ``claude:-Users-…`` segment with a leading dash, from a Claude Code
     project directory name), and a write into a namespace a store already
-    uses has to keep working. What a write must not do is store a name the
-    read side cannot address by that exact name, so the reader decides:
+    uses has to keep working unless that name is one refused below. What a write
+    must not do is store a name the read side cannot address by that exact
+    name, or one its filters would read as some other name, so the reader
+    decides:
 
     * not a string, empty, or only whitespace: refused. Readers treat an
       empty namespace as "no filter", and the indexer would store it as an
       explicit one.
+    * contains a NUL character: refused (#3589). SQLite's ``LIKE`` reads a
+      value only up to its first NUL, so the default-search exclusion and
+      namespace globs would compare ``arc\\x00z`` as ``arc`` while the Python
+      prefix checks compare the whole string. An exact-name filter (``IN``)
+      compares the whole value, so rows already stored under such a name stay
+      reachable by it. Tab and DEL compare the same on both sides and stay
+      accepted.
     * first ``:`` segment is ``agent-runtime``: the strict
       :func:`validate_namespace`, so a write cannot store an agent-runtime
       name the agent-id contract refuses (``agent-runtime:foo:bar``, #496).
@@ -294,6 +303,12 @@ def validate_writable_namespace(value: object) -> str:
         raise InvalidNameError(f"{prefix}: expected str, got {type(value).__name__}")
     if not value.strip():
         raise InvalidNameError(f"{prefix} {value!r}: empty")
+    if "\x00" in value:
+        raise InvalidNameError(
+            f"{prefix} {value!r}: contains a NUL character. SQLite's LIKE reads a value "
+            f"only up to its first NUL, so the default-search exclusion and namespace globs "
+            f"would compare this name as {value.split(chr(0), 1)[0]!r}."
+        )
     if value.split(":", 1)[0] == AGENT_NAMESPACE_PREFIX.rstrip(":"):
         return validate_namespace(value)
     try:
@@ -334,17 +349,18 @@ def writable_namespace_arg(value: object) -> str | None:
 
 
 # A namespace color is display metadata that the Web UI writes into ``style``
-# and ``value`` attributes, so only a ``#`` plus hex digits is stored. The web
-# schema derives its pattern from this one, so both boundaries accept the same
-# set.
-NAMESPACE_COLOR_PATTERN: Final[str] = r"#[0-9a-fA-F]{3,8}"
+# and ``value`` attributes, so only a CSS hex color is stored: ``#`` plus 3, 4,
+# 6 or 8 hex digits. A 5- or 7-digit value is not a CSS color, so a browser
+# would draw nothing for it. The web schema derives its pattern from this one,
+# so both boundaries accept the same set.
+NAMESPACE_COLOR_PATTERN: Final[str] = r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
 
 
 def validate_namespace_color(color: object) -> str | None:
     """Return *color* if it may be stored as a namespace color.
 
     ``None`` (leave unchanged) and ``""`` (clear) pass through. Anything else
-    must be ``#`` followed by 3-8 hex digits, else ``ValueError``.
+    must be ``#`` followed by 3, 4, 6 or 8 hex digits, else ``ValueError``.
     """
     if color is None:
         return None
@@ -353,9 +369,22 @@ def validate_namespace_color(color: object) -> str | None:
     if not isinstance(color, str) or re.fullmatch(NAMESPACE_COLOR_PATTERN, color) is None:
         raise ValueError(
             f"Invalid namespace color: {color!r} "
-            "(expected '#' followed by 3-8 hex digits, or '' to clear)"
+            "(expected '#' followed by 3, 4, 6 or 8 hex digits, or '' to clear)"
         )
     return color
+
+
+def validate_namespace_description(description: object) -> str | None:
+    """Return *description* if it may be stored as a namespace description.
+
+    ``None`` (leave unchanged) and any string pass through. Anything else
+    raises :class:`ValueError`.
+    """
+    if description is None:
+        return None
+    if not isinstance(description, str):
+        raise ValueError("Invalid namespace description: expected a string")
+    return description
 
 
 # Read-side selector for "every namespace except the system prefixes". It is

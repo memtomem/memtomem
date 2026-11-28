@@ -307,11 +307,72 @@ def _opened_text(opened: IO[bytes], name: str) -> str:
     """
     with opened:
         data = opened.read()
+    return _decoded_source(data, name)
+
+
+def _decoded_source(data: bytes, name: str) -> str:
+    """Decode a source's bytes as ``index_file`` reads its text, for a content hash to match."""
     try:
         return indexer_text(data)
     except UnicodeDecodeError:
         logger.warning("Non-UTF-8 content in %s, replacing invalid bytes", name)
         return indexer_text(data, errors="replace")
+
+
+class StoredSourceRead(TypedDict):
+    """What :func:`read_stored_source` found at a stored key."""
+
+    content_hash: str
+    device: int
+    inode: int
+    links: int
+
+
+def read_stored_source(source_key: str) -> StoredSourceRead | str:
+    """Hash the text ``index_file`` would read at ``source_key``, or say why it cannot.
+
+    For checking a source against its index receipt: the hash is the one the
+    receipt's ``source_hash`` was computed with. Opened ``O_NONBLOCK`` so a
+    FIFO at the key cannot block the open; ``fstat`` on the same descriptor
+    refuses anything but a regular file, and the read is bounded by the size
+    ``index_file`` skips above, so nothing larger is read into memory. The
+    identity and link count come from that descriptor too. Blocking; async
+    callers run it in a thread. A string return is the reason for a refusal.
+    """
+    from memtomem.indexing.source_receipt import content_hash
+
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(source_key, flags)
+    except (OSError, ValueError) as exc:
+        return f"cannot be opened ({type(exc).__name__})"
+    try:
+        info = os.fstat(descriptor)
+        if not stat_module.S_ISREG(info.st_mode):
+            return "is not a regular file"
+        if info.st_size > _MAX_INDEX_FILE_BYTES:
+            return "is larger than the indexer reads"
+        chunks: list[bytes] = []
+        remaining = _MAX_INDEX_FILE_BYTES + 1
+        while remaining > 0:
+            block = os.read(descriptor, min(remaining, 1 << 20))
+            if not block:
+                break
+            chunks.append(block)
+            remaining -= len(block)
+    except OSError as exc:
+        return f"cannot be read ({type(exc).__name__})"
+    finally:
+        os.close(descriptor)
+    data = b"".join(chunks)
+    if len(data) > _MAX_INDEX_FILE_BYTES:
+        return "is larger than the indexer reads"
+    return {
+        "content_hash": content_hash(_decoded_source(data, Path(source_key).name)),
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "links": info.st_nlink,
+    }
 
 
 def _leaf_relinked(own_key: str, work_path: Path) -> bool:
@@ -4327,6 +4388,19 @@ class IndexEngine:
         """
         return classify_scope(file_path, self._config.project_memory_dirs, resolved=resolved)
 
+    def _stored_source_keys(self, *, db: sqlite3.Connection | None = None) -> list[str]:
+        """Every distinct stored source key, read as :meth:`_stored_scope_rows` reads.
+
+        One scan of the covering ``(source_file, start_line)`` index. A store
+        that is not SQLite has no keys to compare.
+        """
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        if not isinstance(self._storage, SqliteBackend):
+            return []
+        conn = db if db is not None else self._storage._get_db()
+        return [row[0] for row in conn.execute("SELECT DISTINCT source_file FROM chunks")]
+
     def _stored_scope_rows(
         self, keys: Iterable[str], *, db: sqlite3.Connection | None = None
     ) -> list[tuple[str, str, str | None, str | None]]:
@@ -4360,18 +4434,25 @@ class IndexEngine:
         """Why a by-id rewrite of the source stored as ``stored_key`` must not run (#2923).
 
         Asked under the caller's source locks, before it writes. ``None`` means
-        the rewrite may proceed. Two refusals: the key now resolves to another
-        file, so the write would land there; or re-indexing the file would
-        store the source's project rows under another scope or project root.
+        the rewrite may proceed. Three refusals: the key now resolves to another
+        file, so the write would land there; the file is also stored under
+        another spelling of its path, whose rows would keep serving the lines
+        the rewrite removes (#3408); or re-indexing the file would store the
+        source's project rows under another scope or project root.
         """
         from memtomem.indexing.scope_guard import (
             key_spellings,
             relinked_detail,
             scope_change,
             scope_change_detail,
+            twin_detail,
         )
         from memtomem.storage.sqlite_backend import SqliteBackend
-        from memtomem.storage.sqlite_helpers import stored_key_moved
+        from memtomem.storage.sqlite_helpers import (
+            source_twins,
+            stored_key_moved,
+            twin_candidates,
+        )
 
         name = Path(stored_key).name
         # The scope read waits out another task's write transaction instead of
@@ -4384,9 +4465,20 @@ class IndexEngine:
             if isinstance(self._storage, SqliteBackend)
             else None
         )
+        # Every read on ``scope_db`` happens here, before the first ``await``:
+        # the idle writer is handed out only for reads that run before the next
+        # suspension, and after it another task may own an open transaction.
         rows = self._stored_scope_rows(key_spellings(stored_key), db=scope_db)
+        candidates = twin_candidates(stored_key, self._stored_source_keys(db=scope_db))
         if await asyncio.to_thread(stored_key_moved, stored_key):
             return relinked_detail(name, op=op)
+        # Before ``if not rows``: an index-only delete takes no sidecar lock, so
+        # this key's own rows can be gone while the caller still holds the chunk
+        # it fetched, and the twin's rows would still serve the lines.
+        if candidates:
+            twins = await asyncio.to_thread(source_twins, stored_key, candidates)
+            if twins:
+                return twin_detail(stored_key, twins[0], op=op, surface=surface)
         if not rows:
             return None
         decision_path = await asyncio.to_thread(resolve_path, Path(stored_key))
