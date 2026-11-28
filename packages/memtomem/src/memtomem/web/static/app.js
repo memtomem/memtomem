@@ -3494,7 +3494,7 @@ async function doSearch() {
     list.innerHTML = emptyState('⚠', 'Search failed', escapeHtml(err.message));
     // #results-empty is now hidden, so the sibling welcome card must hide too.
     _syncWelcomeVisibility();
-    clearDetail();
+    if (!_hasUnsavedDetailDraft()) clearDetail();
   } finally {
     btnLoading(btn, false);
   }
@@ -3797,10 +3797,9 @@ function _syncResultTags(chunkId, newTags) {
   if (body) _attachResultTagRow(chunkId, [...newTags], body);
 }
 
-// ``keepDetail``: re-render after rows were removed, not for a new result set.
-// The detail panel (and any draft in it) is left as it is, no row is selected
-// in its place, and the remaining bulk selection survives.
+// ``keepDetail`` also preserves bulk selection when refreshing after a save.
 function renderResults(results, retrievalStats, { keepDetail = false } = {}) {
+  const preserveDetail = keepDetail || _hasUnsavedDetailDraft();
   const keptSelection = keepDetail ? new Set(STATE.selectedIds) : null;
   STATE.lastResults = results;
   STATE.resultScoreViews = _buildScoreViews(results);
@@ -3829,7 +3828,7 @@ function renderResults(results, retrievalStats, { keepDetail = false } = {}) {
       ? emptyState('🔍', 'Enter a query to search', '<kbd>/</kbd> focus · <kbd>j</kbd>/<kbd>k</kbd> navigate · <kbd>p</kbd> pin · <kbd>c</kbd> copy')
       : emptyState('○', 'No results found', 'Try different keywords or filters');
     _syncWelcomeVisibility();
-    if (!keepDetail) clearDetail();
+    if (!preserveDetail) clearDetail();
     return;
   }
   hide(empty);
@@ -3940,18 +3939,20 @@ function renderResults(results, retrievalStats, { keepDetail = false } = {}) {
       groupEl.appendChild(groupItems);
       list.appendChild(groupEl);
     });
-    if (firstItem && !keepDetail) { firstItem.classList.add('selected'); showDetail(firstResult); }
+    if (firstItem && !preserveDetail) { firstItem.classList.add('selected'); showDetail(firstResult); }
   } else {
     filtered.forEach((r, i) => {
       const item = _buildResultItem(r);
       list.appendChild(item);
-      if (i === 0 && !keepDetail) { item.classList.add('selected'); showDetail(r); }
+      if (i === 0 && !preserveDetail) { item.classList.add('selected'); showDetail(r); }
     });
   }
-  if (keepDetail) {
+  if (preserveDetail) {
     list.querySelectorAll('.result-item').forEach(item => {
       item.classList.toggle('selected', String(item.dataset.id) === String(STATE.selectedChunkId));
     });
+  }
+  if (keepDetail) {
     const boxes = list.querySelectorAll('.result-checkbox');
     boxes.forEach(cb => {
       const result = filtered.find(x => String(x.chunk.id) === String(cb.dataset.id));
@@ -4166,6 +4167,10 @@ let _sourceEditGen = 0;
 // selection, so a second save started while the first runs would leave the
 // first one's cleanup deciding the second one's controls.
 let _detailSaveInFlight = false;
+
+function _hasUnsavedDetailDraft() {
+  return STATE.sourceEdit?.loaded === true && qs('d-editor').value !== STATE.selectedOriginal;
+}
 
 function _endSourceEdit() {
   _sourceEditGen += 1;
