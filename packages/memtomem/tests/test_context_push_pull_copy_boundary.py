@@ -36,12 +36,13 @@ Text is classified by where it is published:
 A route path is a frozen wire identifier, so the node written as one is not
 read: the first positional argument, or else ``path=``, of a
 :data:`_ROUTE_METHODS` call on a bare name that is ``router`` or ends in
-``_router``. This checks the name, not the receiver's type. The call's other
-arguments are read. A skipped f-string path takes its format specs with it, but
-string literals in its replacement-field expressions are still read. A literal
-used any other way is read on its own: one assigned to a name, an operand of
-``+``, ``APIRouter(prefix=…)``, or the path given to a receiver not named like a
-router.
+``_router``. This checks the name, not the receiver's type, so any other object
+so named has that argument skipped too (none under the scan roots today). The
+call's other arguments are read. A skipped f-string path takes its format specs
+with it, but string literals in its replacement-field expressions are still
+read. A literal used any other way is read on its own: one assigned to a name,
+an operand of ``+``, ``APIRouter(prefix=…)``, or the path given to a receiver
+not named like a router.
 
 Within public text, exemptions are spans of a value, never a whole line or
 literal, because each is a place a regression could hide: a QUOTED §-citation
@@ -377,7 +378,8 @@ def _render(node: ast.Constant | ast.JoinedStr) -> str:
     return "".join(parts)
 
 
-#: The ``APIRouter`` methods whose first argument is a route path.
+#: The ``APIRouter`` methods whose first parameter is ``path``, as listed from
+#: FastAPI 0.165 (``mount`` is inherited from Starlette).
 _ROUTE_METHODS = frozenset(
     {
         "api_route",
@@ -390,8 +392,14 @@ _ROUTE_METHODS = frozenset(
         "put",
         "trace",
         "websocket",
+        "route",
+        "websocket_route",
         "add_api_route",
         "add_api_websocket_route",
+        "add_route",
+        "add_websocket_route",
+        "mount",
+        "frontend",
     }
 )
 
@@ -951,12 +959,21 @@ def test_a_route_path_is_not_read_but_its_summary_is(tmp_path: Path) -> None:
         "put",
         "trace",
         "websocket",
+        "route",
+        "websocket_route",
         "add_api_route",
         "add_api_websocket_route",
+        "add_route",
+        "add_websocket_route",
+        "mount",
+        "frontend",
     ],
 )
-def test_every_router_registration_method_takes_a_path(tmp_path: Path, method: str) -> None:
-    source = f'router.{method}("/context/reverse-sync")\n'
+@pytest.mark.parametrize("keyword", ["", "path="], ids=["positional", "path-keyword"])
+def test_every_router_registration_method_takes_a_path(
+    tmp_path: Path, method: str, keyword: str
+) -> None:
+    source = f'router.{method}({keyword}"/context/reverse-sync")\n'
     assert _found(tmp_path, {_ROUTE: source}) == set()
 
 
@@ -965,7 +982,6 @@ def test_every_router_registration_method_takes_a_path(tmp_path: Path, method: s
     [
         pytest.param('admin_router.get("/context/reverse-sync")\n', id="admin-router"),
         pytest.param('preview_router.get("/context/reverse-sync")\n', id="any-suffixed-router"),
-        pytest.param('router.post(path="/context/reverse-sync")\n', id="path-keyword"),
         pytest.param('router.get(f"/context/{kind}/reverse-sync")\n', id="fstring-path"),
         pytest.param('router.post("/context/reverse-sync")(handler)\n', id="not-a-decorator"),
         pytest.param('router.post("-reverse-sync")\n', id="no-leading-slash"),
