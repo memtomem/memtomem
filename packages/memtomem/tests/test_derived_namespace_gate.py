@@ -299,3 +299,37 @@ class TestMemAddResponse:
         out = await mem_add(content="zephyr fact", ctx=self._ctx(comp))
         assert "- Namespace: work\n" in out
         assert {ns for ns, _ in await comp.storage.list_namespaces()} == {"work"}
+
+    async def _write(self, tool, comp, **kwargs) -> str:
+        """One ``zephyr fact`` entry through either add tool, with no ``namespace=``."""
+        from memtomem.server.tools.memory_crud import mem_add, mem_batch_add
+
+        ctx = self._ctx(comp)
+        if tool == "mem_add":
+            return await mem_add(content="zephyr fact", ctx=ctx, **kwargs)
+        return await mem_batch_add(
+            entries=[{"key": "k", "value": "zephyr fact"}], ctx=ctx, **kwargs
+        )
+
+    @pytest.mark.parametrize("tool", ["mem_add", "mem_batch_add"])
+    async def test_an_empty_default_is_reported_as_default(self, stack, tool):
+        comp, _ = stack
+        _configure(comp, default_namespace="")
+        out = await self._write(tool, comp)
+        assert not out.startswith("Error"), out
+        assert "- Namespace: default\n" in out
+        assert {ns for ns, _ in await comp.storage.list_namespaces()} == {"default"}
+
+    @pytest.mark.parametrize("tool", ["mem_add", "mem_batch_add"])
+    async def test_reports_the_namespace_the_file_is_already_stored_under(self, stack, tool):
+        comp, mem_dir = stack
+        existing = mem_dir / "existing.md"
+        existing.write_text("# Old\n\nolder fact", encoding="utf-8")
+        await comp.index_engine.index_path(existing, namespace="work")
+        out = await self._write(tool, comp, file="existing.md")
+        assert not out.startswith("Error"), out
+        assert "- Namespace: work\n" in out
+        assert await _stored(comp, existing) == ["work"]
+        chunks = await comp.storage.list_chunks_by_source(existing, limit=None)
+        text = "\n".join(c.content for c in chunks)
+        assert "older fact" in text and "zephyr fact" in text, text

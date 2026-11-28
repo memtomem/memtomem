@@ -20,6 +20,15 @@ E5_REVISION = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
 E5_TOKENIZER = f"model:{E5_MODEL}@{E5_REVISION}"
 E5_TOKENIZER_SHA256 = "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
 E5_MODEL_SHA256 = "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"
+# The other files of the pinned snapshot FastEmbed reads. A revision is immutable on
+# the Hub, but a cached copy is not, so each is checked like the model and tokenizer.
+# These are public file digests; gitleaks' generic-api-key rule reads a hex value under a
+# name containing "token" as a key, hence the allow markers.
+E5_AUXILIARY_SHA256 = {
+    "config.json": "69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959",
+    "tokenizer_config.json": "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b",  # gitleaks:allow
+    "special_tokens_map.json": "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7",  # gitleaks:allow
+}
 CPU_VARIANTS = ("fp32", "int8-arm64", "int8-avx2", "int8-avx512", "int8-avx512-vnni")
 
 BGE_M3_MODEL = "BAAI/bge-m3"
@@ -46,21 +55,36 @@ def is_bge_m3(model: str) -> bool:
     return resolve_embedder_id(model) == BGE_M3_MODEL
 
 
-def e5_contract_error(model: str, dimension: int, max_sequence_tokens: int) -> str | None:
+def e5_contract_error(
+    model: str, dimension: int, max_sequence_tokens: int, *, auto_selected: bool = False
+) -> str | None:
     """Why an ONNX E5 configuration cannot load, or ``None`` when it can.
 
     Shared by ``EmbeddingConfig``'s validator and the loader. Sections do not
     validate assignment, so a model assigned after construction reaches the
     loader without the E5 defaults the validator would have applied.
+
+    ``auto_selected`` says the caller filled E5 into an empty ``model``; the
+    message then says so and names how to fix it.
     """
     if not is_e5(model):
         return None
     spelled = "" if model in ("multilingual-e5-small", E5_MODEL) else f" ({model!r} is {E5_MODEL})"
     if dimension != 384:
-        return f"multilingual-e5-small requires dimension=384{spelled}"
-    if max_sequence_tokens != 512:
-        return f"multilingual-e5-small requires max_sequence_tokens=512{spelled}"
-    return None
+        field, required = "dimension", 384
+    elif max_sequence_tokens != 512:
+        field, required = "max_sequence_tokens", 512
+    else:
+        return None
+    message = f"multilingual-e5-small requires {field}={required}{spelled}"
+    if auto_selected:
+        # The dimension goes with the model: ``model`` alone can leave it at 0.
+        message += (
+            " (embedding.model is empty, so multilingual-e5-small was selected automatically; "
+            "set embedding.model and embedding.dimension for the model you intend, "
+            f"for example bge-m3 and 1024, or remove embedding.{field})"
+        )
+    return message
 
 
 def is_minilm(model: str) -> bool:
@@ -143,9 +167,11 @@ def e5_snapshot() -> Path:
             )
         )
     resolve_tokenizer(E5_TOKENIZER)
-    model = snapshot / "onnx/model.onnx"
-    stat = model.stat()
-    _verify_file(model, stat.st_mtime_ns, stat.st_size, E5_MODEL_SHA256)
+    pins = {"onnx/model.onnx": E5_MODEL_SHA256, **E5_AUXILIARY_SHA256}
+    for name, expected in pins.items():
+        path = snapshot / name
+        stat = path.stat()
+        _verify_file(path, stat.st_mtime_ns, stat.st_size, expected)
     return snapshot
 
 
