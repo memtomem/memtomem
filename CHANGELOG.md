@@ -7,6 +7,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm memory doctor` reports memory files whose frontmatter PyYAML cannot read as a mapping
+  (#2719).**
+  memtomem reads frontmatter line by line, so a `description:` that starts with a backtick or
+  holds `: ` still indexes while a YAML reader of the same file gets no `name` or
+  `description`. The new `frontmatter_invalid` warning lists the path, the line when the parser
+  gives one, and the error class, never the line text. `frontmatter_truncated` (info) lists a
+  `name` or `description` written as a plain scalar that a `#` comment directly follows, in
+  blocks that use no YAML alias. Syntax and the root shape are checked; values are not built, so
+  an unknown tag or an impossible date is not reported.
 - **`mem_decision_record` records a decision point with the agent's recommendation and the
   user's choice kept apart (#3620).** memtomem recorded where a memory came from but not
   whose judgement it holds. The new action, reached as
@@ -44,6 +53,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The related-chunks preview shows a note's YAML frontmatter as metadata (#3093).** The
+  web UI's detail view got this in #3030; the preview under **Related** still drew the
+  opening `---` as a rule and the `key: value` lines above the closing `---` as a heading.
+  It now asks the same `GET /api/chunks/{id}/frontmatter` question and shows a certified
+  block above the rendered note. It also renders `.markdown` sources as Markdown, which it
+  had shown as plain text.
+
+- **Swap recovery warnings list competing marker files or both paths of a failed recovery
+  rename (#3544).** The transfer response still tells callers to see the server log.
+
 - **Auto-tag with `overwrite` off keeps tags committed while it was extracting (#3194).**
   The pass judged "already tagged" from the chunk it read before tag extraction (possibly an
   LLM call), then replaced the tags whatever they were by then, so a manual tag edit, an
@@ -52,6 +71,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   with the chunk reader's own reading of the column. A chunk that gained tags meanwhile is
   left as it is and counted like a hidden or deleted one: skipped, and not in the total.
   `overwrite` on writes as before.
+
+- **Web `POST /api/add` tags the entry it appended when an earlier entry holds a form feed
+  or a similar break (#2765).** The route found the new entry's chunks by counting the
+  file's lines before the append with `str.splitlines`, which also breaks at `\x0b`,
+  `\x0c`, `\x1c`–`\x1e`, `\x85`, U+2028 and U+2029; chunk line numbers break at `\n` only
+  (a lone `\r` is read as `\n` before either count). Enough of them in an earlier entry
+  pushed the boundary past every chunk of the new entry, and an entry that opens with its
+  own `##` heading was then left without its tags. The count now
+  uses the same line rule as chunk line numbers, as `mm add` has since #2726.
 
 - **The five files of the pinned MiniLM snapshot are checked against sha256 pins (#3689).**
   The fp32 `all-MiniLM-L6-v2` load downloads `model.onnx`, `config.json`,

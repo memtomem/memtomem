@@ -478,8 +478,9 @@ function _renderRelatedList() {
 function _showRelatedPreview(r, itemEl) {
   const preview = qs('related-preview');
   const src = r.chunk.source_file || '';
-  const isMarkdown = src.endsWith('.md');
-  const rendered = isMarkdown && typeof marked !== 'undefined'
+  const isMarkdown = _isMarkdownSource(src);
+  const asMarkdown = isMarkdown && typeof marked !== 'undefined';
+  const rendered = asMarkdown
     ? DOMPurify.sanitize(marked.parse(r.chunk.content))
     : `<pre style="white-space:pre-wrap;font-size:0.82rem">${escapeHtml(r.chunk.content)}</pre>`;
 
@@ -509,6 +510,27 @@ function _showRelatedPreview(r, itemEl) {
     hide(preview);
     if (itemEl) itemEl.classList.remove('active');
   });
+
+  if (asMarkdown && _mayOpenWithFrontmatter(r.chunk)) {
+    _boxRelatedFrontmatter(r.chunk, preview.querySelector('.related-preview-content'));
+  }
+}
+
+// Re-renders a preview with the note's frontmatter as metadata once the server
+// certifies it, as the detail view does (#3030). ``contentEl`` is the element
+// of the preview that asked: every preview builds a new one, so an answer for a
+// replaced preview lands in a detached node.
+async function _boxRelatedFrontmatter(chunk, contentEl) {
+  let resp;
+  try {
+    resp = await api('GET', `/api/chunks/${chunk.id}/frontmatter`);
+  } catch (_err) {
+    return;  // A display hint: the note renders as it always has.
+  }
+  if (!(resp && resp.leading)) return;
+  const span = _leadingFrontmatter(chunk.content);
+  if (span === null) return;
+  contentEl.innerHTML = DOMPurify.sanitize(_markdownHtml(chunk.content, span));
 }
 
 // Toggle related list open/close

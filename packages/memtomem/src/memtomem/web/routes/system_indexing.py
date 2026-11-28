@@ -1032,6 +1032,7 @@ async def add_memory(
             # file whose content may not be indexed before anything is written,
             # and let the valve cover this entry only in a file with nothing
             # flagged or masked in it.
+            from memtomem.chunking.base import split_source_lines
             from memtomem.indexing.engine import PrivacyRejection
             from memtomem.indexing.redaction_exemption import indexer_text
             from memtomem.tools.memory_mutation import (
@@ -1060,8 +1061,10 @@ async def add_memory(
             if blocker is not None:
                 raise index_blocked_http(blocker)
             # Counted from the bytes the preflight judged, not a later read that
-            # would follow a link put at the path since (#3289).
-            pre_lines = len(indexer_text(judged.data, errors="replace").splitlines())
+            # would follow a link put at the path since (#3289), and in the lines
+            # a chunk's start_line counts: str.splitlines also breaks at \x0c
+            # and the like, which pushed the boundary past the new entry (#2765).
+            pre_lines = len(split_source_lines(indexer_text(judged.data, errors="replace")))
             try:
                 appended = await _asyncio.to_thread(
                     _sys.append_entry,

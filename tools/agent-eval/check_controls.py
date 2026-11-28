@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -292,7 +293,8 @@ def main(argv: list[str]) -> int:
             try:
                 notes = _visible_notes(root)
             except PermissionError:
-                print(f"{name} run{n}: unread, sealed: chmod 700 {root} {root / 'sealed'}")
+                paths = f"{shlex.quote(str(root))} {shlex.quote(str(root / 'sealed'))}"
+                print(f"{name} run{n}: unread, sealed: chmod 700 {paths}")
                 status = 1
                 continue
             except OSError as exc:
