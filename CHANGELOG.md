@@ -54,7 +54,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   The write changes only the rows that miss a tag and leaves `updated_at` as it was, so it
   does not reset time decay, and adding tags alone does not mark the session's provenance
   incomplete. When a tag write fails, the importer still drops the search cache and, if the
-  index pass changed storage, still tries to flag the session.
+  index pass changed storage, still tries to flag the session. A symlink put at a file's
+  name after it was indexed is not followed, so the link's target does not get the tags.
 
 - **Auto-tag with `overwrite` off keeps tags committed while it was extracting (#3194).**
   The pass judged "already tagged" from the chunk it read before tag extraction (possibly an

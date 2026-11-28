@@ -19,6 +19,7 @@ from memtomem.server.tools._provenance import (
     flag_untracked_write,
 )
 from memtomem.storage.base import WRITER_WAIT_S
+from memtomem.storage.sqlite_helpers import leaf_names_own_key, norm_path, own_leaf_key
 
 
 def _mismatch_refusal(app: object, label: str) -> str | None:
@@ -172,9 +173,17 @@ async def _add_tags(app: AppContext, source: Path, added: set[str]) -> None:
     as they are. ``update_chunk_metadata`` writes only the rows that change and
     leaves content, ``source_file`` and ``updated_at`` alone: a re-import must
     not make an unchanged note look newly written to time decay.
+
+    *source* is resolved once, here, and the rows are matched against that
+    string as stored. A leaf that is a symlink by now gets no tags: following it
+    would tag another file's chunks. A parent directory replaced since the index
+    pass is not detected (#3693).
     """
     async with app.storage.transaction(wait=WRITER_WAIT_S):
-        chunks = await app.storage.list_chunks_by_source(source, limit=None)
+        resolved = Path(norm_path(source))
+        if not leaf_names_own_key(own_leaf_key(source), resolved):
+            return
+        chunks = await app.storage.list_chunks_by_source(resolved, limit=None, as_stored=True)
         for c in chunks:
             c.metadata = replace(c.metadata, tags=tuple(sorted({*c.metadata.tags, *added})))
         await app.storage.update_chunk_metadata(chunks)

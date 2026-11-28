@@ -488,6 +488,59 @@ async def test_a_note_that_carries_every_tag_itself_is_not_rewritten(
     assert changed == [0]
 
 
+@pytest.mark.requires_symlinks
+@pytest.mark.parametrize("swap", ["after_index", "before_listing"])
+@pytest.mark.parametrize("kind", KINDS)
+async def test_the_tag_pass_does_not_follow_a_target_replaced_by_a_link(
+    bm25_only_components, tmp_path, monkeypatch, kind, swap
+):
+    """``index_file`` reported the file current; the leaf is a link by tag time."""
+    comp, mem_dir = bm25_only_components
+    ctx = StubCtx(AppContext.from_components(comp))
+    tool, label = _tool(kind)
+    _flag_spy(monkeypatch)
+    other = mem_dir / "Other.md"
+    other.write_text("# Other\n\nanother note\n", encoding="utf-8")
+    await comp.index_engine.index_file(other)
+    src = _source(tmp_path, kind, {"Alpha": "alpha body"})
+    await tool(str(src), ctx=ctx)
+    alpha = next(mem_dir.rglob("Alpha.md"))
+    swapped: list[str] = []
+
+    def replace_with_link() -> None:
+        alpha.unlink()
+        alpha.symlink_to(other)
+        swapped.append(swap)
+
+    if swap == "after_index":
+        original_index = comp.index_engine.index_file
+
+        async def index_file(path, *args, **kwargs):
+            stats = await original_index(path, *args, **kwargs)
+            replace_with_link()
+            return stats
+
+        monkeypatch.setattr(comp.index_engine, "index_file", index_file)
+    else:
+        original_list = comp.storage.list_chunks_by_source
+
+        async def list_chunks_by_source(*args, **kwargs):
+            replace_with_link()
+            return await original_list(*args, **kwargs)
+
+        monkeypatch.setattr(comp.storage, "list_chunks_by_source", list_chunks_by_source)
+
+    result = await tool(str(src), tags=["later"], ctx=ctx)
+
+    assert result.startswith(f"{label} import complete:"), result
+    assert swapped == [swap]
+    assert [tags for _, _, tags in _stamped(comp, "Other.md")] == [set()]
+    # A link seen before the lookup gets no tags; one that arrives after it
+    # leaves the tags on the rows of the file that was indexed.
+    expected = set() if swap == "after_index" else {"later", kind, "imported"}
+    assert [tags for _, _, tags in _stamped(comp, "Alpha.md")] == [expected]
+
+
 # ---------------------------------------------------------------------------
 # A policy restamp by another process during the import
 # ---------------------------------------------------------------------------
