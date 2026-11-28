@@ -66,8 +66,19 @@ async def _promote(run_id: str, name: str | None, allow_unreplayable_filters: bo
 
 
 @quality.command("cases")
-@click.option("--status", type=click.Choice(["active", "archived"]), default=None)
-@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@click.option(
+    "--status",
+    type=click.Choice(["active", "archived"]),
+    default=None,
+    help="Only list cases with this status (default: all cases).",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Report format on stdout.",
+)
 def cases(status: str | None, fmt: str) -> None:
     """List evaluation cases (newest first)."""
     _run(_cases(status, fmt), as_json=fmt == "json")
@@ -176,7 +187,13 @@ async def _import(file: str, replace: bool) -> None:
 @click.option("--case", "case_selectors", multiple=True, help="Case id or name (repeatable).")
 @click.option("--as-of", type=int, default=None, help="Pin temporal validity + decay (unix).")
 @click.option("--out", type=click.Path(dir_okay=False), default=None, help="Write report to file.")
-@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Report format on stdout. --out always writes JSON.",
+)
 def replay(case_selectors: tuple[str, ...], as_of: int | None, out: str | None, fmt: str) -> None:
     """Replay evaluation cases into a deterministic report.
 
@@ -275,7 +292,13 @@ def _render_replay_table(report: dict) -> None:
 @click.argument("baseline", type=click.Path(exists=True, dir_okay=False))
 @click.argument("candidate", type=click.Path(exists=True, dir_okay=False))
 @click.option("--out", type=click.Path(dir_okay=False), default=None, help="Write result to file.")
-@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Report format on stdout. --out always writes JSON.",
+)
 @click.option(
     "--fail-on-regression",
     is_flag=True,
@@ -377,7 +400,13 @@ class GateInputError(click.ClickException):
     default=None,
     help="Also write the intermediate comparison to file.",
 )
-@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Report format on stdout. --out always writes JSON.",
+)
 def gate(
     baseline: str,
     candidate: str,
@@ -482,7 +511,13 @@ def _render_gate_table(verdict: dict) -> None:
     help="Gate-policy JSON, evaluated independently per candidate.",
 )
 @click.option("--out", type=click.Path(dir_okay=False), default=None, help="Write result to file.")
-@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Report format on stdout. --out always writes JSON.",
+)
 def experiment(
     baseline_path: str | None,
     profile_paths: tuple[str, ...],
