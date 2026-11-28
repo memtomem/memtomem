@@ -94,10 +94,25 @@ def consent_lines(caplog) -> list[str]:
     ]
 
 
+# Where ``isolate_memtomem_env`` points ``config.d``: a child of this regular
+# file, so it is never a directory and no fragment can be read from it.
+_NO_CONFIG_D = Path(__file__).resolve() / "config.d"
+
+
 def isolate_memtomem_env(monkeypatch) -> None:
-    """Strip ``MEMTOMEM_*`` env vars and stub out ``load_config_overrides``
-    so a freshly constructed ``Mem2MemConfig`` is not mutated by the
-    developer's ``~/.memtomem/config.json`` or shell environment.
+    """Keep the developer's ``_MEMTOMEM_ENV_VARS``, ``config.json`` and ``config.d``
+    away from a hand-built ``Mem2MemConfig`` passed to ``create_components``.
+
+    The names in ``_MEMTOMEM_ENV_VARS`` are deleted, ``load_config_overrides`` is
+    stubbed out, and ``config.d`` is pointed at a path that can never hold a
+    fragment. Config loading and change detection (``load_config_d``,
+    ``config_signature``) resolve the module's ``_CONFIG_D_PATH`` at call time,
+    so ``create_components(config)`` with the default ``load_ambient_config=True``
+    reads no fragment either (#3667). ``mm uninstall`` finds ``config.d`` through
+    its own state directory and is not covered.
+
+    A test that wants a live ``config.d`` calls ``isolate_config_paths`` after
+    this helper. ``set_home`` after it does not bring ``config.d`` back.
 
     Used directly by tests that construct their own components (e.g. the
     LangGraph adapter cases). The ``bm25_only_components`` fixture in
@@ -109,6 +124,7 @@ def isolate_memtomem_env(monkeypatch) -> None:
     import memtomem.config as _cfg
 
     monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
+    monkeypatch.setattr(_cfg, "_CONFIG_D_PATH", _NO_CONFIG_D)
 
 
 def set_home(monkeypatch: pytest.MonkeyPatch, path: Path | str) -> None:

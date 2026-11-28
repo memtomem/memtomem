@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from helpers import make_chunk
+from helpers import isolate_memtomem_env, make_chunk
 from memtomem.config import Mem2MemConfig, StorageConfig
 from memtomem.constants import AGENT_NAMESPACE_PREFIX, SHARED_NAMESPACE
 from memtomem.server.component_factory import close_components, create_components
@@ -146,22 +146,6 @@ class TestAddChunkLinkUnit:
 
 # ── Integration: mem_agent_share records the link ───────────────────────
 
-_MEMTOMEM_ENV_VARS = (
-    "MEMTOMEM_EMBEDDING__PROVIDER",
-    "MEMTOMEM_EMBEDDING__MODEL",
-    "MEMTOMEM_EMBEDDING__DIMENSION",
-    "MEMTOMEM_STORAGE__SQLITE_PATH",
-    "MEMTOMEM_INDEXING__MEMORY_DIRS",
-)
-
-
-def _isolate_memtomem_env(monkeypatch) -> None:
-    for var in _MEMTOMEM_ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
-    import memtomem.config as _cfg
-
-    monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
-
 
 class _StubCtx:
     def __init__(self, app: AppContext) -> None:
@@ -178,7 +162,7 @@ async def integration_components(tmp_path, monkeypatch):
     mem_dir = tmp_path / "memories"
     mem_dir.mkdir()
 
-    _isolate_memtomem_env(monkeypatch)
+    isolate_memtomem_env(monkeypatch)
 
     config = Mem2MemConfig()
     config.storage.sqlite_path = db_path
