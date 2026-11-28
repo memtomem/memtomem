@@ -43,9 +43,10 @@ def _histogram(dist: list[dict]) -> dict[str, int]:
 
 @pytest.fixture
 async def store(bm25_only_components, tmp_path_factory, monkeypatch):
-    """Visible and hidden sources whose chunks fall in distinct buckets.
+    """Visible and hidden sources, with chunks of both in one bucket.
 
-    Visible: ``visible.md`` (one source, two chunks in two buckets),
+    Visible: ``visible.md`` (one source, three chunks: two in one bucket, one in
+    another, so a bucket count must add chunks, not count sources),
     ``open.md`` and its policy summary, and a non-policy file at a summary-shaped
     path whose parent is held. Hidden: a held file, a pending file, the held
     parent, its policy summary, and a mixed-origin summary of a held parent
@@ -57,12 +58,15 @@ async def store(bm25_only_components, tmp_path_factory, monkeypatch):
     await comp.storage.upsert_chunks(
         [
             _chunk(m / "visible.md", "0-32"),
+            _chunk(m / "visible.md", "0-32"),
             _chunk(m / "visible.md", "32-64"),
             _chunk(m / "open.md", "0-32"),
             _chunk(m / f"open.md{CONSOLIDATED_SUFFIX}", "0-32", ORIGIN_CONSOLIDATION_POLICY),
             _chunk(m / "parent2.md", "64-128"),
             _chunk(m / f"parent2.md{CONSOLIDATED_SUFFIX}", "0-32"),
             _chunk(m / "held.md", "64-128"),
+            # A hidden chunk in a bucket visible chunks also fill.
+            _chunk(m / "held.md", "0-32"),
             _chunk(m / "pending.md", "128-256"),
             _chunk(m / "parent.md", "256-512"),
             _chunk(m / f"parent.md{CONSOLIDATED_SUFFIX}", "256-512", ORIGIN_CONSOLIDATION_POLICY),
@@ -77,9 +81,9 @@ async def store(bm25_only_components, tmp_path_factory, monkeypatch):
     return comp
 
 
-# Listed: visible.md (2), open.md (1), open summary (1), parent2 summary (1).
-_LISTED = {"0-32": 4, "32-64": 1}
-_STORED_CHUNKS = 13
+# Listed: visible.md (3), open.md (1), open summary (1), parent2 summary (1).
+_LISTED = {"0-32": 5, "32-64": 1}
+_STORED_CHUNKS = 15
 _STORED_SOURCES = 11
 
 
@@ -110,7 +114,7 @@ async def test_listed_stats_count_what_the_sources_listing_lists(store):
     got = await storage.get_listed_stats()
 
     assert got["listed_sources"] == len(listed_rows) == 4
-    assert got["listed_chunks"] == sum(r[1] for r in listed_rows) == 5
+    assert got["listed_chunks"] == sum(r[1] for r in listed_rows) == 6
     assert (got["stored_chunks"], got["stored_sources"]) == (_STORED_CHUNKS, _STORED_SOURCES)
     # One source with chunks in two buckets counts once, and once per bucket.
     assert _histogram(got["distribution"]) == _LISTED
@@ -125,16 +129,19 @@ async def test_totals_only_reads_the_same_counts_without_a_histogram(store):
         assert totals[key] == full[key], key
 
 
+_ZERO = {"listed_chunks": 0, "listed_sources": 0, "stored_chunks": 0, "stored_sources": 0}
+
+
 async def test_an_empty_store_has_seven_zero_buckets(bm25_only_components):
     comp, _ = bm25_only_components
     got = await comp.storage.get_listed_stats()
     assert [b["bucket"] for b in got["distribution"]] == _BUCKETS
     assert all(b["count"] == 0 for b in got["distribution"])
-    assert {k: v for k, v in got.items() if k != "distribution"} == {
-        "listed_chunks": 0,
-        "listed_sources": 0,
-        "stored_chunks": 0,
-        "stored_sources": 0,
+    assert {k: v for k, v in got.items() if k != "distribution"} == _ZERO
+    # Each ``SUM`` of the totals statement is NULL over no rows.
+    assert await comp.storage.get_listed_stats(distribution=False) == {
+        **_ZERO,
+        "distribution": [],
     }
 
 
@@ -145,17 +152,19 @@ async def test_an_all_hidden_store_lists_zero_and_stores_its_rows(bm25_only_comp
     assert await comp.storage.hold_source(held, "redaction_blocked")
 
     got = await comp.storage.get_listed_stats()
+    totals = await comp.storage.get_listed_stats(distribution=False)
 
     assert _histogram(got["distribution"]) == {}
-    assert (got["listed_chunks"], got["listed_sources"]) == (0, 0)
-    assert (got["stored_chunks"], got["stored_sources"]) == (2, 1)
+    for counts in (got, totals):
+        assert (counts["listed_chunks"], counts["listed_sources"]) == (0, 0)
+        assert (counts["stored_chunks"], counts["stored_sources"]) == (2, 1)
 
 
 @pytest.mark.parametrize("params", [{}, {"summary_only": "true"}], ids=["full", "summary_only"])
 async def test_api_stats_leaves_held_and_pending_sources_out(store, params):
     data = await _stats(store, **params)
 
-    assert (data["total_chunks"], data["total_sources"]) == (5, 4)
+    assert (data["total_chunks"], data["total_sources"]) == (6, 4)
     assert data["stored_chunks"] == _STORED_CHUNKS
     assert _histogram(data["chunk_size_distribution"]) == _LISTED
     assert sum(b["count"] for b in data["chunk_size_distribution"]) == data["total_chunks"]
@@ -164,7 +173,7 @@ async def test_api_stats_leaves_held_and_pending_sources_out(store, params):
 async def test_api_stats_totals_only_is_the_header_request(store):
     data = await _stats(store, totals_only="true")
 
-    assert (data["total_chunks"], data["total_sources"]) == (5, 4)
+    assert (data["total_chunks"], data["total_sources"]) == (6, 4)
     assert data["stored_chunks"] == _STORED_CHUNKS
     assert data["chunk_size_distribution"] == []
     assert data["home_sources"] == []

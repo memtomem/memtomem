@@ -3578,9 +3578,9 @@ class SqliteBackend(
                     "SELECT * FROM (WITH g AS MATERIALIZED ("  # nosec B608
                     f"SELECT source_file, {_CHUNK_SIZE_BUCKET_SQL} AS bucket, COUNT(*) AS n "
                     "FROM chunks GROUP BY source_file, bucket), "
-                    "s AS MATERIALIZED (SELECT src.source_file, src.n, "
+                    "s AS MATERIALIZED (SELECT src.source_file, "
                     f"CASE WHEN {visible} THEN 1 ELSE 0 END AS ok FROM ("
-                    "SELECT source_file, SUM(n) AS n FROM g GROUP BY source_file) src) "
+                    "SELECT DISTINCT source_file FROM g) src) "
                     "SELECT g.bucket, SUM(g.n), SUM(g.n * s.ok) "
                     "FROM g JOIN s ON s.source_file = g.source_file GROUP BY g.bucket "
                     "UNION ALL SELECT NULL, COUNT(*), SUM(ok) FROM s)"
