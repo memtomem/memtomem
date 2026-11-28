@@ -1202,6 +1202,8 @@ def _request_runs(repository: str, sha: str, token: str) -> list[dict[str, Any]]
     )
     with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
         payload = json.load(response)
+    if not isinstance(payload, dict):
+        raise ReleaseCheckError("GitHub workflow-runs response is not a JSON object")
     runs = payload.get("workflow_runs")
     if not isinstance(runs, list):
         raise ReleaseCheckError("GitHub workflow-runs response has no workflow_runs list")
