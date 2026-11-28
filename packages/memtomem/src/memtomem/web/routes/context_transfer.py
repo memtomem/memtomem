@@ -394,13 +394,18 @@ _PRIVACY_REFUSED_MESSAGE = (
 def _log_refusal(kind: str, name: str, reason_code: str, text: str) -> None:
     """One warning line for a refusal whose wire message leaves out what an operator needs.
 
-    The whole line is secret-scanned, the caller-chosen name included, and no
-    ``exc_info``: the exception chain would carry the text past the scan. Then
-    ``scrub_text``, so a control character in a project path cannot split the
-    record or forge a line after it.
+    The caller-chosen name is secret-scanned on its own, and the engine text on
+    its own when the name is clean, so a hit leaves the kind and the reason code
+    in the record (#3614). A name that hits takes the engine text with it,
+    unscanned: the text can carry the name where a rule no longer matches it,
+    such as inside a staging file name. No ``exc_info``: the exception chain
+    would carry the text past the scan. The scan reads the raw strings;
+    ``scrub_text`` runs after it, so a control character in a project path cannot
+    split the record or forge a line after it.
     """
-    line = _scan_secrets(f"transfer {kind}/{name} refused ({reason_code}): {text}")
-    logger.warning("%s", scrub_text(line))
+    shown = _scan_secrets(name)
+    detail = _scan_secrets(text) if shown == name else shown
+    logger.warning("%s", scrub_text(f"transfer {kind}/{shown} refused ({reason_code}): {detail}"))
 
 
 @router.post("/context/{kind}/{name}/transfer")

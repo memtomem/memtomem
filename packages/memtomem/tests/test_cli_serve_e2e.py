@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
+from _subprocess_env import subprocess_env
 
 
 _DEADLINE_S = 90.0
@@ -94,7 +95,7 @@ class _Exchange(NamedTuple):
 
 def _env(home: Path) -> dict[str, str]:
     """An isolated HOME so the probe never reads or writes the real store."""
-    env = dict(os.environ)
+    env = subprocess_env()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["MEMTOMEM_STORAGE__SQLITE_PATH"] = str(home / "probe.db")
@@ -156,9 +157,10 @@ def _talk(argv: list[str], home: Path, payloads: list[dict], expect_ids: set[int
         encoding="utf-8",
         # Not the checkout. This is not what closes the ``.env`` channel —
         # see ``_env`` for that — but nothing here needs the repo root (the
-        # entry points are absolute and ``memtomem`` comes from the installed
-        # package), and a probe that runs outside the tree cannot pick up
-        # whatever else happens to be sitting in it.
+        # entry points are absolute and ``_env`` puts the source root of the
+        # ``memtomem`` under test first on ``PYTHONPATH``), and a probe that
+        # runs outside the tree cannot pick up whatever else happens to be
+        # sitting in it.
         cwd=home,
         env=_env(home),
     )

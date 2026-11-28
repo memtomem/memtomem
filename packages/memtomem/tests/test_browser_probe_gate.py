@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _subprocess_env import subprocess_env
 
 from .conftest import (
     _PLAYWRIGHT_LAUNCH_TIMEOUT_MS,
@@ -152,7 +153,7 @@ def test_probe_launches_with_the_cold_runner_budget(monkeypatch: pytest.MonkeyPa
 
 def _collect_browser_suite(tmp_path: Path, required: str | None) -> subprocess.CompletedProcess:
     pytest.importorskip("playwright.sync_api")
-    env = {k: v for k, v in os.environ.items() if k not in _INHERITED_PYTEST_ENV}
+    env = subprocess_env({k: v for k, v in os.environ.items() if k not in _INHERITED_PYTEST_ENV})
     # An empty browser cache makes the real probe fail fast in the child,
     # with Playwright's "Executable doesn't exist" error.
     env["PLAYWRIGHT_BROWSERS_PATH"] = str(tmp_path)
