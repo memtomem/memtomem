@@ -1519,6 +1519,41 @@ def test_wait_ci_cli_reports_truncated_response_without_traceback(
     assert not output.out
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(b"[]", id="list"),
+        pytest.param(b'"x"', id="string"),
+        pytest.param(b"0", id="number"),
+        pytest.param(b"null", id="null"),
+    ],
+)
+def test_wait_ci_counts_non_object_body_as_api_error(monkeypatch, body) -> None:
+    clock = _Clock()
+    calls = []
+
+    def open_request(request, timeout):
+        response = _JSONResponse(body)
+        calls.append(response)
+        return response
+
+    monkeypatch.setattr(rp.urllib.request, "urlopen", open_request)
+    with pytest.raises(rp.ReleaseCheckError, match="3 consecutive times") as caught:
+        rp.wait_for_exact_main_ci(
+            repository="memtomem/memtomem",
+            sha="abc",
+            token="token",
+            timeout_seconds=10,
+            interval_seconds=1,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+    assert "response is not a JSON object" in str(caught.value)
+    assert isinstance(caught.value.__cause__, rp.ReleaseCheckError)
+    assert len(calls) == 3
+    assert clock.now == 2
+
+
 def test_cli_converts_protocol_error_at_the_final_boundary(monkeypatch, capsys):
     # Replacing ``validate_opencode_pypi`` bypasses the normal exception conversion,
     # so only ``main``'s fallback can catch this. In a real run ``_request_json``
