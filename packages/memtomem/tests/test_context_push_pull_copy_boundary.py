@@ -67,7 +67,10 @@ one token (``"SyncAll"``), or starting mid-token (``"Run Sync" "All"``), it
 reads like an identifier and is not matched. Bytes literals are read whole only
 (``b"Sync" b"All"`` is not caught): a UTF-8 sequence can straddle two bytes
 tokens, so a token has no offset of its own in the decoded value. The trees
-hold 5 public bytes literals today, none naming Sync or Import. That check
+hold 5 public bytes literals today, none naming Sync or Import. Adjacent
+t-strings (3.14) are not split either (``t"Sync" t"All"`` is not caught): the
+parser joins their text into one synthesized fragment. The package requires
+Python 3.12, where a t-string does not parse, so the trees hold none. That check
 errs toward flagging a concatenation whose token starts with an identifier
 (``"SyncPhaseError" " raised"``).
 
@@ -1022,6 +1025,18 @@ _TOOL = "server/tools/planted.py"
         ),
         pytest.param(
             _ENGINE,
+            'X = (f"""a\r\n{x}\r\nb"""\r\n     "ImportSkills")\r\nY = "x"\r\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="glued-label-after-a-crlf-triple-quoted-fstring",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = "ok"\nY = f"{f"{x:>{w}}"}" f"{f"{y}"\n"ImportSkills"}"\n',
+            {(2, _TOKEN_START_LABEL)},
+            id="glued-label-in-a-same-quote-nested-fstring-field",
+        ),
+        pytest.param(
+            _ENGINE,
             'X = "SyncPhaseError" " raised"\n',
             {(1, _TOKEN_START_LABEL)},
             id="identifier-starting-a-concatenation-errs-toward-flagging",
@@ -1263,6 +1278,13 @@ def test_a_span_exemption_crossing_pieces_clears_a_token_start_match(tmp_path: P
     assert _found(tmp_path / "b", control) == {(_ENGINE, 1, _TOKEN_START_LABEL)}
 
 
+def test_a_span_exemption_must_cover_the_whole_token_start_match(tmp_path: Path) -> None:
+    """An exemption covering only the start of a glued label does not clear it."""
+    source = {_ENGINE: 'X = "Sy" "nc" "All"\n'}
+    found = _found(tmp_path, source, span_exemptions=(re.compile("Sy"),))
+    assert found == {(_ENGINE, 1, _TOKEN_START_LABEL)}
+
+
 def test_a_site_exemption_clears_a_token_start_match_and_counts_once(tmp_path: Path) -> None:
     site = _SiteExemption(_ENGINE, "f", "ImportSkills does not overwrite", "planted")
     source = {_ENGINE: 'def f():\n    return "x. " "Import" "Skills does not overwrite"\n'}
@@ -1284,7 +1306,9 @@ def test_token_start_check_reads_a_deeply_nested_replacement_field(tmp_path: Pat
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
-        pytest.param('X = t"("\n', set(), id="fragment-is-not-a-literal-span"),
+        # The parser joins adjacent t-strings' text into one fragment, which is
+        # never split: the glued label is missed, a stated limit.
+        pytest.param('X = t"Sync" t"All"\n', set(), id="adjacent-t-strings-are-a-stated-limit"),
         # Split so the synthesized debug text ``'Sy' 'nc' 'All'=`` names no
         # label: the one offence is the inner literal's token-start match.
         pytest.param(
