@@ -124,7 +124,7 @@ spec = importlib.util.spec_from_file_location('slateharbor_lab', sample / 'lab.p
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 if 'lab' in globals():
-    lab.close()  # 준비 셀을 다시 실행해도 이전 실습 상태를 남기지 않습니다.
+    lab.close()  # 준비 셀을 다시 실행해도 이전 실습의 임시 폴더를 남기지 않습니다.
 lab = module.Lab(sample)
 atexit.register(lab.close)
 print('실습용 복사본:', lab.project)
@@ -333,7 +333,9 @@ cell(
     """
 ## 9. 실습 정리
 
-임시 파일은 다음 셀에서 삭제합니다. 평소 AI 도구에서 이 실습 기억이 보이지 않는 것이 정상입니다.
+실습의 임시 폴더(복사본·저장소)는 다음 셀에서 삭제합니다. 평소 AI 도구에서 이 실습 기억이 보이지 않는 것이 정상입니다.
+Core 0.7.9 이상에서는 색인한 복사본 파일마다 빈 잠금 파일이 사용자별 런타임 디렉터리의 `source-locks/`에 남습니다.
+문서 내용은 기록되지 않으며, 다른 memtomem 프로세스와 함께 쓰는 디렉터리라 이 셀이 지우지 않습니다.
 커널을 강제로 종료하면 임시 디렉터리가 남을 수 있습니다. 그 경우 준비 셀이 표시한 실습 경로만 확인하세요.
 """,
 )
@@ -344,7 +346,7 @@ temporary = lab.root
 lab.close()
 assert not temporary.exists()
 module.verify_sources(sample)
-print('SLATEHARBOR COMPLETE — 임시 상태를 정리했고 배포 원본 150개 파일은 그대로입니다.')
+print('SLATEHARBOR COMPLETE — 임시 폴더를 정리했고 배포 원본 150개 파일은 그대로입니다.')
 """,
 )
 cell(

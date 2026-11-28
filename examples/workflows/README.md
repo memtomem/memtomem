@@ -32,8 +32,14 @@ Windows에서는 Python 경로를 `.venv-workflows/Scripts/python.exe`로 바꾸
 기본 체험은 `handoff`, `decisions`, `onboarding`별 실제 검색 결과와 출처를 출력합니다.
 
 실행기는 샘플을 임시 폴더로 복사하고 별도 저장소를 초기화합니다. 기존 사용자 설정이나
-MCP 등록을 변경하지 않으며, 종료하면 임시 자료와 색인을 정리합니다. 검색마다 새 CLI 프로세스를
+MCP 등록을 변경하지 않으며, 종료하면 임시 폴더(복사한 자료와 색인)를 삭제합니다. 검색마다 새 CLI 프로세스를
 실행합니다. 출력의 임시 경로는 종료 후 사라지므로 **실제 작업용 자료로 인용하지 마세요**.
+
+임시 폴더를 삭제해도 잠금 파일은 남습니다. Core 0.7.9 이상의 `mm index`는 색인한 복사본 파일마다
+빈 잠금 파일을 사용자별 런타임 디렉터리에 만듭니다(macOS·Linux: `/tmp/memtomem-<euid>/source-locks/`,
+Windows: Local AppData 알려진 폴더의 `Temp\memtomem-0\source-locks\`). 파일 이름은 `<sha256>.lock`이며,
+값은 복사본의 실제 경로를 NFC 정규화·대소문자 접기한 문자열에서 계산합니다. 문서 내용은 기록되지 않습니다. 이 디렉터리는 다른 memtomem 프로세스와
+함께 쓰며, 다른 프로세스가 잡고 있는 잠금 파일을 지우면 잠금이 깨지므로 실행기는 이 파일을 지우지 않습니다.
 
 BM25 검색이므로 먼저 예제의 영문 식별어로 검색합니다. 한국어 의미 검색과 AI 초안 작성은
 [임베딩 설정](../../docs/guides/embeddings.md)과 [AI 도구 연결](../../docs/guides/mcp-clients.md)을
