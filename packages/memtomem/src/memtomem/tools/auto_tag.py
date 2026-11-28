@@ -322,7 +322,9 @@ async def auto_tag_storage(
             chunks in other namespaces are excluded entirely (not counted in
             total/skipped), mirroring the source_filter semantics.
         max_tags: Maximum tags to extract per chunk (default 5).
-        overwrite: If False (default), skip chunks that already have tags.
+        overwrite: If False (default), skip chunks that already have tags. A
+            pass that writes also keeps tags committed while it was
+            extracting.
         dry_run: If True, compute tags but do NOT write to storage.
         search_pipeline: When given, its result cache is dropped after a pass
             that wrote at least one chunk. Optional so the storage-only
@@ -387,7 +389,9 @@ async def auto_tag_storage(
                     # ``services.tag_management`` (#688). The write touches only
                     # ``tags`` and ``updated_at`` and judges the hold itself, so
                     # a chunk deleted, or whose source was held, while the
-                    # extractor ran is skipped rather than rewritten.
+                    # extractor ran is skipped rather than rewritten. Without
+                    # ``overwrite`` it judges "still untagged" too, so a chunk
+                    # tagged meanwhile is skipped the same way (#3194).
                     #
                     # The write waits for another task's transaction (#3181),
                     # taken before the tag lock: an index holds its transaction
@@ -397,9 +401,11 @@ async def auto_tag_storage(
                         storage.transaction(wait=WRITER_WAIT_S),
                         storage._tag_write_lock,
                     ):
-                        if not await storage.set_chunk_tags(chunk.id, new_tags):
+                        if not await storage.set_chunk_tags(
+                            chunk.id, new_tags, only_if_untagged=not overwrite
+                        ):
                             skipped += 1
-                            total -= 1  # rebalance: the chunk is no longer there to tag
+                            total -= 1  # rebalance: nothing left here to tag
                             continue
                         written += 1
 
