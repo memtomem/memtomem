@@ -1392,9 +1392,9 @@ def _confirm_stale(
 
 # ── Frontmatter: can a YAML reader read it? ─────────────────────────
 
-# An empty block. ``_FRONT_MATTER_RE`` needs a line between the two fences, so
-# on this text it would run on to a later thematic break.
-_EMPTY_FRONT_MATTER_RE = re.compile(r"---\n---(?:\n|$)")
+# The line that ends a block: three hyphens followed by a space, a tab or the end
+# of the line, which is where YAML itself sees a document marker.
+_CLOSING_LINE_RE = re.compile(r"\n---(?=[ \t\n]|$)")
 # What makes the rest of a plain scalar's line a comment.
 _TRAILING_COMMENT_RE = re.compile(r"[ \t]+#")
 
@@ -1414,9 +1414,11 @@ class _FrontmatterCheck:
 def _inspect_frontmatter(content: str) -> _FrontmatterCheck:
     """Check the leading frontmatter block of *content* as YAML.
 
-    The block is the chunker's ``_FRONT_MATTER_RE`` match on the raw text, which
-    is what an external reader sees; a match ending mid-line is no block, as in
-    ``chunking/markdown.leading_frontmatter``.
+    The block runs from the opening ``---`` to the first :data:`_CLOSING_LINE_RE`
+    line of the raw text, which is what an external reader sees. If that line
+    holds anything after the hyphens there is no block. Unlike the chunker's
+    ``_FRONT_MATTER_RE``, a line such as ``----: x`` does not end the search,
+    and two adjacent fences are an empty block.
 
     It is composed into nodes and never constructed into values, as
     ``_frontmatter.flat_yaml`` does. Construction costs more than the text on
@@ -1431,14 +1433,13 @@ def _inspect_frontmatter(content: str) -> _FrontmatterCheck:
     anchor's node, position included, so the line its comment sits on would be
     another entry's.
     """
-    from memtomem.chunking.markdown import _FRONT_MATTER_RE
-
-    match = _FRONT_MATTER_RE.match(content)
-    if match is None or _EMPTY_FRONT_MATTER_RE.match(content):
+    if not content.startswith("---\n"):
         return _FrontmatterCheck()
-    if not match.group(0).endswith("\n") and match.end() != len(content):
+    # From 3, so that the opener's own newline can start the closing line.
+    close = _CLOSING_LINE_RE.search(content, 3)
+    if close is None or content[close.end() : close.end() + 1] not in ("", "\n"):
         return _FrontmatterCheck()
-    block = match.group(1)
+    block = content[4 : close.start()]
 
     def line_of(index: int) -> int:
         # Counted in "\n" only: PyYAML's own line numbers also break on U+2028.

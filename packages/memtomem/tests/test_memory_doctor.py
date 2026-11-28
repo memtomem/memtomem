@@ -3050,6 +3050,11 @@ class TestFrontmatterInvalid:
         _write(mem_dir / "note.md", _fm(*lines))
         assert _frontmatter_items(config, mem_dir) == [item]
 
+    def test_a_line_that_only_starts_with_hyphens_does_not_close_the_block(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm("description: `x`", "----: metadata"))
+        assert _frontmatter_items(config, mem_dir) == ["note.md:2 (ScannerError)"]
+
     def test_control_character_reports_its_line(self, fm_env):
         config, mem_dir = fm_env
         _write(mem_dir / "note.md", _fm("name: x", "description: a\x07b"))
@@ -3073,6 +3078,12 @@ class TestFrontmatterInvalid:
             pytest.param("---\n\n---\n\nbody\n", id="blank"),
             pytest.param("---\n---\n\nprose\n\n---\n", id="adjacent-empty"),
             pytest.param("---\n- a\n----\n", id="four-hyphen-closer"),
+            pytest.param(
+                "---\nname: a\n--- \n\ndescription: `x`\n\n---\n", id="space-after-closer"
+            ),
+            pytest.param(
+                "---\nname: a\n--- x\n\ndescription: `x`\n\n---\n", id="text-after-closer"
+            ),
         ],
     )
     def test_not_reported(self, fm_env, text):
@@ -3184,6 +3195,7 @@ class TestFrontmatterTruncated:
             (("name: &a x # c",), ["note.md:2 (name)"]),
             (("name: x # c", "!!null name: y"), ["note.md:2 (name)"]),
             (("name: # key comment", "  x # value comment"), ["note.md:3 (name)"]),
+            (("name: shipped PR #530", "----: metadata"), ["note.md:2 (name)"]),
         ],
     )
     def test_reports_a_value_a_comment_follows(self, fm_env, lines, items):
