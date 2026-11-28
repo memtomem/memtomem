@@ -44,6 +44,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The related-chunks preview shows a note's YAML frontmatter as metadata (#3093).** The
+  web UI's detail view got this in #3030; the preview under **Related** still drew the
+  opening `---` as a rule and the `key: value` lines above the closing `---` as a heading.
+  It now asks the same `GET /api/chunks/{id}/frontmatter` question and shows a certified
+  block above the rendered note. It also renders `.markdown` sources as Markdown, which it
+  had shown as plain text.
+
 - **Auto-tag with `overwrite` off keeps tags committed while it was extracting (#3194).**
   The pass judged "already tagged" from the chunk it read before tag extraction (possibly an
   LLM call), then replaced the tags whatever they were by then, so a manual tag edit, an
