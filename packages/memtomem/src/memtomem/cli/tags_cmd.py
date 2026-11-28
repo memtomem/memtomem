@@ -24,7 +24,22 @@ import click
 from memtomem.services import tag_management as tag_svc
 
 
-@click.group("tags")
+# Click's raw-paragraph marker preserves one copyable example per line.
+TAGS_EPILOG = """\
+Examples:
+
+rename, merge and delete only preview until you add --apply; --yes needs --apply.
+
+\b
+  mm tags list
+  mm tags rename bugfix fix
+  mm tags rename bugfix fix --apply
+  mm tags merge pm post-mortem --into postmortem --apply
+  mm tags delete wip --apply --yes
+"""
+
+
+@click.group("tags", epilog=TAGS_EPILOG)
 def tags() -> None:
     """Manage tags: list, rename, delete, or merge them across all chunks."""
 
