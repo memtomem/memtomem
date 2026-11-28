@@ -227,6 +227,15 @@ def app(_isolated_config_paths: Path):
     storage = AsyncMock()
     storage.get_stats = AsyncMock(return_value={"total_chunks": 42, "total_sources": 3})
     storage.get_chunk_size_distribution = AsyncMock(return_value=[])
+    storage.get_listed_stats = AsyncMock(
+        return_value={
+            "listed_chunks": 42,
+            "listed_sources": 3,
+            "stored_chunks": 50,
+            "stored_sources": 4,
+            "distribution": [],
+        }
+    )
     storage.get_chunk = AsyncMock(return_value=_make_test_chunk())
     storage.recall_chunks = AsyncMock(return_value=[_make_test_chunk()])
     storage.get_all_source_files = AsyncMock(return_value=[Path("/tmp/test.md")])
@@ -559,6 +568,7 @@ class TestStats:
         data = resp.json()
         assert data["total_chunks"] == 42
         assert data["total_sources"] == 3
+        assert data["stored_chunks"] == 50
         assert "chunk_size_distribution" in data
 
     async def test_stats_returns_home_aggregates(self, app, client: AsyncClient, tmp_path):
@@ -669,7 +679,7 @@ class TestStats:
         assert data["home_total_source_size"] == (md_sizes + txt_sizes)
 
     async def test_stats_summary_only_skips_the_source_scan(self, app, client: AsyncClient):
-        """The header pill's call: totals only, no per-source pass."""
+        """Totals and the histogram from one read, no per-source pass."""
         resp = await client.get("/api/stats", params={"summary_only": "true"})
 
         assert resp.status_code == 200
@@ -680,6 +690,26 @@ class TestStats:
         assert data["home_recent_sources"] == []
         assert data["home_file_type_distribution"] == []
         assert data["home_total_source_size"] == 0
+        app.state.storage.get_listed_stats.assert_awaited_once_with(distribution=True)
+        app.state.storage.get_source_files_with_counts.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "params",
+        [{"totals_only": "true"}, {"totals_only": "true", "summary_only": "true"}],
+        ids=["totals_only", "both_flags"],
+    )
+    async def test_stats_totals_only_skips_the_histogram(self, app, client: AsyncClient, params):
+        """The header pill's call: the totals, read without chunk content.
+        ``totals_only`` wins when ``summary_only`` is also given."""
+        resp = await client.get("/api/stats", params=params)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert (data["total_chunks"], data["total_sources"]) == (42, 3)
+        assert data["stored_chunks"] == 50
+        assert data["chunk_size_distribution"] == []
+        assert data["home_sources"] == []
+        app.state.storage.get_listed_stats.assert_awaited_once_with(distribution=False)
         app.state.storage.get_source_files_with_counts.assert_not_called()
 
     async def test_stats_resolves_each_project_root_once_per_request(

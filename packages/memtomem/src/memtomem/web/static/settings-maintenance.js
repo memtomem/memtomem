@@ -547,8 +547,12 @@ async function runImport() {
 
 async function loadResetInfo() {
   try {
-    const stats = await api('GET', '/api/stats');
-    qs('reset-chunk-count').textContent = stats.total_chunks ?? '—';
+    // totals_only: the panel shows one count, so it needs neither the Home
+    // source scan nor the chunk-size histogram.
+    const stats = await api('GET', '/api/stats?totals_only=true');
+    // A reset deletes every row, held and pending sources included, so this
+    // is the stored count, not the listed ``total_chunks`` (#3115).
+    qs('reset-chunk-count').textContent = stats.stored_chunks ?? '—';
   } catch {
     qs('reset-chunk-count').textContent = '?';
   }

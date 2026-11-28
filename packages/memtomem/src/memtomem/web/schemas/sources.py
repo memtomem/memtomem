@@ -194,9 +194,17 @@ class HomeFileTypeCount(BaseModel):
 
 
 class StatsResponse(BaseModel):
-    total_chunks: int
-    total_sources: int
-    chunk_size_distribution: list[ChunkSizeBucket] = []
+    total_chunks: int = Field(
+        description="Chunks of the sources the Sources tree lists under its held/pending "
+        "rule. Every residency tier is counted."
+    )
+    total_sources: int = Field(description="Sources counted the same way as total_chunks.")
+    stored_chunks: int = Field(
+        default=0, description="Every stored chunk, held and pending sources included."
+    )
+    chunk_size_distribution: list[ChunkSizeBucket] = Field(
+        default=[], description="The chunks total_chunks counts, per token-size bucket."
+    )
     home_sources: list[SourceOut] = []
     home_recent_sources: list[SourceOut] = []
     home_total_source_size: int = 0
