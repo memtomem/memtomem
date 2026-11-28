@@ -53,6 +53,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **The related-chunks preview shows a note's YAML frontmatter as metadata (#3093).** The
+  web UI's detail view got this in #3030; the preview under **Related** still drew the
+  opening `---` as a rule and the `key: value` lines above the closing `---` as a heading.
+  It now asks the same `GET /api/chunks/{id}/frontmatter` question and shows a certified
+  block above the rendered note. It also renders `.markdown` sources as Markdown, which it
+  had shown as plain text.
+
 - **Swap recovery warnings list competing marker files or both paths of a failed recovery
   rename (#3544).** The transfer response still tells callers to see the server log.
 
