@@ -69,10 +69,11 @@ reads like an identifier and is not matched. Bytes literals are read whole only
 tokens, so a token has no offset of its own in the decoded value. The trees
 hold 5 public bytes literals today, none naming Sync or Import. Adjacent
 t-strings (3.14) are not split either (``t"Sync" t"All"`` is not caught): the
-parser joins their text into one synthesized fragment. The package requires
-Python 3.12, where a t-string does not parse, so the trees hold none. That check
-errs toward flagging a concatenation whose token starts with an identifier
-(``"SyncPhaseError" " raised"``).
+parser joins their text into one synthesized fragment. The scan roots hold no
+t-string today, and one would break the package's Python 3.12 support, where a
+t-string does not parse. The token-start check errs toward flagging a
+concatenation whose token starts with an identifier (``"SyncPhaseError"
+" raised"``).
 
 Two more limits, neither of whose shapes exists in the trees today. The checks
 err toward flagging in two places: route path strings are matched as text, and a mounted route's
