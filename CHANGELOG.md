@@ -51,6 +51,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   block above the rendered note. It also renders `.markdown` sources as Markdown, which it
   had shown as plain text.
 
+- **Swap recovery warnings list competing marker files or both paths of a failed recovery
+  rename (#3544).** The transfer response still tells callers to see the server log.
+
 - **Auto-tag with `overwrite` off keeps tags committed while it was extracting (#3194).**
   The pass judged "already tagged" from the chunk it read before tag extraction (possibly an
   LLM call), then replaced the tags whatever they were by then, so a manual tag edit, an
