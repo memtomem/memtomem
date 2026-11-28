@@ -784,6 +784,24 @@ class TestExperiment:
         assert "profile #2 rejected" in result.output
 
 
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("cases", "Only list cases with this status (default: all cases)."),
+        ("cases", "Report format on stdout."),
+        ("replay", "Report format on stdout. --out always writes JSON."),
+        ("compare", "Report format on stdout. --out always writes JSON."),
+        ("gate", "Report format on stdout. --out always writes JSON."),
+        ("experiment", "Report format on stdout. --out always writes JSON."),
+    ],
+)
+def test_status_and_format_options_have_help(command, expected):
+    result = CliRunner().invoke(quality, [command, "--help"])
+    assert result.exit_code == 0, result.output
+    # Click wraps long help lines, so match against collapsed whitespace.
+    assert expected in " ".join(result.output.split())
+
+
 @pytest.mark.parametrize("fmt", ["json", "table"])
 @pytest.mark.parametrize(
     "status,exit_code", [("complete", 0), ("partial", 0), ("unavailable", 2), ("empty", 0)]
