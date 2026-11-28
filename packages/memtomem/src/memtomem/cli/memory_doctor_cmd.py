@@ -94,6 +94,15 @@ Checks (per configured ``memory_dir``):
   (the hot cache loaded into the agent's context each session).
 * **cold_candidate** — indexed files never accessed since indexing
   (``access_count`` sum 0 and ``last_accessed_at`` NULL). Informational.
+* **frontmatter_invalid** — Markdown files whose leading frontmatter block is not
+  valid YAML, or whose root is not a mapping (#2719). memtomem reads frontmatter
+  line by line, so unquoted prose that breaks the YAML still indexes, while a
+  YAML reader of the same file gets no keys. The block is composed, never
+  constructed (see :func:`_inspect_frontmatter`).
+* **frontmatter_truncated** — the effective top-level ``name`` / ``description``
+  is a plain scalar that a ``#`` comment directly follows, so a YAML reader may
+  see less than was meant. A block that uses an alias is not judged.
+  Informational.
 
 Output: human glyphs by default, ``--json`` for a structured payload. Exit
 ``1`` when any *error*-severity finding exists (``stale_source``,
@@ -130,6 +139,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import click
+import yaml
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
@@ -1380,6 +1390,138 @@ def _confirm_stale(
     return "fresh", decision
 
 
+# ── Frontmatter: can a YAML reader read it? ─────────────────────────
+
+# An empty block. ``_FRONT_MATTER_RE`` needs a line between the two fences, so
+# on this text it would run on to a later thematic break.
+_EMPTY_FRONT_MATTER_RE = re.compile(r"---\n---(?:\n|$)")
+# What makes the rest of a plain scalar's line a comment.
+_TRAILING_COMMENT_RE = re.compile(r"[ \t]+#")
+
+
+@dataclass(frozen=True)
+class _FrontmatterCheck:
+    """What :func:`_inspect_frontmatter` found. Lines are 1-based file lines.
+
+    Neither field carries source text: ``problem`` is an exception class name or
+    a fixed phrase, and a ``truncated`` key is one of two known names.
+    """
+
+    problem: tuple[int | None, str] | None = None
+    truncated: tuple[tuple[int, str], ...] = ()
+
+
+def _inspect_frontmatter(content: str) -> _FrontmatterCheck:
+    """Check the leading frontmatter block of *content* as YAML.
+
+    The block is the chunker's ``_FRONT_MATTER_RE`` match on the raw text, which
+    is what an external reader sees; a match ending mid-line is no block, as in
+    ``chunking/markdown.leading_frontmatter``.
+
+    It is composed into nodes and never constructed into values, as
+    ``_frontmatter.flat_yaml`` does. Construction costs more than the text on
+    some input (merge aliases, long base-60 integers) and can raise errors whose
+    message is a source value. So an error only construction would raise (an
+    unknown tag, an impossible date) is not found here.
+
+    A parser failure is reported by class name only: PyYAML's message and
+    ``problem`` string quote the source.
+
+    A block that uses an alias gets no truncation check: a composed alias is its
+    anchor's node, position included, so the line its comment sits on would be
+    another entry's.
+    """
+    from memtomem.chunking.markdown import _FRONT_MATTER_RE
+
+    match = _FRONT_MATTER_RE.match(content)
+    if match is None or _EMPTY_FRONT_MATTER_RE.match(content):
+        return _FrontmatterCheck()
+    if not match.group(0).endswith("\n") and match.end() != len(content):
+        return _FrontmatterCheck()
+    block = match.group(1)
+
+    def line_of(index: int) -> int:
+        # Counted in "\n" only: PyYAML's own line numbers also break on U+2028.
+        return block.count("\n", 0, index) + 2
+
+    try:
+        root = yaml.compose(block, Loader=yaml.SafeLoader)
+    except Exception as exc:  # RecursionError and ReaderError are not MarkedYAMLError
+        mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+        index = mark.index if mark is not None else getattr(exc, "position", None)
+        line = None if index is None else line_of(index)
+        return _FrontmatterCheck(problem=(line, type(exc).__name__))
+    if root is None:  # empty or comment-only: there is no value to lose
+        return _FrontmatterCheck()
+    if not isinstance(root, yaml.MappingNode):
+        return _FrontmatterCheck(problem=(line_of(root.start_mark.index), "not a mapping"))
+
+    # The tags are what a reader goes by: a ``!!set`` root gives ``name`` no
+    # value, and a ``!!null name:`` key is not the ``name`` key.
+    if root.tag != "tag:yaml.org,2002:map" or any(
+        isinstance(t, yaml.AliasToken) for t in yaml.scan(block, Loader=yaml.SafeLoader)
+    ):
+        return _FrontmatterCheck()
+    effective = {
+        key.value: value
+        for key, value in root.value
+        if key.tag == "tag:yaml.org,2002:str" and key.value in ("name", "description")
+    }
+    truncated: list[tuple[int, str]] = []
+    for name, value in effective.items():
+        if not isinstance(value, yaml.ScalarNode) or value.style is not None:
+            continue
+        if _TRAILING_COMMENT_RE.match(block, value.end_mark.index):
+            truncated.append((line_of(value.end_mark.index), name))
+    return _FrontmatterCheck(truncated=tuple(sorted(truncated)))
+
+
+def _check_frontmatter(report: DirReport, root: Path, files: Sequence[Path]) -> None:
+    """Add the two frontmatter findings for the Markdown *files* of one dir."""
+    invalid: list[str] = []
+    truncated: list[str] = []
+    for path in sorted(files):
+        content = _read_indexable_content(path)
+        if content is None:
+            continue
+        check = _inspect_frontmatter(content)
+        try:
+            label = str(path.relative_to(root))
+        except ValueError:  # pragma: no cover - ownership already checked
+            label = path.name
+        if check.problem is not None:
+            line, problem = check.problem
+            where = label if line is None else f"{label}:{line}"
+            invalid.append(f"{where} ({problem})")
+        truncated.extend(f"{label}:{line} ({key})" for line, key in check.truncated)
+    if invalid:
+        report.findings.append(
+            Finding(
+                check="frontmatter_invalid",
+                severity="warn",
+                summary=(
+                    f"{len(invalid)} file(s) have frontmatter PyYAML cannot read as a mapping — "
+                    "a reader like it gets no `name` / `description` (quote a free-text value "
+                    "as a double-quoted YAML string; a block needs `key: value` lines)"
+                ),
+                items=invalid,
+            )
+        )
+    if truncated:
+        report.findings.append(
+            Finding(
+                check="frontmatter_truncated",
+                severity="info",
+                summary=(
+                    f"{len(truncated)} frontmatter value(s) may be cut at a `#` — YAML reads the "
+                    "rest of the line as a comment (if the `#` is meant literally, quote the "
+                    "value as a double-quoted YAML string)"
+                ),
+                items=truncated,
+            )
+        )
+
+
 # ── Analysis ────────────────────────────────────────────────────────
 
 
@@ -1401,6 +1543,7 @@ def _analyze_dir(
     root (whose DB rows are bucketed to the child), making the parent falsely
     report the child's already-indexed files as uncovered.
     """
+    from memtomem.chunking.markdown import MARKDOWN_EXTENSIONS
     from memtomem.config import (
         categorize_memory_dir,
         index_excluded_filenames,
@@ -1422,10 +1565,15 @@ def _analyze_dir(
     # ``_gather_reports`` — a nested child root owns its own subtree).
     disk_files = engine.discover_indexable_files(resolved_dir)  # type: ignore[attr-defined]
     disk_norm: dict[str, Path] = {}
+    # Kept apart from ``disk_norm``, whose keys are resolved paths: a ``z.py``
+    # symlink to ``a.md`` takes that note's slot there.
+    markdown_norm: dict[str, Path] = {}
     for p in disk_files:
         owning = resolve_owning_memory_dir(p, memory_dirs)
         if owning is not None and norm_path(owning) == dir_key:
             disk_norm[norm_path(p)] = p
+            if p.suffix in MARKDOWN_EXTENSIONS:
+                markdown_norm[norm_path(p)] = p
 
     # DB side: source-file signal rows already bucketed to this dir.
     db_norm: dict[str, tuple[Path, int, str | None, int, float, float]] = {
@@ -1681,6 +1829,8 @@ def _analyze_dir(
                 items=[f"{p.name} ({c} chunk{'s' if c != 1 else ''})" for p, c in cold],
             )
         )
+
+    _check_frontmatter(report, resolved_dir, list(markdown_norm.values()))
 
     # 5/6/7. Index-file checks (only for providers with a TOC convention).
     if index_file_name:
