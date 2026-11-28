@@ -123,6 +123,20 @@ logger = logging.getLogger(__name__)
 # valid on every runtime this package supports rather than on the newest.
 _SQL_MAX_PARAMS = 900
 
+# Chunk-size buckets of ``get_chunk_size_distribution`` and ``get_listed_stats``,
+# by a token estimate of ``LENGTH(content) / 3``.
+_CHUNK_SIZE_BUCKETS = ("0-32", "32-64", "64-128", "128-256", "256-512", "512-1024", "1024+")
+_CHUNK_SIZE_BUCKET_SQL = (
+    "CASE "
+    "WHEN LENGTH(content)/3 < 32 THEN '0-32' "
+    "WHEN LENGTH(content)/3 < 64 THEN '32-64' "
+    "WHEN LENGTH(content)/3 < 128 THEN '64-128' "
+    "WHEN LENGTH(content)/3 < 256 THEN '128-256' "
+    "WHEN LENGTH(content)/3 < 512 THEN '256-512' "
+    "WHEN LENGTH(content)/3 < 1024 THEN '512-1024' "
+    "ELSE '1024+' END"
+)
+
 _T = TypeVar("_T")
 
 
@@ -3530,22 +3544,76 @@ class SqliteBackend(
 
         async with self._lease_txn_read_db() as db:
             rows = db.execute(
-                "SELECT "
-                "  CASE "
-                "    WHEN LENGTH(content)/3 < 32   THEN '0-32' "
-                "    WHEN LENGTH(content)/3 < 64   THEN '32-64' "
-                "    WHEN LENGTH(content)/3 < 128  THEN '64-128' "
-                "    WHEN LENGTH(content)/3 < 256  THEN '128-256' "
-                "    WHEN LENGTH(content)/3 < 512  THEN '256-512' "
-                "    WHEN LENGTH(content)/3 < 1024 THEN '512-1024' "
-                "    ELSE '1024+' "
-                "  END AS bucket, "
+                f"SELECT {_CHUNK_SIZE_BUCKET_SQL} AS bucket, "
                 f"  COUNT(*) AS cnt FROM chunks {where} GROUP BY bucket",
                 params,
             ).fetchall()
-        ordered = ["0-32", "32-64", "64-128", "128-256", "256-512", "512-1024", "1024+"]
         counts = {row[0]: row[1] for row in rows}
-        return [{"bucket": b, "count": counts.get(b, 0)} for b in ordered]
+        return [{"bucket": b, "count": counts.get(b, 0)} for b in _CHUNK_SIZE_BUCKETS]
+
+    async def get_listed_stats(self, *, distribution: bool = True) -> dict[str, Any]:
+        """Chunk and source counts as the Sources tree lists them, beside the stored ones.
+
+        ``listed_*`` leave out every source the path-level hold rule hides
+        (``visible_path_sql``: held or pending, or a policy summary of such a
+        source), which is what ``GET /api/sources`` drops; every residency tier
+        is counted. ``stored_*`` count every row, as :meth:`get_stats` does.
+        ``distribution`` is the listed chunks per size bucket, as
+        :meth:`get_chunk_size_distribution` buckets them, or ``[]`` when not
+        asked for (that skips reading every chunk's content).
+
+        One statement, so the totals and the buckets describe one snapshot (a
+        lease hands out a connection, not a snapshot). The rule runs once per
+        source, not once per row: ``s`` is materialised per source key.
+        """
+        # ``visible_path_sql`` names its own tables ``h``, ``p`` and ``o``; an
+        # outer alias of the same name would capture its correlated column
+        # (an outer ``p`` made every source hidden once one check was pending).
+        visible = visible_path_sql("src.source_file")
+        async with self._lease_txn_read_db() as db:
+            if distribution:
+                # Wrapped in ``SELECT * FROM (...)`` so it reads as a read: a
+                # leading ``WITH`` could also open a write.
+                rows = db.execute(
+                    "SELECT * FROM (WITH g AS MATERIALIZED ("  # nosec B608
+                    f"SELECT source_file, {_CHUNK_SIZE_BUCKET_SQL} AS bucket, COUNT(*) AS n "
+                    "FROM chunks GROUP BY source_file, bucket), "
+                    "s AS MATERIALIZED (SELECT src.source_file, src.n, "
+                    f"CASE WHEN {visible} THEN 1 ELSE 0 END AS ok FROM ("
+                    "SELECT source_file, SUM(n) AS n FROM g GROUP BY source_file) src) "
+                    "SELECT g.bucket, SUM(g.n), SUM(g.n * s.ok) "
+                    "FROM g JOIN s ON s.source_file = g.source_file GROUP BY g.bucket "
+                    "UNION ALL SELECT NULL, COUNT(*), SUM(ok) FROM s)"
+                ).fetchall()
+            else:
+                # ``s`` is materialised: a plain subquery is flattened, and the
+                # rule then runs once for each of ``SUM(ok)`` and ``SUM(n * ok)``.
+                rows = db.execute(
+                    "SELECT * FROM (WITH s AS MATERIALIZED ("  # nosec B608
+                    f"SELECT src.n, CASE WHEN {visible} THEN 1 ELSE 0 END AS ok FROM ("
+                    "SELECT source_file, COUNT(*) AS n FROM chunks GROUP BY source_file) src) "
+                    "SELECT COUNT(*), SUM(ok), SUM(n), SUM(n * ok) FROM s)"
+                ).fetchall()
+        if not distribution:
+            stored_sources, listed_sources, stored_chunks, listed_chunks = rows[0]
+            dist: list[dict] = []
+        else:
+            _, stored_sources, listed_sources = next(row for row in rows if row[0] is None)
+            buckets = {row[0]: (row[1], row[2]) for row in rows if row[0] is not None}
+            stored_chunks = sum(stored for stored, _ in buckets.values())
+            listed_chunks = sum(listed for _, listed in buckets.values())
+            dist = [
+                {"bucket": b, "count": int(buckets[b][1]) if b in buckets else 0}
+                for b in _CHUNK_SIZE_BUCKETS
+            ]
+        # ``SUM`` over no rows is NULL: an empty store counts zero.
+        return {
+            "listed_chunks": int(listed_chunks or 0),
+            "listed_sources": int(listed_sources or 0),
+            "stored_chunks": int(stored_chunks or 0),
+            "stored_sources": int(stored_sources or 0),
+            "distribution": dist,
+        }
 
     async def list_chunks_by_source(
         self,

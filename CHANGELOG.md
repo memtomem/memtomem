@@ -47,6 +47,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **Swap recovery warnings list competing marker files or both paths of a failed recovery
   rename (#3544).** The transfer response still tells callers to see the server log.
 
+- **The Web UI header totals and the Home chunk-size chart no longer count held or pending
+  sources (#3115).** After #3109 the Home lists left out a source the Sources tree hides,
+  but `total_chunks`, `total_sources` and `chunk_size_distribution` in `GET /api/stats`
+  still counted every stored row, so with a held source the header named more sources than
+  the Sources tree lists. They now count under the Sources tree's held/pending rule, every
+  residency tier included, from one SQL statement so the totals and the chart describe one
+  snapshot. A new `stored_chunks` field keeps the store-wide count, which the Settings →
+  Reset panel now shows, since a reset deletes held rows too. The header asks for a new
+  `totals_only=true`, which skips the chart and reads no chunk content. On 50,000 chunks
+  in 5,000 sources, that read took 11.9 ms, against 492 ms for `summary_only=true`'s reads
+  before this change (median of 15, one macOS run). The
+  Home Sources tile counts the list it sits above, so an empty list shows 0. `mem_stats`,
+  `mem_ns_list`, `mem_activity` and the MCP resources still count every stored row.
+
 - **Auto-tag with `overwrite` off keeps tags committed while it was extracting (#3194).**
   The pass judged "already tagged" from the chunk it read before tag extraction (possibly an
   LLM call), then replaced the tags whatever they were by then, so a manual tag edit, an

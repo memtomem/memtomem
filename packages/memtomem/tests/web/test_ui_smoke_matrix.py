@@ -180,6 +180,8 @@ def _api_payload(url: str, mode: str) -> dict[str, object]:
         return {
             "total_chunks": 1,
             "total_sources": 1,
+            # Above ``total_chunks``: the store also holds a held source.
+            "stored_chunks": 7,
             "chunk_size_distribution": [{"bucket": "0-500", "count": 1}],
             "home_sources": [source],
             "home_recent_sources": [source],
@@ -572,3 +574,40 @@ def test_hash_history_back_forward_keeps_url_tab_and_panel_in_sync(page) -> None
         page.wait_for_selector('.tab-btn[data-tab="sources"].active')
         assert page.url.endswith("#sources")
         assert page.locator("#tab-sources").is_visible()
+
+
+def test_reset_panel_counts_every_stored_chunk(page) -> None:
+    """A reset deletes held and pending sources too, so the Reset panel shows
+    ``stored_chunks``, not the listed ``total_chunks`` (#3115)."""
+    page.set_viewport_size({"width": 1440, "height": 900})
+    _install_smoke_stubs(page, "prod")
+
+    with _web_server("prod") as base_url:
+        page.goto(f"{base_url}/#settings", wait_until="domcontentloaded")
+        _ensure_nav_visible(page, "#tab-settings", "reset").first.click()
+        page.wait_for_function(
+            "() => document.querySelector('#reset-chunk-count')?.textContent === '7'",
+            timeout=5_000,
+        )
+
+
+def test_home_sources_tile_counts_the_list_it_sits_above(page) -> None:
+    """An empty ``home_sources`` is 0, not ``total_sources``: the totals still
+    count ``project_local`` sources that the list leaves out (#3115)."""
+    page.set_viewport_size({"width": 1440, "height": 900})
+    _install_smoke_stubs(page, "prod")
+
+    def _stats(route) -> None:
+        payload = _api_payload(route.request.url, "prod")
+        payload.update(total_chunks=3, total_sources=3, home_sources=[], home_recent_sources=[])
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
+
+    page.route("**/api/stats", _stats)
+
+    with _web_server("prod") as base_url:
+        page.goto(f"{base_url}/#home", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => document.querySelector('#home-chunks')?.textContent === '3'",
+            timeout=5_000,
+        )
+        assert page.locator("#home-sources").text_content() == "0"

@@ -2447,8 +2447,9 @@ window.addEventListener('hashchange', () => {
 async function loadStats() {
   try {
     // Totals only: the per-source scan is for loadDashboard(), the one reader
-    // of the home_* fields, and this runs on every tab switch.
-    const data = await api('GET', '/api/stats?summary_only=true');
+    // of the home_* fields, and this runs on every tab switch. totals_only also
+    // skips the chunk-size histogram, which reads every chunk's content.
+    const data = await api('GET', '/api/stats?totals_only=true');
     const chunksEl = qs('stat-chunks');
     const sourcesEl = qs('stat-sources');
     chunksEl.removeAttribute('data-i18n');
@@ -2666,9 +2667,9 @@ async function loadDashboard() {
 
     // Kept on STATE so a Home → recent-source click can resolve the target
     // vendor sub-tab before activating the Sources tab. Only navigation reads
-    // it: ``home_sources`` is uncapped but, unlike ``/api/sources``, still
-    // lists held and pending sources, and this load can land after the
-    // Sources tab's own, so it must not replace that tab's list (#2571).
+    // it: ``home_sources`` applies the Sources tree's visibility rule (#3109)
+    // but is uncapped and unpaged, and this load can land after the Sources
+    // tab's own, so it must not replace that tab's list (#2571).
     STATE.homeSources = allSources;
     const _memStatusByPath = {};
     for (const entry of (memDirsResp && memDirsResp.dirs) || []) {
@@ -2678,7 +2679,12 @@ async function loadDashboard() {
 
     // A. Stats cards
     qs('home-chunks').textContent = Number(stats.total_chunks || 0).toLocaleString();
-    qs('home-sources').textContent = Number(allSources.length || stats.total_sources || 0).toLocaleString();
+    // The tile counts the list it sits above. ``total_sources`` still counts
+    // ``project_local`` sources the list leaves out, so an empty list is 0.
+    const sourceCount = Array.isArray(stats.home_sources)
+      ? stats.home_sources.length
+      : Number(stats.total_sources || 0);
+    qs('home-sources').textContent = sourceCount.toLocaleString();
     qs('home-namespaces').textContent = namespaces.length;
     const totalSize = Number(
       typeof stats.home_total_source_size === 'number'

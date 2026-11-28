@@ -463,6 +463,12 @@ async def get_stats(
         description="Return only the totals and the chunk-size distribution. Skips the "
         "per-source scan, so every home_* field comes back empty.",
     ),
+    totals_only: bool = Query(
+        False,
+        description="Return only total_chunks, total_sources and stored_chunks: the header's "
+        "request. Skips the chunk-size distribution as well, so it reads no chunk content. "
+        "Wins over summary_only when both are given.",
+    ),
     storage=Depends(get_storage),
     config=Depends(get_config),
 ) -> StatsResponse:
@@ -481,16 +487,19 @@ async def get_stats(
         except (ValueError, TypeError):
             return None
 
-    data = await storage.get_stats()
-    distribution = await storage.get_chunk_size_distribution()
-    if summary_only:
+    # The totals and the histogram count what the Sources tree lists, under its
+    # held/pending rule, from one statement (#3115); ``stored_chunks`` is every
+    # row, for the Reset panel.
+    data = await storage.get_listed_stats(distribution=not totals_only)
+    totals = {
+        "total_chunks": data["listed_chunks"],
+        "total_sources": data["listed_sources"],
+        "stored_chunks": data["stored_chunks"],
+    }
+    if summary_only or totals_only:
         # The header pill reads only the totals, and it refreshes on every tab
         # switch; the per-source scan below is for the Home dashboard.
-        return StatsResponse(
-            total_chunks=data.get("total_chunks", 0),
-            total_sources=data.get("total_sources", 0),
-            chunk_size_distribution=distribution,
-        )
+        return StatsResponse(**totals, chunk_size_distribution=data["distribution"])
 
     # Every index root owns its sources, matching ``GET /api/sources`` —
     # a read-only or project root's files are not orphans. (#2522)
@@ -574,9 +583,8 @@ async def get_stats(
     )
 
     return StatsResponse(
-        total_chunks=data.get("total_chunks", 0),
-        total_sources=data.get("total_sources", 0),
-        chunk_size_distribution=distribution,
+        **totals,
+        chunk_size_distribution=data["distribution"],
         home_sources=all_sources,
         home_recent_sources=recent_sources[:8],
         home_total_source_size=total_source_size,
