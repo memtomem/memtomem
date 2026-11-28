@@ -220,13 +220,25 @@ addressable through an explicit `namespace=` filter or
 
 ```
 mem_dedup_scan(threshold=0.92, limit=50)
-→ 3 candidate pairs:
-  1. [0.97] chunk-A ↔ chunk-B (exact match)
-  2. [0.94] chunk-C ↔ chunk-D
+→ Duplicate candidates: 2 pairs (threshold=0.92):
 
-mem_dedup_merge(keep_id="chunk-A-uuid", delete_ids=["chunk-B-uuid"])
-→ Deleted 1, kept chunk-A (tags merged)
+  [1] exact duplicate
+    A (<id-1a>): /path/to/notes/deploy.md:12 — "Deploys go out on Tuesdays after the smoke run passes."
+    B (<id-1b>): /path/to/notes/ops.md:40 — "Deploys go out on Tuesdays after the smoke run passes."
+  [2] score=0.9412
+    A (<id-2a>): /path/to/notes/oncall.md:3 — "Page the on-call engineer when the error rate stays above 2%."
+    B (<id-2b>): /path/to/notes/runbook.md:18 — "Page the on-call engineer if the error rate stays above 2 percent."
+  Scanned all 412 scannable chunks; near-duplicate search probed 412.
+
+mem_dedup_merge(keep_id="<id-1a>", delete_ids=["<id-1b>"])
+→ Merge preview (dry-run): 1 chunks would be deleted, keep_id=<id-1a>
+  (no changes -- re-run with dry_run=False to apply)
+
+mem_dedup_merge(keep_id="<id-1a>", delete_ids=["<id-1b>"], dry_run=False)
+→ Merge complete: 1 chunks deleted, keep_id=<id-1a>
 ```
+
+`<id-1a>` and the other ids stand for chunk ids. An applied merge also adds the deleted chunks' tags to the kept chunk, which its answer does not mention.
 
 > **What a scan covers**: `max_scan` (default 500) bounds the scan's pool: the first `max_scan` scannable chunks in chunk-id order, or, with `after`, the first `max_scan` whose id comes after that chunk id. Scannable chunks are the indexed chunks outside held and pending sources, and outside any file that holds a consolidation summary of a held or pending source, so their number can be smaller than the total `mem_status` reports. On a store with more scannable chunks than `max_scan`, the pool is a subset; without `after` it is the same one on every run while the scannable chunks and `max_scan` stay the same. The last line of the output says which case applies: `Scanned all 412 scannable chunks` or `Scanned 500 of 39458 scannable chunks (...)`.
 >
