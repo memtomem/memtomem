@@ -1417,8 +1417,8 @@ def _inspect_frontmatter(content: str) -> _FrontmatterCheck:
     """Check the leading frontmatter block of *content* as YAML.
 
     The block runs from the opening ``---`` to the first :data:`_CLOSING_LINE_RE`
-    line of the raw text, which is what an external reader sees. If that line
-    holds more than blanks after the hyphens there is no block. Unlike the chunker's
+    line of the decoded text. If that line holds more than spaces or tabs after
+    the hyphens there is no block. Unlike the chunker's
     ``_FRONT_MATTER_RE``, a line such as ``----: x`` does not end the search,
     and two adjacent fences are an empty block.
 
