@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from _subprocess_env import subprocess_env
 
 from memtomem.config import Mem2MemConfig
 from memtomem.indexing import budget_migration as migration
@@ -99,7 +100,6 @@ def test_ambiguous_metadata_is_not_flattened():
 
 
 def test_configuration_hash_is_stable_across_process_hash_seeds():
-    import os
     import subprocess
     import sys
 
@@ -111,7 +111,7 @@ def test_configuration_hash_is_stable_across_process_hash_seeds():
     results = [
         subprocess.check_output(
             [sys.executable, "-P", "-c", code],
-            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            env=subprocess_env(PYTHONHASHSEED=str(seed)),
             text=True,
         )
         for seed in (1, 2, 17)

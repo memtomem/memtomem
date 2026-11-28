@@ -12,13 +12,13 @@ order, the timestamps and the holds it names.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from contextlib import asynccontextmanager
 from uuid import UUID
 
 import pytest
+from _subprocess_env import subprocess_env
 
 from memtomem.config import StorageConfig
 from memtomem.models import CONSOLIDATED_SUFFIX, ORIGIN_CONSOLIDATION_POLICY
@@ -389,8 +389,8 @@ class TestAcrossProcesses:
 
         def pool_in_a_process(seed: str) -> str:
             done = subprocess.run(
-                [sys.executable, "-c", _PRINT_POOL, str(path), "6"],
-                env={**os.environ, "PYTHONHASHSEED": seed},
+                [sys.executable, "-P", "-c", _PRINT_POOL, str(path), "6"],
+                env=subprocess_env(PYTHONHASHSEED=seed),
                 capture_output=True,
                 text=True,
                 check=True,

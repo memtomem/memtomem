@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TypedDict
 
 import pytest
+from _subprocess_env import subprocess_env
 
 pytest.importorskip("langgraph")
 from langgraph.graph import END, START, StateGraph
@@ -555,17 +556,16 @@ def report(name, value):
 
 def _run_reentrancy_scenario(script, tmp_path):
     """Run one callback-reentrancy scenario in a child process and return stdout."""
-    import os
     import subprocess
 
     home = tmp_path / "home"
     home.mkdir()
     completed = subprocess.run(
-        [sys.executable, "-c", _REENTRANCY_PREAMBLE + script, str(tmp_path / "s.db")],
+        [sys.executable, "-P", "-c", _REENTRANCY_PREAMBLE + script, str(tmp_path / "s.db")],
         capture_output=True,
         text=True,
         timeout=_REENTRANCY_TIMEOUT_S,
-        env={**os.environ, "HOME": str(home), "USERPROFILE": str(home)},
+        env=subprocess_env(HOME=str(home), USERPROFILE=str(home)),
     )
     assert completed.returncode == 0, completed.stderr
     return completed.stdout
