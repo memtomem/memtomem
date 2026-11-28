@@ -22,6 +22,14 @@ tool file is covered when it is added. Each string literal is read whole: the
 parser has already joined implicit concatenation, so a phrase split across
 literals or lines is one value. An f-string's interpolations read as ``{}``
 (their own literals are read separately) and its format specs as text.
+
+Joining removes the token boundaries, so a literal of two or more source
+tokens is also read where each token starts: :data:`_TOKEN_START_LABEL` matches
+there a label glued to a following capitalised word (``"Sync" "All"`` reads as
+``SyncAll``, ``f"{x}" "ImportSkills"`` as ``{}ImportSkills``). The tokens come
+from one ``tokenize`` pass over the module, so a comment between them is its
+own token and is not read. A one-token literal is never read this way, which
+keeps an identifier such as ``"SyncPhaseError"`` unflagged.
 Text is classified by where it is published:
 
 * **public** — every ``str`` / ``bytes`` literal and f-string that is neither a
@@ -50,11 +58,13 @@ title (the words are the
 identifier), the ``--force-unsafe-import`` flag, the ``Hooks Sync`` feature
 name, and the per-site spans in
 :data:`_SITE_EXEMPTIONS`. A match lying wholly inside an exempt span is
-dropped; one that reaches past it, and the rest of the value, are still matched. :data:`_OTHER_FEATURE_FILES` skips the
+dropped; one that reaches past it, and the rest of the value, are still matched.
+:data:`_OTHER_FEATURE_FILES` skips the
 memory import/export modules whole — "Import" is their own feature's verb.
 
 **Limits, stated honestly.** A green run means no pattern in
-:data:`_STALE_ACTION_COPY` matches public text under the scan roots outside an
+:data:`_STALE_ACTION_COPY` matches public text under the scan roots, and
+:data:`_TOKEN_START_LABEL` matches at no token start of such text, outside an
 exempt span (the real trees carry one match per site exemption). It does not
 prove the trees are free of Sync/Import copy: a spelling no pattern names still
 passes (the hyphen patterns name ``re-``/``reverse-`` and ``<word>-import``, not
@@ -63,15 +73,25 @@ every compound), ``web/schemas/`` is not walked, a file in
 ``another sync may be in progress`` is not policed — whether "sync" is wrong
 there depends on which lock each site waits on.
 
-Two more limits. A label glued by concatenation to a following word
-(``"Sync" "All"`` reads as ``SyncAll``; no such shape in the trees today) is not
-matched: the value has no token boundary, and matching it would also match
-identifiers such as ``SyncPhaseError``. The checks err the other way in one
-place: a mounted route's whole docstring and every class docstring under
-``web/routes/`` count as public, though FastAPI publishes less
-(``include_in_schema=False``, an explicit ``description=``, text after ``\\f``,
-classes that are not schema models). Such docstrings exist; none is flagged
-today.
+A label glued to a following word is caught only at a token start of a
+concatenated literal, and only before an ASCII capital ``A``–``Z``: written as
+one token (``"SyncAll"``), or starting mid-token (``"Run Sync" "All"``), it
+reads like an identifier and is not matched. Bytes literals are read whole only
+(``b"Sync" b"All"`` is not caught): a UTF-8 sequence can straddle two bytes
+tokens, so a token has no offset of its own in the decoded value. The trees
+hold 5 public bytes literals today, none naming Sync or Import. Adjacent
+t-strings (3.14) are not split either (``t"Sync" t"All"`` is not caught): the
+parser joins their text into one synthesized fragment. The scan roots hold no
+t-string today, and one would break the package's Python 3.12 support, where a
+t-string does not parse. The token-start check errs toward flagging a
+concatenation whose token starts with an identifier (``"SyncPhaseError"
+" raised"``).
+
+The checks also err toward flagging in one place: a mounted route's whole
+docstring and every class docstring under ``web/routes/`` count as public,
+though FastAPI publishes less (``include_in_schema=False``, an explicit
+``description=``, text after ``\\f``, classes that are not schema models).
+Such docstrings exist; none is flagged today.
 
 A function's docstring counts as published only when that function is
 mounted or registered: a route module the app never includes, or a tool the
@@ -86,9 +106,13 @@ exempting its docstring.
 from __future__ import annotations
 
 import ast
+import bisect
 import inspect
+import io
 import re
+import sys
 import textwrap
+import tokenize
 import types
 from collections import Counter
 from collections.abc import Iterator
@@ -192,6 +216,13 @@ _STALE_ACTION_COPY = (
     r"(?i)\b(re|reverse)[- ]?(sync|import)(ed|s|ing)?\b",
     r"(?i)\b\w+-import(ed|s|ing)?\b",
 )
+
+#: A label glued by implicit concatenation to a following capitalised word:
+#: ``"Sync" "All"`` reads as ``SyncAll``, which ``Sync(ed)?(?!\w)`` cannot see.
+#: Matched only where a source token of a concatenated literal starts (see
+#: :func:`_piece_starts`), so a one-token identifier such as ``"SyncPhaseError"``
+#: is never read by it.
+_TOKEN_START_LABEL = r"(Sync|Import)(ed)?(?=[A-Z])"
 
 #: Spans exempt wherever they appear.
 _SPAN_EXEMPTIONS = (
@@ -470,17 +501,172 @@ def _public_literals(
             yield node, qual
 
 
+@dataclass(frozen=True)
+class _Piece:
+    """One source token of a string literal: a ``STRING`` token, or a whole
+    ``FSTRING_START … FSTRING_END`` run. ``start`` is (line, character column),
+    and ``depth`` counts the f-/t-strings whose replacement field holds it."""
+
+    start: tuple[int, int]
+    source: str
+    depth: int
+
+
+def _source_lines(source: str) -> list[str]:
+    """The module's lines as tokenize and the parser count them: split at
+    ``\\n`` only. ``str.splitlines`` also splits at a form feed or U+2028,
+    which would shift every line and column after one."""
+    return io.StringIO(source).readlines()
+
+
+def _string_pieces(source: str, lines: list[str]) -> list[_Piece]:
+    """Every string piece of a module, in source order, from one tokenize pass.
+
+    A t-string (3.14) run is not a piece — :func:`_template_parts` keeps its
+    synthesized nodes from being split — but literals inside its replacement
+    fields are, one level deeper.
+    """
+    line_starts = [0]
+    for line in lines:
+        line_starts.append(line_starts[-1] + len(line))
+
+    def offset(pos: tuple[int, int]) -> int:
+        return line_starts[pos[0] - 1] + pos[1]
+
+    opening = {tokenize.FSTRING_START}
+    closing = {tokenize.FSTRING_END}
+    # 3.14 t-strings; ``getattr`` because 3.12 / 3.13 have no such token.
+    t_start, t_end = (
+        getattr(tokenize, "TSTRING_START", None),
+        getattr(tokenize, "TSTRING_END", None),
+    )
+    pieces: list[_Piece] = []
+    open_runs: list[tuple[int, tuple[int, int]]] = []  # (token type, start) per open run
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type in opening or tok.type == t_start:
+            open_runs.append((tok.type, tok.start))
+        elif tok.type in closing or tok.type == t_end:
+            kind, start = open_runs.pop()
+            if kind in opening:
+                text = source[offset(start) : offset(tok.end)]
+                pieces.append(_Piece(start, text, len(open_runs)))
+        elif tok.type == tokenize.STRING:
+            pieces.append(_Piece(tok.start, tok.string, len(open_runs)))
+    pieces.sort(key=lambda p: p.start)
+    return pieces
+
+
+def _template_parts(tree: ast.Module) -> set[int]:
+    """``id`` of every node a 3.14 t-string synthesizes: its text fragments and
+    its interpolations' format specs. Their source spans are not literals of
+    their own, so they are never split into pieces (they are still read whole)."""
+    template = getattr(ast, "TemplateStr", None)
+    parts: set[int] = set()
+    if template is None:
+        return parts
+    for node in ast.walk(tree):
+        if isinstance(node, template):
+            for part in node.values:
+                parts.add(id(part))
+                spec = getattr(part, "format_spec", None)
+                if spec is not None:
+                    # The spec only: a literal in a field nested inside it is real.
+                    parts.add(id(spec))
+    return parts
+
+
+class _CharColumns:
+    """AST columns (UTF-8 bytes) as the character columns tokenize reports.
+
+    An ASCII line needs no conversion; any other line gets one byte-to-
+    character table, built the first time one of its columns is asked for.
+    """
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+        self._tables: dict[int, dict[int, int]] = {}
+
+    def __call__(self, lineno: int, byte_col: int) -> int:
+        line = self._lines[lineno - 1]
+        if line.isascii():
+            return byte_col
+        table = self._tables.get(lineno)
+        if table is None:
+            table, at = {}, 0
+            for i, ch in enumerate(line):
+                table[at] = i
+                at += len(ch.encode("utf-8"))
+            table[at] = len(line)
+            self._tables[lineno] = table
+        return table[byte_col]
+
+
+def _piece_starts(
+    node: ast.Constant | ast.JoinedStr, pieces: list[_Piece], char_col: _CharColumns
+) -> list[int]:
+    """Where each piece of a ``str`` literal or f-string starts in its rendered
+    value; empty for a literal of fewer than two pieces.
+
+    The pieces are the shallowest ones inside the node's span: a literal inside
+    a replacement field is one level deeper and is its own node.
+    """
+    start = (node.lineno, char_col(node.lineno, node.col_offset))
+    end = (node.end_lineno, char_col(node.end_lineno, node.end_col_offset))  # type: ignore[arg-type]
+    lo = bisect.bisect_left(pieces, start, key=lambda p: p.start)
+    hi = bisect.bisect_left(pieces, end, lo=lo, key=lambda p: p.start)
+    inside = pieces[lo:hi]
+    if not inside:
+        return []
+    depth = min(p.depth for p in inside)
+    top = [p for p in inside if p.depth == depth]
+    if len(top) < 2:
+        return []
+    rendered: list[str] = []
+    for piece in top:
+        parsed = ast.parse(piece.source, mode="eval").body
+        assert isinstance(parsed, ast.Constant | ast.JoinedStr), piece
+        rendered.append(_render(parsed))
+    # A renderer that disagrees with the tokens would misplace every offset.
+    assert "".join(rendered) == _render(node), (node.lineno, rendered)
+    starts, at = [], 0
+    for text in rendered:
+        starts.append(at)
+        at += len(text)
+    return starts
+
+
+def _exempt_spans(
+    value: str,
+    relpath: str,
+    func: str,
+    span_exemptions: tuple[re.Pattern[str], ...],
+    site_exemptions: tuple[_SiteExemption, ...],
+) -> list[tuple[int, int, _SiteExemption | None]]:
+    spans: list[tuple[int, int, _SiteExemption | None]] = []
+    for rx in span_exemptions:
+        spans.extend((*m.span(), None) for m in rx.finditer(value))
+    for site in site_exemptions:
+        if site.relpath == relpath and site.func == func:
+            start = value.find(site.text)
+            while start != -1:
+                spans.append((start, start + len(site.text), site))
+                start = value.find(site.text, start + 1)
+    return spans
+
+
 def _scan(
     pkg_root: Path = _PKG_ROOT,
     *,
     endpoints: frozenset[tuple[str, str]],
     roots: tuple[str, ...] = _SCAN_ROOTS,
     patterns: tuple[str, ...] = _STALE_ACTION_COPY,
+    token_start: str | None = _TOKEN_START_LABEL,
     span_exemptions: tuple[re.Pattern[str], ...] = _SPAN_EXEMPTIONS,
     site_exemptions: tuple[_SiteExemption, ...] = _SITE_EXEMPTIONS,
     other_feature_files: frozenset[str] | set[str] = frozenset(_OTHER_FEATURE_FILES),
 ) -> ScanReport:
     report = ScanReport()
+    sources: dict[str, str] = {}
     trees: dict[str, ast.Module] = {}
     for root in roots:
         for path in sorted((pkg_root / root).rglob("*.py")):
@@ -489,30 +675,48 @@ def _scan(
                 report.excluded.append(relpath)
             else:
                 report.files.append(relpath)
-                trees[relpath] = ast.parse(path.read_text(encoding="utf-8"), filename=relpath)
+                sources[relpath] = path.read_text(encoding="utf-8")
+                trees[relpath] = ast.parse(sources[relpath], filename=relpath)
     compiled = [(p, re.compile(p)) for p in patterns]
+    token_rx = re.compile(token_start) if token_start is not None else None
     for relpath, tree in trees.items():
         root = next(r for r in roots if relpath.startswith(r + "/"))
+        if token_rx is not None:
+            # ``lines`` is ``_source_lines`` (split at ``\n`` only) of the
+            # module: the piece offsets and the column tables both index it.
+            lines = _source_lines(sources[relpath])
+            pieces = _string_pieces(sources[relpath], lines)
+            char_col = _CharColumns(lines)
+            synthesized = _template_parts(tree)
         for node, func in _public_literals(relpath, tree, endpoints, report.defs):
             report.public_literals[root] += 1
             value = _render(node)
-            exempt: list[tuple[int, int]] = []
-            for rx in span_exemptions:
-                exempt.extend(m.span() for m in rx.finditer(value))
-            for site in site_exemptions:
-                if site.relpath == relpath and site.func == func:
-                    start = value.find(site.text)
-                    while start != -1:
-                        report.site_hits[site] += 1
-                        exempt.append((start, start + len(site.text)))
-                        start = value.find(site.text, start + 1)
+            exempt = _exempt_spans(value, relpath, func, span_exemptions, site_exemptions)
+            for _start, _end, site in exempt:
+                if site is not None:
+                    report.site_hits[site] += 1
             for pattern, rx in compiled:
                 for m in rx.finditer(value):
-                    if not any(start <= m.start() and m.end() <= end for start, end in exempt):
+                    if not any(s <= m.start() and m.end() <= e for s, e, _ in exempt):
                         report.offences.append(
                             Offence(relpath, node.lineno, node.col_offset, pattern)
                         )
                         break
+            if token_rx is None or id(node) in synthesized:
+                continue
+            if isinstance(node, ast.Constant) and isinstance(node.value, bytes):
+                # Not split: a UTF-8 sequence can straddle two bytes tokens, so a
+                # piece has no offset of its own in the decoded value.
+                continue
+            # A label glued to the next word by concatenation has no boundary in
+            # the value, only in the source: match where each token starts.
+            for at in _piece_starts(node, pieces, char_col):
+                m = token_rx.match(value, at)
+                if m and not any(s <= m.start() and m.end() <= e for s, e, _ in exempt):
+                    report.offences.append(
+                        Offence(relpath, node.lineno, node.col_offset, token_start)  # type: ignore[arg-type]
+                    )
+                    break
     return report
 
 
@@ -806,6 +1010,132 @@ _TOOL = "server/tools/planted.py"
             'X = "SyncPhaseError raised; Imports are pinned"\n',
             set(),
             id="identifier-is-not-a-label",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = {"action": "Sync" "All"}\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="label-glued-to-a-capitalised-word",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = f"{x}" "ImportSkills"\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="label-glued-after-an-fstring",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = "Run " f"SyncAll {x}"\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="glued-label-starts-an-fstring-piece",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = "Auto" "SyncedAll"\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="glued-past-tense-label",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = b"Sync" b"All"\n',
+            set(),
+            id="bytes-are-read-whole-only-a-stated-limit",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = b"\\xc3" b"\\xa7\\"" b"Sync" b"All\\""\n',
+            set(),
+            id="bytes-with-a-utf8-sequence-split-across-tokens",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = "Sync" "All" "ImportSkills"\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="two-glued-labels-in-one-literal-are-one-offence",
+        ),
+        pytest.param(
+            _ENGINE,
+            'é = "Sync" "All"\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="non-ascii-before-the-literal-on-its-line",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = ["é", "Sync" "All"]\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="non-ascii-literal-before-it-on-the-line",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = ("Run "\n     "Sync"\n     "All")\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="glued-label-across-lines",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = "a" \\\n    "SyncAll"\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="glued-label-after-a-line-continuation",
+        ),
+        pytest.param(
+            _ENGINE,
+            "X = f\"{'Sync' 'All'}\"\n",
+            {(1, _TOKEN_START_LABEL)},
+            id="glued-label-inside-a-replacement-field-once",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = (f"""a\r\n{x}\r\nb"""\r\n     "ImportSkills")\r\nY = "x"\r\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="glued-label-after-a-crlf-triple-quoted-fstring",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = "ok"\nY = f"{f"{x:>{w}}"}" f"{f"{y}"\n"ImportSkills"}"\n',
+            {(2, _TOKEN_START_LABEL)},
+            id="glued-label-in-a-same-quote-nested-fstring-field",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = "SyncPhaseError" " raised"\n',
+            {(1, _TOKEN_START_LABEL)},
+            id="identifier-starting-a-concatenation-errs-toward-flagging",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = "x" "Syncs"\nY = "x" "Synchronise"\nZ = "AgentSyncResult"\n',
+            set(),
+            id="token-start-needs-a-capital-and-two-pieces",
+        ),
+        pytest.param(
+            _ENGINE,
+            '__all__ = ["SkillSyncResult", "SyncPhaseError"]\n',
+            set(),
+            id="one-token-identifiers",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = ("a"  # "SyncAll"\n     "b")\n',
+            set(),
+            id="comment-between-pieces-is-not-a-piece",
+        ),
+        pytest.param(
+            _ENGINE,
+            '# \x0cabcdefghiABCDEFGHI1234567890\nY = f"{x}" "ImportSkills"\n',
+            {(2, _TOKEN_START_LABEL)},
+            id="form-feed-is-not-a-line-break",
+        ),
+        pytest.param(
+            _ENGINE,
+            '# \u2028abcdefghiABCDEFGHI1234567890\nY = f"{x}" "ImportSkills"\n',
+            {(2, _TOKEN_START_LABEL)},
+            id="line-separator-in-a-comment-is-not-a-line-break",
+        ),
+        pytest.param(
+            _ENGINE,
+            'X = "Run Sync" "All"\n',
+            set(),
+            id="label-glued-mid-piece-is-a-stated-limit",
         ),
         pytest.param(
             _ENGINE,
@@ -1136,6 +1466,64 @@ def test_developer_text_is_not_policed_but_public_text_is(
 def test_span_exemptions_cover_only_their_span(tmp_path: Path, exempt: str, control: str) -> None:
     assert _found(tmp_path / "a", {_ENGINE: exempt}) == set()
     assert _found(tmp_path / "b", {_ENGINE: control}) != set()
+
+
+def test_a_span_exemption_crossing_pieces_clears_a_token_start_match(tmp_path: Path) -> None:
+    """Exemptions are spans of the whole value, so one that spans two tokens
+    still covers a glued label inside it."""
+    exempt = {_ENGINE: "X = 'ADR-0021 §\"' \"Sync\" 'All\" deferred this.'\n"}
+    control = {_ENGINE: "X = 'ADR-0021 ' \"Sync\" 'All deferred this.'\n"}
+    assert _found(tmp_path / "a", exempt) == set()
+    assert _found(tmp_path / "b", control) == {(_ENGINE, 1, _TOKEN_START_LABEL)}
+
+
+def test_a_span_exemption_must_cover_the_whole_token_start_match(tmp_path: Path) -> None:
+    """An exemption covering only the start of a glued label does not clear it."""
+    source = {_ENGINE: 'X = "Sy" "nc" "All"\n'}
+    found = _found(tmp_path, source, span_exemptions=(re.compile("Sy"),))
+    assert found == {(_ENGINE, 1, _TOKEN_START_LABEL)}
+
+
+def test_a_site_exemption_clears_a_token_start_match_and_counts_once(tmp_path: Path) -> None:
+    site = _SiteExemption(_ENGINE, "f", "ImportSkills does not overwrite", "planted")
+    source = {_ENGINE: 'def f():\n    return "x. " "Import" "Skills does not overwrite"\n'}
+    report = _scan(_plant(tmp_path / "a", source), endpoints=frozenset(), site_exemptions=(site,))
+    assert report.offences == []
+    assert report.site_hits[site] == 1
+    assert _found(tmp_path / "b", source, site_exemptions=()) == {(_ENGINE, 2, _TOKEN_START_LABEL)}
+
+
+def test_token_start_check_reads_a_deeply_nested_replacement_field(tmp_path: Path) -> None:
+    """Tokenizing the module once adds no nesting level: a field 199
+    parentheses deep, which a re-tokenized and re-parenthesised span would
+    refuse, is read, and the literal inside it is checked."""
+    source = 'X = f"{' + "(" * 199 + "'Sync' 'All'" + ")" * 199 + '}"\n'
+    assert _found(tmp_path, {_ENGINE: source}) == {(_ENGINE, 1, _TOKEN_START_LABEL)}
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings are 3.14 syntax")
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # The parser joins adjacent t-strings' text into one fragment, which is
+        # never split: the glued label is missed, a stated limit.
+        pytest.param('X = t"Sync" t"All"\n', set(), id="adjacent-t-strings-are-a-stated-limit"),
+        # Split so the synthesized debug text ``'Sy' 'nc' 'All'=`` names no
+        # label: the one offence is the inner literal's token-start match.
+        pytest.param(
+            "X = t\"{'Sy' 'nc' 'All'=}\"\n", {(1, _TOKEN_START_LABEL)}, id="debug-field-text"
+        ),
+        pytest.param(
+            "X = t\"{name:{'Sync' 'All'}}\"\n", {(1, _TOKEN_START_LABEL)}, id="format-spec-field"
+        ),
+    ],
+)
+def test_token_start_check_skips_template_string_synthesized_nodes(
+    tmp_path: Path, source: str, expected: set[tuple[int, str]]
+) -> None:
+    """A t-string's fragments and format specs have spans that are not
+    literals of their own; only a real literal inside a field is split."""
+    assert _found(tmp_path, {_ENGINE: source}) == {(_ENGINE, ln, p) for ln, p in expected}
 
 
 def test_flag_exemption_is_what_clears_the_flag(tmp_path: Path) -> None:
