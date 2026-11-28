@@ -354,9 +354,7 @@ async def _apply_tags(
 ) -> None:
     """Merge *new_tags* into every chunk for *source_file* and upsert.
 
-    No-op when the chunk already has the full tag set. Mirrors the tag
-    application pattern in ``server/tools/importers.py`` so behavior is
-    consistent across Notion/Obsidian/Claude ingestion paths.
+    No-op when the chunk already has the full tag set.
     """
     chunks = await storage.list_chunks_by_source(source_file)
     if not chunks:

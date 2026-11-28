@@ -186,6 +186,35 @@ async def test_reads_after_an_observation_flush_see_it_past_an_open_pool_stateme
         assert gaps == ["nothing found here"]
 
 
+async def test_source_listing_in_a_transaction_reads_past_an_open_pool_statement(
+    storage, monkeypatch
+):
+    """The importers' tag pass merges onto the rows it lists, so it lists the writer's."""
+    source = _chunk("noted.md").metadata.source_file
+    await storage.upsert_chunks([_chunk("noted.md")])
+    with pool_reader_mid_statement(storage, monkeypatch):
+        await storage.upsert_chunks(
+            [make_chunk("a later section", namespace="routed", source="noted.md")]
+        )
+        async with storage.transaction():
+            rows = await storage.list_chunks_by_source(source)
+    assert len(rows) == 2
+
+
+async def test_source_listing_by_another_task_reads_committed_state_during_a_transaction(storage):
+    committed = _chunk("noted.md")
+    source = committed.metadata.source_file
+    await storage.upsert_chunks([committed])
+    async with storage.transaction():
+        await storage.upsert_chunks(
+            [make_chunk("a pending section", namespace="routed", source="noted.md")]
+        )
+        owner = await storage.list_chunks_by_source(source)
+        other = await asyncio.create_task(storage.list_chunks_by_source(source))
+    assert len(owner) == 2
+    assert [c.content for c in other] == [committed.content]
+
+
 def _commit_scope(storage, chunk_id, scope: str) -> None:
     writer = storage._get_db()
     writer.execute("UPDATE chunks SET scope=? WHERE id=?", (scope, str(chunk_id)))

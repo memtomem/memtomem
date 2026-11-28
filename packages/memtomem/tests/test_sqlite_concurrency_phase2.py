@@ -636,6 +636,8 @@ _TRANSACTION_SITES = {
     # mem_dedup_remove's read of holds, receipts and rows on the writer (#3419).
     "server/tools/dedup_decay.py": [True],
     "server/tools/hermes_mirror.py": [True, True],
+    # Each imported file's tag merge after its index pass (#3186).
+    "server/tools/importers.py": [True],
     # _gated_delete_transaction: mem_delete's Gate-B probe and its source or
     # namespace delete in one transaction (#3202).
     "server/tools/memory_crud.py": [True],
