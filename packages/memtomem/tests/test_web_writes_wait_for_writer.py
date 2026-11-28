@@ -704,6 +704,37 @@ async def test_auto_tag_waits_for_the_writer_before_the_tag_lock(
     assert stats.tagged_chunks > 0
 
 
+async def test_auto_tag_keeps_tags_the_owner_commits_while_it_waits(
+    components, memory_dir, monkeypatch
+):
+    """#3194: the chunk is still untagged when auto-tag starts waiting for the writer."""
+    storage = components.storage
+    path = memory_dir / "note.md"
+    await _indexed(components.index_engine, path)
+    chunks = await storage.list_chunks_by_source(path, limit=None)
+    assert all(not c.metadata.tags for c in chunks)
+
+    async def owner_tags() -> None:
+        for c in chunks:
+            await storage.set_chunk_tags(c.id, ["by-owner"])
+
+    owner = _Owner(storage, then=owner_tags)
+
+    async def extract(*_args, **_kwargs):
+        if owner.task is None:
+            await owner.start()
+        return ["falcon"]
+
+    monkeypatch.setattr(auto_tag_mod, "_extract_tags_with_fallback", extract)
+
+    stats, _ = await _overlap(storage, owner, auto_tag_mod.auto_tag_storage(storage))
+
+    assert stats.tagged_chunks == 0
+    assert stats.skipped_chunks == len(chunks)
+    for c in await storage.list_chunks_by_source(path, limit=None):
+        assert c.metadata.tags == ("by-owner",)
+
+
 async def test_a_timed_out_auto_tag_write_raises_after_the_wait(
     components, memory_dir, monkeypatch
 ):

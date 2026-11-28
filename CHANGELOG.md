@@ -44,6 +44,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Auto-tag with `overwrite` off keeps tags committed while it was extracting (#3194).**
+  The pass judged "already tagged" from the chunk it read before tag extraction (possibly an
+  LLM call), then replaced the tags whatever they were by then, so a manual tag edit, an
+  import or a re-index that committed tags during the extraction, or while the pass waited
+  for the writer, was overwritten. The write now checks "untagged" inside the same `UPDATE`,
+  with the chunk reader's own reading of the column. A chunk that gained tags meanwhile is
+  left as it is and counted like a hidden or deleted one: skipped, and not in the total.
+  `overwrite` on writes as before.
+
 - **Web `POST /api/add` tags the entry it appended when an earlier entry holds a form feed
   or a similar break (#2765).** The route found the new entry's chunks by counting the
   file's lines before the append with `str.splitlines`, which also breaks at `\x0b`,
