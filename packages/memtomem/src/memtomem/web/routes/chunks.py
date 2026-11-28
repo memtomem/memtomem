@@ -41,6 +41,7 @@ from memtomem.tools.memory_writer import (
     SourceRemovedError,
     SourceReplacedError,
     WrittenSource,
+    open_fence_delete_refusal,
     open_fence_edit_refusal,
     read_pre_image,
     read_with_source_key,
@@ -1018,6 +1019,14 @@ async def delete_chunk(
                     logger.warning("Source of chunk %s was replaced mid-delete: %s", chunk_id, exc)
                     raise HTTPException(
                         status_code=409, detail=SOURCE_REPLACED_DURING_WRITE_DETAIL
+                    ) from exc
+                except OpenFenceEditError as exc:
+                    # Ahead of its base class below. Raised inside the rewrite
+                    # before a byte was written (#3669): removing the span would
+                    # open a code fence over the entries after it.
+                    mutation_attempted = False
+                    raise HTTPException(
+                        status_code=409, detail=open_fence_delete_refusal(exc.run)
                     ) from exc
                 except StaleSourceProvenanceError as exc:
                     mutation_attempted = False
