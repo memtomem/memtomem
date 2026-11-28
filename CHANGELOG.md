@@ -44,6 +44,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Auto-tag with `overwrite` off keeps tags committed while it was extracting (#3194).**
+  The pass judged "already tagged" from the chunk it read before tag extraction (possibly an
+  LLM call), then replaced the tags whatever they were by then, so a manual tag edit, an
+  import or a re-index that committed tags during the extraction, or while the pass waited
+  for the writer, was overwritten. The write now checks "untagged" inside the same `UPDATE`,
+  with the chunk reader's own reading of the column. A chunk that gained tags meanwhile is
+  left as it is and counted like a hidden or deleted one: skipped, and not in the total.
+  `overwrite` on writes as before.
+
 - **The E5 embedding model's `config.json`, `tokenizer_config.json` and
   `special_tokens_map.json` are checked against sha256 pins (#2465).** The pinned E5
   snapshot verified only `onnx/model.onnx` and `tokenizer.json`; the three other files
