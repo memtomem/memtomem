@@ -53,6 +53,7 @@ from memtomem.tools.memory_writer import (
     RestoreOutcome,
     SourceChangedError,
     WrittenSource,
+    open_fence_delete_refusal,
     open_fence_edit_refusal,
     read_pre_image,
     read_with_source_key,
@@ -717,8 +718,9 @@ async def _mutate_file_and_reindex(
             # retry against the source text can succeed.
             return None, edit_base_mismatch_message(exc)
         if isinstance(exc, OpenFenceEditError) and not mutation_completed:
-            # Refused inside the rewrite before a byte was written (#3633).
-            return None, f"Error: {open_fence_edit_refusal(exc.run)}"
+            # Refused inside the rewrite before a byte was written (#3633, #3669).
+            refusal = open_fence_delete_refusal if op == "delete" else open_fence_edit_refusal
+            return None, f"Error: {refusal(exc.run)}"
         if isinstance(exc, StaleSourceProvenanceError) and not mutation_completed:
             # No byte was written. In particular, do not reindex here: doing
             # so could erase the stale row and bless an unrelated replacement.

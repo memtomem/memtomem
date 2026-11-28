@@ -79,8 +79,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   whole file is compared before and after the edit under the chunker's fence rules: the
   edit is refused when it puts a previously unfenced, non-blank line after the edited span
   inside a fence, or makes a file that ended outside a fence end inside one. A file that
-  already ended inside a fence can still be edited and repaired. Deleting a chunk can still
-  open a fence the same way (#3669).
+  already ended inside a fence can still be edited and repaired. A chunk delete is judged
+  the same way since #3669.
+
+- **A chunk delete that would put the entries after it inside a code fence is refused
+  (#3669).** `mem_delete(chunk_id=...)` and the web `DELETE /api/chunks/{id}` removed the
+  span with no fence check. When the span held the closer of a fence an earlier line
+  opened (a file edited by hand after indexing, for example), that fence ran on over the
+  later entries, which dropped out of the index (no chunk, heading or tags of their own),
+  and the delete reported success. The removal is now judged as an edit is since #3633,
+  and refused before writing with its own message (web: 409). `mem_dedup_remove` goes
+  through the same writer and gets the same check. A source holding a separator such as
+  U+2028, which `str.splitlines` reads as a line break and the chunker does not (CRLF and
+  a lone CR are already read as LF), is refused as stale provenance, as the edit writers
+  refuse it. A file that already ended inside a fence can still be deleted from.
 
 - **The Web Hooks panel reports the settings files it could not check (#2644).** The CLI
   (`mm context settings-doctor`, the `sync`/`diff --include=settings` warnings) and the MCP

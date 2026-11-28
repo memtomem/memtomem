@@ -950,12 +950,14 @@ class EditBaseMismatchError(StaleSourceProvenanceError):
 
 
 class OpenFenceEditError(StaleSourceProvenanceError):
-    """The edit would open a code fence over the text after it; nothing was written.
+    """An edit or a delete would open a code fence over the text after it; nothing was written.
 
     Raised from inside the rewrite, as :class:`EditBaseMismatchError` is: after
-    every gate in front of it (a Gate B consent line and the privacy guard's
-    audit stay recorded) and before a byte is written. Carries only the fence
-    run, never caller text (#3633).
+    every gate in front of it and before a byte is written, so what those gates
+    recorded stays recorded (a Gate B consent line; for an edit, the privacy
+    guard's audit). Carries only the fence run, never caller text (#3633,
+    #3669). The edit surfaces word it with :func:`open_fence_edit_refusal`, the
+    delete surfaces with :func:`open_fence_delete_refusal`.
     """
 
     def __init__(self, run: str) -> None:
@@ -969,6 +971,15 @@ def open_fence_edit_refusal(run: str) -> str:
         f"The edit leaves a {run} code fence open over the text after it, so the entries "
         "there would be indexed inside the fence (or the next entry appended to the file "
         "would be). Close the fence and retry; nothing was written."
+    )
+
+
+def open_fence_delete_refusal(run: str) -> str:
+    """The refusal both chunk delete surfaces give for :class:`OpenFenceEditError`."""
+    return (
+        f"Deleting this entry would leave a {run} code fence open over the text after it, "
+        "so the entries there would be indexed inside the fence (or the next entry appended "
+        "to the file would be). Fix the fence in the file and retry; nothing was written."
     )
 
 
@@ -1242,16 +1253,24 @@ def remove_lines(
     source raises. A delete whose source somebody else already removed is not a
     failure of intent, but it is this helper's business only to say so — the
     surfaces decide what to do about it.
+
+    The removal is judged as an edit is (#3669): a Markdown source whose removal
+    would put the text after the span inside a code fence, or leave the file
+    ending inside one it did not end inside, raises :class:`OpenFenceEditError`,
+    and a source whose ``splitlines()`` rows are not its LF rows raises
+    :class:`StaleSourceProvenanceError`, both having written nothing.
     """
 
     def edit(text: str) -> str:
         trailing_newline = text.endswith("\n")
         lines = text.splitlines()
         _validate_source_span(lines, start_line, end_line, expected_source_span_hash)
+        _require_lf_line_breaks(text)
         new_lines = lines[: start_line - 1] + lines[end_line:]
         result = "\n".join(new_lines)
         if trailing_newline and new_lines:
             result += "\n"
+        _edit_open_fence(file_path, text, result, len(lines) - end_line)
         return result
 
     return _rewrite_in_place(file_path, expected_identity, edit)
