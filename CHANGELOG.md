@@ -44,6 +44,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Auto-tag with `overwrite` off keeps tags committed while it was extracting (#3194).**
+  The pass judged "already tagged" from the chunk it read before tag extraction (possibly an
+  LLM call), then replaced the tags whatever they were by then, so a manual tag edit, an
+  import or a re-index that committed tags during the extraction, or while the pass waited
+  for the writer, was overwritten. The write now checks "untagged" inside the same `UPDATE`,
+  with the chunk reader's own reading of the column. A chunk that gained tags meanwhile is
+  left as it is and counted like a hidden or deleted one: skipped, and not in the total.
+  `overwrite` on writes as before.
+
+- **The E5 embedding model's `config.json`, `tokenizer_config.json` and
+  `special_tokens_map.json` are checked against sha256 pins (#2465).** The pinned E5
+  snapshot verified only `onnx/model.onnx` and `tokenizer.json`; the three other files
+  FastEmbed reads from it were pinned by revision alone, so a cached copy that no longer
+  matched the pinned revision was loaded as is. Each is now hashed the way the model and
+  tokenizer are, and a mismatch stops the load with the same
+  `Pinned E5 artifact checksum mismatch` error. As for those two, a check that passed is
+  reused within one process while the file's size and modification time stay the same.
+
 - **A chunk edit that would put the entries after it inside a code fence is refused (#3633).**
   `mem_edit` and the web `PATCH /api/chunks/{id}` wrote a body that left a fence open, and
   every later entry in the file then dropped out of the index (no chunk, heading or tags of
@@ -54,6 +72,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   inside a fence, or makes a file that ended outside a fence end inside one. A file that
   already ended inside a fence can still be edited and repaired. Deleting a chunk can still
   open a fence the same way (#3669).
+
+- **The Web Hooks panel reports the settings files it could not check (#2644).** The CLI
+  (`mm context settings-doctor`, the `sync`/`diff --include=settings` warnings) and the MCP
+  context branches already reported a settings file that exists but could not be read; the
+  Web panel did not, so a tier the duplicate check skipped — invalid JSON, not a JSON object,
+  or, since #2476, a parent directory without search permission — disappeared from it without
+  a trace. `GET /api/settings-sync` (and `GET /api/context/settings`) now returns
+  `unscanned_settings` rows (`source`, `tier`, `path`, `reason`, the keys of
+  `settings-doctor --json`); a row's `path` is the tier's fixed location
+  (`.claude/settings.local.json`, `~/.claude/settings.json`, …), never the file's host path.
+  The panel shows one "was not checked" row per file. `POST /api/settings-sync` and the
+  `/context/sync-all*` rows are unchanged. The settings reader behind these checks now treats
+  a file nested deep enough to raise `RecursionError` in the JSON decoder, or holding an
+  integer past Python's digit limit, as unreadable: the duplicate, matcher and command checks
+  skip it and the unscanned report lists it as `invalid JSON`, where before the checks
+  crashed. The Web route's own comparison of the canonical and selected target files does
+  not use that reader and is unchanged. A tier linked to another tier that does not exist
+  (`.claude/settings.local.json` → a missing `.claude/settings.json`), or two tiers linked to
+  the same missing file, are now reported as broken symlinks on every surface; before, the
+  missing destination counted as seen and the later link was skipped as its alias.
 
 - **A search whose `deadline_ms` budget runs out during the session-summary rescue no longer
   logs and counts the expiry as a rescue failure (#3637).** The rescue's links walk and its

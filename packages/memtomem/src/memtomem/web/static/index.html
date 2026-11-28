@@ -824,6 +824,9 @@
                across tiers (filled from the GET /api/settings-sync payload's
                duplicate_tier_warnings; #1247 id 32). -->
           <div id="hooks-duplicate-banner" class="hooks-duplicate-banner" hidden></div>
+          <!-- #2644: settings files no check could read (filled from the GET
+               payload's unscanned_settings). -->
+          <div id="hooks-unscanned-banner" class="hooks-duplicate-banner" hidden></div>
           <!-- #1983 validation signal: canonical rules the sync drops for a
                non-string matcher (matcher_warnings) and target rules the diff
                skips as malformed (target_hooks.malformed). -->
@@ -1954,7 +1957,7 @@
   <script src="/settings-maintenance.js?v=10"></script>
   <script src="/settings-namespaces.js?v=20"></script>
   <script src="/settings-harness.js?v=16"></script>
-  <script src="/settings-hooks-watchdog.js?v=30"></script>
+  <script src="/settings-hooks-watchdog.js?v=31"></script>
   <script src="/timeline.js?v=4"></script>
   <script src="/context-gateway-core.js?v=5"></script>
   <script src="/context-gateway-controls.js?v=3"></script>

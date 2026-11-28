@@ -110,6 +110,8 @@ def test_snapshot_and_tokenizer_use_separate_windows(monkeypatch, tmp_path):
     snapshot = tmp_path / "snapshot"
     (snapshot / "onnx").mkdir(parents=True)
     (snapshot / "onnx/model.onnx").write_bytes(b"model")
+    for name in profiles.E5_AUXILIARY_SHA256:
+        (snapshot / name).write_text("{}", encoding="utf-8")
     seen: list[tuple[str, bool]] = []
 
     def snapshot_download(*args, **kwargs):
