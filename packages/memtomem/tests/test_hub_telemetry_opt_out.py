@@ -138,6 +138,9 @@ def test_snapshot_and_tokenizer_use_separate_windows(monkeypatch, tmp_path):
 
 def test_minilm_snapshot_is_pinned_and_runs_with_telemetry_off(monkeypatch, tmp_path):
     seen: list[tuple[tuple, dict, bool]] = []
+    (tmp_path / "snapshot").mkdir()
+    for name in profiles.MINILM_SHA256:
+        (tmp_path / "snapshot" / name).write_bytes(b"{}")
 
     def snapshot_download(*args, **kwargs):
         seen.append((args, kwargs, constants.HF_HUB_DISABLE_TELEMETRY))
