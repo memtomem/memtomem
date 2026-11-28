@@ -81,13 +81,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   own `##` heading was then left without its tags. The count now
   uses the same line rule as chunk line numbers, as `mm add` has since #2726.
 
+- **The five files of the pinned MiniLM snapshot are checked against sha256 pins (#3689).**
+  The fp32 `all-MiniLM-L6-v2` load downloads `model.onnx`, `config.json`,
+  `tokenizer.json`, `tokenizer_config.json` and `special_tokens_map.json` at a pinned
+  revision and checked none of them, so a cached copy that no longer matched that revision
+  was loaded as is. Each is now hashed the way the E5 snapshot's files are, and a mismatch
+  stops the load with `Pinned model artifact checksum mismatch`.
+
 - **The E5 embedding model's `config.json`, `tokenizer_config.json` and
   `special_tokens_map.json` are checked against sha256 pins (#2465).** The pinned E5
   snapshot verified only `onnx/model.onnx` and `tokenizer.json`; the three other files
   FastEmbed reads from it were pinned by revision alone, so a cached copy that no longer
   matched the pinned revision was loaded as is. Each is now hashed the way the model and
   tokenizer are, and a mismatch stops the load with the same
-  `Pinned E5 artifact checksum mismatch` error. As for those two, a check that passed is
+  `Pinned model artifact checksum mismatch` error. As for those two, a check that passed is
   reused within one process while the file's size and modification time stay the same.
 
 - **A chunk edit that would put the entries after it inside a code fence is refused (#3633).**
