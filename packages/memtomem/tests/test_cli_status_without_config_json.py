@@ -18,11 +18,12 @@ import subprocess
 import sys
 
 import pytest
+from _subprocess_env import subprocess_env
 
 
 def _mm(home: Path, extra: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("MEMTOMEM_")}
-    env.update(HOME=str(home), USERPROFILE=str(home), **extra)
+    base = {k: v for k, v in os.environ.items() if not k.upper().startswith("MEMTOMEM_")}
+    env = subprocess_env(base, HOME=str(home), USERPROFILE=str(home), **extra)
     return subprocess.run(
         [sys.executable, "-c", "from memtomem.cli import cli; cli()", *args],
         env=env,
