@@ -1395,6 +1395,8 @@ def _confirm_stale(
 # The line that ends a block: three hyphens followed by a space, a tab or the end
 # of the line, which is where YAML itself sees a document marker.
 _CLOSING_LINE_RE = re.compile(r"\n---(?=[ \t\n]|$)")
+# What may follow those hyphens for the line to close the block.
+_CLOSING_REST_RE = re.compile(r"[ \t]*(?:\n|$)")
 # What makes the rest of a plain scalar's line a comment.
 _TRAILING_COMMENT_RE = re.compile(r"[ \t]+#")
 
@@ -1416,7 +1418,7 @@ def _inspect_frontmatter(content: str) -> _FrontmatterCheck:
 
     The block runs from the opening ``---`` to the first :data:`_CLOSING_LINE_RE`
     line of the raw text, which is what an external reader sees. If that line
-    holds anything after the hyphens there is no block. Unlike the chunker's
+    holds more than blanks after the hyphens there is no block. Unlike the chunker's
     ``_FRONT_MATTER_RE``, a line such as ``----: x`` does not end the search,
     and two adjacent fences are an empty block.
 
@@ -1437,7 +1439,7 @@ def _inspect_frontmatter(content: str) -> _FrontmatterCheck:
         return _FrontmatterCheck()
     # From 3, so that the opener's own newline can start the closing line.
     close = _CLOSING_LINE_RE.search(content, 3)
-    if close is None or content[close.end() : close.end() + 1] not in ("", "\n"):
+    if close is None or not _CLOSING_REST_RE.match(content, close.end()):
         return _FrontmatterCheck()
     block = content[4 : close.start()]
 
