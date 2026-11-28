@@ -7,6 +7,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm memory doctor` reports memory files whose frontmatter PyYAML cannot read as a mapping
+  (#2719).**
+  memtomem reads frontmatter line by line, so a `description:` that starts with a backtick or
+  holds `: ` still indexes while a YAML reader of the same file gets no `name` or
+  `description`. The new `frontmatter_invalid` warning lists the path, the line when the parser
+  gives one, and the error class, never the line text. `frontmatter_truncated` (info) lists a
+  `name` or `description` written as a plain scalar that a `#` comment directly follows, in
+  blocks that use no YAML alias. Syntax and the root shape are checked; values are not built, so
+  an unknown tag or an impossible date is not reported.
 - **`mem_decision_record` records a decision point with the agent's recommendation and the
   user's choice kept apart (#3620).** memtomem recorded where a memory came from but not
   whose judgement it holds. The new action, reached as
@@ -43,6 +52,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `kimi` 0.2.32, `antigravity` 0.2.23.
 
 ### Fixed
+
+- **The related-chunks preview shows a note's YAML frontmatter as metadata (#3093).** The
+  web UI's detail view got this in #3030; the preview under **Related** still drew the
+  opening `---` as a rule and the `key: value` lines above the closing `---` as a heading.
+  It now asks the same `GET /api/chunks/{id}/frontmatter` question and shows a certified
+  block above the rendered note. It also renders `.markdown` sources as Markdown, which it
+  had shown as plain text.
 
 - **Swap recovery warnings list competing marker files or both paths of a failed recovery
   rename (#3544).** The transfer response still tells callers to see the server log.

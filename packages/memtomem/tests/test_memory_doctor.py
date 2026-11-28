@@ -28,6 +28,7 @@ Layers:
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 import os
 import re
@@ -2964,6 +2965,279 @@ class TestCli:
         finding = self._budget_finding(json.loads(result.output))
         assert finding is not None
         assert "24520 UTF-16 units (cap 24400)" in finding["summary"]
+
+
+# ── Frontmatter validity (#2719) ────────────────────────────────────
+
+
+@pytest.fixture
+def fm_env(tmp_path, monkeypatch):
+    """An empty ``claude-memory`` dir and a DB path that does not exist."""
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-test-fm" / "memory"
+    mem_dir.mkdir(parents=True)
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "absent.db"
+    config.indexing.memory_dirs = [mem_dir]
+    return config, mem_dir
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(text.encode("utf-8"))
+
+
+def _fm(*lines: str) -> str:
+    return "---\n" + "".join(f"{line}\n" for line in lines) + "---\n\nbody\n"
+
+
+def _frontmatter_items(config, mem_dir, check: str = "frontmatter_invalid") -> list[str]:
+    (report,) = [
+        r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path[0] != "("
+    ]
+    finding = _findings_by_check(report).get(check)
+    return [] if finding is None else finding.items
+
+
+class TestFrontmatterInvalid:
+    @pytest.mark.parametrize(
+        ("line", "problem"),
+        [
+            ("description: `mm` shortcut not available", "ScannerError"),
+            ("description: Read commands use `{error: ...}`", "ScannerError"),
+            ('description: "no such table: chunks_vec" on every call', "ParserError"),
+        ],
+    )
+    def test_reports_the_shapes_from_the_issue(self, fm_env, line, problem):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm("name: note", line))
+        (report,) = [
+            r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path[0] != "("
+        ]
+        finding = _findings_by_check(report)["frontmatter_invalid"]
+        assert finding.severity == "warn"
+        assert finding.items == [f"note.md:3 ({problem})"]
+
+    def test_crlf_file_reports_the_same_line(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm("name: note", "description: `x`").replace("\n", "\r\n"))
+        assert _frontmatter_items(config, mem_dir) == ["note.md:3 (ScannerError)"]
+
+    @pytest.mark.parametrize(
+        ("lines", "item"),
+        [
+            (("- a", "- b"), "note.md:2 (not a mapping)"),
+            (("# comment", "null"), "note.md:3 (not a mapping)"),
+            (("", "just prose"), "note.md:3 (not a mapping)"),
+        ],
+    )
+    def test_reports_a_root_that_is_not_a_mapping(self, fm_env, lines, item):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm(*lines))
+        assert _frontmatter_items(config, mem_dir) == [item]
+
+    @pytest.mark.parametrize(
+        ("lines", "item"),
+        [
+            (("name: x\u2028description: `y`",), "note.md:2 (ScannerError)"),
+            (("# comment\u2028- a",), "note.md:2 (not a mapping)"),
+        ],
+    )
+    def test_line_counts_only_newlines(self, fm_env, lines, item):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm(*lines))
+        assert _frontmatter_items(config, mem_dir) == [item]
+
+    def test_a_line_that_only_starts_with_hyphens_does_not_close_the_block(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm("description: `x`", "----: metadata"))
+        assert _frontmatter_items(config, mem_dir) == ["note.md:2 (ScannerError)"]
+
+    @pytest.mark.parametrize("padding", [" ", "\t"], ids=["space", "tab"])
+    def test_a_closing_line_may_end_in_blanks(self, fm_env, padding):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", f"---\ndescription: `x`\n---{padding}\n\nbody\n")
+        assert _frontmatter_items(config, mem_dir) == ["note.md:2 (ScannerError)"]
+
+    def test_control_character_reports_its_line(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm("name: x", "description: a\x07b"))
+        assert _frontmatter_items(config, mem_dir) == ["note.md:3 (ReaderError)"]
+
+    def test_deep_nesting_does_not_stop_the_run(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "a.md", _fm("a: " + "[" * 5000))
+        _write(mem_dir / "b.md", _fm("description: `x`"))
+        assert _frontmatter_items(config, mem_dir) == [
+            "a.md (RecursionError)",
+            "b.md:2 (ScannerError)",
+        ]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param(_fm("name: note", "description: plain"), id="valid"),
+            pytest.param("# Title\n\n---\n- a\n---\n", id="no-leading-block"),
+            pytest.param(_fm("## Heading"), id="comment-only"),
+            pytest.param("---\n\n---\n\nbody\n", id="blank"),
+            pytest.param("---\n---\n\nprose\n\n---\n", id="adjacent-empty"),
+            pytest.param("---\n- a\n----\n", id="four-hyphen-closer"),
+            pytest.param(
+                "---\nname: a\n--- \n\ndescription: `x`\n\n---\n", id="space-after-closer"
+            ),
+            pytest.param(
+                "---\nname: a\n--- x\n\ndescription: `x`\n\n---\n", id="text-after-closer"
+            ),
+        ],
+    )
+    def test_not_reported(self, fm_env, text):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", text)
+        assert _frontmatter_items(config, mem_dir) == []
+        assert _frontmatter_items(config, mem_dir, "frontmatter_truncated") == []
+
+    @pytest.mark.parametrize(
+        "lines",
+        [
+            pytest.param(("x: !!bool abc",), id="constructor-only-error"),
+            pytest.param(("a: &a {k: v}", "b: {<<: [*a, *a]}"), id="merge-aliases"),
+        ],
+    )
+    def test_values_are_never_constructed(self, fm_env, monkeypatch, lines):
+        import yaml
+
+        def construct(*_args):
+            raise AssertionError("frontmatter values were constructed")
+
+        monkeypatch.setattr(yaml.constructor.BaseConstructor, "construct_document", construct)
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm(*lines))
+        assert _frontmatter_items(config, mem_dir) == []
+
+    def test_no_source_text_reaches_any_output(self, fm_env, monkeypatch, caplog):
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        config, mem_dir = fm_env
+        canary = "sk-canary-2719"
+        _write(mem_dir / "a.md", _fm(f"description: `{canary}`"))
+        _write(mem_dir / "b.md", _fm(f"x: *{canary}"))
+        _write(mem_dir / "c.md", _fm(f"{canary}"))
+        _write(mem_dir / "d.md", _fm(f"name: {canary} #{canary}"))
+        monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
+        caplog.set_level(logging.DEBUG)
+        human = CliRunner().invoke(cli, ["memory", "doctor"])
+        as_json = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+        # Warnings alone: the exit code stays 0.
+        assert (human.exit_code, as_json.exit_code) == (0, 0)
+        assert "a.md:2 (ScannerError)" in human.output
+        assert "b.md:2 (ComposerError)" in human.output
+        assert "c.md:2 (not a mapping)" in human.output
+        assert "d.md:2 (name)" in human.output
+        payload = json.loads(as_json.stdout)
+        assert payload["status"] == "issues"
+        (entry,) = [d for d in payload["dirs"] if d["path"][0] != "("]
+        items = {f["check"]: f["items"] for f in entry["findings"]}
+        assert items["frontmatter_invalid"] == [
+            "a.md:2 (ScannerError)",
+            "b.md:2 (ComposerError)",
+            "c.md:2 (not a mapping)",
+        ]
+        assert items["frontmatter_truncated"] == ["d.md:2 (name)"]
+        assert canary not in human.output
+        assert canary not in as_json.output
+        assert canary not in caplog.text
+
+    def test_only_markdown_files_are_read(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "data.yaml", _fm("description: `x`"))
+        _write(mem_dir / "other.markdown", _fm("description: `x`"))
+        assert _frontmatter_items(config, mem_dir) == []
+        config.indexing.supported_extensions = config.indexing.supported_extensions | {".markdown"}
+        assert _frontmatter_items(config, mem_dir) == ["other.markdown:2 (ScannerError)"]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlink needs privilege on Windows")
+    def test_a_non_markdown_alias_does_not_hide_the_note(self, fm_env):
+        config, mem_dir = fm_env
+        _write(mem_dir / "a.md", _fm("description: `x`"))
+        (mem_dir / "z.py").symlink_to(mem_dir / "a.md")
+        assert _frontmatter_items(config, mem_dir) == ["a.md:2 (ScannerError)"]
+
+    def test_nested_root_owns_its_files(self, fm_env):
+        config, mem_dir = fm_env
+        child = mem_dir / "child"
+        _write(child / "note.md", _fm("description: `x`"))
+        _write(mem_dir / "sub" / "note.md", _fm("description: `x`"))
+        config.indexing.memory_dirs = [mem_dir, child]
+        assert _frontmatter_items(config, mem_dir) == [
+            f"{Path('sub') / 'note.md'}:2 (ScannerError)"
+        ]
+        assert _frontmatter_items(config, child) == ["note.md:2 (ScannerError)"]
+
+    def test_index_files_follow_the_provider_convention(self, fm_env, tmp_path):
+        config, mem_dir = fm_env
+        notes = tmp_path / "notes"
+        for root in (mem_dir, notes):
+            _write(root / "MEMORY.md", _fm("description: `x`"))
+            _write(root / "README.md", _fm("description: `x`"))
+        config.indexing.memory_dirs = [mem_dir, notes]
+        assert _frontmatter_items(config, mem_dir) == []
+        assert _frontmatter_items(config, notes) == [
+            "MEMORY.md:2 (ScannerError)",
+            "README.md:2 (ScannerError)",
+        ]
+
+
+class TestFrontmatterTruncated:
+    @pytest.mark.parametrize(
+        ("lines", "items"),
+        [
+            (("name: shipped PR #530",), ["note.md:2 (name)"]),
+            (("description: #530 shipped",), ["note.md:2 (description)"]),
+            (("name: x", "description: first", "  second #3"), ["note.md:4 (description)"]),
+            (("# c\u2028name: x #1",), ["note.md:2 (name)"]),
+            (("{name: x, description: y # c", "}"), ["note.md:2 (description)"]),
+            (("name: &a x # c",), ["note.md:2 (name)"]),
+            (("name: x # c", "!!null name: y"), ["note.md:2 (name)"]),
+            (("name: # key comment", "  x # value comment"), ["note.md:3 (name)"]),
+            (("name: shipped PR #530", "----: metadata"), ["note.md:2 (name)"]),
+        ],
+    )
+    def test_reports_a_value_a_comment_follows(self, fm_env, lines, items):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm(*lines))
+        (report,) = [
+            r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path[0] != "("
+        ]
+        finding = _findings_by_check(report)["frontmatter_truncated"]
+        assert (finding.severity, finding.items) == ("info", items)
+        assert "frontmatter_invalid" not in _findings_by_check(report)
+
+    @pytest.mark.parametrize(
+        "lines",
+        [
+            pytest.param(('name: "x #1"',), id="double-quoted"),
+            pytest.param(("name: 'x' # c",), id="quoted-then-comment"),
+            pytest.param(("name: a#b",), id="no-space-before-hash"),
+            pytest.param(("description: |  # c", "  x"), id="block-scalar"),
+            pytest.param(("name: x", "# standalone"), id="comment-line"),
+            pytest.param(("name:", "  # standalone", "b: 1"), id="empty-then-comment-line"),
+            pytest.param(("title: x #1",), id="other-key"),
+            pytest.param(("name: x #1", "name: y"), id="overridden-duplicate"),
+            pytest.param(("title: &a x # c", "name: *a"), id="alias-value"),
+            pytest.param(("meta:", "  &k name: &v x # c", "*k : *v"), id="aliased-key-and-value"),
+            pytest.param(("meta: &k name", "*k : x # c"), id="aliased-key"),
+            pytest.param(("name: &a x # c", "other: *a"), id="any-alias-skips-the-block"),
+            pytest.param(("!!null name: x # c",), id="key-tagged-null"),
+            pytest.param(("!!set {name: x # c", "}"), id="root-tagged-set"),
+            pytest.param(("meta:", "  name: x #1"), id="nested"),
+        ],
+    )
+    def test_not_reported(self, fm_env, lines):
+        config, mem_dir = fm_env
+        _write(mem_dir / "note.md", _fm(*lines))
+        assert _frontmatter_items(config, mem_dir, "frontmatter_truncated") == []
 
 
 # ── Docs-as-tests parity ────────────────────────────────────────────

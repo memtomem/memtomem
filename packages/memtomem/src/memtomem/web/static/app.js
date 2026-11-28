@@ -4111,6 +4111,22 @@ function _isMarkdownSource(path) {
   return p.endsWith('.md') || p.endsWith('.markdown');
 }
 
+// Whether the server may certify this chunk's content as opening with
+// frontmatter: only a Markdown file's first chunk that opens with ``---``.
+function _mayOpenWithFrontmatter(chunk) {
+  return _isMarkdownSource(chunk.source_file) && chunk.start_line === 1
+    && (chunk.content || '').startsWith('---\n');
+}
+
+// Markdown of ``content``, with ``span`` (from ``_leadingFrontmatter``, or
+// null) as a metadata box above the rendered rest. Unsanitized: the caller
+// passes it through ``DOMPurify``.
+function _markdownHtml(content, span) {
+  if (span === null) return marked.parse(content);
+  return `<pre class="md-frontmatter"><code>${escapeHtml(span.replace(/\n$/, ''))}</code></pre>`
+    + marked.parse(content.slice(span.length));
+}
+
 // Indexed content alone cannot say whether it opens with the file's
 // frontmatter (a file opening ``# Topic`` / ``---`` / text / ``---`` stores the
 // same shape), so the server answers from the file. Source text needs no
@@ -4118,8 +4134,7 @@ function _isMarkdownSource(path) {
 let _frontmatterGen = 0;
 
 async function _requestFrontmatter(chunk) {
-  if (!_isMarkdownSource(chunk.source_file) || chunk.start_line !== 1) return;
-  if (!(chunk.content || '').startsWith('---\n')) return;
+  if (!_mayOpenWithFrontmatter(chunk)) return;
   const gen = _frontmatterGen;
   let resp;
   try {
@@ -4350,12 +4365,8 @@ function _setDetailMode(mode) {
     const isMarkdown = (lang === 'markdown' || _isMarkdownSource(STATE.detailViewSource));
     if (isMarkdown && typeof marked !== 'undefined') {
       codeView.className = 'detail-code-view md-preview';
-      const span = _detailFrontmatterSpan(content);
-      const html = span === null
-        ? marked.parse(content)
-        : `<pre class="md-frontmatter"><code>${escapeHtml(span.replace(/\n$/, ''))}</code></pre>`
-          + marked.parse(content.slice(span.length));
-      codeView.innerHTML = DOMPurify.sanitize(html);
+      codeView.innerHTML = DOMPurify.sanitize(
+        _markdownHtml(content, _detailFrontmatterSpan(content)));
     } else if (lang && lang !== 'markdown' && window.Prism && Prism.languages[lang]) {
       codeView.className = 'detail-code-view';
       codeView.innerHTML = `<pre><code class="language-${lang}">${Prism.highlight(content, Prism.languages[lang], lang)}</code></pre>`;

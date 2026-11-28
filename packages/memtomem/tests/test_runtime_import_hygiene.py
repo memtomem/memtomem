@@ -28,10 +28,11 @@ regression (the pattern in ``test_langgraph_optional_import.py``).
 from __future__ import annotations
 
 import ast
-import os
 import subprocess
 import sys
 from pathlib import Path
+
+from _subprocess_env import subprocess_env
 
 _TRANSPORT_ROOTS = ("mcp", "memtomem.server", "memtomem.web")
 
@@ -317,12 +318,12 @@ assert not leaked, "transport modules leaked into the runtime import graph: " + 
 
 
 def _run(body: str, *, home: Path | None = None) -> None:
-    env = None
+    env = subprocess_env()
     if home is not None:
         # Isolate ambient config: MemtomemStore resolves ``config.d`` and
         # persisted overrides from the real home directory otherwise.
-        env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
-    subprocess.run([sys.executable, "-c", body + _ASSERT_CLEAN], check=True, env=env)
+        env.update(HOME=str(home), USERPROFILE=str(home))
+    subprocess.run([sys.executable, "-P", "-c", body + _ASSERT_CLEAN], check=True, env=env)
 
 
 def test_runtime_import_does_not_pull_in_the_mcp_server() -> None:
